@@ -1,0 +1,33 @@
+# 编译产物
+*.exe
+*.pdb
+*.dll
+obj/
+bin/
+
+# 运行时数据（每台机器自己的历史，不该进仓库）
+history.tsv
+rog-battery.log
+*.log
+*.tsv
+
+# MSIX 产物
+AppPackages/
+*.msix
+*.msixupload
+*.appx
+*.appxupload
+msix/*.msix
+msix/Assets/*.png.bak
+
+# 签名证书私钥：绝对不进仓库
+*.pfx
+*.cer
+*.pvk
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini
