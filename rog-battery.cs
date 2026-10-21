@@ -1051,31 +1051,74 @@ static class RogBattery
     // 而实测碰到的那个坑是 6 小时空档（程序退出/机器睡眠），必须拦下来。
     const int HIST_GAP_BREAK_SEC = 7200;
 
-    static string HistoryPath()
+    /// <summary>
+    /// 当前进程是不是跑在 MSIX/Appx 包里。
+    /// 为什么要问这一句：装了包之后 exe 会被放在
+    /// C:\Program Files\WindowsApps\... 下，那个目录**对普通写操作是只读的**。
+    /// 而下面 HistoryPath 原来只判 Directory.Exists 就往那儿写，
+    /// 结果是每次都失败、又永远退回不到 AppData（因为路径分支已经"返回"了）。
+    /// </summary>
+    static bool IsPackaged()
     {
-        // 优先放 exe 同目录：跟工具主体在一起，拷走/换机时历史也跟着走，
-        // 而且不受某些环境里"AppData 不可写"的限制（本机实测程序写
-        // %LOCALAPPDATA% 会被拒绝，但写自己所在的 D 盘目录没问题）。
         try
         {
-            string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
-            if (!string.IsNullOrEmpty(exe))
-            {
-                string dir = System.IO.Path.GetDirectoryName(exe);
-                if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
-                    return System.IO.Path.Combine(dir, "history.tsv");
-            }
+            int len = 0;
+            int rc = GetCurrentPackageFullName(ref len, null);
+            // 15700 = APPMODEL_ERROR_NO_PACKAGE，即没打包
+            return rc != 15700;
         }
-        catch { }
+        catch { return false; }
+    }
 
-        // 退路：AppData
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetCurrentPackageFullName(ref int packageFullNameLength, System.Text.StringBuilder packageFullName);
+
+    static string HistoryPath()
+    {
+        // 打包运行时**必须**先排除 exe 同目录。
+        // 装成 MSIX 后 exe 在 C:\Program Files\WindowsApps\<包名>\ 里，
+        // 那里对非管理员写入一律拒绝；而原来的判断只看目录存不存在，
+        // 于是返回一个写不进去的路径、并且直接 return（不会走到 AppData 退路）。
+        // 实测：包内跑起来后 history.tsv 完全写不出来，也不报错，估算功能静默失效。
+        bool packaged = IsPackaged();
+
+        // 绿色版：优先放 exe 同目录 —— 但要**真的试写一次**才知道能不能写。
+        // 只看 Directory.Exists 是不够的：D:\codex 曾经带 Low 完整性标签、
+        // Program Files 下的普通用户目录、只读挂载的盘，都是"目录存在但写不进"。
+        // LogPath 一直用「追加一次空串」来探测，这里照抄同一招。
+        if (!packaged)
+        {
+            try
+            {
+                string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+                if (!string.IsNullOrEmpty(exe))
+                {
+                    string dir = System.IO.Path.GetDirectoryName(exe);
+                    if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
+                    {
+                        string same = System.IO.Path.Combine(dir, "history.tsv");
+                        System.IO.File.AppendAllText(same, "", System.Text.Encoding.ASCII);
+                        return same;    // 探测成功就不用往下走了
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // 退路：AppData。
+        // 打包运行时 SpecialFolder.LocalApplicationData 仍然返回
+        // %LOCALAPPDATA%，但写入会被系统重定向到
+        // %LOCALAPPDATA%\Packages\<包族名>\LocalCache\Local\ 下 —— 这是 MSIX 的
+        // 文件虚拟化，对程序透明：同样路径读回来自动命中重定向后的真实文件。
         try
         {
             string dir = System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "rog-battery");
             System.IO.Directory.CreateDirectory(dir);
-            return System.IO.Path.Combine(dir, "history.tsv");
+            string appData = System.IO.Path.Combine(dir, "history.tsv");
+            System.IO.File.AppendAllText(appData, "", System.Text.Encoding.ASCII);
+            return appData;
         }
         catch { return null; }
     }

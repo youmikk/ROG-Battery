@@ -184,8 +184,15 @@ static class Tray
     static int _intervalSec = 30;
 
     // winexe 没有控制台，诊断信息只能落盘。
-    // 位置：优先 exe 同目录（跟 history.tsv 一样，本机实测 %TEMP% 有时写不进去），
-    // 失败再退 %TEMP%。两个位置都试一遍，全失败就静默放弃（不能因为写日志崩掉托盘）。
+    //
+    // 候选顺序（每个都**真的试写一次**才算数，只看目录存在是不够的）：
+    //   1. exe 同目录 —— 绿色版最方便，就在手边
+    //   2. %LOCALAPPDATA%\rog-battery —— 跟 history.tsv 同一个目录，实测两态都可写
+    //   3. %TEMP%
+    //
+    // 为什么必须加 2：打包成 MSIX 后 exe 在 Program Files\WindowsApps\ 下（只读），
+    // 而打包进程的 GetTempPath() 指向包的 TempState，实测写不进去。
+    // 结果就是包内跑的版本**一条日志都没有**，排查全靠猜。第 2 项是包内外共同的可写位置。
     static string LogPath
     {
         get
@@ -199,6 +206,17 @@ static class Tray
                 {
                     string dir = System.IO.Path.GetDirectoryName(exe);
                     if (!string.IsNullOrEmpty(dir)) candidates.Add(System.IO.Path.Combine(dir, "rog-battery.log"));
+                }
+            }
+            catch { }
+            try
+            {
+                string la = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrEmpty(la))
+                {
+                    string dir = System.IO.Path.Combine(la, "rog-battery");
+                    System.IO.Directory.CreateDirectory(dir);       // 不存在就建
+                    candidates.Add(System.IO.Path.Combine(dir, "rog-battery.log"));
                 }
             }
             catch { }
@@ -1199,17 +1217,256 @@ static class Tray
         finally { DestroyMenu(menu); }
     }
 
-    // ---------- 开机自启（HKCU\Software\Microsoft\Windows\CurrentVersion\Run）----------
-    // 用注册表而不是启动文件夹快捷方式：不用建 .lnk、路径带空格也不用管引号，
-    // 而且 HKCU 不需要管理员权限。
+    // ---------- 开机自启 ----------
+    // 两套实现，按运行形态自动选：
+    //
+    //   绿色版（未打包）：写 HKCU\Software\Microsoft\Windows\CurrentVersion\Run。
+    //       不用建 .lnk、路径带空格也不用管引号、不需要管理员权限。
+    //
+    //   MSIX 包内：**不能**写 Run 键。打包应用的注册表写入会被 MSIX 虚拟化
+    //       重定向到包的私有位置，看着 SetValue 成功、实际系统启动项里没有，
+    //       重开机也不会自启。官方做法是在 manifest 里声明
+    //       <desktop:Extension Category="windows.startupTask">，
+    //       然后代码里用 Windows.ApplicationModel.StartupTask API 请求启用；
+    //       用户在「任务管理器 → 启动应用」里能看见并手动开关。
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     const string RunValue = "RogBattery";
+
+    // 必须和 AppxManifest.xml.template 里 desktop:StartupTask 的 TaskId 一字不差。
+    const string StartupTaskId = "RogBatteryAutoStart";
 
     static string ExePath()
     {
         try { return System.Reflection.Assembly.GetEntryAssembly().Location; }
         catch { return null; }
     }
+
+    /// <summary>
+    /// 当前进程是不是跑在 MSIX 包里。开机自启要走哪套实现全靠它决定。
+    /// 15700 = APPMODEL_ERROR_NO_PACKAGE。
+    /// </summary>
+    static bool IsPackaged()
+    {
+        try
+        {
+            int len = 0;
+            int rc = GetCurrentPackageFullName(ref len, null);
+            return rc != 15700;
+        }
+        catch { return false; }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetCurrentPackageFullName(ref int packageFullNameLength, System.Text.StringBuilder packageFullName);
+
+    // ---------- 包内：StartupTask ----------
+    // 用反射调 WinRT，而不是在编译期 /r Windows.ApplicationModel.winmd。
+    // 理由：这个项目坚持"只用 Windows 自带的 csc.exe、零外部引用"，
+    // 而 winmd 引用会让 build.cmd 依赖系统里恰好装了哪些 SDK 元数据。
+    // 反射的代价是启动时多几毫秒，但这个函数只在点菜单/开面板时跑。
+
+    static Type _startupTaskType;
+    static Type StartupTaskType
+    {
+        get
+        {
+            if (_startupTaskType == null)
+            {
+                // WinRT 类型在 .NET Framework 里要靠 WindowsRuntimeSystemExtensions 的
+                // AsTask 才能同步等；这里直接用 IAsyncOperation 的 GetResults 反射调用。
+                _startupTaskType = Type.GetType(
+                    "Windows.ApplicationModel.StartupTask, Windows.ApplicationModel, " +
+                    "ContentType=WindowsRuntime", false);
+            }
+            return _startupTaskType;
+        }
+    }
+
+    /// <summary>
+    /// 同步取一个 StartupTask 实例。失败（比如 manifest 里没声明那个 TaskId）返回 null。
+    /// </summary>
+    static object GetStartupTask()
+    {
+        var t = StartupTaskType;
+        if (t == null) { Log("StartupTask 类型取不到（这台系统没有 WinRT 投影）"); return null; }
+        try
+        {
+            var getAsync = t.GetMethod("GetAsync", new[] { typeof(string) });
+            if (getAsync == null) { Log("StartupTask.GetAsync 找不到"); return null; }
+            object op = getAsync.Invoke(null, new object[] { StartupTaskId });
+            if (op == null) { Log("StartupTask.GetAsync 返回 null"); return null; }
+            return AwaitWinRT(op);
+        }
+        catch (Exception e)
+        {
+            var inner = e is System.Reflection.TargetInvocationException && e.InnerException != null ? e.InnerException : e;
+            Log("StartupTask.GetAsync 抛异常: " + inner.GetType().Name + ": " + inner.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 等一个 WinRT IAsyncOperation&lt;T&gt; 并取出结果。
+    ///
+    /// 为什么不能自己反射 GetResults：WinRT 异步对象在 .NET Framework 里是
+    /// System.__ComObject（RCW），它的托管类型没有任何可反射的接口，
+    /// GetType().GetMethod("GetResults") 必然拿不到，GetInterfaces() 也是空的。
+    /// 实测报错就是「GetResults 拿不到（op 类型 System.__ComObject）」。
+    ///
+    /// 正确做法是走 System.Runtime.WindowsRuntime 的投影：
+    /// IAsyncOperation&lt;T&gt; → AsTask&lt;T&gt;() → Task&lt;T&gt;.Result。
+    /// 那个程序集是 .NET Framework 自带的（4.5 起），不需要额外引用 SDK。
+    /// </summary>
+    static object AwaitWinRT(object op)
+    {
+        try
+        {
+            // 用字符串加载，不在编译期引用 System.Runtime.WindowsRuntime。
+            // 理由：build.cmd 坚持只用 csc 默认引用集（System.dll / System.Drawing.dll），
+            // 多一个 /r: 就得管路径存在性。这个程序集其实每台 Win10/11 都有，
+            // 晚绑定能拿到就用，拿不到就降级（下面返回 null，菜单会提示）。
+            var extAsm = System.Reflection.Assembly.Load(
+                "System.Runtime.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089");
+            if (extAsm == null) { Log("System.Runtime.WindowsRuntime 加载不了"); return null; }
+            var ext = extAsm.GetType("System.WindowsRuntimeSystemExtensions");
+            if (ext == null) { Log("WindowsRuntimeSystemExtensions 找不到"); return null; }
+
+            // AsTask(IAsyncOperation`1) 是泛型方法的开放构造，调用时要先把
+            // 单个类型参数填成 T。T 从 StartupTask.GetAsync 的返回类型
+            // IAsyncOperation<StartupTask> 里取出来。
+            Type tArg = null;
+            var stType = StartupTaskType;
+            if (stType != null)
+            {
+                var ga = stType.GetMethod("GetAsync", new[] { typeof(string) }).ReturnType;
+                if (ga.IsGenericType) tArg = ga.GetGenericArguments()[0];
+            }
+            if (tArg == null) { Log("推断不出 IAsyncOperation 的 T"); return null; }
+
+            System.Reflection.MethodInfo asTask = null;
+            foreach (var m in ext.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+            {
+                if (m.Name != "AsTask" || !m.IsGenericMethodDefinition) continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 1) continue;
+                if (!ps[0].ParameterType.IsGenericType) continue;
+                if (ps[0].ParameterType.GetGenericTypeDefinition().FullName != "Windows.Foundation.IAsyncOperation`1") continue;
+                asTask = m; break;
+            }
+            if (asTask == null) { Log("AsTask(IAsyncOperation<T>) 找不到"); return null; }
+
+            var closed = asTask.MakeGenericMethod(tArg);
+            object taskObj = closed.Invoke(null, new object[] { op });
+            if (taskObj == null) { Log("AsTask 返回 null"); return null; }
+
+            var task = (System.Threading.Tasks.Task)taskObj;
+            if (!task.Wait(5000)) { Log("等 StartupTask 超时"); return null; }
+            var resProp = taskObj.GetType().GetProperty("Result");
+            if (resProp == null) { Log("Task<T>.Result 找不到"); return null; }
+            return resProp.GetValue(taskObj, null);
+        }
+        catch (Exception e)
+        {
+            var inner = e is System.Reflection.TargetInvocationException && e.InnerException != null ? e.InnerException : e;
+            Log("AwaitWinRT 失败: " + inner.GetType().Name + ": " + inner.Message);
+            return null;
+        }
+    }
+
+    /// <summary>StartupTaskState 枚举值 → 中文说明。</summary>
+    static string DescribeStartupState(object task)
+    {
+        try
+        {
+            var p = task.GetType().GetProperty("State");
+            int v = Convert.ToInt32(p.GetValue(task, null));
+            // 0 Disabled / 1 DisabledByUser / 2 Enabled / 3 DisabledByPolicy / 4 EnabledByPolicy
+            switch (v)
+            {
+                case 0: return "未启用";
+                case 1: return "已被用户在任务管理器里关闭";
+                case 2: return "已启用";
+                case 3: return "被组策略禁用";
+                case 4: return "被组策略强制启用";
+                default: return "未知(" + v + ")";
+            }
+        }
+        catch { return "未知"; }
+    }
+
+    static bool PackagedAutostartEnabled()
+    {
+        var task = GetStartupTask();
+        if (task == null) return false;
+        try
+        {
+            var p = task.GetType().GetProperty("State");
+            int v = Convert.ToInt32(p.GetValue(task, null));
+            return v == 2 || v == 4;    // Enabled / EnabledByPolicy
+        }
+        catch { return false; }
+    }
+
+    static void TogglePackagedAutostart()
+    {
+        var task = GetStartupTask();
+        if (task == null)
+        {
+            Toast("这个版本没有注册开机自启项");
+            Log("StartupTask 取不到（manifest 里可能没声明 " + StartupTaskId + "）");
+            return;
+        }
+
+        try
+        {
+            if (PackagedAutostartEnabled())
+            {
+                var disable = task.GetType().GetMethod("Disable");
+                if (disable != null) disable.Invoke(task, null);
+                Log("包内：已关闭开机自启");
+                Toast("已关闭开机自启");
+                return;
+            }
+
+            var requestEnable = task.GetType().GetMethod("RequestEnableAsync", Type.EmptyTypes);
+            if (requestEnable == null) { Toast("这个系统不支持设置开机自启"); return; }
+            object op = requestEnable.Invoke(task, null);
+            var getResults = op.GetType().GetMethod("GetResults");
+            if (getResults == null) { Toast("设置失败"); return; }
+            object result = getResults.Invoke(op, null);
+            int state = Convert.ToInt32(result);
+
+            // RequestEnableAsync 的返回值就是新的 StartupTaskState
+            if (state == 2 || state == 4)
+            {
+                Log("包内：已开启开机自启");
+                Toast("已设为开机自动启动");
+            }
+            else if (state == 1)
+            {
+                // 用户之前在任务管理器里手动关过，系统不再让程序自己打开
+                Log("包内：用户已禁用，需要去任务管理器手动开启");
+                Toast("请到「任务管理器 → 启动应用」里手动开启");
+            }
+            else if (state == 3)
+            {
+                Log("包内：被组策略禁用");
+                Toast("开机自启被组策略禁用");
+            }
+            else
+            {
+                Log("包内：RequestEnableAsync 返回 state=" + state);
+                Toast("设置后状态：" + state);
+            }
+        }
+        catch (Exception e)
+        {
+            Log("包内自启设置失败: " + e.Message);
+            Toast("设置失败：" + e.Message);
+        }
+    }
+
+    // ---------- 绿色版：注册表 Run 键 ----------
 
     static bool AutostartEnabled()
     {
@@ -1231,6 +1488,9 @@ static class Tray
 
     static void ToggleAutostart()
     {
+        // 包内世界和绿色版世界完全是两套东西，入口统一分派到这里。
+        if (IsPackaged()) { TogglePackagedAutostart(); return; }
+
         try
         {
             using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKey))
