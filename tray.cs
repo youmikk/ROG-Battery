@@ -41,9 +41,12 @@ static class Tray
     const int NIF_MESSAGE = 1, NIF_ICON = 2, NIF_TIP = 4, NIF_INFO = 0x10;
     const int MF_STRING = 0;
     const int MF_CHECKED = 0x8;
+    const int MF_POPUP = 0x10;
     const int MF_SEPARATOR = 0x800;
     const int TPM_RETURNCMD = 0x0100;
     const int ID_REFRESH = 1001, ID_EXIT = 1002, ID_AUTOSTART = 1003;
+    // 刷新间隔四个档位。ID 连续，菜单回传的 cmd 减掉 BASE 就是 Settings.INTERVAL_CHOICES 的下标。
+    const int ID_INTERVAL_BASE = 1100;
     const int TIMER_ID = 1;
     // 悬停探测。200ms 一次 GetCursorPos，开销约等于零（纯本地，不进内核等待）。
     // 之所以要这么勤：Shell 在鼠标停留约 500ms 后才弹提示，我们得赶在那之前
@@ -150,8 +153,11 @@ static class Tray
     static extern bool KillTimer(IntPtr hWnd, UIntPtr id);
     [DllImport("user32.dll")]
     static extern IntPtr CreatePopupMenu();
+    // 第三个参数是 UINT_PTR：普通项传菜单 ID，MF_POPUP 项传子菜单句柄。
+    // 必须是 IntPtr 而不是 int —— x64 下句柄有 64 位，声明成 int 会被截断，
+    // 点开子菜单直接崩或者开出个垃圾菜单。
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    static extern bool AppendMenu(IntPtr menu, int flags, int id, string text);
+    static extern bool AppendMenu(IntPtr menu, int flags, IntPtr id, string text);
     [DllImport("user32.dll")]
     static extern bool DestroyMenu(IntPtr menu);
     [DllImport("user32.dll")]
@@ -181,7 +187,9 @@ static class Tray
     static IntPtr _hwnd;
     static IntPtr _icon;               // 当前托盘图标（需手动 DestroyIcon，GDI 对象会泄漏）
     static NOTIFYICONDATA _nid;
-    static int _intervalSec = 30;
+    // 刷新间隔（秒）。Run() 进来时从 Settings 取，菜单改档时同步写回。
+    // 不再是构造函数参数直接写死：用户要能在托盘菜单里随时换。
+    static int _intervalSec = Settings.DEFAULT_INTERVAL_SEC;
 
     // winexe 没有控制台，诊断信息只能落盘。
     //
@@ -259,7 +267,11 @@ static class Tray
         catch { }
     }
 
-    /// <summary>托盘主循环。intervalSec = 刷新间隔秒数。</summary>
+    /// <summary>
+    /// 托盘主循环。
+    /// intervalSec &gt; 0：本次运行用这个间隔（命令行 --tray 30），不改设置。
+    /// intervalSec &lt;= 0：用 settings.ini 里的值（双击启动走这条）。
+    /// </summary>
     public static int Run(int intervalSec)
     {
         if (DebugOn)
@@ -273,7 +285,14 @@ static class Tray
             catch { }
         }
         Log("Run(" + intervalSec + ") 进入");
-        _intervalSec = Math.Max(2, intervalSec);
+        // intervalSec > 0 是命令行显式指定（--tray 30），只对本次运行生效，
+        // **不写回设置** —— 否则用户临时测一次就把默认值永久改了。
+        // intervalSec <= 0 表示"用设置里的值"（双击启动走这条路）。
+        _intervalSec = intervalSec > 0
+            ? Math.Max(10, intervalSec)
+            : Settings.IntervalSec;
+        Log("刷新间隔 " + _intervalSec + " 秒"
+            + (intervalSec > 0 ? "（命令行临时覆盖）" : "（来自设置 " + Settings.Path + "）"));
 
         var wc = new WNDCLASSEX();
         wc.cbSize = Marshal.SizeOf(typeof(WNDCLASSEX));
@@ -1176,6 +1195,14 @@ static class Tray
                 if (id == ID_REFRESH) { Refresh(); return IntPtr.Zero; }
                 if (id == ID_AUTOSTART) { ToggleAutostart(); return IntPtr.Zero; }
                 if (id == ID_EXIT) { PostQuitMessage(0); return IntPtr.Zero; }
+                // 间隔档位。正常路径是 ShowMenu 里拿 TrackPopupMenuEx 的返回值处理，
+                // 这里再兜一次：某些托盘启动器/键盘操作会把菜单命令走 WM_COMMAND 回来。
+                int idx = id - ID_INTERVAL_BASE;
+                if (idx >= 0 && idx < Settings.INTERVAL_CHOICES.Length)
+                {
+                    SetInterval(Settings.INTERVAL_CHOICES[idx]);
+                    return IntPtr.Zero;
+                }
                 return IntPtr.Zero;
             }
 
@@ -1198,23 +1225,69 @@ static class Tray
         IntPtr menu = CreatePopupMenu();
         try
         {
-            AppendMenu(menu, MF_STRING, ID_REFRESH, "立即刷新");
-            AppendMenu(menu, MF_SEPARATOR, 0, null);
+            AppendMenu(menu, MF_STRING, (IntPtr)ID_REFRESH, "立即刷新");
+            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+
+            // 刷新间隔：做成子菜单，收起状态下只看得到一行。
+            // 不用一堆平铺项是因为主菜单本来就短，塞 4 行进去会把
+            // "立即刷新/开机自启/退出" 挤得很散。
+            IntPtr sub = CreatePopupMenu();
+            if (sub != IntPtr.Zero)
+            {
+                for (int i = 0; i < Settings.INTERVAL_CHOICES.Length; i++)
+                {
+                    int sec = Settings.INTERVAL_CHOICES[i];
+                    int flags = MF_STRING;
+                    if (sec == _intervalSec) flags |= MF_CHECKED;
+                    AppendMenu(sub, flags, (IntPtr)(ID_INTERVAL_BASE + i), Settings.Describe(sec));
+                }
+                // MF_POPUP = 0x10：这个项本身不可点，点开是子菜单
+                AppendMenu(menu, MF_STRING | MF_POPUP, sub, "刷新间隔");
+            }
+
+            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             // 自启项带勾选状态
             AppendMenu(menu, AutostartEnabled() ? (MF_STRING | MF_CHECKED) : MF_STRING,
-                ID_AUTOSTART, "开机自动启动");
-            AppendMenu(menu, MF_SEPARATOR, 0, null);
-            AppendMenu(menu, MF_STRING, ID_EXIT, "退出");
+                (IntPtr)ID_AUTOSTART, "开机自动启动");
+            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+            AppendMenu(menu, MF_STRING, (IntPtr)ID_EXIT, "退出");
             POINT pt;
             GetCursorPos(out pt);
             // 注意：托盘菜单必须先 SetForegroundWindow，否则点击别处菜单不会消失
             SetForegroundWindow(_hwnd);
             int cmd = TrackPopupMenuEx(menu, TPM_RETURNCMD, pt.X, pt.Y, _hwnd, IntPtr.Zero);
-            if (cmd == ID_REFRESH) Refresh();
+
+            // 子菜单挂在父菜单上，DestroyMenu(父) 会连带销毁它，不用单独 Destroy。
+            // cmd == 0 表示用户点到菜单外面，此时不要误判成下标 0 的 30 秒。
+            int idx = cmd - ID_INTERVAL_BASE;
+            if (cmd != 0 && idx >= 0 && idx < Settings.INTERVAL_CHOICES.Length)
+            {
+                SetInterval(Settings.INTERVAL_CHOICES[idx]);
+            }
+            else if (cmd == ID_REFRESH) Refresh();
             else if (cmd == ID_AUTOSTART) ToggleAutostart();
             else if (cmd == ID_EXIT) { PostQuitMessage(0); }
         }
         finally { DestroyMenu(menu); }
+    }
+
+    /// <summary>
+    /// 切换刷新间隔：改内存值 → 落盘 → 重建定时器。
+    /// 必须 KillTimer 再 SetTimer：SetTimer 对同一个 ID 再次调用虽然会返回原
+    /// 定时器并顺带改间隔，但那种"依赖文档保证"的写法一旦行为变了就会静默
+    /// 继续用旧间隔。显式一杀一建，行为确定。
+    /// </summary>
+    static void SetInterval(int sec)
+    {
+        if (sec == _intervalSec) return;
+        _intervalSec = sec;
+        Settings.IntervalSec = sec;         // 落盘，下次启动沿用
+        if (_hwnd != IntPtr.Zero)
+        {
+            KillTimer(_hwnd, (UIntPtr)TIMER_ID);
+            SetTimer(_hwnd, (UIntPtr)TIMER_ID, (uint)(_intervalSec * 1000), IntPtr.Zero);
+        }
+        Log("刷新间隔 → " + _intervalSec + " 秒（定时器已重建）");
     }
 
     // ---------- 开机自启 ----------

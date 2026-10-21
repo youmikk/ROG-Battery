@@ -1725,7 +1725,10 @@ static class RogBattery
         bool tray = args.Length == 0;       // 无参数（双击）= 托盘常驻
         bool watch = false;
         bool help = false;
-        int interval = 30;
+        // 0 = 没在命令行指定。托盘模式会回落到 settings.ini（默认 60 秒），
+        // 控制台模式回落到本地默认值。以前写死 30 秒，对电池来说太密了。
+        int interval = 0;
+        int watchInterval = Settings.DEFAULT_INTERVAL_SEC;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -1740,7 +1743,7 @@ static class RogBattery
             {
                 watch = true; tray = false;
                 int v;
-                if (i + 1 < args.Length && int.TryParse(args[i + 1], out v)) interval = v;
+                if (i + 1 < args.Length && int.TryParse(args[i + 1], out v)) watchInterval = v;
             }
             else if (a == "--once")
             {
@@ -1799,6 +1802,7 @@ static class RogBattery
             using (var mutex = new Mutex(true, @"Local\RogBatteryTray", out isNew))
             {
                 if (!isNew) return 0;
+                // interval == 0（双击启动）→ Tray.Run 内部回落到 settings.ini
                 return Tray.Run(interval);
             }
         }
@@ -1818,9 +1822,9 @@ static class RogBattery
         {
             Console.WriteLine("用法: rog-battery.exe [选项]");
             Console.WriteLine("  不带参数        托盘常驻，图标上显示电量（双击就是这个）");
-            Console.WriteLine("  --tray [秒]     同上，可指定刷新间隔（默认 30）");
+            Console.WriteLine("  --tray [秒]     同上，可指定刷新间隔（默认 60 秒，可在托盘菜单里改）");
             Console.WriteLine("  --once          只读一次然后退出");
-            Console.WriteLine("  --watch [秒]    在控制台持续刷新（默认 30）");
+            Console.WriteLine("  --watch [秒]    在控制台持续刷新（默认 60 秒）");
             Console.WriteLine("  --mode          打印当前连接方式（有线 / 2.4G）和命令通道");
             Console.WriteLine("  --dpi           打印四档 DPI 和当前档位");
             Console.WriteLine("  --estimate      看剩余/充满时间的历史样本和当前估算");
@@ -1862,7 +1866,7 @@ static class RogBattery
                         + (int)Math.Round(est.SpanMinutes) + " 分钟）" : ""));
             }
             if (!watch) break;
-            Thread.Sleep(Math.Max(1, interval) * 1000);
+            Thread.Sleep(Math.Max(1, watchInterval) * 1000);
         } while (true);
 
         return 0;
