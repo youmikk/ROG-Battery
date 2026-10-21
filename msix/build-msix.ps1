@@ -1,4 +1,4 @@
-﻿# 把仓库里的 rog-battery.exe + AppxManifest 打成一个 .msix
+# 把仓库里的 rog-battery.exe + AppxManifest 打成一个 .msix
 #
 # 用法（在本目录下）:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File build-msix.ps1
@@ -204,7 +204,12 @@ if ($Sign) {
         Write-Host '  以管理员 PowerShell 跑：'
         Write-Host ("    Export-Certificate -Cert Cert:\CurrentUser\My\{0} -FilePath `$env:TEMP\rb-test.cer" -f $cert.Thumbprint)
         Write-Host '    Import-Certificate -FilePath $env:TEMP\rb-test.cer -CertStoreLocation Cert:\LocalMachine\Root'
-        Write-Host '  测完记得删掉那张根证书，别留在机器上。'
+        Write-Host ''
+        Write-Host '  测完务必清干净（留着根证书 = 任何用这张私钥签的东西都能在本机静默安装）：'
+        Write-Host ("    Remove-Item Cert:\LocalMachine\Root\{0}" -f $cert.Thumbprint)
+        Write-Host ("    Remove-Item Cert:\CurrentUser\My\{0}" -f $cert.Thumbprint)
+        Write-Host '  再删掉测试包：'
+        Write-Host '    Get-AppxPackage -Name <包名> | Remove-AppxPackage'
         Write-Host ("  安装：Add-AppxPackage '{0}'" -f $msixPath)
     }
 }
