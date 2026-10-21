@@ -1,7 +1,11 @@
-# rog-battery —— ROG 龙鳞 Ace Mini 电量 / DPI 托盘工具
+# rog-battery —— ROG 外设电量 / DPI 托盘工具
 
 双击就常驻托盘，图标上直接显示电量数字，鼠标移上去看详情（含当前 DPI）。
-单个 **50 KB** 的 exe，**没有控制台黑框**，不依赖 Python、不用装任何运行时。
+单个 **70 KB** 的 exe，**没有控制台黑框**，不依赖 Python、不用装任何运行时。
+
+内置 **75 个 PID 的型号表**，覆盖 36 个 ROG 鼠标、47 个 ROG 键盘、4 个手柄
+（来源：ASUS Gear Link 的 hid-whitelist + 每个型号的 manifest）。
+型号表里没有的设备也能识别——会读设备固件自报的产品名。
 
 ---
 
@@ -35,8 +39,9 @@ rog-battery.exe                托盘常驻（双击就是这个），默认 1 �
 rog-battery.exe --tray 10      托盘常驻，10 秒刷新（临时覆盖，不改设置）
 rog-battery.exe --once         读一次打印后退出
 rog-battery.exe --watch 5      控制台持续刷新
-rog-battery.exe --mode         打印当前连接方式（有线 / 2.4G）和命令通道
-rog-battery.exe --charge-selftest    检查充电三态判定的真值表（不需要鼠标真在充电）
+rog-battery.exe --mode         打印当前连接方式（有线 / 2.4G / 蓝牙）和命令通道
+rog-battery.exe --list-devices 列出型号表收录的设备与本机检测到的设备
+rog-battery.exe --charge-selftest    检查充电三态判定的真值表（不需要设备真在充电）
 rog-battery.exe --dpi          打印四档 DPI 和当前档位
 rog-battery.exe --estimate     看剩余/充满时间的历史样本和当前估算
 rog-battery.exe --estimate-selftest  估算器自检（合成数据，不用等真的掉电）
@@ -48,6 +53,21 @@ rog-battery.exe --help         帮助
 > 注意：因为是 GUI 程序（所以双击不弹黑框），在 PowerShell 里直接调用拿不到输出——
 > 这是 PowerShell 对 GUI 子系统程序的行为。要看输出请用 cmd 运行，或
 > `cmd /c "rog-battery.exe --once"`。
+
+### 支持的设备
+
+`--list-devices` 会打印型号表收录了多少个 PID，以及这台机器上当前插着的 ROG 设备。
+
+- **鼠标**：走 `0xFF01` 命令通道，电量命令 `12 07`，能读到电量、电压、
+  低电量阈值、电池类型、充满效果、睡眠模式
+- **键盘**：走 `0xFF00` 命令通道（经接收器时是 `0xFF02` 的 rid 2），
+  电量命令 `12 01`，只能读到电量、省电模式、充电状态、低电量阈值
+  —— **键盘不回报电压**，所以提示里不会出现电压行
+- **接收器**：一个 dongle 可能同时带键盘和鼠标，程序优先选鼠标槽位
+  （鼠标信息更全），没有鼠标才退到键盘
+
+型号表里没有的设备，会读设备固件自报的产品名顶上。实测 0x19AF 读出来是
+`ROG AURA LED Controller`（主板的灯控），这类没电池的设备不会被当成外设。
 
 ---
 
@@ -106,7 +126,7 @@ WinForms 的 `NotifyIcon` 常驻要 28.8 MB，纯 Win32 在 28 MB 上下。
 
 | 方案 | 体积 | 常驻内存 |
 |---|---|---|
-| 本项目 | **50 KB** | **30 MB** |
+| 本项目 | **70 KB** | **30 MB** |
 | WinForms 版 | ~30 KB | 28.8 MB |
 | Python + hidapi | 需装解释器 | ~25 MB |
 | PyInstaller 打包 | 8–15 MB | ~30 MB |
@@ -465,9 +485,11 @@ build.cmd
 
 | Usage Page | report ID | 用途 |
 |---|---|---|
-| `0xFF02` | 1 | 接收器命令通道 |
-| `0xFF00` | 2 | 接收器备用 |
+| `0xFF02` | 1 | 接收器命令通道（扫描槽位、读接收器序列号） |
+| `0xFF00` | 2 | 键盘命令通道 |
 | `0xFF01` | 3 | 鼠标命令通道 |
+
+插线直连时不经过接收器：鼠标本体走 `0xFF01`，键盘本体走 `0xFF00`。
 
 ### 1. 扫描配对设备
 
@@ -485,8 +507,10 @@ build.cmd
 ```
 
 例：`01 a0 00 01 00 65 1b 03 04` → 1 台，PID `0x1B65`，命令用 report ID `03`。
+（第 3 字节 `03` 是 controlReportId：`2` = 键盘槽位，`3` = 鼠标槽位。
+程序按这个字节挑设备，所以同一个接收器上插键盘也能认出来。）
 
-### 2. 读电量
+### 2. 读电量（鼠标）
 
 往 `0xFF01` 发，**report ID 用上一步扫描到的那个**：
 
@@ -503,6 +527,32 @@ build.cmd
 
 实测：电量 `100`、低电量阈值 `20`、电压 `4176` mV、充满效果 `1`、睡眠 `0`。
 电压随负载抖动（几秒内 4171→4184 mV 属正常）。
+
+`电量 == 0 && 充电 == 0` 表示**设备休眠、暂时没有数据**，不是真的 0%——
+程序会把它当成读不到，保留上一次的值。
+
+### 2b. 读电量（键盘）
+
+键盘是**另一条命令**，字段偏移也不同：
+
+```
+02 | 12 01 00 00 | 00 ... 00
+     ^cmd ^sub=1        （键盘槽位用 report ID 2；经接收器是 0xFF02 的 rid 2）
+```
+
+响应（需 ≥10 字节）：
+
+```
+02 | 12 01 00 00 | 0 | 电量% | idle枚举 | 省电模式 | 充电 | 低电量阈值 | ...
+                       ^d[5]
+```
+
+- **电量取 `d[5]`，不是鼠标的 `d[4]`**（`d[4]` 恒 0），取到 >100 就当未知
+- `d[6]` idle：0=1分钟、1=2、2=3、3=5、4=10、255=从不
+- `d[7]` 省电：0 关闭、1 关灯、2 变暗
+- `d[8]` 充电：1 = 充电中
+- **键盘不回报电压**，所以提示里没有电压行
+- 注意 `12 07` 在键盘上是「查询 Windows 灯效支持」，不是电量
 
 ### 帧格式
 
@@ -565,11 +615,18 @@ DPI 是**可以直接问的**，不需要监听什么异步事件：
 
 ## 已知限制
 
-- 只处理接收器连接（`0x1ACE`）。插线变有线时 PID 变成 `0x1B63`，当前不覆盖。
-- 接收器接多台设备时优先挑 PID `0x1B65`（龙鳞 Ace Mini），其它型号按第 0 台处理。
+- **型号表里的设备不用接上就能查**：`--list-devices` 会列出收录的 75 个 PID，
+  但只有本机真的插着的设备才能读到电量。没有对应设备的用户只能看型号表。
+- **只测过龙鳞 Ace Mini 一台实物**。其余 35 个鼠标 PID、47 个键盘 PID 的型号名
+  来自 ASUS 官方 manifest，协议按 Gear Link / libratbag 的公开实现编写 ——
+  理论上通用（都是 `12 07` / `12 01` 那套），但没在实机上逐个验证。
+  遇到读不出的设备，用 `--list-devices` 与 `--mode` 看走到哪一步。
+- **键盘只能读电量和充电状态**，没有电压、电池类型、充满效果
+  —— 键盘的电量响应里就没有这些字段。
 - **只能读 DPI，不能改**。改 DPI 的命令字节没有逆出来（GearLink 日志只记 JSON，
   不记原始 HID 帧），而且不确定 `ROGMS.sys` 过滤驱动是否参与。目前要改 DPI
   请用鼠标上的实体键，或用 GearLink。
+- **DPI 只对鼠标有效**。键盘没有 DPI 概念，悬停时不会出现那一行。
 - 启动气泡（`NIF_INFO`）在 Windows 11 上不显示——Win11 已用 toast 通知取代 balloon，
   这不影响使用，图标本身正常。
 - 控制台中文依赖代码页 936（GBK）。终端若是 UTF-8，设 `ROG_BATTERY_UTF8=1`。
@@ -632,15 +689,68 @@ Shell 不会主动再来问我们要内容——悬停着按 DPI 键切档，提
 
 ---
 
+## 支持的型号（75 个 PID / 30 个型号）
+
+下表来自 ASUS Gear Link 的 `hid-whitelist.json` 与各型号 `manifest.json` 的
+`caps.deviceNameZH`，只收录 `hasPowerInfo = true` 的设备。
+同一型号通常有 2 个 PID（有线 / 2.4G 各一个），少数型号有 3–4 个。
+
+| 型号 | 英文名 | PID |
+|---|---|---|
+| ROG 龙鳞 Ace Mini | ROG HARPE ACE MINI | `0x1B63` `0x1B65` |
+| ROG 龙鳞 Ace Extreme | ROG HARPE ACE EXTREME | `0x1B67` `0x1B69` |
+| ROG 龙鳞 Ace Aim Lab 合作版 | ROG HARPE ACE AIM LAB EDITION | `0x1A92` `0x1A94` |
+| ROG 龙鳞 2 Ace | ROG HARPE II ACE | `0x1C69` `0x1C6B` |
+| ROG 龙鳞 2 Ace Mini | ROG HARPE II ACE MINI | `0x1E2F` `0x1E32` |
+| ROG 龙鳞 2 Ace Mini Demon1联名版 | ROG HARPE II ACE MINI DEMON1 EDITION | `0x1E51` `0x1E52` |
+| ROG 龙鳞 2 Extreme 20周年版 | ROG HARPE II EXTREME EDITION 20 | `0x1D7A` `0x1D7B` `0x1D7C` |
+| ROG 龙鳞2 ACE - PBZ | ROG HARPE II ACE-PBZ | `0x1E4A` `0x1E4B` `0x1E4D` |
+| ROG 月刃2 ACE | ROG KERIS II ACE | `0x1B16` `0x1B18` |
+| ROG 月刃2 RGB | ROG KERIS II ORIGIN | `0x1C0C` `0x1C0E` |
+| ROG 月刃 2 RGB - KJP | ROG KERIS II ORIGIN-KJP | `0x1D4C` `0x1D4E` |
+| ROG 战刃 4 ACE | ROG GLADIUS IV ACE | `0x1DB0` `0x1DBF` |
+| ROG 战刃 4 ACE MAX | ROG GLADIUS IV ACE MAX | `0x1E4E` `0x1E4F` |
+| ROG 斯巴达 X 65K | ROG SPATHA X 65K | `0x1DDE` `0x1DDF` `0x1DE0` `0x1DE1` |
+| PROART MOUSE MD301 | PROART MOUSE MD301 | `0x1CD3` `0x1CD5` |
+| ROG 夜魔 | ROG AZOTH | `0x1A83` `0x1A85` |
+| ROG 夜魔 X | ROG AZOTH X | `0x1C24` `0x1C25` `0x1C26` |
+| ROG 夜魔 EXTREME | ROG AZOTH EXTREME | `0x1B3F` `0x1B40` `0x1B42` |
+| ROG 夜魔 EXTREME SPECIAL EDITION | ROG AZOTH EXTREME SPECIAL EDITION | `0x1CEF` `0x1CF0` `0x1CF1` |
+| ROG 夜魔 Extreme 20 周年版 | ROG Azoth Extreme Edition 20 | `0x1DA2` `0x1DA3` `0x1DA4` |
+| ROG 夜魔 98 HE / LITE | ROG AZOTH 96 HE / LITE | `0x1C10` `0x1C11` `0x1C12` |
+| ROG 游侠2 98无线版 | ROG STRIX SCOPE II 96 WIRELESS | `0x1AAE` `0x1AAF` `0x1AB0` |
+| ROG 术士 98 | ROG STRIX MORPH 96 WIRELESS | `0x1CE8` `0x1CE9` `0x1CEA` |
+| ROG 术士 98 X | ROG STRIX MORPH 96 X WIRELESS | `0x1E0A` `0x1E0B` `0x1E0C` |
+| ROG 术士 98 - PBZ | ROG STRIX MORPH 96 WIRELESS-PBZ | `0x1E5B` `0x1E5C` `0x1E5D` |
+| ROG 影魔 | ROG FALCATA | `0x1C2F` `0x1C30` `0x1C31` |
+| 华硕天选TX75 | ASUS TX75 ANALOG GAMING KEYBOARD | `0x1D68` `0x1D6A` |
+| PROART KEYBOARD KD300 | PROART KEYBOARD KD300 | `0x1D45` `0x1D46` `0x1D47` |
+| ROG 雷切 II PRO PC | ROG RAIKIRI II PRO PC | `0x1C64` `0x1C65` |
+| ROG 雷切 II XBOX无线手柄 | ROG RAIKIRI II XBOX WIRELESS | `0x1C91` `0x1C92` |
+
+接收器（不读电量，只用来转发命令）：
+
+| 接收器 | PID |
+|---|---|
+| ROG OMNI 无线接收器 | `0x1ACE` `0x1ACF` |
+| ROG SpeedNova 8K 无线接收器 | `0x1AD0` `0x1AD1` |
+| 华硕无线接收器 | `0x1D54` |
+
+> 你的设备不在表里也能用——程序会读设备固件自报的产品名当显示名。
+> 想让某个型号进表，把 `--list-devices` 的输出贴到 issue 里即可。
+
+---
+
 ## 文件
 
 | 文件 | 说明 |
 |---|---|
 | `rog-battery.cs` | 主程序：HID 协议、Win32 枚举、命令行、电量历史与时间预测 |
+| `devices.cs` | 型号表：75 个 PID → 型号名（鼠标 / 键盘 / 手柄）+ 接收器名字表 |
 | `tray.cs` | 托盘：消息窗口、右键菜单、定时刷新、图标绘制 |
 | `settings.cs` | 设置持久化：`settings.ini` 读写，目前只有刷新间隔 |
 | `build.cmd` | 一行编译脚本 |
-| `rog-battery.exe` | 构建产物，约 60 KB |
+| `rog-battery.exe` | 构建产物，约 70 KB |
 | `settings.ini` | 用户设置（自动生成，不入库）。包内版在 `%LOCALAPPDATA%\rog-battery\` |
 | `history.tsv` | 电量采样历史（自动生成，删掉即重新开始攒）。包内版在 `%LOCALAPPDATA%\rog-battery\` |
 | `msix/` | MSIX 打包脚本、manifest 模板、图标生成、发布参数 |
