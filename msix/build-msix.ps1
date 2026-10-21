@@ -1,4 +1,4 @@
-# 把仓库里的 rog-battery.exe + AppxManifest 打成一个 .msix
+﻿# 把仓库里的 rog-battery.exe + AppxManifest 打成一个 .msix
 #
 # 用法（在本目录下）:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File build-msix.ps1
@@ -218,7 +218,15 @@ Write-Host ''
 Write-Host '=== done ==='
 Write-Host ("  {0}" -f $msixPath)
 Write-Host ''
-Write-Host '提交 Store 时：'
-Write-Host '  - 提这个**未签名**的 .msix（Store 会用自己的证书重新签），'
-Write-Host '  - 但 Publisher 必须改成 Partner Center 产品标识页给出的原值，'
-Write-Host '  - 用 -Sign 打出来的包**不要**提交，那是本地测试用的。'
+if ($Sign) {
+    Write-Host '这个包是自签的，**只用于本地测试**，不要提交 Store。'
+    Write-Host '提交前重跑一次不带 -Sign 的命令，产出的未签名包才是要上传的。'
+} else {
+    Write-Host '提交 Store：把上面这个**未签名**的 .msix 传上去，Store 会用自己的证书重签，'
+    Write-Host '装到用户机器上永不触发 SmartScreen。'
+    Write-Host ''
+    Write-Host 'manifest 里的身份已对齐 Partner Center：'
+    Write-Host '  Name      = Sonder.RBattery'
+    Write-Host '  Publisher = CN=1307ADA3-FCC0-4C75-81A2-9CC947003BD7'
+    Write-Host '换产品时改 package.props.psd1，不要在这里改。'
+}

@@ -383,24 +383,32 @@ Windows 的设计，不是 bug。
   Import-Certificate -FilePath $env:TEMP\rb-test.cer -CertStoreLocation Cert:\LocalMachine\Root
   ```
   测完记得删掉那张根证书（`Remove-Item Cert:\LocalMachine\Root\<指纹>`），
-  别留在机器上。自签证书 `CN=Neonrain`，有效期 3 年。
+  别留在机器上。自签证书的 Subject 就是 `Publisher` 那个值
+  （`CN=1307ADA3-FCC0-4C75-81A2-9CC947003BD7`），有效期 3 年——
+  跟正式身份一致的好处是本地装的包不会因为 Subject 和 manifest 对不上被拒。
 - **提交 Store**：提**未签名**的那个（`build-msix.ps1` 不带 `-Sign` 的产物）。
   Store 会用自己的证书重新签，装到用户机器上**永远不会弹 SmartScreen**——
   这是目前唯一免费消除「Windows 已保护你的电脑」的路。
   自签的那个**不要**提交。
 
-### manifest 里必须改的东西
+### 身份字段（已填好正式值）
 
-`package.props.psd1` 集中了所有可变项。提交前至少改三处：
+`package.props.psd1` 集中了所有可变项。下面三项直接对应 Partner Center
+「产品标识」页，**不要自己改写格式**：
 
-| 项 | 现在 | 提交前改成 |
-|---|---|---|
-| `Publisher` | `CN=Neonrain` | Partner Center「产品标识」页给的 `Package/Identity/Publisher` 原值 |
-| `IdentityName` | `Neonrain.RBattery` | Partner Center 分配的包名 |
-| `PublisherDisplayName` | `Neonrain` | 你注册的发布者显示名 |
+| 项 | 值 |
+|---|---|
+| `IdentityName` | `Sonder.RBattery` |
+| `Publisher` | `CN=1307ADA3-FCC0-4C75-81A2-9CC947003BD7` |
+| `PublisherDisplayName` | `Sonder` |
 
-`Publisher` 必须和证书 Subject **逐字一致**（区分大小写、逗号后空格也要一样），
-否则提交必被拒。
+包族名（PFN）随之变成 `Sonder.RBattery_wm3rvpzgxb7kt`，
+Store ID `9NRC8HCD4BZ7`。`Publisher` 必须和签名证书 Subject **逐字一致**
+（区分大小写、逗号后空格也要一样），否则提交必被拒。
+
+> `DisplayName` / `ShortName` / `Description` 是用户在开始菜单和任务管理器里
+> 看到的名字，跟身份无关，可以随时改（改完重打包，Store 允许更新）。
+> 身份三项提交后**锁死**，改不了。
 
 ### `runFullTrust` 不等于放宽权限
 
