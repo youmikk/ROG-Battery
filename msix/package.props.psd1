@@ -1,28 +1,32 @@
 ﻿# MSIX 打包用的可变参数。build-msix.ps1 读这个文件填 AppxManifest.xml.template。
 #
-# 为什么单独一个 psd1 而不是塞进脚本：这 8 个值每次发布/每次换身份都要动，
+# 为什么单独一个 psd1 而不是塞进脚本：这些值每次发布/每次换身份都要动，
 # 而脚本逻辑不该跟着动。改这里不会有改坏逻辑的风险。
 #
 # 【最需要注意的是 Publisher】
 # 它必须和签名证书 Subject 逐字一致（大小写、空格、逗号后空格都算）。
-# 现在填的是占位用的自签名身份；**提交 Microsoft Store 前必须换成
-# Partner Center → 产品标识（Product identity）页给出的原值**，
-# 形如 CN=1A2B3C4D-5E6F-...。填错了提交会被拒。
+# 现在填的是 Partner Center 给的正式值，**不要自己改写格式**。
+# 换产品/换账号时整段重新复制一遍。
 
 @{
     # ---------- 身份 ----------
-    # Store 上的唯一包名。一旦提交就不能改，所以用反向域名风格最稳。
-    # 这里用 github 用户名占位，等你确定网名再改（改早不改晚，提交后锁死）。
-    IdentityName = 'Neonrain.RBattery'
+    # 下面三项**直接对应 Partner Center → 产品标识**页的原值，不要自己改写格式。
+    # 一旦提交就不能改，所以现在就是最终值。
 
-    # 见上面的大注释。自签测试时用 CN= 加你想显示的名字；
-    # 提交 Store 时换成 Partner Center 给的那串。
-    Publisher    = 'CN=Neonrain'
+    # Package/Identity/Name
+    IdentityName = 'Sonder.RBattery'
 
-    # 商店页面「由 XXX 发布」显示的名字。个人开发者建议用自己的网名/GitHub 用户名。
-    PublisherDisplayName = 'Neonrain'
+    # Package/Identity/Publisher
+    # 必须是 CN=<GUID> 这个形式，逐字复制。它同时是自签测试证书的 Subject，
+    # 所以 -Sign 打出来的包 Subject 会和提交值一致，本地装包不会因为身份不符被拒。
+    Publisher    = 'CN=1307ADA3-FCC0-4C75-81A2-9CC947003BD7'
+
+    # Package/Properties/PublisherDisplayName
+    PublisherDisplayName = 'Sonder'
 
     # ---------- 展示 ----------
+    # DisplayName / ShortName 是用户在开始菜单、设置、任务管理器里看到的名称，
+    # 和上面的身份字段无关，可以随时改（改完重打包即可，Store 允许更新）。
     DisplayName  = 'R Battery'
     ShortName    = 'R Battery'
     Description  = 'Shows battery level, voltage and DPI for ASUS ROG wireless mice in the system tray.'
