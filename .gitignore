@@ -46,3 +46,6 @@ store-credentials.psd1
 
 # 逆向时的抓包/探针草稿（含下载来的第三方内核源码，不入库）
 _research/
+
+# 用户自己的设置（刷新间隔等），每台机器不同，不入库
+settings.ini
