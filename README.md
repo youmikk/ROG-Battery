@@ -302,6 +302,133 @@ rog-battery.exe --estimate             # 看真实历史：样本数、变化记
 
 ---
 
+## 打包成 MSIX（上架 Store 用）
+
+除了双击运行的绿色版，`msix\` 目录里有一套完整的打包脚本，能产出可直接提交
+Microsoft Store 的 `.msix`。
+
+```
+cd msix
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1          # 未签名，提交 Store 用这个
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Sign     # 自签，本机测试安装用
+```
+
+产物在 `msix\AppPackages\`。脚本会依次做：编译 → 生成图标 → 渲染 manifest
+模板 → `makeappx pack` →（可选）`signtool sign`。
+
+### 打包版和绿色版的四处行为差异
+
+装成 MSIX 后 exe 会被放进 `C:\Program Files\WindowsApps\...`（**只读**），
+进程也带上了包身份，于是有三件事必须走另一套实现：
+
+| | 绿色版 | 包内 |
+|---|---|---|
+| 开机自启 | 写 `HKCU\...\Run` | manifest 声明 `windows.startupTask` + `StartupTask` API |
+| `history.tsv` | exe 同目录 | `%LOCALAPPDATA%\rog-battery\` |
+| `rog-battery.log` | exe 同目录 | `%LOCALAPPDATA%\rog-battery\` |
+| 卸载 | 删目录 | 设置 → 应用 |
+
+代码里靠 `GetCurrentPackageFullName` 的返回值（15700 = 没打包）自动分派，
+**同一份 exe 两种形态都能跑**，不需要编译两个版本。
+
+#### 开机自启为什么不能沿用注册表
+
+打包应用的注册表写入会被 MSIX **虚拟化**重定向到包的私有位置。写
+`HKCU\...\Run` 看上去 `SetValue` 成功、注册表编辑器里也确实能看到，
+但那是个影子键——真实的系统启动项里没有这一条，重启后不会自启。
+
+正确做法是在 manifest 里声明：
+
+```xml
+<desktop:Extension Category="windows.startupTask" Executable="rog-battery.exe"
+                    EntryPoint="Windows.FullTrustApplication">
+  <desktop:StartupTask TaskId="RogBatteryAutoStart" Enabled="false" DisplayName="R Battery" />
+</desktop:Extension>
+```
+
+`TaskId` 必须和 `tray.cs` 里 `StartupTaskId` 常量一字不差。然后代码里
+`StartupTask.GetAsync(taskId)` → `RequestEnableAsync()` 请求启用，系统会把
+状态记在
+`HKCU\...\AppModel\SystemAppData\<包族名>\RogBatteryAutoStart\State`
+（`0=Disabled`、`1=DisabledByUser`、`2=Enabled`、`3=DisabledByPolicy`、
+`4=EnabledByPolicy`），用户能在**任务管理器 → 启动应用**里看到并手动开关。
+
+`RequestEnableAsync` 返回值是新的状态。如果返回 `1`（用户之前在任务管理器里
+手动关过），系统不再允许程序自己打开，程序只能提示用户去手动开——这是
+Windows 的设计，不是 bug。
+
+> **技术细节**：WinRT 的 `IAsyncOperation<T>` 在 .NET Framework 里是
+> `System.__ComObject`（RCW），`GetType().GetMethod("GetResults")` **拿不到**，
+> 实测报错就是「GetResults 拿不到（op 类型 System.__ComObject）」。
+> 必须走 `System.Runtime.WindowsRuntime` 的投影：`AsTask<T>()` → `Task<T>.Result`。
+> `build.cmd` 坚持不加额外 `/r:` 引用，所以这里用
+> `Assembly.Load("System.Runtime.WindowsRuntime, ...")` 晚绑定，
+> 拿不到就降级（菜单提示），不影响绿色版。
+
+#### 为什么绿色版和包内版不要同时开自启
+
+两套都启用的话，开机会各拉一个进程。单实例 Mutex `Local\RogBatteryTray`
+会让第二个直接退出，所以不会真跑两个，但会有一个进程白启一次。
+只用其中一种即可。
+
+### 签名与 SmartScreen
+
+`.msix` **必须签名**才能 `Add-AppxPackage` 安装，否则报
+`0x800B0100: 应用包必须经过数字签名才能进行签名验证`。
+
+- **本机测试**：`-Sign` 用自签证书签，然后把证书导进
+  「受信任的根证书颁发机构」才能装：
+  ```powershell
+  Export-Certificate -Cert Cert:\CurrentUser\My\<指纹> -FilePath $env:TEMP\rb-test.cer
+  Import-Certificate -FilePath $env:TEMP\rb-test.cer -CertStoreLocation Cert:\LocalMachine\Root
+  ```
+  测完记得删掉那张根证书（`Remove-Item Cert:\LocalMachine\Root\<指纹>`），
+  别留在机器上。自签证书 `CN=Neonrain`，有效期 3 年。
+- **提交 Store**：提**未签名**的那个（`build-msix.ps1` 不带 `-Sign` 的产物）。
+  Store 会用自己的证书重新签，装到用户机器上**永远不会弹 SmartScreen**——
+  这是目前唯一免费消除「Windows 已保护你的电脑」的路。
+  自签的那个**不要**提交。
+
+### manifest 里必须改的东西
+
+`package.props.psd1` 集中了所有可变项。提交前至少改三处：
+
+| 项 | 现在 | 提交前改成 |
+|---|---|---|
+| `Publisher` | `CN=Neonrain` | Partner Center「产品标识」页给的 `Package/Identity/Publisher` 原值 |
+| `IdentityName` | `Neonrain.RBattery` | Partner Center 分配的包名 |
+| `PublisherDisplayName` | `Neonrain` | 你注册的发布者显示名 |
+
+`Publisher` 必须和证书 Subject **逐字一致**（区分大小写、逗号后空格也要一样），
+否则提交必被拒。
+
+### `runFullTrust` 不等于放宽权限
+
+manifest 里声明了 `<rescap:Capability Name="runFullTrust" />`。它是桌面桥应用的
+准入门槛（少了 exe 起不来），但**不额外授予文件系统或设备权限**——进程仍然跑在
+用户身份下，读 `%LOCALAPPDATA%\ASUS\...`、打开 HID 设备的权限跟普通 exe 完全一样。
+
+所以**不需要** `broadFileSystemAccess`（那个是给真 UWP 用的，加它反而要写评审理由）。
+
+### makeappx 从哪来
+
+`package.props.psd1` 里默认指向：
+
+```
+D:\codex\_tools\makeappx\makeappx.exe
+D:\codex\_tools\makeappx\signtool.exe
+```
+
+来自 NuGet 包 `microsoft.windows.sdk.buildtools`（版本 10.0.28000.2705），
+解压在 `D:\codex\_tools\sdk-buildtools\`。**整个目录要留着**——`makeappx`
+靠同目录的 `.manifest` 做免注册 COM 绑定，只拷 exe 会报
+`side-by-side configuration is incorrect`。
+
+换机器时改 `package.props.psd1` 里那两个路径即可，或者装了 Windows SDK
+的话直接指向 `bin\<version>\x64\` 下的同名文件。
+
+---
+
 ## 重新构建
 
 ```
@@ -490,5 +617,6 @@ Shell 不会主动再来问我们要内容——悬停着按 DPI 键切档，提
 | `rog-battery.cs` | 主程序：HID 协议、Win32 枚举、命令行、电量历史与时间预测 |
 | `tray.cs` | 托盘：消息窗口、右键菜单、定时刷新、图标绘制 |
 | `build.cmd` | 一行编译脚本 |
-| `rog-battery.exe` | 构建产物，50 KB |
-| `history.tsv` | 电量采样历史（自动生成，删掉即重新开始攒） |
+| `rog-battery.exe` | 构建产物，约 57 KB |
+| `history.tsv` | 电量采样历史（自动生成，删掉即重新开始攒）。包内版在 `%LOCALAPPDATA%\rog-battery\` |
+| `msix/` | MSIX 打包脚本、manifest 模板、图标生成、发布参数 |
