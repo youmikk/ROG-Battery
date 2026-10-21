@@ -721,6 +721,8 @@ static class Tray
         }
 
         ApplyState(st);
+        // 成功后记住型号名：设备休眠时 st 为 null，提示里还得显示正确型号
+        if (st != null && !string.IsNullOrEmpty(st.Model)) _lastModel = st.Model;
         _nid.hIcon = _icon;
         _nid.szTip = TipText(st, dpi);
         _nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
@@ -745,6 +747,11 @@ static class Tray
         if (old != IntPtr.Zero) DestroyIcon(old);
     }
 
+    // 型号名取自 PID → 型号表（devices.cs）。表里没有的 PID 退化成 "ROG 外设 (0xXXXX)"。
+    // 上一次成功读到的型号名要缓存：设备休眠后 st 为 null，提示里仍应显示正确型号，
+    // 而不是掉回一个通用名字。
+    static string _lastModel = null;
+
     static string TipText(RogBattery.State st, RogBattery.DpiInfo dpi)
     {
         string dpiLine = "";
@@ -754,11 +761,15 @@ static class Tray
             if (dpi.Values.Length > 0 && dpi.Selected >= 0)
                 dpiLine += "（第 " + (dpi.Selected + 1) + "/" + dpi.Values.Length + " 档）";
         }
+        string model = st != null && !string.IsNullOrEmpty(st.Model)
+                     ? st.Model
+                     : (_lastModel ?? "ROG 鼠标");
         if (st == null)
-            return "ROG 龙鳞 Ace Mini\n未连接（鼠标休眠或未配对）" + dpiLine;
+            return model + "\n未连接（设备休眠或未配对）" + dpiLine;
         // Shell_NotifyIcon 的 szTip 上限 128 字符（含结尾 \0），且用 \n 换行
         string link = st.Mode == RogBattery.LinkMode.Wired ? "有线"
                     : st.Mode == RogBattery.LinkMode.Wireless24G ? "2.4G 无线"
+                    : st.Mode == RogBattery.LinkMode.Bluetooth ? "蓝牙"
                     : "未知";
         string charge = st.Charge == RogBattery.ChargeState.Charging ? "充电中"
                       : st.Charge == RogBattery.ChargeState.Full ? "已充满"
@@ -774,11 +785,15 @@ static class Tray
         }
         catch { }
 
-        return "ROG 龙鳞 Ace Mini"
+        // 键盘不回报电压，硬写 "0 mV" 会让人以为读数坏了，直接省掉这一行。
+        string voltLine = st.Kind == RogBattery.DevKind.Keyboard
+                        ? "" : "\n电压 " + st.Voltage + " mV";
+
+        return model
              + "\n连接 " + link + " · " + charge
              + "\n剩余电量 " + st.Level + "%"
              + estLine
-             + "\n电压 " + st.Voltage + " mV"
+             + voltLine
              + dpiLine;
     }
 
@@ -799,6 +814,7 @@ static class Tray
             Level = 100, Voltage = 4185,
             Charge = RogBattery.ChargeState.Discharging,
             Mode = RogBattery.LinkMode.Wireless24G,
+            Pid = 0x1B65, Model = "ROG 龙鳞 Ace Mini",
         };
 
         Action<string, string> check = delegate (string name, string text)
@@ -841,8 +857,30 @@ static class Tray
         _lastEst = null;
         check("未连接", TipText(null, dpi));
 
+        // 6) 长型号名（表里最长的一条是 Demon1 联名版，19 个汉字），验证不会撞 128 上限
+        st.Model = Devices.NameZhOrPid(0x1E51);
+        check("最长型号名", TipText(st, dpi));
+        st.Model = "ROG 龙鳞 Ace Mini";
+
+        // 7) 键盘：不该出现电压行（键盘不回报电压，写 "0 mV" 会像读数坏了）
+        var kbd = new RogBattery.State
+        {
+            Level = 65, Voltage = 0,
+            Charge = RogBattery.ChargeState.Discharging,
+            Mode = RogBattery.LinkMode.Wireless24G,
+            Kind = RogBattery.DevKind.Keyboard,
+            Pid = 0x1A83, Model = "ROG 夜魔",
+        };
+        _lastEst = new RogBattery.Estimate { Known = true, Text = "预计还能用 8 小时 12 分钟" };
+        string k = TipText(kbd, null);
+        check("键盘无电压", k);
+        if (k.IndexOf("电压") >= 0)
+        {
+            fail++; Console.WriteLine("  FAIL 键盘不该显示电压");
+        }
+
         Console.WriteLine();
-        Console.WriteLine(fail == 0 ? "全部通过 (5 项)" : fail + " 项失败");
+        Console.WriteLine(fail == 0 ? "全部通过 (7 项)" : fail + " 项失败");
         return fail;
     }
 

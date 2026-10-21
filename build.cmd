@@ -18,7 +18,7 @@ rem                     When launched from cmd/PowerShell we AttachConsole() to 
 rem                     parent so --once/--watch/--help still print.
 "%CSC%" /nologo /target:winexe /platform:x64 /optimize+ ^
   /r:System.dll /r:System.Drawing.dll ^
-  /out:rog-battery.exe rog-battery.cs tray.cs settings.cs
+  /out:rog-battery.exe rog-battery.cs tray.cs settings.cs devices.cs
 if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1

@@ -38,12 +38,10 @@ using System.Threading;
 
 static class RogBattery
 {
-    const ushort VID = 0x0B05;
-    const ushort PID_DONGLE = 0x1ACE;      // ROG OMNI RECEIVER（2.4G 接收器，本体无型号）
-    const ushort PID_MOUSE = 0x1B65;       // 龙鳞 Ace Mini（接收器扫描响应里报的 PID）
-    const ushort PID_WIRED = 0x1B63;       // 龙鳞 Ace Mini 插线直连时本体自己的 PID
+    const ushort VID = Devices.VID;
     const ushort P_DONGLE_CTRL = 0xFF02;   // 接收器命令通道
     const ushort P_MOUSE_CTRL = 0xFF01;    // 鼠标命令通道（有线/无线都是这个 UsagePage）
+    const ushort P_KEYBOARD_CTRL = 0xFF00; // 键盘命令通道（有线直连时；经接收器走 0xFF02 的 rid 2）
 
     const uint GENERIC_READ = 0x80000000;
     const uint GENERIC_WRITE = 0x40000000;
@@ -144,6 +142,11 @@ static class RogBattery
 
     [DllImport("hid.dll", SetLastError = true)]
     static extern bool HidD_FreePreparsedData(IntPtr pp);
+
+    // 读设备自报的产品名。表里没有的 PID 靠它给出可读名字，
+    // 比 "ROG 外设 (0x19AF)" 有用得多。缓冲区按 HID 规范给 126 个 wchar。
+    [DllImport("hid.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool HidD_GetProductString(IntPtr h, System.Text.StringBuilder buf, int bufLen);
 
     [DllImport("hid.dll", SetLastError = true)]
     static extern int HidP_GetCaps(IntPtr pp, ref HIDP_CAPS caps);
@@ -271,6 +274,7 @@ static class RogBattery
         public ushort Usage;
         public ushort InLen;
         public ushort OutLen;
+        public string ProductName;   // 设备固件自报的产品名；读不到就是 null
 
         // 命令通道 = vendor 集合(0xFF01/0xFF02) + Usage 1 + 报告长度 >= 64。
         // 只看 UsagePage 会误抓到同一 PID 下那些 In=2/12/21 的输入集合。
@@ -328,6 +332,18 @@ static class RogBattery
                         var caps = new HIDP_CAPS();
                         caps.Reserved = new ushort[17];
                         if (HidP_GetCaps(pp, ref caps) != 0x00110000) continue;
+
+                        // 顺手读一次产品名。固件没实现就拿到空串，不影响任何逻辑，
+                        // 只在 "表里没有的 PID" 时用来顶替 "ROG 外设 (0xXXXX)"。
+                        string pname = null;
+                        try
+                        {
+                            var sb = new System.Text.StringBuilder(126);
+                            if (HidD_GetProductString(h, sb, 126 * 2)) pname = sb.ToString().Trim();
+                            if (pname != null && pname.Length == 0) pname = null;
+                        }
+                        catch { pname = null; }
+
                         list.Add(new HidIface
                         {
                             Path = detail.DevicePath,
@@ -336,6 +352,7 @@ static class RogBattery
                             Usage = caps.Usage,
                             InLen = caps.InputReportByteLength,
                             OutLen = caps.OutputReportByteLength,
+                            ProductName = pname,
                         });
                     }
                     finally { HidD_FreePreparsedData(pp); }
@@ -461,20 +478,36 @@ static class RogBattery
     }
 
     // ---------------- 连接方式 ----------------
-    public enum LinkMode { None = 0, Wired = 1, Wireless24G = 2 }
+    public enum LinkMode { None = 0, Wired = 1, Wireless24G = 2, Bluetooth = 3 }
 
     public static string ModeText(LinkMode m)
     {
         if (m == LinkMode.Wired) return "有线";
         if (m == LinkMode.Wireless24G) return "2.4G 无线";
+        if (m == LinkMode.Bluetooth) return "蓝牙";
         return "未连接";
     }
+
+    // 设备种类。接收器扫描响应里的 controlReportId 直接对应它：
+    //   2 = 键盘槽位，3 = 鼠标槽位。
+    public enum DevKind { Mouse = 0, Keyboard = 1 }
 
     class Link
     {
         public LinkMode Mode;
-        public HidIface Ctrl;      // 鼠标命令通道
-        public byte Rid;           // 写帧首字节
+        public HidIface Ctrl;      // 命令通道
+        public byte Rid;           // 写帧首字节（接收器槽位给的 controlReportId）
+        public ushort Pid;         // 本体的 PID（有线时是本体 PID，无线时是接收器扫描报的 PID）
+        public DevKind Kind;       // 鼠标还是键盘——两者电量命令不同
+
+        /// <summary>命令通道上报的产品名（固件自报，可能为 null）。</summary>
+        public string ProductName;
+
+        /// <summary>
+        /// 型号中文名。表里没有时用固件自报的产品名顶替，
+        /// 再没有才退化成 "ROG 外设 (0xXXXX)"。
+        /// </summary>
+        public string ModelName { get { return Devices.Display(Pid, ProductName); } }
     }
 
     // ---------- 连接缓存 ----------
@@ -511,79 +544,167 @@ static class RogBattery
         err = null;
         var all = Enumerate(0);
 
-        HidIface wired = null;
-        var cands = new System.Collections.Generic.List<HidIface>();
+        // ---------- 1) 优先看接收器：一个 dongle 可能同时带键盘和鼠标 ----------
+        HidIface dc = null, mc = null, kc = null;
         foreach (var x in all)
         {
-            if (x.UsagePage != P_MOUSE_CTRL || !x.IsCommandChannel) continue;
-            if (x.ProductId == PID_DONGLE) continue;      // 接收器侧的不算本体
-            cands.Add(x);
+            if (!Devices.DonglePids.Contains(x.ProductId) || !x.IsCommandChannel) continue;
+            if (dc == null && x.UsagePage == P_DONGLE_CTRL) dc = x;
+            if (mc == null && x.UsagePage == P_MOUSE_CTRL) mc = x;
+            if (kc == null && x.UsagePage == P_KEYBOARD_CTRL) kc = x;
         }
+
+        Link dongleLink = null;
+        if (dc != null)
+            dongleLink = OpenViaDongle(dc, mc, kc);
+
+        // ---------- 2) 直接连的（有线 / 本体自带接收能力） ----------
+        // 鼠标通道 0xFF01、键盘通道 0xFF00。别的 ROG 设备也可能有同名通道，
+        // 所以要多候选时靠"发一条电量查询能不能应答"甄别。
+        var mouseCands = new System.Collections.Generic.List<HidIface>();
+        var kbdCands = new System.Collections.Generic.List<HidIface>();
+        foreach (var x in all)
+        {
+            if (!x.IsCommandChannel) continue;
+            if (Devices.DonglePids.Contains(x.ProductId)) continue;   // 接收器侧的不算本体
+            if (x.UsagePage == P_MOUSE_CTRL) mouseCands.Add(x);
+            else if (x.UsagePage == P_KEYBOARD_CTRL) kbdCands.Add(x);
+        }
+
+        // 优先有线鼠标：鼠标电量信息更丰富（电压、低电量阈值、充满效果），
+        // 用户也更常在这种状态下打开托盘看。
+        var wiredMouse = PickDirect(mouseCands, DevKind.Mouse);
+        if (wiredMouse != null)
+            return new Link
+            {
+                Mode = LinkMode.Wired, Ctrl = wiredMouse, Rid = 3,
+                Pid = wiredMouse.ProductId, Kind = DevKind.Mouse,
+                ProductName = wiredMouse.ProductName,
+            };
+
+        var wiredKbd = PickDirect(kbdCands, DevKind.Keyboard);
+        if (wiredKbd != null)
+            return new Link
+            {
+                Mode = LinkMode.Wired, Ctrl = wiredKbd, Rid = 2,
+                Pid = wiredKbd.ProductId, Kind = DevKind.Keyboard,
+                ProductName = wiredKbd.ProductName,
+            };
+
+        // 有线都没有，回到接收器结果
+        if (dongleLink != null) return dongleLink;
+
+        if (dc == null) { err = "没找到接收器命令通道 (0xFF02)"; return null; }
+        err = "没找到可用的鼠标或键盘通道";
+        return null;
+    }
+
+    /// <summary>从直连候选里挑一个，靠"能应答电量查询"甄别。</summary>
+    static HidIface PickDirect(System.Collections.Generic.List<HidIface> cands, DevKind kind)
+    {
+        if (cands.Count == 0) return null;
         if (cands.Count == 1)
         {
             // 只有一台候选，不用试探——省掉每秒一次的额外写操作
-            wired = cands[0];
+            return cands[0];
         }
-        else if (cands.Count > 1)
-        {
-            // 别的 ROG 设备（键盘等）也可能有 0xFF01 命令通道，
-            // 所以不能见到就用——发一条电量查询，能应答的才真是鼠标。
-            foreach (var x in cands)
-                if (AnswersAsMouse(x)) { wired = x; break; }
-        }
-        if (wired != null)
-            return new Link { Mode = LinkMode.Wired, Ctrl = wired, Rid = 3 };
+        // 表里认得的型号优先（免得别的设备抢在前头），认不得的再靠应答甄别。
+        foreach (var x in cands)
+            if (Devices.IsKnown(x.ProductId) && AnswersAs(x, kind)) return x;
+        foreach (var x in cands)
+            if (AnswersAs(x, kind)) return x;
+        return null;
+    }
 
-        HidIface dc = null, mc = null;
-        foreach (var x in all)
-        {
-            if (x.ProductId != PID_DONGLE || !x.IsCommandChannel) continue;
-            if (dc == null && x.UsagePage == P_DONGLE_CTRL) dc = x;
-            if (mc == null && x.UsagePage == P_MOUSE_CTRL) mc = x;
-        }
-        if (dc == null) { err = "没找到接收器命令通道 (0xFF02)"; return null; }
-        if (mc == null) { err = "没找到鼠标命令通道 (0xFF01)"; return null; }
-
+    /// <summary>经接收器找配对设备。</summary>
+    static Link OpenViaDongle(HidIface dc, HidIface mc, HidIface kc)
+    {
         var d = new Dev(dc.Path, dc.InLen, dc.OutLen);
         try
         {
-            if (!d.WriteOk) { err = "接收器句柄无写权限"; return null; }
+            if (!d.WriteOk) return null;
 
             byte[] scan = null;
             for (int i = 0; i < 3 && scan == null; i++)
                 scan = Ask(d, 1, 160, 0, null, 2000);
-            if (scan == null) { err = "接收器扫描配对设备无响应"; return null; }
+            if (scan == null) return null;
 
             int count = scan[3] << 8 | scan[2];
-            if (count < 1) { err = "接收器没有配对的设备"; return null; }
+            if (count < 1) return null;
 
-            // 每台配对设备 4 字节：PID(LE16) reportId notifyReportId
-            // 只接一台鼠标时直接用第 0 台；接了多台就优先挑 0x1B65（龙鳞 Ace Mini）
-            int pick = 0;
+            // 每台配对设备 4 字节：PID(LE16) controlReportId notifyReportId
+            //   controlReportId: 2 = 键盘槽位，3 = 鼠标槽位（Gear Link / libratbag 一致）
+            // 优先鼠标槽位（电量信息更全），没有鼠标再退键盘。
+            int pickMouse = -1, pickMouseKnown = -1;
+            int pickKbd = -1, pickKbdKnown = -1;
             for (int i = 0; i < count; i++)
             {
                 int c = 4 + i * 4;
                 if (scan.Length < c + 4) break;
-                if ((scan[c + 1] << 8 | scan[c]) == PID_MOUSE) { pick = i; break; }
+                int slotPid = scan[c] | scan[c + 1] << 8;
+                byte slotType = scan[c + 2];
+                bool known = Devices.IsKnown((ushort)slotPid);
+                if (slotType == 3)
+                {
+                    if (pickMouse < 0) pickMouse = i;
+                    if (pickMouseKnown < 0 && known) pickMouseKnown = i;
+                }
+                else if (slotType == 2)
+                {
+                    if (pickKbd < 0) pickKbd = i;
+                    if (pickKbdKnown < 0 && known) pickKbdKnown = i;
+                }
             }
-            int b = 4 + pick * 4;
-            if (scan.Length < b + 4) { err = "扫描响应长度不足"; return null; }
+            if (pickMouseKnown >= 0) pickMouse = pickMouseKnown;
+            if (pickKbdKnown >= 0) pickKbd = pickKbdKnown;
 
+            int pick = pickMouse;
+            DevKind kind = DevKind.Mouse;
+            HidIface chan = mc;
+            if (pick < 0)
+            {
+                pick = pickKbd;
+                kind = DevKind.Keyboard;
+                chan = kc != null ? kc : mc;   // 键盘命令通道优先 0xFF00；老固件可能只有 0xFF01
+            }
+            if (pick < 0)
+            {
+                // 没有任何槽位报类型。老固件可能不填 controlReportId，
+                // 这时退回"只接了一台就当它是鼠标"，保持旧行为。
+                if (count == 1) { pick = 0; kind = DevKind.Mouse; chan = mc; }
+                else return null;
+            }
+            if (chan == null) return null;
+
+            int b = 4 + pick * 4;
+            if (scan.Length < b + 4) return null;
+
+            ushort pid = (ushort)(scan[b] | scan[b + 1] << 8);
             byte rid = scan[b + 2];
-            if (rid == 0) rid = 3;
-            return new Link { Mode = LinkMode.Wireless24G, Ctrl = mc, Rid = rid };
+            if (rid == 0) rid = kind == DevKind.Mouse ? (byte)3 : (byte)2;
+            return new Link
+            {
+                Mode = LinkMode.Wireless24G, Ctrl = chan, Rid = rid, Pid = pid,
+                Kind = kind, ProductName = chan.ProductName,
+            };
         }
+        catch { return null; }
         finally { d.Dispose(); }
     }
 
-    // 试探某个命令通道是不是真鼠标：发电量查询，看有没有正常长度的应答。
-    // 只用于有线判定，所以 reportId 固定 3（实测本体就是 3）。
-    static bool AnswersAsMouse(HidIface x)
+    // 试探某条通道是不是真的要找的那种设备：发对应的电量查询，看有没有正常长度的应答。
+    static bool AnswersAs(HidIface x, DevKind kind)
     {
         var d = new Dev(x.Path, x.InLen, x.OutLen);
         try
         {
             if (!d.WriteOk) return false;
+            if (kind == DevKind.Keyboard)
+            {
+                // 键盘：12 01 00 00，需要 >= 10 字节数据
+                var k = Ask(d, 2, 18, 1, 0, 700);
+                return k != null && k.Length >= 6;
+            }
             var p = Ask(d, 3, 18, 7, 0, 600);
             return p != null && p.Length >= 12;
         }
@@ -666,11 +787,14 @@ static class RogBattery
         public bool Charging;      // 设备报告的 charging_status
         public ChargeState Charge; // 归并后的三态
         public LinkMode Mode;
+        public string Model;       // 型号名，来自 PID → 型号表
+        public ushort Pid;         // 设备 PID，排查用
+        public DevKind Kind;       // 鼠标还是键盘（键盘没有电压）
     }
 
     /// <summary>把一次 PowerInfo 读数包装成 State（含三态归并）。
     /// 只能用 private：PowerInfo 是私有嵌套类，公开出去会触发 CS0051。</summary>
-    static State FromDevice(PowerInfo p, LinkMode mode)
+    static State FromDevice(PowerInfo p, LinkMode mode, ushort pid, DevKind kind, string productName)
     {
         if (p == null) return null;
         return new State
@@ -680,6 +804,9 @@ static class RogBattery
             Charging = p.Charging,
             Charge = DecideCharge(p, mode),
             Mode = mode,
+            Pid = pid,
+            Kind = kind,
+            Model = Devices.Display(pid, productName),
         };
     }
 
@@ -688,8 +815,11 @@ static class RogBattery
     {
         string err;
         LinkMode mode;
-        var p = ReadPower(out err, out mode);
-        return FromDevice(p, mode);
+        ushort pid;
+        string pname;
+        DevKind kind;
+        var p = ReadPower(out err, out mode, out pid, out pname, out kind);
+        return FromDevice(p, mode, pid, kind, pname);
     }
 
     /// <summary>把"设备报的 charging_status"和"接线方式"归并成三态。</summary>
@@ -713,14 +843,20 @@ static class RogBattery
         return lk == null ? LinkMode.None : lk.Mode;
     }
 
-    static PowerInfo ReadPower(out string err, out LinkMode mode)
+    static PowerInfo ReadPower(out string err, out LinkMode mode, out ushort pid, out string productName, out DevKind kind)
     {
         err = null;
         mode = LinkMode.None;
+        pid = 0;
+        productName = null;
+        kind = DevKind.Mouse;
 
         var lk = OpenLinkCached(out err);
         if (lk == null) return null;
         mode = lk.Mode;
+        pid = lk.Pid;
+        productName = lk.ProductName;
+        kind = lk.Kind;
 
         var dev = new Dev(lk.Ctrl.Path, lk.Ctrl.InLen, lk.Ctrl.OutLen);
         try
@@ -729,21 +865,43 @@ static class RogBattery
             {
                 // 句柄开不出写权限，多半是设备已经拔了/换了接法：缓存作废，下次重新枚举
                 InvalidateLinkCache();
-                err = "鼠标命令通道无写权限";
+                err = "命令通道无写权限";
                 return null;
             }
 
+            // 鼠标和键盘的电量命令不同：
+            //   鼠标 12 07 → d[4] 电量、d[5] 睡眠、d[6] 低电量阈值、d[7..8] 电压、d[9] 充电、d[10] 电池类型、d[11] 充满效果
+            //   键盘 12 01 → d[4] 恒 0、d[5] 电量、d[6] 空闲枚举、d[7] 省电、d[8] 充电、d[9] 低电量阈值
+            // 键盘没有电压和电池类型，所以那几个字段留 0（托盘会跳过不显示）。
+            byte powerSub = lk.Kind == DevKind.Keyboard ? (byte)1 : (byte)7;
             byte[] p = null;
             for (int i = 0; i < 3 && p == null; i++)
-                p = Ask(dev, lk.Rid, 18, 7, 0, 1500);
+                p = Ask(dev, lk.Rid, 18, powerSub, 0, 1500);
             if (p == null)
             {
-                // 连发 3 次都无应答：可能是鼠标休眠，也可能是换了接法导致这条通道失效。
+                // 连发 3 次都无应答：可能是设备休眠，也可能是换了接法导致这条通道失效。
                 // 作废缓存，下一轮重新枚举——比一直往死通道写更可靠。
                 InvalidateLinkCache();
-                err = "鼠标电量命令无响应";
+                err = lk.Kind == DevKind.Keyboard ? "键盘电量命令无响应" : "鼠标电量命令无响应";
                 return null;
             }
+
+            if (lk.Kind == DevKind.Keyboard)
+            {
+                if (p.Length < 10) { err = "键盘电量响应过短"; return null; }
+                if (p[5] > 100) { err = "电量越界 " + p[5]; return null; }
+                return new PowerInfo
+                {
+                    Level = p[5],
+                    Sleep = p[6],
+                    LowPower = p[9],
+                    Voltage = 0,              // 键盘不回电压
+                    Charging = p[8] == 1,
+                    BatteryType = 0,
+                    FullEffect = 0,
+                };
+            }
+
             if (p.Length < 12) { err = "电量响应过短"; return null; }
 
             // 电量必须是 0..100。以前不校验，坏帧会让托盘直接画出 "255%"，
@@ -1007,10 +1165,54 @@ static class RogBattery
             return 1;
         }
         Console.WriteLine("连接方式: " + ModeText(lk.Mode));
+        Console.WriteLine("设备型号: " + lk.ModelName + "  (PID 0x" + lk.Pid.ToString("X4") + ")");
         Console.WriteLine("命令通道: PID=0x" + lk.Ctrl.ProductId.ToString("X4")
             + "  UsagePage=0x" + lk.Ctrl.UsagePage.ToString("X4")
             + "  In=" + lk.Ctrl.InLen + " Out=" + lk.Ctrl.OutLen
             + "  reportId=" + lk.Rid);
+        return 0;
+    }
+
+    // 用法: rog-battery.exe --list-devices
+    // 列出型号表里认识的全部设备，以及本机当前插着的。
+    static int ShowDevices()
+    {
+        Console.WriteLine("型号表收录 " + Devices.Count + " 个 PID（来源：ASUS Gear Link hid-whitelist + manifest）");
+        Console.WriteLine("接收器 PID: " + string.Join(", ",
+            System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(Devices.DonglePids,
+                delegate (ushort p) { return "0x" + p.ToString("X4"); }))));
+        Console.WriteLine();
+
+        Console.WriteLine("本机当前检测到（VID 0x0B05）：");
+        var all = Enumerate(0);
+        if (all.Count == 0)
+        {
+            Console.WriteLine("  (没有)");
+        }
+        else
+        {
+            var seen = new System.Collections.Generic.Dictionary<ushort, bool>();
+            foreach (var x in all)
+            {
+                if (seen.ContainsKey(x.ProductId)) continue;
+                seen[x.ProductId] = true;
+                string kind = Devices.DonglePids.Contains(x.ProductId) ? "接收器"
+                            : x.IsCommandChannel ? "命令通道" : "";
+                Console.WriteLine("  0x" + x.ProductId.ToString("X4") + "  "
+                    + Devices.Display(x.ProductId, x.ProductName) + "  " + kind);
+            }
+        }
+
+        Console.WriteLine();
+        string devErr;
+        var lk = OpenLinkCached(out devErr);
+        if (lk == null)
+        {
+            Console.WriteLine("当前连接的设备: 未连接" + (string.IsNullOrEmpty(devErr) ? "" : "（" + devErr + "）"));
+            return 1;
+        }
+        Console.WriteLine("当前连接的设备: " + lk.ModelName + "（PID 0x" + lk.Pid.ToString("X4")
+            + "，" + ModeText(lk.Mode) + "，" + (lk.Kind == DevKind.Keyboard ? "键盘" : "鼠标") + "）");
         return 0;
     }
 
@@ -1788,6 +1990,12 @@ static class RogBattery
                     Console.WriteLine("当前 DPI: " + info.Current);
                 return 0;
             }
+            else if (a == "--list-devices")
+            {
+                EnsureConsole();
+                try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
+                return ShowDevices();
+            }
             else if (a == "--help" || a == "-h" || a == "-?")
             {
                 help = true;
@@ -1826,6 +2034,7 @@ static class RogBattery
             Console.WriteLine("  --once          只读一次然后退出");
             Console.WriteLine("  --watch [秒]    在控制台持续刷新（默认 60 秒）");
             Console.WriteLine("  --mode          打印当前连接方式（有线 / 2.4G）和命令通道");
+            Console.WriteLine("  --list-devices  列出型号表收录的设备与本机检测结果");
             Console.WriteLine("  --dpi           打印四档 DPI 和当前档位");
             Console.WriteLine("  --estimate      看剩余/充满时间的历史样本和当前估算");
             Console.WriteLine("  --charge-selftest    充电三态判定真值表自检");
@@ -1839,7 +2048,10 @@ static class RogBattery
         {
             string err;
             LinkMode mode;
-            var info = ReadPower(out err, out mode);
+            ushort pid;
+            string pname;
+            DevKind kind;
+            var info = ReadPower(out err, out mode, out pid, out pname, out kind);
             string stamp = DateTime.Now.ToString("HH:mm:ss");
             if (info == null)
             {
@@ -1848,17 +2060,23 @@ static class RogBattery
             else
             {
                 var cs = DecideCharge(info, mode);
-                string chg = mode == LinkMode.Wired ? "  🔌有线" : "  📶2.4G";
+                string chg = mode == LinkMode.Wired ? "  🔌有线"
+                           : mode == LinkMode.Bluetooth ? "  🔵蓝牙"
+                           : "  📶2.4G";
                 chg += cs == ChargeState.Charging ? " ⚡充电中"
                      : cs == ChargeState.Full ? " ✅已充满"
                      : " 🔋使用中";
-                Console.WriteLine("[" + stamp + "] ROG 龙鳞 Ace Mini   电量 " + info.Level + "% ("
-                    + Colorize(info.Level) + ")   电压 " + info.Voltage + " mV" + chg);
-                Console.WriteLine("            低电量阈值 " + info.LowPower
+                // 键盘不回电压，硬打 "0 mV" 反而像出错，直接省掉这一段。
+                string volt = kind == DevKind.Keyboard ? "" : "   电压 " + info.Voltage + " mV";
+                Console.WriteLine("[" + stamp + "] " + Devices.Display(pid, pname) + "   电量 " + info.Level + "% ("
+                    + Colorize(info.Level) + ")" + volt + chg);
+                Console.WriteLine("            PID 0x" + pid.ToString("X4")
+                    + "   " + (kind == DevKind.Keyboard ? "键盘" : "鼠标")
+                    + "   低电量阈值 " + info.LowPower
                     + "%   电池类型 " + info.BatteryType
                     + "   充满效果 " + info.FullEffect + "   睡眠模式 " + info.Sleep);
 
-                var st = FromDevice(info, mode);
+                var st = FromDevice(info, mode, pid, kind, pname);
                 RecordSample(st);
                 var est = Predict(st);
                 Console.WriteLine("            " + est.Text
