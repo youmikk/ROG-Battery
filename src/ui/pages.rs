@@ -742,7 +742,19 @@ fn raw_options(drop: Drop) -> Vec<(String, usize)> {
             .enumerate()
             .map(|(i, hz)| (format!("{hz} Hz"), i))
             .collect(),
-        Drop::Stage => (0..4).map(|i| (format!("档位 {}", i + 1), i)).collect(),
+        // value 必须是**协议里的 1 基档位**，不是 0 基下标。
+        //
+        // 原来写的是 `(0..4).map(|i| (..., i))`，于是：
+        //   点「档位 1」→ 传 stage=0 → `set_stage` 报「档位必须是 1-4」
+        //   点「档位 2」→ 传 stage=1 → 设备真的切到 **档位 1**
+        //   点「档位 3」→ 传 stage=2 → 设备真的切到 **档位 2**
+        //   点「档位 4」→ 传 stage=3 → 设备真的切到 **档位 3**
+        // 用户原话「切换 dpi 没有反应，写的是切换了实际没有切换档位」——
+        // 真机点「档位 3」时设备正好当前是 2，切到 2 等于没变，
+        // 界面高亮也跟着留在 2，看起来完全没反应。
+        Drop::Stage => (0..4)
+            .map(|i| (format!("档位 {}", i + 1), i + 1))
+            .collect(),
         Drop::Debounce => (0u8..=7)
             .map(|c| (crate::proto::debounce_name(c), c as usize))
             .collect(),
