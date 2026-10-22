@@ -44,6 +44,7 @@
 //!   必须放进 `Cell` / `RefCell` / `Mutex`。
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -109,6 +110,9 @@ enum Status {
 }
 
 impl Status {
+    /// 用没用得上 `is_busy` 都不影响语义：队列本身已经承担了「有活在排队」
+    /// 的表达，`Busy` 只是给界面看的显示态。
+    #[allow(dead_code)]
     fn is_busy(&self) -> bool {
         matches!(self, Status::Busy)
     }
@@ -235,8 +239,17 @@ struct Shared {
     /// 本地设置。界面改了就更新这里再落盘。
     cfg: Settings,
     autostart: (crate::autostart::AutoStartState, crate::autostart::AutoStartPath),
-    /// 待执行的写命令。
-    pending: Option<Cmd>,
+    /// 待执行的写命令队列。
+    ///
+    /// **以前是单个 `Option<Cmd>`**：后台正在写设备或正在读全量快照时
+    /// （全量要 590~1000ms，休眠时更久），用户再点一下就被 `submit` 静默丢掉，
+    /// 界面上一点反馈都没有 —— 表现就是「我选了下拉项，但什么都没发生」。
+    /// 用户报的「去抖切换没反应」有一个真实成因就是它：点开下拉选值时
+    /// 恰好上一轮全量读取还没完。
+    ///
+    /// 改成队列后连点几下都会依次执行。上限 [`MAX_PENDING`] 防止用户
+    /// 疯狂拖滑块时堆几百条命令、松手后设备还在慢慢追。
+    pending: VecDeque<Cmd>,
     /// 最近一条命令的结果，GUI 线程取走一次就清空。
     last: Option<CmdResult>,
     /// 下一轮要不要读全量。
@@ -258,7 +271,7 @@ impl Shared {
             estimate: crate::history::Estimate::default(),
             cfg,
             autostart: (crate::autostart::AutoStartState::Unknown, crate::autostart::AutoStartPath::Unknown),
-            pending: None,
+            pending: VecDeque::new(),
             last: None,
             want_full: false,
         }
@@ -408,7 +421,13 @@ impl<'a> UiEnv<'a> {
     }
 
     fn submit(&self, cmd: Cmd) -> bool {
-        submit(self.shared, self.signal, cmd)
+        let ok = submit(self.shared, self.signal, cmd);
+        if !ok {
+            // 以前这里是什么都不说就返回 false —— 用户点了一下，
+            // 界面上完全没有变化，只会以为功能坏了。现在至少给一句话。
+            self.say("✘ 操作排不进去了（前面的还没写完），稍等一下再试");
+        }
+        ok
     }
 }
 
@@ -1073,18 +1092,27 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
     Some(q)
 }
 
+/// 命令队列上限。
+///
+/// 拖滑块时 `Act::CommitSlide` 一次只发一条，但用户可能连点几个下拉、
+/// 再按几下「应用」。给到 4 就够覆盖正常手速，又不会在后台卡住时
+/// 堆出一长串「等会儿再写」的旧值（那会让松手后的设备慢慢追你早就改掉的数）。
+const MAX_PENDING: usize = 4;
+
 /// 把请求排进队列。
 ///
-/// 返回 `false` = **这条命令被丢掉了**（上一条还没写完）。设备写命令不关心
-/// 这个（丢掉的本来就是用户等不及的重复点击），但开机自启不碰设备、
-/// 也不该无声消失 —— 那条路径要检查返回值。
+/// 返回 `false` = **这条命令没进队列**（队列满了）。调用方该把这个告诉用户，
+/// 不能像以前那样静默丢掉 —— 用户点了一下却什么都没发生，只会以为是坏的。
+///
+/// `Status::Busy` 只表示「后台正在写设备」。读快照期间**不再拒绝新命令**：
+/// 那时设备是空闲的，命令完全可以排队等这一轮读完。
 fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
     {
         let mut s = lock_shared(shared);
-        if s.pending.is_some() || s.status.is_busy() {
+        if s.pending.len() >= MAX_PENDING {
             return false;
         }
-        s.pending = Some(cmd);
+        s.pending.push_back(cmd);
         s.status = Status::Busy;
     }
     signal.request_refresh();
@@ -1777,9 +1805,20 @@ pub fn run() -> Result<(), String> {
                     return;
                 }
 
-                // ① 有写命令就先执行（它自己会读回断言，顺便带回新状态）。
-                let pending = { lock_shared(&shared_t).pending.take() };
-                if let Some(cmd) = pending {
+                // ① 把队列里的写命令**全部**执行掉，一条一轮。
+                //
+                // 以前每轮只取一条，并且取的是单个 `Option`，所以第二条
+                // 要么被丢掉要么等一整轮（读完 17 帧 590~1000ms）。
+                // 现在按顺序排空：用户连点两个下拉，两条都会落地，
+                // 而且后一条能正确覆盖前一条。
+                //
+                // 循环上限 `MAX_PENDING` 再多给几条余量：`drain` 期间
+                // 界面线程可能又塞进新的（那是好事，说明用户还在操作），
+                // 但不能让这个 loop 无限跑下去、把读取饿死。
+                let mut ran = 0usize;
+                loop {
+                    let cmd = { lock_shared(&shared_t).pending.pop_front() };
+                    let Some(cmd) = cmd else { break };
                     let res = match &cmd {
                         Cmd::Backup(_) | Cmd::Restore(_) => run_file_cmd(&cmd),
                         _ => run_cmd(&cmd),
@@ -1797,6 +1836,19 @@ pub fn run() -> Result<(), String> {
                     s.want_full = true;
                     drop(s);
                     sender_t.notice();
+                    ran += 1;
+                    if ran >= MAX_PENDING * 2 {
+                        break;
+                    }
+                }
+
+                // 队列空了才把 Busy 放下 —— 否则界面会闪一下「空闲」，
+                // 下一轮又变回「正在写设备」。
+                {
+                    let mut s = lock_shared(&shared_t);
+                    if s.pending.is_empty() && matches!(s.status, Status::Busy) {
+                        s.status = Status::Ok;
+                    }
                 }
 
                 // ② TTL 改了要重建缓存（`SnapshotCache::new` 只在建时记 ttl）。
