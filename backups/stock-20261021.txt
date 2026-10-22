@@ -1,0 +1,40 @@
+# ROG 龙鳞 Ace Mini (Harpe Ace Mini) 设置备份
+# 由 rog-mouse-ctl 生成于 unix 1792590893
+# 链路=Wireless24G report_id=0x03
+#
+# 注意：写完任何设置都必须 commit（0x50 0x03）才会进 flash，否则重连即丢。
+# 注意：DPI 只能取 50 的整数倍，其他值会被设备静默截断。
+#
+# 表面标定参考（不参与还原）：surface_type=0 material=255 extra=ff k=000000
+
+poll_code=3
+dpi1_enc=7
+dpi1_rgb=ff1929
+dpi2_enc=15
+dpi2_rgb=ff00ff
+dpi3_enc=31
+dpi3_rgb=0000ff
+dpi4_enc=63
+dpi4_rgb=00ff00
+active_stage=2
+debounce_code=2
+angle_snap=0
+angle_tuning=0
+lod=0
+light_mode=2
+light_bright=50
+light_rgb=000000
+light_dir=0
+light_random=0
+light_speed=0
+button0=496
+button1=497
+button2=498
+button3=484
+button4=485
+button5=486
+button6=488
+button7=489
+poweroff_code=4
+low_warn=20
+full_effect=1

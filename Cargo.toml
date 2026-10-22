@@ -1,0 +1,62 @@
+[package]
+name = "rog-mouse-ctl"
+version = "0.1.0"
+edition = "2021"
+description = "ROG 龙鳞 Ace Mini (Harpe Ace Mini) HID 参数控制工具，不依赖 ASUS 驱动"
+
+# HID / Win32 全部手写 FFI，不引 windows-sys / winapi。
+# 唯一的依赖是 GUI 框架 nwg —— 它只 `#[link]` 系统已有 DLL（user32/comctl32/
+# kernel32/ntdll/msvcrt/ole32），**不走 dlltool**，所以能在本机这套残缺 MinGW
+# toolchain（x86_64-pc-windows-gnu，有 import library 但没有 as.exe）上编译。
+#
+# 关于 egui / iced（2026-10-22 更正，细节见 docs/nwg-gotchas.md 的附录）：
+# 原先这里写「eframe 会触发 dlltool，而 dlltool 需要 as.exe，本机没有 →
+# 此路必死」。这句话**已被实测推翻**：做一个 dlltool 转发 exe（转给 LLVM-MinGW
+# 的 llvm-dlltool.exe）就能生成 import lib，iced 0.14 在这套工具链上实测
+# 编译通过、开窗存活、中文正常。所以「本机编不了 GUI 库」不是事实。
+#
+# nwg 仍然是当前选择，但理由换成了实测出来的三条：
+#   1. nwg 有原生 TrayNotification；iced / egui 都不带托盘，得自己写
+#      Shell_NotifyIconW + 隐藏窗口 + 消息泵，托盘共存尚未验证完。
+#   2. eframe 0.29 在本机实测启动 2.5~3 秒后必崩（0xC0000005，Faulting module
+#      = unknown，崩溃地址不属于任何已加载模块）。加一条**从不调用**的 kernel32
+#      导入崩溃就消失 → 是链接布局/导入表敏感，不是缺 GPU、不是 clipboard
+#      feature、不是 profile。这种 bug 我没法保证在真项目里不出现。
+#   3. 现有 gui.rs 已把五页 + 托盘 + 后台 HID 线程 + 31 项设备功能全验证过，
+#      换框架等于全部重测。
+# iced 是「观感更好、但托盘待验」的候选，不是「不可行」。
+#
+# `default-features = false` 是必须的：nwg 的 `default = ["all"]` 会连带拉
+# plotters / plotters-backend / stretch / newline-converter / raw-window-handle，
+# 编译时间从秒级变成分钟级。下面这份清单是实际用到的，已实测 12 个 feature
+# 对应的类型全部可编译 + 运行（见 docs/startup-modes.md）。
+[dependencies]
+native-windows-gui = { version = "1.0.13", default-features = false, features = [
+    "tabs",              # TabsContainer + Tab（五页）
+    "tray-notification", # TrayNotification
+    "message-window",    # MessageWindow（TrayNotification 的 parent 必须是它）
+    "cursor",            # GlobalCursor::position()（托盘右键菜单定位）
+    "menu",              # Menu + MenuItem
+    "progress-bar",      # 电量条
+    "trackbar",          # 亮度 / 角度微调
+    "combobox",          # 回报率 / 去抖 / 灯光模式 / 按键绑定
+    "animation-timer",   # 周期刷新（Timer 已废弃）
+    "notice",            # 后台 HID 线程唤醒 GUI（绝不能在 GUI 线程读 HID）
+    "image-decoder",     # 托盘图标 Icon::from_bin
+    "file-dialog",       # 备份/还原选文件
+] }
+
+[[bin]]
+name = "rog-mouse-ctl"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# `panic = "abort"` 与 nwg 无冲突：nwg 内部的 panic!（例如 TrayNotification
+# 建的时候没给 icon → src\controls\tray_notification.rs:370）在 unwind 和
+# abort 下都是「进程死」，差别只是 abort 不跑析构。GUI 代码按「永远给 icon」
+# 来写即可规避。保留 abort 是为了产物小（约 260 KB）。
+panic = "abort"

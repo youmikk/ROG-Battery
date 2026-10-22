@@ -1,0 +1,13 @@
+﻿[package]
+name = "trayprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+native-windows-gui = { version = "1.0", features = ["tabs", "tray-notification", "message-window", "cursor", "menu", "image-decoder"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

@@ -1,0 +1,1324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROG 鼠标控制 · UI 原型</title>
+<style>
+/* ============================================================
+   设计令牌
+   深色 = Win11 深色主题 + 一个蓝色强调色
+   浅色 = Win11 浅色主题
+   切换按钮在标题栏右侧
+   ============================================================ */
+:root {
+  --bg: #202020;
+  --bg-nav: #272727;
+  --bg-sunken: #1B1B1B;
+  --card: #2C2C2C;
+  --card-hover: #323232;
+  --border: rgba(255, 255, 255, 0.075);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text: #FFFFFF;
+  --text-2: rgba(255, 255, 255, 0.62);
+  --text-3: rgba(255, 255, 255, 0.38);
+  --accent: #4CC2FF;
+  --accent-fg: #00293A;
+  --accent-soft: rgba(76, 194, 255, 0.14);
+  --green: #6CCB5F;
+  --green-soft: rgba(108, 203, 95, 0.15);
+  --warn: #FFD24C;
+  --warn-soft: rgba(255, 210, 76, 0.13);
+  --red: #FF6B6B;
+  --radius-card: 8px;
+  --radius-ctl: 4px;
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+  --track: rgba(255, 255, 255, 0.22);
+}
+body[data-theme="light"] {
+  --bg: #F3F3F3;
+  --bg-nav: #EAEAEA;
+  --bg-sunken: #E2E2E2;
+  --card: #FFFFFF;
+  --card-hover: #FAFAFA;
+  --border: rgba(0, 0, 0, 0.065);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --text: #1B1B1B;
+  --text-2: rgba(0, 0, 0, 0.60);
+  --text-3: rgba(0, 0, 0, 0.38);
+  --accent: #0067C0;
+  --accent-fg: #FFFFFF;
+  --accent-soft: rgba(0, 103, 192, 0.10);
+  --green: #0F7B0F;
+  --green-soft: rgba(15, 123, 15, 0.10);
+  --warn: #9D5D00;
+  --warn-soft: rgba(157, 93, 0, 0.09);
+  --red: #C42B1C;
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.07);
+  --track: rgba(0, 0, 0, 0.28);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  font-family: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.46;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  transition: background .18s ease, color .18s ease;
+}
+
+/* ============================================================
+   模拟系统标题栏（真实程序由 DWM 提供深色，这里只是示意）
+   ============================================================ */
+.titlebar {
+  height: 32px;
+  flex: 0 0 32px;
+  display: flex;
+  align-items: center;
+  background: var(--bg-nav);
+  border-bottom: 1px solid var(--border);
+  padding-left: 12px;
+  user-select: none;
+}
+.titlebar .ticon {
+  width: 16px; height: 16px; margin-right: 8px;
+  border-radius: 3px;
+  background: var(--accent);
+  display: grid; place-items: center;
+  font-size: 9px; font-weight: 700; color: var(--accent-fg);
+}
+.titlebar .ttext { font-size: 12px; color: var(--text-2); }
+.titlebar .spacer { flex: 1; }
+.titlebar .tbtn {
+  width: 46px; height: 32px;
+  display: grid; place-items: center;
+  font-size: 10px; color: var(--text-2);
+}
+.titlebar .tbtn:hover { background: var(--card-hover); }
+.titlebar .tbtn.close:hover { background: #C42B1C; color: #fff; }
+.titlebar .tbtn.menu { font-size: 13px; width: 42px; cursor: pointer; }
+
+/* ============================================================
+   主体：左导航 + 右内容
+   ============================================================ */
+.app { flex: 1; display: flex; min-height: 0; }
+
+/* 侧边栏：展开 240px / 收起 56px 图标轨道。
+   收起不是「消失」而是「只剩图标」——导航始终可达，鼠标悬停有 title 提示。
+   宽度用 CSS 变量驱动，一处改两边都跟。 */
+:root { --sb-w: 240px; }
+body.rail { --sb-w: 56px; }
+
+.sidebar {
+  width: var(--sb-w);
+  flex: 0 0 var(--sb-w);
+  background: var(--bg-nav);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 8px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  transition: width .2s cubic-bezier(.4,0,.2,1),
+              flex-basis .2s cubic-bezier(.4,0,.2,1),
+              background .18s ease;
+}
+.sidebar::-webkit-scrollbar { width: 0; }
+
+/* 收起态：文字、设备卡正文、二级导航、底栏全部隐藏，只留图标 */
+body.rail .device,
+body.rail .nav-label,
+
+body.rail .nav-foot { display: none; }
+body.rail .nav-item { justify-content: center; padding: 0; gap: 0; }
+body.rail .nav-item .badge-dot {
+  position: absolute; right: 11px; top: 50%;
+  width: 6px; height: 6px; margin-top: -3px;
+  border-radius: 50%;
+  background: var(--green);
+}
+body.rail .nav-item.active::before { left: 0; }
+
+/* 设备卡 */
+.device {
+  padding: 10px 12px 14px;
+  margin: 0 4px 12px;
+  border-radius: var(--radius-card);
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+.device .dname {
+  font-size: 13px; font-weight: 600;
+  letter-spacing: .2px;
+  margin-bottom: 3px;
+}
+.device .dsub { font-size: 11px; color: var(--text-3); margin-bottom: 10px; letter-spacing: .1px; }
+.device .dline { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); }
+.device .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+.device .dpct { margin-left: auto; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
+
+/* 一级导航 */
+.nav { display: flex; flex-direction: column; gap: 1px; }
+.nav-item {
+  position: relative;
+  display: flex; align-items: center; gap: 11px;
+  height: 38px;
+  padding: 0 12px;
+  border: 0; border-radius: var(--radius-ctl);
+  background: transparent; color: var(--text);
+  font: inherit; font-size: 13.5px;
+  text-align: left; cursor: pointer;
+  transition: background .12s ease;
+}
+.nav-item:hover { background: var(--card-hover); }
+.nav-item .ico { width: 16px; height: 16px; flex: 0 0 16px; opacity: .78; }
+.nav-item .ico svg { display: block; width: 16px; height: 16px; }
+.nav-item.active { background: var(--card); }
+.nav-item.active .ico { opacity: 1; color: var(--accent); }
+.nav-item.active::before {
+  content: "";
+  position: absolute; left: 0; top: 50%;
+  width: 3px; height: 15px;
+  margin-top: -7.5px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.nav-spacer { flex: 1; }
+.nav-foot {
+  padding: 10px 12px 4px;
+  font-size: 11px; color: var(--text-3);
+  border-top: 1px solid var(--border);
+  margin: 0 4px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+
+/* ============================================================
+   右侧内容
+   ============================================================ */
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.page { display: none; flex: 1; min-height: 0; flex-direction: column; }
+.page.active { display: flex; }
+
+/* 二级导航（挂在侧栏当前页下面）。原来的顶部 chip 条已按用户要求取消。 */
+/* 二级导航已按用户要求去掉：侧栏只保留五个一级项，页面内容纵向排列靠滚动。 */
+
+/* 滚动容器 */
+.scroll { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; }
+.scroll::-webkit-scrollbar { width: 10px; }
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 3px solid var(--bg);
+}
+.scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* 底部留白：不留的话最后一个区块永远滚不到顶部，
+   点它的 chip 只会滚到底、而它还在屏幕下半截，滚动跟随也就激活不了它。
+   留 240px 后，所有区块都能对齐到顶部。 */
+.page-body { padding: 6px 40px 240px; max-width: 940px; }
+
+/* 标题 */
+h1 {
+  font-size: 26px; font-weight: 600;
+  letter-spacing: -.4px;
+  margin: 10px 0 20px;
+}
+h2 {
+  font-size: 14px; font-weight: 600;
+  letter-spacing: .1px;
+  color: var(--text-2);
+  margin: 26px 0 10px;
+  scroll-margin-top: 64px;
+}
+h2:first-of-type { margin-top: 4px; }
+
+/* 卡片 */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  transition: background .18s ease, border-color .18s ease;
+}
+
+/* 设置行 */
+.row {
+  display: flex; align-items: center; gap: 18px;
+  min-height: 62px;
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.row:last-child { border-bottom: 0; }
+.row .lbl { flex: 1; min-width: 0; }
+.row .lbl .t { font-size: 13.5px; }
+.row .lbl .d { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+.row .ctl { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+
+/* 开关 */
+.toggle {
+  position: relative;
+  width: 40px; height: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease;
+}
+.toggle::after {
+  content: "";
+  position: absolute; top: 50%; left: 3px;
+  width: 12px; height: 12px; margin-top: -6px;
+  border-radius: 50%;
+  background: var(--text-2);
+  transition: transform .16s cubic-bezier(.4,0,.2,1), background .16s ease;
+}
+.toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); }
+.toggle[aria-pressed="true"]::after { transform: translateX(20px); background: var(--accent-fg); }
+
+/* 分段控件 */
+.seg {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-ctl);
+  background: var(--bg-sunken);
+  gap: 2px;
+}
+.seg button {
+  height: 26px; padding: 0 12px;
+  border: 0; border-radius: 3px;
+  background: transparent; color: var(--text-2);
+  font: inherit; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.seg button:hover { color: var(--text); }
+.seg button.on {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+
+/* 下拉（静态示意） */
+.select {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 30px; padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-ctl);
+  background: var(--bg-sunken);
+  color: var(--text); font: inherit; font-size: 12.5px;
+  cursor: pointer;
+  min-width: 108px;
+  justify-content: space-between;
+}
+.select:hover { border-color: var(--text-3); }
+.select .caret { font-size: 9px; color: var(--text-3); }
+
+/* 数字输入 */
+.num {
+  width: 76px; height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-ctl);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font: inherit; font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  outline: none;
+}
+.num:focus { border-color: var(--accent); }
+
+/* 按钮 */
+.btn {
+  height: 30px; padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-ctl);
+  background: var(--card);
+  color: var(--text);
+  font: inherit; font-size: 12.5px;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+.btn:hover { background: var(--card-hover); border-color: var(--text-3); }
+.btn.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+  font-weight: 600;
+}
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--accent); }
+.btn.ghost:hover { background: var(--accent-soft); }
+.btn:disabled { opacity: .38; cursor: default; }
+
+/* 色块 */
+.swatch {
+  width: 30px; height: 30px;
+  border-radius: var(--radius-ctl);
+  border: 1px solid var(--border-strong);
+  background: var(--c, #000);
+  cursor: pointer;
+  position: relative;
+  flex: 0 0 auto;
+}
+.swatch.sm { width: 14px; height: 14px; border-radius: 3px; }
+
+/* 徽章 */
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 21px; padding: 0 8px;
+  border-radius: 11px;
+  font-size: 11px; font-weight: 500;
+  background: var(--green-soft); color: var(--green);
+  white-space: nowrap;
+}
+.badge.blue { background: var(--accent-soft); color: var(--accent); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.mute { background: var(--bg-sunken); color: var(--text-3); }
+
+/* 提示条 */
+.note {
+  display: flex; gap: 9px;
+  margin: 0 18px 12px;
+  padding: 10px 13px;
+  border-radius: var(--radius-ctl);
+  background: var(--warn-soft);
+  font-size: 12px; line-height: 1.5;
+  color: var(--warn);
+}
+.note .ni { flex: 0 0 auto; font-weight: 700; }
+
+/* 高级折叠 */
+.adv {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  overflow: hidden;
+}
+.adv > summary {
+  display: flex; align-items: center; gap: 9px;
+  height: 46px; padding: 0 18px;
+  font-size: 13px; color: var(--text-2);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary .arw {
+  font-size: 9px; color: var(--text-3);
+  transition: transform .16s ease;
+}
+.adv[open] > summary .arw { transform: rotate(90deg); }
+.adv[open] > summary { border-bottom: 1px solid var(--border); }
+
+/* ============================================================
+   电量页
+   ============================================================ */
+.hero {
+  display: flex; gap: 18px;
+  margin-bottom: 18px;
+}
+.hero-main {
+  flex: 1;
+  display: flex; align-items: center; gap: 26px;
+  padding: 22px 24px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  position: relative;
+  overflow: hidden;
+}
+.hero-main::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at 12% 40%, var(--accent-soft), transparent 62%);
+  pointer-events: none;
+}
+.ring { position: relative; flex: 0 0 auto; width: 118px; height: 118px; }
+.ring svg { display: block; transform: rotate(-90deg); }
+.ring .val {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 0;
+}
+.ring .val .n {
+  font-size: 36px; font-weight: 600; letter-spacing: -1.5px;
+  line-height: 1; font-variant-numeric: tabular-nums;
+}
+.ring .val .u { font-size: 11px; color: var(--text-3); margin-top: 3px; letter-spacing: .4px; }
+
+.kv-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 26px;
+  position: relative;
+}
+.kv .k { font-size: 11px; color: var(--text-3); letter-spacing: .2px; margin-bottom: 3px; }
+.kv .v {
+  font-size: 19px; font-weight: 600; letter-spacing: -.3px;
+  font-variant-numeric: tabular-nums;
+}
+.kv .v small { font-size: 11px; font-weight: 400; color: var(--text-3); letter-spacing: 0; margin-left: 3px; }
+
+.hero-side {
+  flex: 0 0 246px;
+  padding: 18px 20px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.hero-side h3 {
+  font-size: 11px; font-weight: 600;
+  color: var(--text-3); letter-spacing: .5px;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+.dl { display: flex; flex-direction: column; gap: 9px; }
+.dl .r { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+.dl .r .k { color: var(--text-3); }
+.dl .r .v { color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; }
+.pills { display: flex; gap: 6px; margin-top: 14px; flex-wrap: wrap; }
+
+/* 历史曲线 */
+.chart-wrap { padding: 16px 18px 12px; }
+.chart-head {
+  display: flex; align-items: baseline; gap: 10px;
+  margin-bottom: 4px;
+}
+.chart-head .t { font-size: 13px; font-weight: 600; }
+.chart-head .s { font-size: 11.5px; color: var(--text-3); }
+.chart-head .slope {
+  margin-left: auto; font-size: 12px; font-weight: 600;
+  color: var(--green); font-variant-numeric: tabular-nums;
+}
+svg.chart { display: block; width: 100%; height: 168px; }
+
+/* ============================================================
+   DPI 页
+   ============================================================ */
+.dpi-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--border);
+  transition: background .12s ease;
+}
+.dpi-row:last-child { border-bottom: 0; }
+.dpi-row.cur { background: var(--accent-soft); }
+.dpi-row .tag {
+  flex: 0 0 52px;
+  font-size: 11.5px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.dpi-row.cur .tag { color: var(--accent); font-weight: 600; }
+.dpi-row .sep { flex: 1; }
+.dpi-row .curmark {
+  font-size: 11px; color: var(--accent); font-weight: 600;
+  display: flex; align-items: center; gap: 5px;
+}
+
+/* ============================================================
+   灯光页
+   ============================================================ */
+.slider-row { display: flex; align-items: center; gap: 14px; width: 260px; }
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 20px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--p, 50%), var(--track) var(--p, 50%));
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px; height: 18px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 4px solid var(--card);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+.slider-val {
+  width: 34px; text-align: right;
+  font-size: 12.5px; font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+/* ============================================================
+   按键页
+   ============================================================ */
+.key-name { display: flex; align-items: center; gap: 10px; flex: 1; }
+.key-name .kn { font-size: 13.5px; }
+.key-name .kc {
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px; border-radius: 3px;
+  background: var(--bg-sunken);
+}
+
+/* 空态 */
+.empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+/* 让 h2 滚到顶部时留出 sticky 高度 */
+.anchor { scroll-margin-top: 60px; }
+
+/* ============================================================
+   自适应
+   布局本身是流式的（flex + grid + min-width:0），窄了就自动收；
+   这里只处理三处会「挤坏」的地方：左右留白、hero 两栏、DPI 行。
+   断点按可用内容宽度定，不是按窗口宽度 —— 侧栏收起后内容区会多出 184px。
+   ============================================================ */
+
+/* ≤ 1000px：内容区留白从 40 收到 24，hero 开始感到挤 */
+@media (max-width: 1000px) {
+  .page-body { padding-left: 26px; padding-right: 26px; }
+  .hero-side { flex-basis: 210px; }
+}
+
+/* ≤ 880px：hero 改成上下两段（电量环 + KPI 一行，设备信息另起一行） */
+@media (max-width: 880px) {
+  .hero { flex-direction: column; }
+  .hero-side { flex: 0 0 auto; }
+  h1 { font-size: 23px; margin: 8px 0 16px; }
+}
+
+/* ≤ 760px：KPI 两列变一列，DPI 行允许折行 */
+@media (max-width: 760px) {
+  .page-body { padding-left: 18px; padding-right: 18px; }
+  .kv-grid { grid-template-columns: 1fr; gap: 12px; }
+  .hero-main { gap: 18px; padding: 18px; }
+  .ring { width: 92px; height: 92px; }
+  .ring svg { width: 92px; height: 92px; }
+  .ring .val .n { font-size: 29px; }
+  /* DPI 行绝不能折行：一折就把「应用」挤到第二行，4 档变 8 行高。
+     我第一版写的是 `.dpi-row .sep { flex-basis: 100% }` —— 那个弹性分隔条
+     想要占满整行，反而强制换行，正是它把按钮挤下去的。窄屏应该整体收窄，不是换行。 */
+  .dpi-row { gap: 10px; padding: 11px 12px; }
+  .dpi-row .tag { flex: 0 0 46px; }
+  .dpi-row .num { width: 64px; }
+  /* 设置页那种「标题 + 控件」的行，窄屏改成上下两段反而更好读 */
+  .row { flex-wrap: wrap; gap: 10px; }
+  .row .ctl { flex-basis: 100%; justify-content: flex-start; }
+  .slider-row { width: 100% !important; }
+  .chart-wrap { padding: 12px 12px 8px; }
+}
+
+/* 极窄（侧栏展开 + 小窗口）：把侧栏本身也收成 rail，避免内容区被压到 400 以下 */
+@media (max-width: 700px) {
+  :root { --sb-w: 56px; }
+  .device, .nav-label, .nav-foot { display: none; }
+  .nav-item { justify-content: center; padding: 0; gap: 0; }
+  .page-body { padding-left: 14px; padding-right: 14px; }
+}
+
+/* 高度不够时（比如笔记本 720p），压缩纵向留白，别让用户一开始就得滚 */
+@media (max-height: 660px) {
+  .page-body { padding-top: 0; }
+  h1 { font-size: 21px; margin: 4px 0 12px; }
+  h2 { margin: 16px 0 8px; }
+  .row { min-height: 54px; padding: 8px 16px; }
+  .hero-main { padding: 16px 18px; }
+  .chart-wrap { padding: 12px 16px 8px; }
+  svg.chart { height: 130px; }
+}
+</style>
+</head>
+<body data-theme="light">
+
+<!-- 模拟系统标题栏 -->
+<div class="titlebar">
+  <div class="tbtn menu" id="menuBtn" title="收起 / 展开侧边栏（Ctrl+B）">☰</div>
+  <div class="ticon">R</div>
+  <div class="ttext">R Battery</div>
+  <div class="spacer"></div>
+  <div class="tbtn" id="themeBtn" title="切换深浅色（真实程序里跟随系统）">◐</div>
+  <div class="tbtn">—</div>
+  <div class="tbtn">□</div>
+  <div class="tbtn close">✕</div>
+</div>
+
+<div class="app">
+  <!-- ============ 左侧导航 ============ -->
+  <aside class="sidebar">
+    <div class="device">
+      <div class="dname">ROG HARPE ACE MINI</div>
+      <div class="dsub">ROG OMNI RECEIVER · 2.4G</div>
+      <div class="dline">
+        <span class="dot"></span>
+        <span>使用中</span>
+        <span class="dpct">82%</span>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-page="battery" title="电量">
+        <span class="ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="4.5" width="11" height="7" rx="1.5"/><path d="M14.5 6.5v3" stroke-linecap="round"/><rect x="3.2" y="6.2" width="5" height="3.6" rx=".6" fill="currentColor" stroke="none"/></svg></span>
+        <span class="badge-dot"></span>
+        <span class="nav-label">电量</span>
+      </button>
+      <button class="nav-item" data-page="perf" title="性能">
+        <span class="ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 11.5a6 6 0 1 1 12 0" stroke-linecap="round"/><path d="M8 8.5 11 5.5" stroke-linecap="round"/><circle cx="8" cy="11.5" r="1.2" fill="currentColor" stroke="none"/></svg></span>
+        <span class="nav-label">性能</span>
+      </button>
+      <button class="nav-item" data-page="light" title="灯光">
+        <span class="ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 12.5h4M6.5 14h3" stroke-linecap="round"/><path d="M8 1.5a4.2 4.2 0 0 0-2.4 7.65c.4.3.6.7.6 1.2v.15h3.6v-.15c0-.5.2-.9.6-1.2A4.2 4.2 0 0 0 8 1.5Z"/></svg></span>
+        <span class="nav-label">灯光</span>
+      </button>
+      <button class="nav-item" data-page="keys" title="按键">
+        <span class="ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="4" width="13" height="8" rx="1.8"/><path d="M4 6.6h.01M6.4 6.6h.01M8.8 6.6h.01M11.2 6.6h.01M4 9.3h.01M11.2 9.3h.01M6.2 9.3h3.6" stroke-linecap="round"/></svg></span>
+        <span class="nav-label">按键</span>
+      </button>
+      <button class="nav-item" data-page="settings" title="设置">
+        <span class="ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" stroke-linecap="round"/></svg></span>
+        <span class="nav-label">设置</span>
+      </button>
+    </nav>
+
+    <div class="nav-spacer"></div>
+    <div class="nav-foot">
+      <span>19 帧 · 588 ms</span>
+      <span>v1.1.0</span>
+    </div>
+  </aside>
+
+  <!-- ============ 右侧内容 ============ -->
+  <div class="content">
+
+    <!-- ==================== 电量 ==================== -->
+    <section class="page active" id="page-battery"><div class="scroll" data-scroll="battery">
+        <div class="page-body">
+          <h1>电量</h1>
+
+          <div class="hero" id="bat-overview">
+            <div class="hero-main">
+              <div class="ring">
+                <svg width="118" height="118" viewBox="0 0 118 118">
+                  <defs>
+                    <linearGradient id="ringA" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0%" stop-color="#4CC2FF"/>
+                      <stop offset="100%" stop-color="#2A8FD0"/>
+                    </linearGradient>
+                  </defs>
+                  <circle cx="59" cy="59" r="50" fill="none" stroke="var(--track)" stroke-width="9" opacity=".28"/>
+                  <circle cx="59" cy="59" r="50" fill="none" stroke="url(#ringA)" stroke-width="9"
+                          stroke-linecap="round"
+                          stroke-dasharray="257.6 314.2"/>
+                </svg>
+                <div class="val"><div class="n">82</div><div class="u">剩余电量</div></div>
+              </div>
+              <div class="kv-grid">
+                <div class="kv"><div class="k">电压</div><div class="v">3974<small>mV</small></div></div>
+                <div class="kv"><div class="k">回报率</div><div class="v">1000<small>Hz</small></div></div>
+                <div class="kv"><div class="k">当前档位</div><div class="v">2<small>· 800 DPI</small></div></div>
+                <div class="kv"><div class="k">续航估算</div><div class="v" style="font-size:15px;color:var(--text-2)">样本不足</div></div>
+              </div>
+            </div>
+
+            <div class="hero-side">
+              <h3>设备信息</h3>
+              <div class="dl">
+                <div class="r"><span class="k">鼠标 SN</span><span class="v">B00000000000</span></div>
+                <div class="r"><span class="k">接收器固件</span><span class="v">7.00.07</span></div>
+                <div class="r"><span class="k">链路</span><span class="v">0x1B65 无线</span></div>
+              </div>
+              <div class="pills">
+                <span class="badge">2.4G</span>
+                <span class="badge blue">1000 Hz</span>
+                <span class="badge mute">19 帧</span>
+              </div>
+            </div>
+          </div>
+
+          <h2 id="bat-history" class="anchor">电量历史</h2>
+          <div class="card">
+            <div class="chart-wrap">
+              <div class="chart-head">
+                <span class="t">近 48 小时</span>
+                <span class="s">8 个采样点 · 10-21 15:48 → 10-22 00:33</span>
+                <span class="slope">-1.26 %/h</span>
+              </div>
+              <svg class="chart" viewBox="0 0 700 168" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#4CC2FF" stop-opacity=".34"/>
+                    <stop offset="100%" stop-color="#4CC2FF" stop-opacity=".02"/>
+                  </linearGradient>
+                </defs>
+                <!-- 网格 -->
+                <g stroke="var(--track)" stroke-width="1" opacity=".22">
+                  <line x1="42" y1="14" x2="686" y2="14"/>
+                  <line x1="42" y1="49" x2="686" y2="49"/>
+                  <line x1="42" y1="84" x2="686" y2="84"/>
+                  <line x1="42" y1="119" x2="686" y2="119"/>
+                  <line x1="42" y1="140" x2="686" y2="140"/>
+                </g>
+                <!-- Y 轴 -->
+                <g fill="var(--text-3)" font-size="10" font-family="Segoe UI, sans-serif">
+                  <text x="34" y="18" text-anchor="end">92</text>
+                  <text x="34" y="53" text-anchor="end">88</text>
+                  <text x="34" y="88" text-anchor="end">84</text>
+                  <text x="34" y="123" text-anchor="end">80</text>
+                </g>
+                <!-- 面积 -->
+                <path d="M42,32 L131,36.7 L221,41.4 L309,55.4 L398,55.4 L486,55.4 L563,64.8 L686,64.8 L686,140 L42,140 Z"
+                      fill="url(#areaFill)"/>
+                <!-- 折线 -->
+                <polyline points="42,32 131,36.7 221,41.4 309,55.4 398,55.4 486,55.4 563,64.8 686,64.8"
+                          fill="none" stroke="#4CC2FF" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+                <!-- 数据点 -->
+                <g fill="var(--card)" stroke="#4CC2FF" stroke-width="2">
+                  <circle cx="42" cy="32" r="3.4"/>
+                  <circle cx="131" cy="36.7" r="3.4"/>
+                  <circle cx="221" cy="41.4" r="3.4"/>
+                  <circle cx="309" cy="55.4" r="3.4"/>
+                  <circle cx="398" cy="55.4" r="3.4"/>
+                  <circle cx="486" cy="55.4" r="3.4"/>
+                  <circle cx="563" cy="64.8" r="3.4"/>
+                </g>
+                <!-- 最新点高亮 -->
+                <circle cx="686" cy="64.8" r="9" fill="#4CC2FF" opacity=".18"/>
+                <circle cx="686" cy="64.8" r="4.6" fill="#4CC2FF"/>
+                <!-- X 轴 -->
+                <g fill="var(--text-3)" font-size="10" font-family="Segoe UI, sans-serif">
+                  <text x="42" y="160">15:48</text>
+                  <text x="686" y="160" text-anchor="end">00:33</text>
+                </g>
+              </svg>
+            </div>
+          </div>
+
+          <h2 id="bat-power" class="anchor">电源管理</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">自动休眠</div>
+                <div class="d">鼠标静止多久后进入省电模式 · 醒来只需动一下</div>
+              </div>
+              <div class="ctl">
+                <button class="select">10 分钟 <span class="caret">▼</span></button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">低电量提醒阈值</div>
+                <div class="d">低于此电量时，托盘图标变红</div>
+              </div>
+              <div class="ctl">
+                <input class="num" value="20"><span style="font-size:12px;color:var(--text-3)">%</span>
+                <button class="btn">应用</button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">充满电时的灯效</div>
+                <div class="d">电池充满后让滚轮灯效闪烁提示</div>
+              </div>
+              <div class="ctl">
+                <button class="toggle" aria-pressed="true"></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 性能 ==================== -->
+    <section class="page" id="page-perf"><div class="scroll" data-scroll="perf">
+        <div class="page-body">
+          <h1>性能</h1>
+
+          <h2 id="perf-dpi" class="anchor">DPI 档位</h2>
+          <div class="card">
+            <div class="dpi-row">
+              <span class="tag">档位 1</span>
+              <input class="num" value="400">
+              <span style="font-size:11px;color:var(--text-3)">DPI</span>
+              <button class="swatch" style="--c:#ff1929" title="#ff1929"></button>
+              <span class="sep"></span>
+              <button class="btn">应用</button>
+            </div>
+            <div class="dpi-row cur">
+              <span class="tag">档位 2</span>
+              <input class="num" value="800">
+              <span style="font-size:11px;color:var(--text-3)">DPI</span>
+              <button class="swatch" style="--c:#ff00ff" title="#ff00ff"></button>
+              <span class="sep"></span>
+              <span class="curmark">● 当前使用</span>
+            </div>
+            <div class="dpi-row">
+              <span class="tag">档位 3</span>
+              <input class="num" value="1600">
+              <span style="font-size:11px;color:var(--text-3)">DPI</span>
+              <button class="swatch" style="--c:#0000ff" title="#0000ff"></button>
+              <span class="sep"></span>
+              <button class="btn">应用</button>
+            </div>
+            <div class="dpi-row">
+              <span class="tag">档位 4</span>
+              <input class="num" value="3200">
+              <span style="font-size:11px;color:var(--text-3)">DPI</span>
+              <button class="swatch" style="--c:#00ff00" title="#00ff00"></button>
+              <span class="sep"></span>
+              <button class="btn">应用</button>
+            </div>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-3);padding:9px 18px 0">
+            范围 100–42000 DPI，步进 50。颜色是该档位的指示灯光。
+          </div>
+
+          <h2 id="perf-poll" class="anchor">回报率</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">轮询频率</div>
+                <div class="d">越高越跟手，也越费电 · 本型号最高 1000 Hz</div>
+              </div>
+              <div class="ctl">
+                <div class="seg">
+                  <button>125</button>
+                  <button>250</button>
+                  <button>500</button>
+                  <button class="on">1000</button>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">当前档位</div>
+                <div class="d">按 DPI 键循环切换</div>
+              </div>
+              <div class="ctl">
+                <div class="seg">
+                  <button>1</button>
+                  <button class="on">2</button>
+                  <button>3</button>
+                  <button>4</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <h2 id="perf-debounce" class="anchor">去抖</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">按键去抖时间</div>
+                <div class="d">时间越短响应越快，但老旧微动可能连击</div>
+              </div>
+              <div class="ctl">
+                <button class="select">12 ms <span class="caret">▼</span></button>
+              </div>
+            </div>
+          </div>
+
+          <h2 id="perf-angle" class="anchor">角度</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">角度吸附</div>
+                <div class="d">把接近水平的移动修正为完全水平</div>
+              </div>
+              <div class="ctl">
+                <button class="toggle" aria-pressed="false"></button>
+              </div>
+            </div>
+          </div>
+          <details class="adv">
+            <summary><span class="arw">▶</span>高级</summary>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">角度微调</div>
+                <div class="d">-20 到 20，步进 5。校正鼠标摆放角度</div>
+              </div>
+              <div class="ctl">
+                <div class="slider-row" style="width:220px">
+                  <input type="range" min="-20" max="20" step="5" value="0" style="--p:50%">
+                  <span class="slider-val">0</span>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">加速度 / 减速度</div>
+                <div class="d">保持 0 可获得最一致的镜头移动</div>
+              </div>
+              <div class="ctl">
+                <input class="num" value="0">
+                <input class="num" value="0">
+              </div>
+            </div>
+          </details>
+
+          <h2 id="perf-lod" class="anchor">抬起距离</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">Lift-off distance</div>
+                <div class="d">鼠标抬多高才停止追踪</div>
+              </div>
+              <div class="ctl">
+                <div class="seg">
+                  <button class="on">Low</button>
+                  <button>High</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="note">
+            <span class="ni">!</span>
+            <span>写入抬起距离会把<strong>表面标定重置为默认值</strong>。厂商确认没有单独恢复标定的命令，改动后建议重新跑一次鼠标垫校准。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 灯光 ==================== -->
+    <section class="page" id="page-light"><div class="scroll" data-scroll="light">
+        <div class="page-body">
+          <h1>灯光</h1>
+
+          <h2 id="light-mode" class="anchor">模式</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">灯效模式</div>
+                <div class="d">本型号单灯区（滚轮）</div>
+              </div>
+              <div class="ctl">
+                <button class="select" style="min-width:140px">ColorCycle <span class="caret">▼</span></button>
+              </div>
+            </div>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-3);padding:9px 18px 0">
+            可选：静置 / 呼吸 / 循环 / 响应 / 跟随电量 / 关闭。
+            <br>Rainbow 与 Comet 本型号不认，设备会静默回落到循环，因此不列出。
+          </div>
+
+          <h2 id="light-color" class="anchor">亮度与颜色</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">亮度</div>
+                <div class="d">0 为熄灭，100 最亮</div>
+              </div>
+              <div class="ctl">
+                <div class="slider-row">
+                  <input type="range" min="0" max="100" value="50" style="--p:50%">
+                  <span class="slider-val">50</span>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">颜色</div>
+                <div class="d">部分模式忽略此颜色（如循环）</div>
+              </div>
+              <div class="ctl">
+                <button class="swatch" style="--c:#000000"></button>
+                <span style="font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums">#000000</span>
+              </div>
+            </div>
+          </div>
+
+          <h2 id="light-adv" class="anchor">高级</h2>
+          <details class="adv" open>
+            <summary><span class="arw">▶</span>仅「响应」与「跟随电量」模式使用</summary>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">方向</div>
+                <div class="d">灯效流动方向</div>
+              </div>
+              <div class="ctl">
+                <div class="seg">
+                  <button class="on">正向</button>
+                  <button>反向</button>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">随机颜色</div>
+                <div class="d">每次触发换一个颜色</div>
+              </div>
+              <div class="ctl">
+                <button class="toggle" aria-pressed="false"></button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">速度</div>
+                <div class="d">0 最慢，100 最快</div>
+              </div>
+              <div class="ctl">
+                <div class="slider-row">
+                  <input type="range" min="0" max="100" value="0" style="--p:0%">
+                  <span class="slider-val">0</span>
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 按键 ==================== -->
+    <section class="page" id="page-keys"><div class="scroll" data-scroll="keys">
+        <div class="page-body">
+          <h1>按键</h1>
+
+          <h2 id="keys-map" class="anchor">按键映射</h2>
+          <div class="card">
+            <div class="row">
+              <div class="key-name"><span class="kn">左键</span><span class="kc">01F0</span></div>
+              <div class="ctl">
+                <button class="select" style="min-width:150px">左键点击 <span class="caret">▼</span></button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="key-name"><span class="kn">右键</span><span class="kc">01F1</span></div>
+              <div class="ctl"><button class="select" style="min-width:150px">右键点击 <span class="caret">▼</span></button></div>
+            </div>
+            <div class="row">
+              <div class="key-name"><span class="kn">滚轮按下</span><span class="kc">01F2</span></div>
+              <div class="ctl"><button class="select" style="min-width:150px">中键点击 <span class="caret">▼</span></button></div>
+            </div>
+            <div class="row">
+              <div class="key-name"><span class="kn">侧键后退</span><span class="kc">01E4</span></div>
+              <div class="ctl"><button class="select" style="min-width:150px">浏览器后退 <span class="caret">▼</span></button></div>
+            </div>
+            <div class="row">
+              <div class="key-name"><span class="kn">侧键前进</span><span class="kc">01E5</span></div>
+              <div class="ctl"><button class="select" style="min-width:150px">浏览器前进 <span class="caret">▼</span></button></div>
+            </div>
+            <div class="row">
+              <div class="key-name"><span class="kn">DPI 键</span><span class="kc">01E6</span></div>
+              <div class="ctl"><button class="select" style="min-width:150px">切换 DPI 档位 <span class="caret">▼</span></button></div>
+            </div>
+            <div class="row">
+              <div class="key-name"><span class="kn">滚轮上</span><span class="kc">01E8</span></div>
+              <div class="ctl"><button class="select" style="min-width:150px">滚轮上滚 <span class="caret">▼</span></button></div>
+            </div>
+            <div class="row">
+              <div class="key-name"><span class="kn">滚轮下</span><span class="kc">01E9</span></div>
+              <div class="ctl"><button class="select" style="min-width:150px">滚轮下滚 <span class="caret">▼</span></button></div>
+            </div>
+          </div>
+          <div class="note">
+            <span class="ni">!</span>
+            <span>把某个键设为 <strong>0000 等于禁用它</strong>，那个键会完全没反应。恢复只能靠备份文件，因此保存前会二次确认。</span>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:14px">
+            <button class="btn">从备份恢复全部按键</button>
+            <button class="btn ghost">导出当前配置</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 设置 ==================== -->
+    <section class="page" id="page-settings"><div class="scroll" data-scroll="settings">
+        <div class="page-body">
+          <h1>设置</h1>
+
+          <h2 id="set-app" class="anchor">程序</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">在系统托盘显示图标</div>
+                <div class="d">关闭后只能从开始菜单打开</div>
+              </div>
+              <div class="ctl"><button class="toggle" aria-pressed="true"></button></div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">关闭窗口时最小化到托盘</div>
+                <div class="d">点 ✕ 不退出程序，后台继续刷新电量</div>
+              </div>
+              <div class="ctl"><button class="toggle" aria-pressed="true"></button></div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">开机自动启动</div>
+                <div class="d">当前：未启用（注册表）</div>
+              </div>
+              <div class="ctl"><button class="toggle" aria-pressed="false"></button></div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">后台刷新间隔</div>
+                <div class="d">越频繁越及时，耗电几乎不变</div>
+              </div>
+              <div class="ctl"><button class="select">60 秒 <span class="caret">▼</span></button></div>
+            </div>
+          </div>
+
+          <h2 id="set-data" class="anchor">数据</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl">
+                <div class="t">快照缓存有效期</div>
+                <div class="d">从设备重读全部参数的冷却时间</div>
+              </div>
+              <div class="ctl"><button class="select">30 秒 <span class="caret">▼</span></button></div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">备份与还原</div>
+                <div class="d">备份含 31 个键，还原后可逐项校验</div>
+              </div>
+              <div class="ctl">
+                <button class="btn">备份到文件</button>
+                <button class="btn">从文件还原</button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="t">历史记录</div>
+                <div class="d">每 60 秒一条，保留 48 小时 / 最多 2000 行</div>
+              </div>
+              <div class="ctl">
+                <button class="btn">打开所在文件夹</button>
+                <button class="btn">清空</button>
+              </div>
+            </div>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-3);padding:9px 18px 0">
+            配置存放于 %LOCALAPPDATA%\rog-mouse-ctl\，历史记录在 %LOCALAPPDATA%\rog-battery\history.tsv
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<script>
+/* ---------- 主题切换 ---------- */
+document.getElementById('themeBtn').addEventListener('click', () => {
+  const b = document.body;
+  b.dataset.theme = b.dataset.theme === 'dark' ? 'light' : 'dark';
+});
+
+/* ---------- 一级导航切换 ---------- */
+const navItems = [...document.querySelectorAll('.nav-item')];
+const pages = [...document.querySelectorAll('.page')];
+
+function showPage(name) {
+  navItems.forEach(n => n.classList.toggle('active', n.dataset.page === name));
+  pages.forEach(p => p.classList.toggle('active', p.id === 'page-' + name));
+
+  /* 切页回到顶部 */
+  const target = document.getElementById('page-' + name);
+  if (target) target.querySelector('.scroll').scrollTop = 0;
+}
+
+navItems.forEach(n => n.addEventListener('click', () => showPage(n.dataset.page)));
+
+/* 二级导航已去掉，这里只剩一个工具函数：当前显示的是哪一页。
+   （保留它是给截图脚本 &s=<锚点id> 用的，靠它找对滚动容器。） */
+function currentPageName() {
+  const p = pages.find(p => p.classList.contains('active'));
+  return p ? p.id.replace('page-', '') : 'battery';
+}
+
+/* ---------- 演示用：滑块数值与填充 ---------- */
+document.querySelectorAll('input[type="range"]').forEach(r => {
+  const out = r.parentElement.querySelector('.slider-val');
+  const paint = () => {
+    const min = +r.min, max = +r.max, v = +r.value;
+    r.style.setProperty('--p', ((v - min) / (max - min) * 100) + '%');
+    if (out) out.textContent = v;
+  };
+  r.addEventListener('input', paint);
+  paint();
+});
+
+/* ---------- 演示用：开关可以点 ---------- */
+document.querySelectorAll('.toggle').forEach(t => {
+  t.addEventListener('click', () => {
+    t.setAttribute('aria-pressed', t.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+  });
+});
+
+/* ---------- 演示用：分段控件单选 ---------- */
+document.querySelectorAll('.seg').forEach(seg => {
+  seg.querySelectorAll('button').forEach(b => {
+    b.addEventListener('click', () => {
+      seg.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+    });
+  });
+});
+
+/* ---------- 侧边栏收起 / 展开 ---------- */
+/* 收起 = 切到图标轨道（rail），不是隐藏 */
+function toggleSidebar(force) {
+  const rail = force !== undefined ? force : !document.body.classList.contains('rail');
+  document.body.classList.toggle('rail', rail);
+  try { localStorage.setItem('sidebarRail', rail ? '1' : '0'); } catch (e) {}
+}
+
+document.getElementById('menuBtn').addEventListener('click', () => toggleSidebar());
+
+/* Ctrl+B 是 Win11 里收起侧栏的常用键，顺手加上 */
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+    e.preventDefault();
+    toggleSidebar();
+  }
+});
+
+/* 记住上次状态（真实程序里应该存进 settings.ini，这里用 localStorage 示意） */
+try {
+  if (localStorage.getItem('sidebarRail') === '1') toggleSidebar(true);
+} catch (e) {}
+
+/* 初始页面：支持 ?p=battery|perf|light|keys|settings 与 ?theme=dark
+   （加这个是为了能对每个页面单独截图给用户看，平时用不到）
+   默认：浅色 + 电量页（用户明确要求的默认） */
+const q = new URLSearchParams(location.search);
+if (q.get('theme') === 'dark') document.body.dataset.theme = 'dark';
+if (q.get('rail') === '1') toggleSidebar(true);
+showPage(q.get('p') || 'battery');
+
+/* 截图用：&s=<锚点id> 直接滚到某个二级区块（验证 sticky 高亮跟随）
+   例如 ui-prototype.html?p=perf&s=perf-debounce
+   注意：这里必须同步执行，不能用 requestAnimationFrame —— headless 截图
+   会在 rAF 之前抓帧，导致滚不动（我第一次就是这么踩的）。 */
+/* 必须等 load：这段脚本在 <body> 末尾同步执行时，布局还没算完，
+   getBoundingClientRect / scrollIntoView 都会拿到错的位置（我实测滚到了上一个区块）。 */
+const sTarget = q.get('s');
+if (sTarget) {
+  window.addEventListener('load', () => {
+    const page = document.getElementById('page-' + currentPageName());
+    const el = document.getElementById(sTarget);
+    if (!page || !el) return;
+    const sc = page.querySelector('.scroll');
+    /* behavior:'instant' 不能省：.scroll 有 CSS scroll-behavior:smooth，
+       默认会走动画，而 headless 截图在动画开始前就抓帧 → 图上看不出滚动。 */
+    el.scrollIntoView({ block: 'start', behavior: 'instant' });
+    sc.dispatchEvent(new Event('scroll'));
+  });
+}
+</script>
+</body>
+</html>

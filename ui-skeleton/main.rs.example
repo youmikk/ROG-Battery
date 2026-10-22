@@ -1,0 +1,291 @@
+//! UI 骨架参考实现 —— native-windows-gui 1.0.13
+//!
+//! 目的：给 rog-mouse-ctl 的 GUI 定一个**实测可编译通过**的骨架,
+//!      把踩过的坑全部标出来,避免重复试错。
+//!
+//! 编译：cargo build --release（实测 2.4 秒,产物 314 KB）
+//!
+//! ── 已实测的 11 个坑 ─────────────────────────────────────────
+//! 1. `TabsContainer` 高度必须给够（>=340）,给 60 会导致标签条不渲染
+//! 2. 控件类名是 `TabsContainer` + `Tab`,不是 `Tabs`
+//! 3. `TrayNotification` 的 parent 必须是 `MessageWindow`,不能是普通 `Window`
+//! 4. `TrayNotification::build` 时 icon 为 None 会 **panic**
+//!    （`src\controls\tray_notification.rs:370`）
+//! 5. `OemIcon` 只有 6 个变体：Sample/Ques/WinLogo/Warning/Error/Information,
+//!    **没有 `Application`**
+//! 6. `Menu` 没有 `append()`,每个 `MenuItem` 都要显式 `.parent(&menu)`
+//! 7. `Timer` 已 deprecated,用 `AnimationTimer`
+//!    （`.interval(Duration)` + `.active(true)`,不是 `.interval(ms)` + `.stopped(false)`）
+//! 8. `TrayNotification::set_tip` 签名是 `set_tip(&self, tip: &str)`,
+//!    **不接受 Option**（builder 的 `.tip()` 才收 `Option<&str>`）
+//! 9. `Window` 只有 `minimize()`,**没有 `set_minimized(bool)`**；
+//!    从托盘恢复用 `set_visible(true)` 即可
+//! 10. **页面控件必须 parent 到 `Tab`,不能 parent 到 `Window`**
+//!     `Tab` 是真正的子窗口（类名 `NWG_TAB`,`WS_CHILD | WS_CLIPCHILDREN`）,
+//!     `Tab::init` 会把它 resize 成和 tab 视图一样大并把所有 tab 隐藏。
+//!     如果把控件挂在 Window 上,会挡在 Tab 容器下面（z-order 在后）。
+//! 11. 页面坐标是**相对 Tab 客户区**的,左上角约 (4, 26) 起（标签条下方）。
+//!
+//! ── 已实测通过的验证结果 ─────────────────────────────────────
+//! * `Shell_NotifyIconGetRect` 返回 hr=0,图标矩形 L=2251 T=1392 R=2283 B=1440
+//!   -> 托盘图标真实注册进通知区
+//!   注意：nwg 的 MessageWindow 类名也是 `NativeWindowsGuiWindow`,
+//!   父句柄是 HWND_MESSAGE(-3),所以 `EnumWindows` 枚举不到,
+//!   必须 `FindWindowEx(HWND_MESSAGE, 0, "NativeWindowsGuiWindow", null)`。
+//! * `TabsContainer` 的五个中文标签全部正常渲染
+//! * 零外部 crate,仅依赖 user32/comctl32/kernel32/ntdll/msvcrt/ole32
+//!
+//! ── PowerShell 5.1 陷阱（别用 shell 改这个文件）─────────────────
+//! `Get-Content -Raw` 在 5.1 里默认按系统 ANSI(GBK) 解码,读 UTF-8 源文件
+//! 会把中文写成乱码。要改请用编辑器,或显式 `-Encoding UTF8`。
+
+use native_windows_gui as nwg;
+
+fn main() {
+    nwg::init().expect("Failed to init Native Windows GUI");
+
+    // 中文字体：不设也能显示,设了更整齐
+    let _ = nwg::Font::set_global_family("Microsoft YaHei UI");
+
+    let mut w = nwg::Window::default();
+    nwg::Window::builder()
+        .size((720, 520))
+        .center(true)
+        .title("ROG Harpe Ace Mini")
+        .build(&mut w)
+        .expect("window");
+
+    // ── 分页容器 ────────────────────────────────────────────
+    let mut tabs = nwg::TabsContainer::default();
+    nwg::TabsContainer::builder()
+        .parent(&w)
+        .position((10, 10))
+        .size((690, 460))
+        .build(&mut tabs)
+        .expect("tabs");
+
+    // 每页是一个 NWG_TAB 子窗口,内部会自动 resize 到 tab 视图大小。
+    // 控件必须 parent 到对应的 tab,不能 parent 到 window（坑 10）。
+    let mut tab_ctrls: Vec<nwg::Tab> = Vec::new();
+    for name in ["电量", "性能", "灯光", "按键", "设置"].iter() {
+        let mut t = nwg::Tab::default();
+        nwg::Tab::builder()
+            .text(name)
+            .parent(&tabs)
+            .build(&mut t)
+            .expect("tab");
+        tab_ctrls.push(t);
+    }
+
+    // ── 页 0：电量 ──────────────────────────────────────────
+    let mut lbl_bat = nwg::Label::default();
+    nwg::Label::builder()
+        .text("电量")
+        .parent(&tab_ctrls[0])
+        .position((24, 24))
+        .size((50, 22))
+        .build(&mut lbl_bat)
+        .unwrap();
+
+    let mut pb = nwg::ProgressBar::default();
+    nwg::ProgressBar::builder()
+        .parent(&tab_ctrls[0])
+        .position((80, 26))
+        .size((320, 20))
+        .range(0..100)
+        .pos(85)
+        .build(&mut pb)
+        .unwrap();
+
+    let mut lbl_volt = nwg::Label::default();
+    nwg::Label::builder()
+        .text("电压 3999 mV  ·  使用中 (2.4G)")
+        .parent(&tab_ctrls[0])
+        .position((24, 62))
+        .size((380, 22))
+        .build(&mut lbl_volt)
+        .unwrap();
+
+    let mut btn = nwg::Button::default();
+    nwg::Button::builder()
+        .text("立即刷新")
+        .parent(&tab_ctrls[0])
+        .position((24, 100))
+        .size((110, 32))
+        .build(&mut btn)
+        .unwrap();
+
+    // ── 页 1：性能 ──────────────────────────────────────────
+    let mut lbl_poll = nwg::Label::default();
+    nwg::Label::builder()
+        .text("回报率")
+        .parent(&tab_ctrls[1])
+        .position((24, 24))
+        .size((60, 22))
+        .build(&mut lbl_poll)
+        .unwrap();
+
+    let mut cb = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(&tab_ctrls[1])
+        .position((100, 22))
+        .size((150, 200))
+        .collection(vec![
+            "125 Hz".to_string(),
+            "250 Hz".to_string(),
+            "500 Hz".to_string(),
+            "1000 Hz".to_string(),
+        ])
+        .build(&mut cb)
+        .unwrap();
+    cb.set_selection(Some(3));
+
+    let mut lbl_deb = nwg::Label::default();
+    nwg::Label::builder()
+        .text("去抖 (ms)")
+        .parent(&tab_ctrls[1])
+        .position((24, 62))
+        .size((70, 22))
+        .build(&mut lbl_deb)
+        .unwrap();
+
+    // 坑：TrackBar 的 range 是 Option<Range<usize>>,pos 是 Option<usize>
+    let mut tb = nwg::TrackBar::default();
+    nwg::TrackBar::builder()
+        .parent(&tab_ctrls[1])
+        .position((100, 58))
+        .size((300, 32))
+        .range(Some(0..32))
+        .pos(Some(12))
+        .build(&mut tb)
+        .unwrap();
+
+    // ── 页 4：设置 ──────────────────────────────────────────
+    let mut chk_tray = nwg::CheckBox::default();
+    nwg::CheckBox::builder()
+        .text("在系统托盘显示电量")
+        .parent(&tab_ctrls[4])
+        .position((24, 24))
+        .size((240, 24))
+        .check_state(nwg::CheckBoxState::Checked)
+        .build(&mut chk_tray)
+        .unwrap();
+
+    let mut chk_auto = nwg::CheckBox::default();
+    nwg::CheckBox::builder()
+        .text("开机自动启动")
+        .parent(&tab_ctrls[4])
+        .position((24, 56))
+        .size((240, 24))
+        .check_state(nwg::CheckBoxState::Unchecked)
+        .build(&mut chk_auto)
+        .unwrap();
+
+    // ── 托盘 ────────────────────────────────────────────────
+    let mut mw = nwg::MessageWindow::default();
+    nwg::MessageWindow::builder()
+        .build(&mut mw)
+        .expect("message window");
+
+    let mut icon = nwg::Icon::default();
+    nwg::Icon::builder()
+        .source_system(Some(nwg::OemIcon::Information))
+        .build(&mut icon)
+        .expect("icon");
+
+    let mut menu = nwg::Menu::default();
+    nwg::Menu::builder()
+        .popup(true)
+        .parent(&mw)
+        .build(&mut menu)
+        .unwrap();
+
+    let mut mi_show = nwg::MenuItem::default();
+    nwg::MenuItem::builder()
+        .text("显示主窗口")
+        .parent(&menu)
+        .build(&mut mi_show)
+        .unwrap();
+    let mut mi_refresh = nwg::MenuItem::default();
+    nwg::MenuItem::builder()
+        .text("立即刷新")
+        .parent(&menu)
+        .build(&mut mi_refresh)
+        .unwrap();
+    let mut mi_quit = nwg::MenuItem::default();
+    nwg::MenuItem::builder()
+        .text("退出")
+        .parent(&menu)
+        .build(&mut mi_quit)
+        .unwrap();
+
+    let mut tray = nwg::TrayNotification::default();
+    nwg::TrayNotification::builder()
+        .parent(&mw)
+        .icon(Some(&icon))
+        .tip(Some("电量 85%"))
+        .build(&mut tray)
+        .expect("tray");
+
+    // ── 定时器 / 跨线程唤醒 ─────────────────────────────────
+    // Timer 已 deprecated,用 AnimationTimer（坑 7）
+    let mut timer = nwg::AnimationTimer::default();
+    nwg::AnimationTimer::builder()
+        .parent(&w)
+        .interval(std::time::Duration::from_secs(15))
+        .active(true)
+        .build(&mut timer)
+        .unwrap();
+
+    let mut notice = nwg::Notice::default();
+    nwg::Notice::builder()
+        .parent(&w)
+        .build(&mut notice)
+        .unwrap();
+    let sender = notice.sender();
+
+    // ── 事件绑定 ────────────────────────────────────────────
+    // 坑：闭包 move 捕获 `w` 会报 E0505（w 在后面还要用）,
+    //     解法是 clone 出 handle 再用。控件本身由 closure move 持有,
+    //     nwg 会把 handler 存进全局,所以控件生命周期跟着进程走。
+    let wh = w.handle.clone();
+    let tray_h = tray.handle.clone();
+    let mi_show_h = mi_show.handle.clone();
+    let mi_refresh_h = mi_refresh.handle.clone();
+    let mi_quit_h = mi_quit.handle.clone();
+    let btn_h = btn.handle.clone();
+
+    nwg::full_bind_event_handler(&wh, move |evt, _data, handle| {
+        use nwg::Event as E;
+        match evt {
+            E::OnWindowClose => nwg::stop_thread_dispatch(),
+
+            // 托盘右键 -> 弹菜单（必须用屏幕坐标）
+            E::OnContextMenu if handle == tray_h => {
+                let (x, y) = nwg::GlobalCursor::position();
+                menu.popup(x, y);
+            }
+
+            E::OnMenuItemSelected if handle == mi_quit_h => nwg::stop_thread_dispatch(),
+            E::OnMenuItemSelected if handle == mi_show_h => {
+                w.set_visible(true);
+            }
+            E::OnMenuItemSelected if handle == mi_refresh_h => {
+                pb.set_pos(99);
+                tray.set_tip("电量 99%");
+            }
+
+            E::OnButtonClick if handle == btn_h => pb.set_pos(85),
+
+            _ => {}
+        }
+    });
+
+    // 后台线程 -> Notice 唤醒 GUI 线程（真实实现里这里换成 HID 轮询）
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        sender.notice();
+    });
+
+    nwg::dispatch_thread_events();
+}

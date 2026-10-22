@@ -1,0 +1,297 @@
+# rog-mouse-ctl MSIX 打包
+
+把 Rust 写的 `rog-mouse-ctl.exe` 打成微软商店可提交的 MSIX 包，同时保留免安装绿色版。
+两种形态来自**同一份编译产物**，只有开机自启的实现方式不同。
+
+```
+D:\codex\rog-mouse-ctl\
+├── Cargo.toml
+├── src\                      ← 零依赖 Win32 手写 FFI，与打包无关
+├── target\release\
+│   └── rog-mouse-ctl.exe     ← 唯一的真·产物
+└── msix\                     ← 本目录
+    ├── AppxManifest.xml.template   带 @占位符@ 的清单模板
+    ├── package.props.psd1          可变参数（身份/版本/工具路径）
+    ├── build-msix.ps1              打包 + 可选签名 + 可选解包校验
+    ├── Cargo.toml.metadata-snippet.txt  待粘到 Cargo.toml 的 metadata 片段
+    ├── Assets\                     11 张 MSIX 图标（从 rog-battery 沿用）
+    ├── stage\                      打包中间目录（脚本自动重建，可删）
+    ├── AppPackages\                产物：Sonder.RBattery_<版本>_x64.msix
+    └── scratch\unpack\             -Verify 的解包目录（可删）
+```
+
+---
+
+## 一、绿色版（免安装）
+
+```powershell
+cd D:\codex\rog-mouse-ctl
+cargo build --release
+```
+
+产物：`target\release\rog-mouse-ctl.exe`（当前约 **904 KB / 925,184 字节**，`lto + strip + panic=abort` 之后就这么大；GUI 改自绘 GDI+ 之后比早期的 478 KB 大了近一倍）。
+
+直接把**这一个 exe** 拷走就能用 —— **不需要任何 DLL、不需要运行时、不需要安装程序**。
+
+这一点相对 C# 版是硬优势：C# 版要么要求目标机装 .NET Framework，
+要么得 self-contained 发布跟着几百 MB 的运行时目录走。这个 exe 是
+Rust 静态链接产物，导入表里只有系统自带的 `KERNEL32.dll` / `hid.dll` /
+`SETUPAPI.dll` / `ntdll.dll` / `msvcrt.dll`（`msvcrt.dll` 从 XP 起就是系统组件，
+**不是** VC++ 可再发行包；二进制里没有 `vcruntime140` / `msvcp140` 依赖）。
+
+所以验收标准就一句：**拷到任意一台 x64 Win10 1809+ 机器上双击能跑**。
+不需要 ASUS 驱动、不需要管理员权限、不需要注册表写入之外的任何前置准备。
+配置/缓存/备份全部落在用户目录，见下方差异表。
+
+> PE 头现状：`machine = 0x8664 (x64)`，`subsystem = 3 (WINDOWS_CUI)`。
+> 后者意味着**它会带一个控制台窗口**。作为 CLI 工具这是对的（`info` / `backup` /
+> `setdpi` 都要输出）；但它同时在 tray 里跑 GUI，双形态下都带控制台会有点吵。
+> 若将来想做成纯 GUI 无控制台，要给 linker 加
+> `/SUBSYSTEM:WINDOWS` 并在入口自己 `AttachConsole(ATTACH_PARENT_PROCESS)`
+> 决定要不要连回父控制台 —— 这是程序侧改动，不在打包范围内，此处仅记录现状。
+
+> 别名做全局命令：把 exe 所在目录加进 `PATH`，或在 `%USERPROFILE%` 下放一个
+> `rog.cmd` 转发。程序本身不需要任何同目录文件 —— 所以随便放哪都行，
+> 这正是它能塞进只读的 `C:\Program Files\WindowsApps\` 的前提。
+
+---
+
+## 二、MSIX 版
+
+```powershell
+cd D:\codex\rog-mouse-ctl\msix
+
+# 1) 先编译
+cargo build --release --manifest-path ..\Cargo.toml
+
+# 2) 打包（默认版本取 package.props.psd1 的 1.1.0.0）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1
+
+# 3) 打包 + 解包自检（推荐，不碰系统状态）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Verify
+
+# 4) 换版本号
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Version 1.1.1.0 -Verify
+
+# 5) 本地测试装包前签名（用已有上架证书，脚本不会自建证书）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Sign -CertPath D:\secret\sonder.pfx -CertPassword '密码'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Sign -Thumbprint <证书 SHA1 指纹>
+
+# 6) 清干净
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Clean
+```
+
+产物：`AppPackages\Sonder.RBattery_<版本>_x64.msix`（1.1.0.0 于 GUI 自绘改造前实测 **410,268 字节** / 当时对应 817,152 字节的 exe。
+当前 exe 已到 925,184 字节，**重新打包后包体必然更大，以实测为准** —— 不要拿旧数字对号）。
+
+### 版本号必须严格递增（脚本会拦）
+
+同一个 identity 下，Store **只接受严格大于**已发布版本的号；本地 `Add-AppxPackage`
+遇到同版本/降级也会拒绝（`0x80073CF9`）。所以 `build-msix.ps1` 在打包**之前**会拿
+`Get-AppxPackage -Name Sonder.RBattery` 的本机已装版本做比对，不满足就直接报错退出：
+
+```
+已装版本: 1.0.0.0   本次打包: 1.0.0.0
+版本号撞车：本次打包的 1.0.0.0 等于 本机已安装的 1.0.0.0。
+```
+
+机器上没装这个包就跳过检查（换机器/新账号打包不该报错）。
+确实要打一个不大于已装版本的号（纯看包结构），加 `-SkipInstalledVersionCheck`。
+
+> 当前基线：商店里已上架的是 **C# 版 1.0.0.0**，所以 Rust 版从 **1.1.0.0** 起。
+> 定 1.1.0.0 而不是 1.0.1.0 的理由：Rust 重写是功能大改（灯光/按键/性能全参数可写
+> + 历史曲线），按语义化版本属于 minor 升级；1.0.1.0 会让人误以为只是修 bug。
+
+### 脚本参数
+
+| 参数 | 作用 |
+|---|---|
+| `-Version 1.1.1.0` | 覆盖 psd1 里的版本，必须是 4 段数字且首段 ≥ 1，且**必须大于本机已装版本** |
+| `-Verify` | 打完后 `makeappx unpack` 解到 `scratch\unpack\`，逐项核对 manifest 与文件 |
+| `-Sign` | 签名；**必须**配合 `-CertPath` 或 `-Thumbprint`，或证书库里已有 Subject 匹配的证书 |
+| `-CertPath` / `-CertPassword` | `.pfx` 路径与密码 |
+| `-Thumbprint` | 从 `Cert:\CurrentUser\My` 按 SHA1 指纹选证书 |
+| `-TimestampUrl` | 可选，签名时加 RFC3161 时间戳（需联网） |
+| `-SkipInstalledVersionCheck` | 跳过版本撞车检查。**打出来的包不要提交商店** |
+| `-Clean` | 删 `stage\`、`AppPackages\`、`scratch\` |
+
+### 签名是可选的，而且默认就该跳过
+
+**本地不需要签名。** 提交 Store 时微软会用自己的证书重新签，所以：
+
+* 日常开发 / 提交商店 → **不要带 `-Sign`**，产出的未签名包直接上传。
+* 只有在你想 `Add-AppxPackage` 本地装一下看效果时，才需要签名。
+
+没有可用证书时 `-Sign` 会**直接报错退出**，不会生成"半个签名包"：
+`makeappx pack` 出的未签名包已经完整落盘，签名失败不影响它 ——
+但脚本会以非零码退出，让你注意到"我本来想签名但没签成"。
+
+脚本**刻意不自动创建自签名证书**（C# 版会自动建）。原因：用户已有正式上架证书，
+自动建只会往证书库里塞垃圾，而且自签证书要装进「受信任的根证书颁发机构」
+才能装包，装完还得手动清，风险和心智负担都大于收益。
+
+需要签名的两条路：
+
+```powershell
+# A. 用你已有的上架证书（.pfx）
+-Sign -CertPath D:\secret\sonder.pfx -CertPassword '密码'
+
+# B. 证书已装进 Cert:\CurrentUser\My，按指纹选
+-Sign -Thumbprint <SHA1 指纹>
+# 或者 Subject 与 manifest Publisher 完全一致时，直接 -Sign 就能匹配上
+```
+
+### 提交商店前
+
+1. 跑**不带 `-Sign`** 的命令 —— 商店会用自己的证书重签，未签名包才是要上传的。
+2. 版本号必须比商店里已发布的**大**。
+3. `Publisher` 必须和 Partner Center「产品标识」页的值逐字一致（现在已对齐）。
+
+---
+
+## 三、双形态差异清单
+
+**只有两处不同**，其余全部一致 —— 这是 MSIX 桌面桥（`runFullTrust`）不虚拟化文件系统的结果。
+
+| 项 | 绿色版 | MSIX |
+|---|---|---|
+| 配置 | `%APPDATA%\rog-mouse-ctl\settings.ini` | **同**（真实路径，不重定向） |
+| 缓存 | `%LOCALAPPDATA%\rog-mouse-ctl\snapshot.cache` | **同** |
+| 备份 | `Documents\rog-mouse-ctl\backups\` | **同** |
+| exe 位置 | 随便放（含只读目录） | `C:\Program Files\WindowsApps\Sonder.RBattery_<版本>_x64__<hash>\` |
+| **开机自启** | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | **WinRT `startupTask`**（manifest 声明 + `RequestEnableAsync`） |
+| **分发方式** | 拷 exe / 解压即用 | 微软商店（或 `.msix` + `Add-AppxPackage`） |
+| 更新 | 手动换 exe | 商店自动 / `AppInstaller` 自动 |
+| 卸载 | 删文件 | 「应用和功能」/ `Remove-AppxPackage` |
+| 代码签名 | 无（SmartScreen 靠口碑积累） | 商店代签，装包不触发 SmartScreen |
+| 权限 | 用户身份 | 用户身份（`runFullTrust`，**不是** AppContainer） |
+| HID 访问 | 标准 Win32 `CreateFile` on `\\?\hid#vid_0b05...` | **同**，无需额外 capability |
+| 单实例/身份 | 无包身份 | 有 PFN，可与其他应用共存不同版本 |
+
+> 注意：绿色版和 MSIX 版**共用同一份 AppData 配置**。同时装两个不会打架，
+> 但改了一个的配置另一个也会读到。这是刻意的 —— 迁移时用户设置自动带过去。
+
+---
+
+## 四、踩过的坑（都是真机验证过的）
+
+### 1. `runFullTrust` **不**虚拟化文件系统
+
+`%APPDATA%`、`%LOCALAPPDATA%`、`Documents` 全部落到真实路径，**不会**被重定向到
+`%LOCALAPPDATA%\Packages\<PFN>\LocalCache\...`。所以程序**不需要**改任何配置路径，
+`src\paths.rs` 里那套 `env_dir("APPDATA")` / `env_dir("LOCALAPPDATA")` 在两种形态下
+走的是完全相同的分支。
+
+（会虚拟化的只有 UWP/AppContainer 应用。桌面桥进程跑在用户身份下，看到的文件系统
+和 explorer.exe 一样。）
+
+### 2. 注册表虚拟化是**真的**
+
+写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 会**静默成功**，但被重定向进
+包私有的 Helium hive：
+
+```
+%LOCALAPPDATA%\Packages\Sonder.RBattery_<publisherhash>\SystemAppData\Helium\User.dat
+```
+
+现象极具迷惑性：`RegSetValue` 返回 `ERROR_SUCCESS`，读回来也是对的，
+但「任务管理器 → 启动应用」和「设置 → 启动」里什么都没有，重启后当然不会自启。
+
+→ **开机自启必须用 `startupTask` 扩展，不能用 Run 键。**
+
+### 3. manifest 的硬性要求
+
+- `<rescap:Capability Name="runFullTrust" />` 必须有。缺了 exe 根本起不来。
+- `<Application EntryPoint="Windows.FullTrustApplication">` 必须有。缺了进程被塞进
+  AppContainer，`CreateFile` 打不开 HID 设备（`ERROR_ACCESS_DENIED`）。
+- `<desktop:Extension Category="windows.startupTask" Executable="...">` 的
+  `Executable` **必须**和 `<Application Executable>` 逐字一致，否则 `makeappx` 报
+  `The extension executable ... does not match`。本模板用 `@EXECUTABLE@` 占位符
+  同时填两处，就是为了防这个。
+
+### 4. `WindowsApps` 目录**只读**
+
+`C:\Program Files\WindowsApps\<包名>\` 是受 ACL 保护的只读目录，**且带包完整性校验**。
+程序不能往 exe 同目录写任何东西（日志、配置、缓存、临时文件都不行）。
+
+程序侧已经按这个前提设计：所有可变数据都在 `%APPDATA%` / `%LOCALAPPDATA%` /
+`Documents`。以后加新功能时也别往 exe 旁边写文件 —— 绿色版下"能写"会掩盖这个问题，
+直到装上 MSIX 才炸。
+
+### 5. `startupTask` 的 `Enabled="false"` 是**规定值**，不是可选
+
+manifest 里必须写 `Enabled="false"`（微软的规定，装机默认关）。用户首次启用要靠程序
+主动调：
+
+```rust
+// 伪代码，实际是 WinRT: Windows.ApplicationModel.StartupTask
+let task = StartupTask::GetAsync("RogBatteryAutoStart").get()?;
+match task.State {
+    Disabled      => { task.RequestEnableAsync().get()?; }  // 会弹一次用户确认
+    EnabledByPolicy => { /* 组策略禁用，没法绕 */ }
+    _ => {}
+}
+```
+
+`RequestEnableAsync` **会弹一个系统确认框**（"是否允许此应用在登录时启动"）。用户点否
+之后就一直是 `Disabled`，程序不该反复骚扰 —— 只在他显式打开开关时再调一次。
+
+绿色版则退回 `HKCU\...\Run`。两条路径的开关状态**不互通**（一个在注册表，一个在包
+状态里），这是预期行为。
+
+### 6. PowerShell 5.1 的两个坑（脚本已处理）
+
+- **没有 `Join-String`**。用 `-join` 运算符或 `[string]::Join`。
+- **`Get-Content -Raw` 会按 ANSI（本机 GBK）解码 UTF-8 文件**，中文全毁。
+  读带中文的模板/XML 一律 `[System.IO.File]::ReadAllBytes` + `[System.Text.Encoding]::UTF8.GetString`。
+  注意 `GetString` 会把 BOM 解成一个 `U+FEFF` 字符带进 XML，导致
+  `Data at the root level is invalid` —— 脚本里 `Read-Utf8NoBom` 会 `TrimStart(0xFEFF)`。
+- 脚本自身必须存成 **UTF-8 带 BOM**，否则 5.1 按 GBK 读源码，中文注释变乱码，
+  乱码字节可能吞掉后续行，表现为莫名其妙的语法错误。
+
+### 7. `makeappx` 不能单文件拷
+
+它靠**同目录**的 `.manifest` 做免注册 COM 绑定。只拷 `makeappx.exe` 会报
+`side-by-side configuration is incorrect`。本机整套在 `D:\codex\_tools\makeappx\`。
+
+---
+
+## 五、验证方式（不碰系统状态）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Verify
+```
+
+会 `makeappx unpack` 到 `scratch\unpack\`，逐项核对：
+
+- `Identity/@Name` = `Sonder.RBattery`
+- `Identity/@Publisher` = `CN=1307ADA3-...`
+- `Identity/@Version` / `@ProcessorArchitecture` = 目标版本 / `x64`
+- `Application/@Executable` = `rog-mouse-ctl.exe`，`@EntryPoint` = `Windows.FullTrustApplication`
+- `startupTask` 扩展存在、`Executable` 一致、`TaskId` = `RogBatteryAutoStart`、`Enabled` = `false`
+- `runFullTrust` capability 存在，且**能力总数 = 1**（多声明会被抓出来）
+- exe 存在且字节数和源文件一致
+- 六张被 manifest 点名的 Assets 都在
+- 包根没有多余文件（防止误把源码/README 打进去）
+
+**为什么不用 `Add-AppxPackage -Register stage\AppxManifest.xml` 验证能装**：
+开发模式注册会**占用 identity**，可能顶掉用户已上架的商店版，且留下难以清理的
+开发包注册项。解包校验能覆盖 manifest 的全部结构性错误，风险为零。
+
+---
+
+## 六、改东西时的对照表
+
+| 想改 | 改哪 |
+|---|---|
+| 版本号 | `package.props.psd1` 的 `Version`，或 `-Version` 参数 |
+| 身份 / Publisher | `package.props.psd1`（改完必须和证书 Subject 一致） |
+| 显示名 / 描述 | `package.props.psd1` 的 `DisplayName` / `ShortName` / `Description` |
+| 可执行文件名 | `package.props.psd1` 的 `Executable` **和** `Cargo.toml` 的 `[[bin]] name` |
+| 开机自启 TaskId | `package.props.psd1` 的 `StartupTaskId` **和** `src\` 里的常量（两边必须一致） |
+| 图标 | 替换 `Assets\*.png`（尺寸/命名别变，manifest 按名字引用） |
+| makeappx 路径 | `package.props.psd1` 的 `MakeAppxPath` / `FallbackMakeAppxPath` |
+
+`build-msix.ps1` **只读 `package.props.psd1`**，不读 `Cargo.toml`。所以 `package.props.psd1`
+是身份的唯一真源，`Cargo.toml` 里的 `[package.metadata.msix]` 只是给
+`cargo metadata` / 未来 build.rs 用的副本，改身份时两处都要动。

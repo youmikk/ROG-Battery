@@ -1,0 +1,26 @@
+Cargo.toml 的 metadata 片段 —— 直接粘到 D:\codex\rog-mouse-ctl\Cargo.toml 末尾。
+（本次交付**没有**改 Cargo.toml 本体，需要你自己粘。粘在当前 [profile.release] 之后即可，
+ 位置无所谓，TOML 的 [package.metadata.*] 表可以在任何位置。）
+
+----------------------------------------------------------------------
+
+[package.metadata.msix]
+identity_name = "Sonder.RBattery"
+publisher = "CN=1307ADA3-FCC0-4C75-81A2-9CC947003BD7"
+startup_task_id = "RogBatteryAutoStart"
+
+----------------------------------------------------------------------
+
+说明：
+
+* 这三个值是 `msix\package.props.psd1` 里同名值的权威副本（single source of truth
+  仍然是 psd1 —— build-msix.ps1 只读 psd1，不读 Cargo.toml）。
+
+* 放在 Cargo.toml 里的意义是让 `cargo metadata` 能读到身份信息，将来若想让
+  程序侧（src\）在运行时自检「我的 StartupTaskId 和包裹 manifest 一致」，
+  可以走 `env!("CARGO_PKG_METADATA_...")` 之外的方式读取，或者干脆做个 build.rs
+  把 startup_task_id 生成为常量，避免程序侧硬编码常量和 manifest 漂移。
+
+* 现阶段程序侧的 `RogBatteryAutoStart` 是硬编码常量，两边靠本文件 + README
+  的对照表保持同步。改一处必须改另一处，否则 startupTask 会静默失效
+  （StartupTask.GetAsync 拿不到任务，程序只是启动项没生效，不报错）。

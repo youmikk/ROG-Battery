@@ -1,0 +1,7 @@
+/target
+/scratch
+/msix/stage
+/msix/AppPackages
+/msix/scratch
+*.pdb
+hwnd.txt
