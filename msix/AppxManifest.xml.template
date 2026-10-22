@@ -1,0 +1,116 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX 清单模板。不要直接用它打包 —— build-msix.ps1 会把 @占位符@ 替换成实际值，
+  生成 AppxManifest.xml 再交给 makeappx。
+
+  为什么用模板：身份、版本号这些每次发布都要变，而 manifest 是 XML 不能
+  随便注环境变量。把可变的挖成占位符，剩下的结构就能当一个文件审阅。
+
+  【关于 Publisher】
+  这里的 Publisher 必须和签名证书的 Subject **逐字一致**（区分大小写、空格、逗号后空格）。
+  自签测试时用自签证书的 Subject；提交 Store 时必须换成 Partner Center
+  「产品标识」页给出的 Package/Identity/Publisher 原值，否则提交必被拒。
+
+  【关于 EntryPoint="Windows.FullTrustApplication"】
+  这一行是「桌面桥 / full-trust 打包应用」的关键：它告诉 Windows 这个 exe 不是
+  UWP，可以按普通 Win32 权限运行（开 HID 设备、读写文件、联网都按用户身份来）。
+  少了它，进程会被塞进 AppContainer，本程序连 HID 设备都打不开。
+
+  【本模板是 rog-mouse-ctl 的，结构与 rog-battery 版一一对应】
+  唯一的结构性差异：Executable 从 rog-battery.exe 换成了本程序的 exe，并且做成了
+  占位符（见 package.props.psd1 的 Executable 键）—— 因为 Application 和
+  startupTask Extension 两处都要写同一个文件名，写死两处容易改漏一处。
+-->
+<Package
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+    xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+    IgnorableNamespaces="uap rescap desktop">
+
+  <Identity
+      Name="@IDENTITY_NAME@"
+      Publisher="@PUBLISHER@"
+      Version="@VERSION@"
+      ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>@DISPLAY_NAME@</DisplayName>
+    <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>@DESCRIPTION@</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily
+        Name="Windows.Desktop"
+        MinVersion="10.0.17763.0"
+        MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="zh-CN" />
+    <Resource Language="en-US" />
+  </Resources>
+
+  <Applications>
+    <Application
+        Id="App"
+        Executable="@EXECUTABLE@"
+        EntryPoint="Windows.FullTrustApplication">
+
+      <uap:VisualElements
+          DisplayName="@DISPLAY_NAME@"
+          Description="@DESCRIPTION@"
+          BackgroundColor="transparent"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+            Wide310x150Logo="Assets\Wide310x150Logo.png"
+            Square310x310Logo="Assets\Square310x310Logo.png"
+            ShortName="@SHORT_NAME@" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+
+      <!--
+        开机自启。
+        打包应用不能写 HKCU\...\Run —— 那会被 MSIX 注册表虚拟化重定向到包的私有
+        Helium hive（%LOCALAPPDATA%\Packages\<PFN>\SystemAppData\Helium\User.dat），
+        看着写成功、实际系统启动项里没有。官方做法是在这里声明一个 startupTask，
+        代码里用 StartupTask.GetAsync("<TaskId>") 请求启用，用户可以在
+        「任务管理器 → 启动应用」里手动开关。
+
+        TaskId 必须和程序侧常量一字不差（当前程序侧定为 RogBatteryAutoStart）。
+        Enabled="false" 是微软规定的初始值：装机后默认关，首次运行由程序调
+        RequestEnableAsync 弹一次用户确认，之后用户可以随时在任务管理器里关掉。
+
+        注意这里必须给 desktop:Extension 也写上 Executable，且和上面的
+        <Application Executable> 完全一致，否则 makeappx 会报
+        「The extension executable ... does not match」。
+      -->
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="@EXECUTABLE@" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask
+              TaskId="@STARTUP_TASK_ID@"
+              Enabled="false"
+              DisplayName="@DISPLAY_NAME@" />
+        </desktop:Extension>
+      </Extensions>
+
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!--
+      runFullTrust 是桌面桥应用的准入门槛，没有它 exe 起不来。
+      它本身**不**额外授予文件系统或设备权限 —— 进程跑在用户身份下，
+      ReadFile/WriteFile 打开 \\?\hid#vid_0b05... 设备的权限跟普通 exe 完全一样。
+
+      所以这里不需要：
+        - broadFileSystemAccess（那是给真 UWP 的，加它反而要评审理由）
+        - 任何 device capability（HID 走的是标准 Win32 句柄，不是 UWP DeviceAccess）
+    -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+</Package>

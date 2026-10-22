@@ -1,0 +1,2759 @@
+//! 图形界面（native-windows-gui 1.0.13）。
+//!
+//! # 两条铁律
+//!
+//! 1. **HID 操作绝不在 GUI 线程上跑**。鼠标休眠时一次 MISS 要等满 1200ms 超时，
+//!    在 GUI 线程上跑会让窗口直接假死（用户会以为程序崩了）。
+//!    做法：后台线程独占设备句柄干活，读完通过 [`nwg::Notice`] 唤醒 GUI 线程，
+//!    数据用 [`Arc<Mutex<Shared>>`] 交接。
+//!
+//! 2. **所有页面控件 parent 到 [`nwg::Tab`]，不是 [`nwg::Window`]**。
+//!    `Tab` 是真正的子窗口（类名 `NWG_TAB`，`WS_CHILD | WS_CLIPCHILDREN`），
+//!    `Tab::init` 会把它 resize 成 tab 视图大小并把所有 tab 隐藏。挂到 Window 上的
+//!    控件会挡在 Tab 容器下面（z-order 在后），看起来就像「控件没画出来」。
+//!
+//! # 范围
+//!
+//! 第一批：主窗口 + 五标签 + 电量页 + 设置页。
+//! 第二批：性能页 / 灯光页 / 按键页（全部经 [`crate::ops`]，GUI 里没有第二套写逻辑）。
+//!
+//! # 写操作为什么要走队列
+//!
+//! GUI 线程不能碰 HID（铁律 1）。但设置页面上的按钮点下去必须真的写设备，
+//! 于是设计成：**GUI 线程只往队列里塞一个 [`Cmd`]，后台线程取出来执行**。
+//!
+//! 这样写有三个好处：
+//! 1. 写操作天然串行 —— 后台线程一次只干一件事，不会两个 setter 交叉写同一寄存器
+//!    （这会把设备写坏，正是文档第 5 节那次事故的形状）。
+//! 2. 写的过程中 GUI 还能响应重绘（写一次要 1.4 秒）。
+//! 3. 写完之后后台线程顺手读一次新状态，界面自动跟上，不需要 GUI 侧再触发一次刷新。
+//!
+//! GUI 线程提交命令后立刻切到 [`Status::Busy`]，按钮置灰，直到后台线程回报结果。
+//!
+//! # 为什么没有定时器
+//!
+//! 骨架里用了 `AnimationTimer`，这里**刻意不用**：刷新节奏由后台线程自己控制
+//! （它 sleep 在 `Condvar` 上，被「立即刷新」和「改间隔」唤醒）。
+//! 再加一个定时器只会让「谁触发刷新」有两个来源，出问题时更难定位。
+//!
+//! # 已踩过的坑（写在这里省下一次试错）
+//!
+//! - `TabsContainer` 高度必须给够（≥340），给 60 会导致标签条完全不渲染。
+//! - 控件类名是 `TabsContainer` + `Tab`，**不是** `Tabs`。
+//! - `TrayNotification` 的 parent 必须是 `MessageWindow`，不能是普通 `Window`。
+//! - `TrayNotification::build` 时 icon 为 `None` 会 **panic**
+//!   （`src\controls\tray_notification.rs:370`）。本项目用 `include_bytes!` 编进 exe 的
+//!   `assets\tray.ico`，**且不能给 `.size()`** —— 那条路走 WIC image factory，
+//!   ico 里 256×256 的 PNG 条目 WIC 不认，报 `Failed to create a image factory`。
+//! - `Menu` 没有 `append()`，每个 `MenuItem` 都要显式 `.parent(&menu)`。
+//! - `TrayNotification::set_tip(&self, tip: &str)` **不接受 `Option`**。
+//! - `Window` 只有 `minimize()`，**没有** `set_minimized(bool)`；从托盘恢复用
+//!   `set_visible(true)`。
+//! - `WindowCloseData::close(false)` 可以**取消**关闭 —— `close_to_tray` 靠它实现
+//!   （`src\win32\window.rs:721-729` 的 `WM_CLOSE` 分支会看这个 bool）。
+//! - `nwg::full_bind_event_handler` 收的是 **`Fn`**，不是 `FnMut`。所以事件处理器
+//!   只能对捕获的东西取 `&self`。所有 nwg 的更新方法（`set_text` / `set_pos` /
+//!   `set_visible`）都是 `&self`，所以把控件 `move` 进闭包就够了 ——
+//!   这也是骨架里验证过的模式。
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+use native_windows_gui as nwg;
+
+use crate::hid::{self, HidDevice};
+use crate::proto;
+use crate::settings::{self, Settings};
+use crate::snapshot::{self, FetchOutcome};
+use crate::win32;
+
+/// 托盘图标。**编进 exe**，不是运行时读文件。
+///
+/// 三个理由：绿色版是单文件发布（旁边不会有 `assets\`）、MSIX 里 exe 所在的
+/// install 目录只读、`Icon::from_file` 在 strict=false 时读不到会 panic。
+static TRAY_ICON: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/tray.ico"));
+
+const WINDOW_TITLE: &str = "ROG 龙鳞 Ace Mini";
+
+/// 刷新间隔的可选值（秒），与下拉框选项一一对应。
+const REFRESH_CHOICES: [u64; 4] = [5, 15, 30, 60];
+/// 缓存 TTL 的可选值（秒）。0 = 每次都重读设备。
+const TTL_CHOICES: [u64; 4] = [0, 30, 60, 120];
+
+/// Tab 页客户区的背景色。
+///
+/// nwg 的 `Label` 默认用 `COLOR_BTNFACE`（#F0F0F0）铺满自己的矩形，而 Tab 页
+/// 的客户区是纯白（#FFFFFF）—— 结果每个标签都变成一块灰底方块，看起来像画坏的
+/// 占位框。给每个 Label 显式指定白色背景，它们才融进页面。
+const PAGE_BG: [u8; 3] = [255, 255, 255];
+
+/// 曲线自绘用的子类过程 ID。**必须 > 0xFFFF** —— nwg 的
+/// `bind_raw_event_handler` 对 ≤ 0xFFFF 的 id 直接 panic（那是它自己保留的段）。
+const CHART_HANDLER_ID: usize = 0x00C4_0001;
+
+// ==================== 后台线程 ↔ GUI 线程的交接 ====================
+
+/// 一次轻量读取的结果，转成 UI 能直接用的形态。
+#[derive(Clone)]
+struct QuickData {
+    level: u8,
+    voltage_mv: u16,
+    charging: bool,
+    poll_code: u8,
+    active_stage: u8,
+}
+
+impl QuickData {
+    /// 电量那一行的文字，例如 `84%`。
+    fn level_text(&self) -> String {
+        format!("{}%", self.level)
+    }
+
+    /// 充电状态的人话。三态对用户的意义完全不同，不能只说「充电 0/1」。
+    fn charge_text(&self) -> &'static str {
+        if self.charging {
+            "充电中"
+        } else {
+            "使用中"
+        }
+    }
+
+    fn meta_text(&self) -> String {
+        format!(
+            "电压 {} mV  ·  {}  ·  回报率 {}  ·  当前档位 {}",
+            self.voltage_mv,
+            self.charge_text(),
+            proto::poll_name(self.poll_code),
+            self.active_stage
+        )
+    }
+}
+
+/// UI 的五态。`Asleep` 和 `Error` 必须分开 —— 前者是设备的正常状态，
+/// 后者才需要用户动手排查。混成一句「失败」会让人瞎试，
+/// 而这个程序瞎试意味着往 flash 里写东西。
+enum Status {
+    /// 还没读过。
+    Idle,
+    /// 读到了。
+    Ok,
+    /// 鼠标休眠 —— **不是错误**。
+    Asleep,
+    /// 正在写设备（一个 setter 约 1.4 秒）。期间按钮要置灰。
+    Busy,
+    /// 真出错了（设备没接、被独占、读失败）。
+    Error(String),
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Status::Idle
+    }
+}
+
+impl Status {
+    /// `Busy` 时所有写入按钮都要禁用 —— 两次写交叉执行会写坏设备。
+    fn is_busy(&self) -> bool {
+        matches!(self, Status::Busy)
+    }
+}
+
+// ==================== 写命令队列 ====================
+
+/// GUI 线程 → 后台线程的一条写命令。
+///
+/// 每个变体都对应 [`crate::ops`] 里一个已经写好、单测过的函数。
+/// **这里只做参数打包，不做任何校验** —— 校验在 `ops::*` 里，
+/// 保证 CLI 和 GUI 走的是同一份判断（漏一处就是设备被写坏的那一处）。
+#[derive(Clone)]
+enum Cmd {
+    Poll(i32),
+    Dpi { stage: usize, dpi: i32, rgb: Option<[u8; 3]> },
+    Stage(u8),
+    Debounce(u8),
+    Snap(u8),
+    Tuning(i16),
+    Lod(u8),
+    /// 灯光。`dir` / `random` / `speed` 是灯光页「高级」折叠里的三个控件。
+    ///
+    /// 本型号只支持 Static / Breathing / ColorCycle / React / BatteryState / Off，
+    /// 其中用到方向、随机、速度的是 Rainbow 与 Comet —— 而这两个设备会**静默回落**
+    /// 到 ColorCycle（见 `proto::light_mode_supported` 与厂商 `IsLightingModeSupported()`）。
+    /// 也就是说这三个值当前写下去不产生可见效果，但**必须照样写**：
+    /// ① `ops::set_light` 的 `probe`/`expect` 会把它们纳入读回断言，不传就会
+    ///    把设备上原有的非零值清零、且断言永不相等报 `applied=NO`；
+    /// ② 将来换型号或厂商放开限制时，这三个控件已经是对的。
+    Light {
+        mode: u8,
+        bright: Option<u8>,
+        rgb: Option<[u8; 3]>,
+        dir: Option<u8>,
+        random: Option<u8>,
+        speed: Option<u8>,
+    },
+    Button { slot: usize, dst: u16, confirmed: bool },
+    /// 开机自启开关。`true` = 用户勾上，`false` = 用户取消。
+    ///
+    /// 放进同一个 `Cmd` 队列是为了绕开一个具体的坑：`autostart::enable()`
+    /// 会同步等 WinRT / 注册表往返（`RoInitialize` + `RequestEnableAsync` 的
+    /// 异步等待最坏要几百毫秒），在 GUI 线程上直接调会把窗口卡住 ——
+    /// 而且 `enable()` 内部还要读注册表回读验证。所以和其他写命令一样
+    /// 丢给后台线程，`Busy` 期间按钮一并禁用（防连点交叉写）。
+    AutoStart(bool),
+}
+
+impl Cmd {
+    /// 给界面看的短名，用来拼「正在写：xxx」这类提示。
+    fn label(&self) -> String {
+        match self {
+            Cmd::Poll(hz) => format!("回报率 {hz} Hz"),
+            Cmd::Dpi { stage, dpi, .. } => format!("DPI 档 {stage} → {dpi}"),
+            Cmd::Stage(s) => format!("当前档位 {s}"),
+            Cmd::Debounce(c) => format!("去抖 {c}"),
+            Cmd::Snap(v) => format!("角度吸附 {v}"),
+            Cmd::Tuning(v) => format!("角度微调 {v}"),
+            Cmd::Lod(v) => format!("抬起距离 {}", if *v == 0 { "Low" } else { "High" }),
+            Cmd::Light { mode, .. } => format!("灯光 {}", proto::light_mode_name(*mode)),
+            Cmd::Button { slot, dst, .. } => format!("按键槽 {slot} → 0x{dst:04X}"),
+            Cmd::AutoStart(on) => {
+                format!("开机自启 {}", if *on { "开启" } else { "关闭" })
+            }
+        }
+    }
+}
+
+/// 一条写命令的结局，回到 GUI 线程后显示在页面上。
+struct CmdResult {
+    label: String,
+    /// 成功时的摘要（来自 [`crate::ops::ApplyReport::summary`]）。
+    ok: Option<String>,
+    /// 附加提示（口径不一致的 DPI、会重置标定等）。
+    warning: Option<String>,
+    /// 失败原因。`kind` 决定要不要提示「鼠标休眠中」。
+    err: Option<(crate::ops::ErrorKind, String)>,
+    /// 自启命令**回读**到的真实状态（只有 `Cmd::AutoStart` 会填）。
+    ///
+    /// 界面拿它去改勾选框 —— 这不属于「成功/失败」，
+    /// 因为「操作成功但状态没变」也是一种要正确显示的情况。
+    auto: Option<(crate::autostart::AutoStartState, crate::autostart::AutoStartPath)>,
+}
+
+/// 从 `Shared` 里抄出来给渲染用的只读快照。
+///
+/// `CmdResult` 里有 `ErrorKind`（`Copy`）和一堆 `String`，
+/// 直接 clone 比在持锁状态下渲染安全 —— 渲染会调 Win32，不该握着锁。
+struct CmdEcho {
+    label: String,
+    ok: Option<String>,
+    warning: Option<String>,
+    err: Option<(crate::ops::ErrorKind, String)>,
+    /// 自启命令回读到的真实状态（见 [`CmdResult::auto`]）。
+    auto: Option<(crate::autostart::AutoStartState, crate::autostart::AutoStartPath)>,
+}
+
+/// 性能页里需要被 `render_perf` 更新的那批「当前值」控件。
+struct PerfUi {
+    poll_now: nwg::Label,
+    dpi_now: Vec<nwg::Label>,
+    stage_now: nwg::Label,
+    deb_now: nwg::Label,
+    snap_now: nwg::Label,
+    tune_now: nwg::Label,
+    lod_now: nwg::Label,
+}
+
+/// 灯光页的「当前值」控件。
+struct LightUi {
+    mode_now: nwg::Label,
+    bright_now: nwg::Label,
+    rgb_now: nwg::Label,
+}
+
+
+/// 后台线程 / GUI 线程共享的全部可变状态。
+#[derive(Default)]
+struct Shared {
+    data: Option<QuickData>,
+    /// 从 17 帧快照解析出来的**完整**状态。性能/灯光/按键三页要用。
+    ///
+    /// 与 `data` 分开是因为：`data` 来自 3 帧轻量读取（`fetch_light`），
+    /// 而三页 UI 需要 DPI 四档颜色、按键表这些只有全量读取才有的字段。
+    /// 两个都留着 —— 电量页每 15 秒刷一次只要 95ms，没必要为了它读 17 帧。
+    full: Option<proto::State>,
+    status: Status,
+    /// 这次读是缓存命中还是真读了设备。
+    from_cache: bool,
+    /// 真读设备时的耗时（毫秒）；缓存命中时是 0。
+    elapsed_ms: u128,
+    /// `close_to_tray` 的当前值。放这里是因为事件处理器要读它，
+    /// 而事件处理器是 `Fn`，读不了被 move 进它自己的控件状态。
+    close_to_tray: bool,
+    /// 托盘是否启用（同上，事件处理器要用）。
+    tray_enabled: bool,
+    /// 待执行的写命令。`Some` 表示后台线程还有活没干。
+    pending: Option<Cmd>,
+    /// 上一条命令的结局，显示在对应页面上。
+    last_result: Option<CmdResult>,
+    /// 下一次读取要不要读全量 17 帧。
+    ///
+    /// 三个触发点：启动时（三页要立刻有值）、切到性能/灯光/按键页时、
+    /// 用户点「立即刷新」。其余时间走 3 帧轻量读取 —— 3 帧 95ms、
+    /// 17 帧 590ms，差 6 倍，周期刷新用全量会有肉眼可见的迟滞感。
+    want_full: bool,
+    /// 历史曲线的**已算好的**点集。`WM_PAINT` 只读它，绝不在这里读盘。
+    ///
+    /// `None` 表示后台线程还没读完第一遍。此时 `WM_PAINT` 画「正在读取历史…」
+    /// 而不是「样本不足」—— 后者会骗人（文件里明明有 7 条）。
+    plot: Option<crate::chart::Plot>,
+}
+
+/// 后台线程的“马上刷一次”信号。
+///
+/// 用 `Condvar` 而不是轮询：用户点「立即刷新」时不该等满一个 interval。
+/// 第三个字段是间隔（毫秒），改设置时由 GUI 线程写、后台线程每轮重读。
+struct Signal {
+    /// 递增的“请求序号”。后台线程记着上次处理到哪一号。
+    poke: Mutex<u64>,
+    cv: Condvar,
+    interval_ms: AtomicU64,
+    shutdown: AtomicBool,
+}
+
+impl Signal {
+    fn new(interval_sec: u64) -> Self {
+        Signal {
+            poke: Mutex::new(0),
+            cv: Condvar::new(),
+            interval_ms: AtomicU64::new(interval_sec.saturating_mul(1000)),
+            shutdown: AtomicBool::new(false),
+        }
+    }
+
+    /// GUI 线程调：请立刻刷新一次。
+    fn request_refresh(&self) {
+        if let Ok(mut g) = self.poke.lock() {
+            *g = g.wrapping_add(1);
+        }
+        self.cv.notify_all();
+    }
+
+    /// 后台线程调：等到「该动手了」。
+    ///
+    /// 返回 `false` 表示该退出了。
+    ///
+    /// `seen` 是调用方记的「已处理到哪一号请求」，由本函数自己推进 ——
+    /// 放在调用方会被下一轮循环冲掉。
+    fn wait_for_work(&self, seen: &mut u64) -> bool {
+        loop {
+            if self.shutdown.load(Ordering::Relaxed) {
+                return false;
+            }
+            let ms = self.interval_ms.load(Ordering::Relaxed).max(1000);
+            let g = match self.poke.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            // 上一轮之后有人点过「立即刷新」→ 不睡，马上干活
+            if *g != *seen {
+                *seen = *g;
+                return true;
+            }
+            // 超时到期 = 常规轮询刷新
+            let (g, timeout) = match self.cv.wait_timeout(g, Duration::from_millis(ms)) {
+                Ok(v) => v,
+                Err(p) => p.into_inner(),
+            };
+            let poked = *g != *seen;
+            let timed_out = timeout.timed_out();
+            if poked {
+                *seen = *g;
+            }
+            drop(g);
+            if self.shutdown.load(Ordering::Relaxed) {
+                return false;
+            }
+            if poked || timed_out {
+                return true;
+            }
+        }
+    }
+}
+
+// ==================== 入口 ====================
+
+/// GUI 主入口。
+///
+/// 调用前控制台已经被 [`crate::win32::FreeConsole`] 脱离干净，
+/// **这里不能有任何 `println!`** —— 没有东西会接住它。
+pub fn run() -> Result<(), String> {
+    nwg::init().map_err(|e| format!("初始化 GUI 失败：{e}"))?;
+
+    // 中文字体：不设也能显示，设了更整齐。失败不是致命错误。
+    //
+    // 但**不能把错误吞掉**：`set_global_family` 只在 `CreateFontW` 返回空句柄时
+    // 报错，那时 nwg 会把全局默认字体留成 `None`，所有控件退到系统 DEFAULT_GUI_FONT
+    // —— 中文能显示，但字形和字号在整套界面上是乱的。
+    //
+    // 所以按「雅黑 → 宋体 → 放弃」三级回落：宋体（SimSun）在任何中文 Windows 上
+    // 都有（本机 `C:\Windows\Fonts\simsun.ttc` 18.1 MB 实测存在）。
+    // 连宋体都建不出来就只能放弃，交给 nwg 的默认字体。
+    if nwg::Font::set_global_family("Microsoft YaHei UI").is_err()
+        && nwg::Font::set_global_family("SimSun").is_err()
+    {
+        // 两种中文字体都建不出来（理论上不会发生）。保持 nwg 默认字体。
+    }
+
+    let cfg = settings::load();
+
+    // ── 主窗口 ──────────────────────────────────────────────
+    let mut window = nwg::Window::default();
+    nwg::Window::builder()
+        .size((780, 580))
+        .center(true)
+        .title(WINDOW_TITLE)
+        .build(&mut window)
+        .map_err(|e| format!("建主窗口失败：{e}"))?;
+
+    // ── 分页容器 ────────────────────────────────────────────
+    // 高度必须给够（坑：给 60 会导致标签条完全不渲染）
+    let mut tabs = nwg::TabsContainer::default();
+    nwg::TabsContainer::builder()
+        .parent(&window)
+        .position((12, 12))
+        .size((740, 520))
+        .build(&mut tabs)
+        .map_err(|e| format!("建标签容器失败：{e}"))?;
+
+    let tab_names = ["电量", "性能", "灯光", "按键", "设置"];
+    let mut pages: Vec<nwg::Tab> = Vec::new();
+    for name in tab_names {
+        let mut t = nwg::Tab::default();
+        nwg::Tab::builder()
+            .text(name)
+            .parent(&tabs)
+            .build(&mut t)
+            .map_err(|e| format!("建标签页 {name} 失败：{e}"))?;
+        pages.push(t);
+    }
+
+    // ── 电量页（tab 0）──────────────────────────────────────
+    // 坐标相对 Tab 客户区，左上角约 (4, 26) 起（标签条下方）
+    let page_bat = &pages[0];
+
+    let mut lbl_level = nwg::Label::default();
+    nwg::Label::builder()
+        .text("电量")
+        .parent(page_bat)
+        .position((24, 28))
+        .size((48, 26))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_level)
+        .map_err(|e| format!("电量标签：{e}"))?;
+
+    let mut pb_level = nwg::ProgressBar::default();
+    nwg::ProgressBar::builder()
+        .parent(page_bat)
+        .position((80, 30))
+        .size((400, 22))
+        .range(0..100)
+        .pos(0)
+        .build(&mut pb_level)
+        .map_err(|e| format!("电量进度条：{e}"))?;
+
+    let mut lbl_level_text = nwg::Label::default();
+    nwg::Label::builder()
+        .text("--%")
+        .parent(page_bat)
+        .position((496, 28))
+        .size((160, 26))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_level_text)
+        .map_err(|e| format!("电量文字：{e}"))?;
+
+    let mut lbl_status = nwg::Label::default();
+    nwg::Label::builder()
+        .text("状态    尚未读取")
+        .parent(page_bat)
+        .position((24, 68))
+        .size((640, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_status)
+        .map_err(|e| format!("状态行：{e}"))?;
+
+    let mut lbl_meta = nwg::Label::default();
+    nwg::Label::builder()
+        .text("电压 -- mV  ·  --  ·  回报率 --  ·  当前档位 --")
+        .parent(page_bat)
+        .position((24, 98))
+        .size((640, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_meta)
+        .map_err(|e| format!("次要信息：{e}"))?;
+
+    let mut btn_refresh = nwg::Button::default();
+    nwg::Button::builder()
+        .text("立即刷新")
+        .parent(page_bat)
+        .position((24, 134))
+        .size((110, 34))
+        .build(&mut btn_refresh)
+        .map_err(|e| format!("刷新按钮：{e}"))?;
+
+    // 历史曲线：没有控件，直接在电量页的 `Tab` 窗口上挂子类过程自己画
+    // （`chart.rs` 顶部解释了为什么不用 Frame / ExternCanvas）。
+    //
+    // 这里**不建任何控件**：`WM_PAINT` 的落点就是 `page_bat` 本身，
+    // 绘图区在 `chart::area()`（24,186 起的 660×200），
+    // 与下方没有任何控件重叠（这一页最靠下的是 134 处的刷新按钮）。
+    //
+    // 处理器只做「读现成点集 + 画」，点集由后台线程算好塞进 `shared`。
+    let h_page_bat = page_bat.handle.clone();
+
+    // ── 设置页（tab 4）──────────────────────────────────────
+    let page_set = &pages[4];
+
+    let mut chk_tray = nwg::CheckBox::default();
+    nwg::CheckBox::builder()
+        .text("在系统托盘显示图标")
+        .parent(page_set)
+        .position((24, 30))
+        .size((320, 26))
+        // 必须显式给白底。`Tab` 的窗口类背景刷是 `COLOR_BTNFACE`（#F0F0F0），
+        // 不设这个就会在文字周围露出一块灰方块
+        // （`docs\nwg-gotchas.md` 第 1 节：`Label` 同样的坑，`CheckBox` 也一样）。
+        .background_color(Some(PAGE_BG))
+        .check_state(bool_to_check(cfg.tray_enabled))
+        .build(&mut chk_tray)
+        .map_err(|e| format!("托盘开关：{e}"))?;
+
+    let mut chk_close = nwg::CheckBox::default();
+    nwg::CheckBox::builder()
+        .text("关闭窗口时最小化到托盘（不退出）")
+        .parent(page_set)
+        .position((24, 64))
+        .size((400, 26))
+        .background_color(Some(PAGE_BG))
+        .check_state(bool_to_check(cfg.close_to_tray))
+        .build(&mut chk_close)
+        .map_err(|e| format!("关闭行为开关：{e}"))?;
+
+    // 开机自启：状态来自注册表 / WinRT，**不能自己猜**。
+    //
+    // `autostart::state()` 永不返回 Err（读不到就是 `Unknown`），所以这里
+    // 不会因为查状态失败而挡住整个界面。
+    let (auto_state, auto_path) = crate::autostart::state();
+
+    let mut chk_autostart = nwg::CheckBox::default();
+    nwg::CheckBox::builder()
+        .text("开机自动启动")
+        .parent(page_set)
+        .position((24, 98))
+        .size((400, 26))
+        .background_color(Some(PAGE_BG))
+        .check_state(bool_to_check(auto_state.is_enabled()))
+        .build(&mut chk_autostart)
+        .map_err(|e| format!("自启开关：{e}"))?;
+
+    // 自启的真实状态显示在勾选框右边。
+    //
+    // 用**短名**而不是 `AutoStartState::describe()`：describe 里最长的一句是
+    // 「已被用户关闭（需在系统设置里手动开启）」，23 个字放不进 275 px。
+    // 完整解释留给下面的 `lbl_hint`（点了才有）。
+    //
+    // 把「走哪条路」也带上：绿色版写注册表、MSIX 包内走 WinRT StartupTask，
+    // 出问题时这是第一个要区分的信息。
+    let mut lbl_auto_state = nwg::Label::default();
+    nwg::Label::builder()
+        .text(&format!(
+            "当前：{}（{}）",
+            auto_state_short(auto_state),
+            auto_path.short()
+        ))
+        .parent(page_set)
+        .position((430, 98))
+        .size((275, 26))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_auto_state)
+        .map_err(|e| format!("自启状态标签：{e}"))?;
+
+    let mut lbl_refresh = nwg::Label::default();
+    nwg::Label::builder()
+        .text("后台刷新间隔")
+        .parent(page_set)
+        .position((24, 142))
+        .size((110, 26))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_refresh)
+        .map_err(|e| format!("刷新间隔标签：{e}"))?;
+
+    let mut cb_refresh = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_set)
+        .position((140, 140))
+        .size((170, 200))
+        .collection(REFRESH_CHOICES.iter().map(|s| format!("{s} 秒")).collect())
+        .build(&mut cb_refresh)
+        .map_err(|e| format!("刷新间隔下拉：{e}"))?;
+    cb_refresh.set_selection(Some(nearest_index(&REFRESH_CHOICES, cfg.refresh_interval_sec)));
+
+    let mut lbl_ttl = nwg::Label::default();
+    nwg::Label::builder()
+        .text("快照缓存有效期")
+        .parent(page_set)
+        .position((24, 178))
+        .size((110, 26))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_ttl)
+        .map_err(|e| format!("TTL 标签：{e}"))?;
+
+    let mut cb_ttl = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_set)
+        .position((140, 176))
+        .size((170, 200))
+        .collection(
+            TTL_CHOICES
+                .iter()
+                .map(|s| {
+                    if *s == 0 {
+                        "每次都读设备".to_string()
+                    } else {
+                        format!("{s} 秒")
+                    }
+                })
+                .collect(),
+        )
+        .build(&mut cb_ttl)
+        .map_err(|e| format!("TTL 下拉：{e}"))?;
+    cb_ttl.set_selection(Some(nearest_index(&TTL_CHOICES, cfg.cache_ttl_sec)));
+
+    let mut btn_save = nwg::Button::default();
+    nwg::Button::builder()
+        .text("保存设置")
+        .parent(page_set)
+        .position((24, 220))
+        .size((110, 34))
+        .build(&mut btn_save)
+        .map_err(|e| format!("保存设置按钮：{e}"))?;
+
+    let mut lbl_hint = nwg::Label::default();
+    nwg::Label::builder()
+        .text("")
+        .parent(page_set)
+        .position((24, 264))
+        .size((660, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_hint)
+        .map_err(|e| format!("设置提示行：{e}"))?;
+
+    // ── 性能页（tab 1）──────────────────────────────────────
+    //
+    // 布局原则：左列标签、中列控件、右列当前值。
+    // 右列的「当前值」全部来自快照，不是本地记的 —— 设备才是唯一事实来源。
+    let page_perf = &pages[1];
+
+    let mut lbl_perf_poll = nwg::Label::default();
+    nwg::Label::builder()
+        .text("回报率")
+        .parent(page_perf)
+        .position((24, 24))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_poll)
+        .map_err(|e| format!("性能页回报率标签：{e}"))?;
+
+    let mut cb_poll = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_perf)
+        .position((120, 22))
+        .size((140, 200))
+        .collection(vec![
+            "125 Hz".to_string(),
+            "250 Hz".to_string(),
+            "500 Hz".to_string(),
+            "1000 Hz".to_string(),
+        ])
+        .build(&mut cb_poll)
+        .map_err(|e| format!("回报率下拉：{e}"))?;
+
+    let mut lbl_perf_poll_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前 --")
+        .parent(page_perf)
+        .position((275, 24))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_poll_now)
+        .map_err(|e| format!("回报率当前值：{e}"))?;
+
+    let mut btn_poll_apply = nwg::Button::default();
+    nwg::Button::builder()
+        .text("应用")
+        .parent(page_perf)
+        .position((485, 20))
+        .size((80, 28))
+        .build(&mut btn_poll_apply)
+        .map_err(|e| format!("回报率应用按钮：{e}"))?;
+
+    // —— DPI 档 ——
+    //
+    // 四档同时显示：档位号、输入框里的 DPI、颜色按钮、当前值。
+    // 用户改一档不影响别的档，所以四档各自独立的「应用」。
+    let mut lbl_perf_dpi = nwg::Label::default();
+    nwg::Label::builder()
+        .text("DPI 档位")
+        .parent(page_perf)
+        .position((24, 66))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_dpi)
+        .map_err(|e| format!("DPI 标签：{e}"))?;
+
+    let mut dpi_inputs: Vec<nwg::TextInput> = Vec::new();
+    let mut dpi_titles: Vec<nwg::Label> = Vec::new();
+    let mut dpi_nows: Vec<nwg::Label> = Vec::new();
+    let mut dpi_apply: Vec<nwg::Button> = Vec::new();
+    for i in 0..proto::DPI_STAGES {
+        let y = 60 + (i as i32) * 34;
+
+        let mut lb = nwg::Label::default();
+        nwg::Label::builder()
+            .text(&format!("档 {}", i + 1))
+            .parent(page_perf)
+            .position((120, y + 4))
+            .size((40, 24))
+            .background_color(Some(PAGE_BG))
+            .build(&mut lb)
+            .map_err(|e| format!("DPI 档 {i} 标签：{e}"))?;
+        dpi_titles.push(lb);
+
+        let mut ti = nwg::TextInput::default();
+        nwg::TextInput::builder()
+            .text("")
+            .parent(page_perf)
+            .position((165, y))
+            .size((90, 26))
+            .limit(5)
+            .build(&mut ti)
+            .map_err(|e| format!("DPI 档 {i} 输入框：{e}"))?;
+        dpi_inputs.push(ti);
+
+        let mut lb2 = nwg::Label::default();
+        nwg::Label::builder()
+            .text("当前 --")
+            .parent(page_perf)
+            .position((275, y + 4))
+            .size((200, 24))
+            .background_color(Some(PAGE_BG))
+            .build(&mut lb2)
+            .map_err(|e| format!("DPI 档 {i} 当前值：{e}"))?;
+        dpi_nows.push(lb2);
+
+        let mut bt = nwg::Button::default();
+        nwg::Button::builder()
+            .text("应用")
+            .parent(page_perf)
+            .position((485, y))
+            .size((80, 26))
+            .build(&mut bt)
+            .map_err(|e| format!("DPI 档 {i} 应用按钮：{e}"))?;
+        dpi_apply.push(bt);
+    }
+
+    // —— 当前档位（哪个 DPI 档生效）——
+    let mut lbl_perf_stage = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前档位")
+        .parent(page_perf)
+        .position((24, 208))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_stage)
+        .map_err(|e| format!("档位标签：{e}"))?;
+
+    let mut cb_stage = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_perf)
+        .position((120, 206))
+        .size((140, 200))
+        .collection(vec![
+            "档 1".to_string(),
+            "档 2".to_string(),
+            "档 3".to_string(),
+            "档 4".to_string(),
+        ])
+        .build(&mut cb_stage)
+        .map_err(|e| format!("档位下拉：{e}"))?;
+
+    let mut lbl_perf_stage_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前 --")
+        .parent(page_perf)
+        .position((275, 208))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_stage_now)
+        .map_err(|e| format!("档位当前值：{e}"))?;
+
+    let mut btn_stage_apply = nwg::Button::default();
+    nwg::Button::builder()
+        .text("应用")
+        .parent(page_perf)
+        .position((485, 204))
+        .size((80, 28))
+        .build(&mut btn_stage_apply)
+        .map_err(|e| format!("档位应用按钮：{e}"))?;
+
+    // —— 去抖 / 角度吸附 / 角度微调 ——
+    let mut lbl_perf_deb = nwg::Label::default();
+    nwg::Label::builder()
+        .text("去抖")
+        .parent(page_perf)
+        .position((24, 250))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_deb)
+        .map_err(|e| format!("去抖标签：{e}"))?;
+
+    let mut cb_debounce = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_perf)
+        .position((120, 248))
+        .size((140, 220))
+        .collection(
+            (0..=7u8)
+                .map(|c| proto::debounce_name(c))
+                .collect::<Vec<_>>(),
+        )
+        .build(&mut cb_debounce)
+        .map_err(|e| format!("去抖下拉：{e}"))?;
+
+    let mut lbl_perf_deb_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前 --")
+        .parent(page_perf)
+        .position((275, 250))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_deb_now)
+        .map_err(|e| format!("去抖当前值：{e}"))?;
+
+    let mut btn_deb_apply = nwg::Button::default();
+    nwg::Button::builder()
+        .text("应用")
+        .parent(page_perf)
+        .position((485, 246))
+        .size((80, 28))
+        .build(&mut btn_deb_apply)
+        .map_err(|e| format!("去抖应用按钮：{e}"))?;
+
+    let mut lbl_perf_snap = nwg::Label::default();
+    nwg::Label::builder()
+        .text("角度吸附")
+        .parent(page_perf)
+        .position((24, 290))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_snap)
+        .map_err(|e| format!("吸附标签：{e}"))?;
+
+    let mut cb_snap = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_perf)
+        .position((120, 288))
+        .size((140, 200))
+        .collection(vec!["关".to_string(), "开".to_string()])
+        .build(&mut cb_snap)
+        .map_err(|e| format!("吸附下拉：{e}"))?;
+
+    let mut lbl_perf_snap_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前 --")
+        .parent(page_perf)
+        .position((275, 290))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_snap_now)
+        .map_err(|e| format!("吸附当前值：{e}"))?;
+
+    let mut btn_snap_apply = nwg::Button::default();
+    nwg::Button::builder()
+        .text("应用")
+        .parent(page_perf)
+        .position((485, 286))
+        .size((80, 28))
+        .build(&mut btn_snap_apply)
+        .map_err(|e| format!("吸附应用按钮：{e}"))?;
+
+    let mut lbl_perf_tune = nwg::Label::default();
+    nwg::Label::builder()
+        .text("角度微调")
+        .parent(page_perf)
+        .position((24, 330))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_tune)
+        .map_err(|e| format!("微调标签：{e}"))?;
+
+    let mut cb_tuning = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_perf)
+        .position((120, 328))
+        .size((140, 220))
+        .collection(
+            (-20..=20)
+                .step_by(5)
+                .map(|v| format!("{v}"))
+                .collect::<Vec<_>>(),
+        )
+        .build(&mut cb_tuning)
+        .map_err(|e| format!("微调下拉：{e}"))?;
+
+    let mut lbl_perf_tune_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前 --")
+        .parent(page_perf)
+        .position((275, 330))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_tune_now)
+        .map_err(|e| format!("微调当前值：{e}"))?;
+
+    let mut btn_tune_apply = nwg::Button::default();
+    nwg::Button::builder()
+        .text("应用")
+        .parent(page_perf)
+        .position((485, 326))
+        .size((80, 28))
+        .build(&mut btn_tune_apply)
+        .map_err(|e| format!("微调应用按钮：{e}"))?;
+
+    // —— LOD ——
+    let mut lbl_perf_lod = nwg::Label::default();
+    nwg::Label::builder()
+        .text("抬起距离")
+        .parent(page_perf)
+        .position((24, 370))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_lod)
+        .map_err(|e| format!("LOD 标签：{e}"))?;
+
+    let mut cb_lod = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_perf)
+        .position((120, 368))
+        .size((140, 200))
+        .collection(vec!["Low（低）".to_string(), "High（高）".to_string()])
+        .build(&mut cb_lod)
+        .map_err(|e| format!("LOD 下拉：{e}"))?;
+
+    let mut lbl_perf_lod_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前 --")
+        .parent(page_perf)
+        .position((275, 370))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_lod_now)
+        .map_err(|e| format!("LOD 当前值：{e}"))?;
+
+    let mut btn_lod_apply = nwg::Button::default();
+    nwg::Button::builder()
+        .text("应用")
+        .parent(page_perf)
+        .position((485, 366))
+        .size((80, 28))
+        .build(&mut btn_lod_apply)
+        .map_err(|e| format!("LOD 应用按钮：{e}"))?;
+
+    // LOD 的常驻警告。厂商源码原注释承认写 LOD 会重置表面标定，
+    // 而且没有单独只设 LOD 的命令 —— 这条警告不能只出现在点完之后。
+    let mut lbl_lod_warn = nwg::Label::default();
+    nwg::Label::builder()
+        .text("⚠ 写抬起距离会把表面标定重置为默认值（厂商确认无恢复命令），本机已被重置过")
+        .parent(page_perf)
+        .position((24, 402))
+        .size((640, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_lod_warn)
+        .map_err(|e| format!("LOD 警告：{e}"))?;
+
+    let mut lbl_perf_result = nwg::Label::default();
+    nwg::Label::builder()
+        .text("")
+        .parent(page_perf)
+        .position((24, 432))
+        .size((648, 44))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_perf_result)
+        .map_err(|e| format!("性能页结果行：{e}"))?;
+
+    // ── 灯光页（tab 2）──────────────────────────────────────
+    let page_light = &pages[2];
+
+    let mut lbl_light_mode = nwg::Label::default();
+    nwg::Label::builder()
+        .text("模式")
+        .parent(page_light)
+        .position((24, 24))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_light_mode)
+        .map_err(|e| format!("灯光模式标签：{e}"))?;
+
+    // 只列出本型号真的支持的六个模式。
+    // Rainbow(3) 和 Comet(5) 会被设备静默回落到 ColorCycle ——
+    // 列出来等于骗用户，不如不列。
+    const LIGHT_MODES: [(u8, &str); 6] = [
+        (0, "Static（常亮）"),
+        (1, "Breathing（呼吸）"),
+        (2, "ColorCycle（循环变色）"),
+        (4, "React（响应）"),
+        (6, "BatteryState（电量指示）"),
+        (240, "Off（关灯）"),
+    ];
+
+    let mut cb_light_mode = nwg::ComboBox::default();
+    nwg::ComboBox::builder()
+        .parent(page_light)
+        .position((120, 22))
+        .size((190, 220))
+        .collection(
+            LIGHT_MODES
+                .iter()
+                .map(|(_, n)| n.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .build(&mut cb_light_mode)
+        .map_err(|e| format!("灯光模式下拉：{e}"))?;
+
+    let mut lbl_light_mode_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前 --")
+        .parent(page_light)
+        .position((325, 24))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_light_mode_now)
+        .map_err(|e| format!("灯光模式当前值：{e}"))?;
+
+    let mut lbl_light_bright = nwg::Label::default();
+    nwg::Label::builder()
+        .text("亮度")
+        .parent(page_light)
+        .position((24, 66))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_light_bright)
+        .map_err(|e| format!("亮度标签：{e}"))?;
+
+    // TrackBar 的 range 和 pos 都是 Option（与 ProgressBar 不同）
+    let mut tb_bright = nwg::TrackBar::default();
+    nwg::TrackBar::builder()
+        .parent(page_light)
+        .position((120, 64))
+        .size((190, 32))
+        .range(Some(0..100))
+        .pos(Some(50))
+        .build(&mut tb_bright)
+        .map_err(|e| format!("亮度滑条：{e}"))?;
+
+    let mut lbl_light_bright_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("--")
+        .parent(page_light)
+        .position((325, 66))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_light_bright_now)
+        .map_err(|e| format!("亮度当前值：{e}"))?;
+
+    let mut lbl_light_rgb = nwg::Label::default();
+    nwg::Label::builder()
+        .text("颜色")
+        .parent(page_light)
+        .position((24, 108))
+        .size((90, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_light_rgb)
+        .map_err(|e| format!("颜色标签：{e}"))?;
+
+    let mut ti_light_rgb = nwg::TextInput::default();
+    nwg::TextInput::builder()
+        .text("")
+        .parent(page_light)
+        .position((120, 106))
+        .size((190, 26))
+        .limit(7)
+        .placeholder_text(Some("RRGGBB，如 ff1929"))
+        .build(&mut ti_light_rgb)
+        .map_err(|e| format!("颜色输入框：{e}"))?;
+
+    let mut lbl_light_rgb_now = nwg::Label::default();
+    nwg::Label::builder()
+        .text("当前 --")
+        .parent(page_light)
+        .position((325, 108))
+        .size((200, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_light_rgb_now)
+        .map_err(|e| format!("颜色当前值：{e}"))?;
+
+    let mut btn_light_apply = nwg::Button::default();
+    nwg::Button::builder()
+        .text("应用灯光")
+        .parent(page_light)
+        .position((24, 150))
+        .size((120, 32))
+        .build(&mut btn_light_apply)
+        .map_err(|e| format!("灯光应用按钮：{e}"))?;
+
+    let mut lbl_light_warn = nwg::Label::default();
+    nwg::Label::builder()
+        .text("注：Rainbow / Comet 两个模式本型号不认，设备会静默回落到 ColorCycle，故不列出")
+        .parent(page_light)
+        .position((24, 196))
+        .size((648, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_light_warn)
+        .map_err(|e| format!("灯光说明：{e}"))?;
+
+    let mut lbl_light_result = nwg::Label::default();
+    nwg::Label::builder()
+        .text("")
+        .parent(page_light)
+        .position((24, 228))
+        .size((648, 44))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_light_result)
+        .map_err(|e| format!("灯光页结果行：{e}"))?;
+
+    // ── 按键页（tab 3）──────────────────────────────────────
+    //
+    // 八个槽位的 src 是设备固定的（左键=0x01F0 等），只有 dst 可改。
+    // 所以每行只给一个输入框 + 一个「应用」。
+    let page_btn = &pages[3];
+
+    let mut btn_inputs: Vec<nwg::TextInput> = Vec::new();
+    let mut btn_now_labels: Vec<nwg::Label> = Vec::new();
+    let mut btn_apply: Vec<nwg::Button> = Vec::new();
+    let mut btn_name_labels: Vec<nwg::Label> = Vec::new();
+
+    for slot in 0..proto::BUTTON_SLOTS {
+        let y = 20 + (slot as i32) * 40;
+
+        let mut lb = nwg::Label::default();
+        nwg::Label::builder()
+            .text(&format!(
+                "{}  ({:04X})",
+                proto::BUTTON_NAME[slot], proto::BUTTON_SRC[slot]
+            ))
+            .parent(page_btn)
+            .position((24, y + 4))
+            .size((170, 24))
+            .background_color(Some(PAGE_BG))
+            .build(&mut lb)
+            .map_err(|e| format!("按键槽 {slot} 标签：{e}"))?;
+        btn_name_labels.push(lb);
+
+        let mut ti = nwg::TextInput::default();
+        nwg::TextInput::builder()
+            .text("")
+            .parent(page_btn)
+            .position((200, y))
+            .size((90, 26))
+            .limit(6)
+            .placeholder_text(Some("如 01F0"))
+            .build(&mut ti)
+            .map_err(|e| format!("按键槽 {slot} 输入框：{e}"))?;
+        btn_inputs.push(ti);
+
+        let mut lb2 = nwg::Label::default();
+        nwg::Label::builder()
+            .text("当前 --")
+            .parent(page_btn)
+            .position((305, y + 4))
+            .size((180, 24))
+            .background_color(Some(PAGE_BG))
+            .build(&mut lb2)
+            .map_err(|e| format!("按键槽 {slot} 当前值：{e}"))?;
+        btn_now_labels.push(lb2);
+
+        let mut bt = nwg::Button::default();
+        nwg::Button::builder()
+            .text("应用")
+            .parent(page_btn)
+            .position((495, y))
+            .size((75, 26))
+            .build(&mut bt)
+            .map_err(|e| format!("按键槽 {slot} 应用按钮：{e}"))?;
+        btn_apply.push(bt);
+    }
+
+    let mut lbl_btn_warn = nwg::Label::default();
+    nwg::Label::builder()
+        .text("⚠ 填 0000 表示禁用该键 —— 键会完全没反应，恢复只能靠备份文件，因此会二次确认")
+        .parent(page_btn)
+        .position((24, 344))
+        .size((648, 24))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_btn_warn)
+        .map_err(|e| format!("按键警告：{e}"))?;
+
+    let mut lbl_btn_result = nwg::Label::default();
+    nwg::Label::builder()
+        .text("")
+        .parent(page_btn)
+        .position((24, 372))
+        .size((648, 44))
+        .background_color(Some(PAGE_BG))
+        .build(&mut lbl_btn_result)
+        .map_err(|e| format!("按键页结果行：{e}"))?;
+
+    // ── 把三页的“当前值”控件收拢成结构 ─────────────────────
+    //
+    // 渲染函数要一次刷一批控件。逐个当参数传会让签名长到看不懂，
+    // 而且加一个字段就要改三处调用点。
+    //
+    // 注意这里 `dpi_now` 只收每档的「当前值」标签（下标交替的那个），
+    // 不含「档 N」标题 —— 标题是静态的，不用刷。
+    let perf_ui = PerfUi {
+        poll_now: lbl_perf_poll_now,
+        dpi_now: dpi_nows,
+        stage_now: lbl_perf_stage_now,
+        deb_now: lbl_perf_deb_now,
+        snap_now: lbl_perf_snap_now,
+        tune_now: lbl_perf_tune_now,
+        lod_now: lbl_perf_lod_now,
+    };
+
+    let light_ui = LightUi {
+        mode_now: lbl_light_mode_now,
+        bright_now: lbl_light_bright_now,
+        rgb_now: lbl_light_rgb_now,
+    };
+
+    // ── 托盘 ────────────────────────────────────────────────
+    // parent 必须是 MessageWindow（坑 3）
+    let mut msg_window = nwg::MessageWindow::default();
+    nwg::MessageWindow::builder()
+        .build(&mut msg_window)
+        .map_err(|e| format!("建消息窗口失败：{e}"))?;
+
+    let mut icon = nwg::Icon::default();
+    nwg::Icon::builder()
+        .source_bin(Some(TRAY_ICON))
+        // 千万不要加 .size()：那条路走 WIC，ico 里的 PNG 条目 WIC 不认，
+        // 实测报 Err(ResourceCreationError("Failed to create a image factory"))
+        .build(&mut icon)
+        .map_err(|e| format!("从内嵌字节建图标失败：{e}"))?;
+
+    let mut menu = nwg::Menu::default();
+    nwg::Menu::builder()
+        .popup(true)
+        .parent(&msg_window)
+        .build(&mut menu)
+        .map_err(|e| format!("建托盘菜单失败：{e}"))?;
+
+    // Menu 没有 append()，每个 MenuItem 都要显式 parent（坑 6）
+    let mut mi_show = nwg::MenuItem::default();
+    nwg::MenuItem::builder()
+        .text("显示主窗口")
+        .parent(&menu)
+        .build(&mut mi_show)
+        .map_err(|e| format!("菜单项：{e}"))?;
+
+    let mut mi_refresh = nwg::MenuItem::default();
+    nwg::MenuItem::builder()
+        .text("立即刷新")
+        .parent(&menu)
+        .build(&mut mi_refresh)
+        .map_err(|e| format!("菜单项：{e}"))?;
+
+    let mut mi_quit = nwg::MenuItem::default();
+    nwg::MenuItem::builder()
+        .text("退出")
+        .parent(&menu)
+        .build(&mut mi_quit)
+        .map_err(|e| format!("菜单项：{e}"))?;
+
+    let mut tray = nwg::TrayNotification::default();
+    nwg::TrayNotification::builder()
+        .parent(&msg_window)
+        // icon 必须给，None 会 panic（坑 4）
+        .icon(Some(&icon))
+        .tip(Some(&tray_tip(None, &Status::Idle)))
+        .visible(cfg.tray_enabled)
+        .build(&mut tray)
+        .map_err(|e| format!("建托盘图标失败：{e}"))?;
+
+    let mut notice = nwg::Notice::default();
+    nwg::Notice::builder()
+        .parent(&window)
+        .build(&mut notice)
+        .map_err(|e| format!("建通知通道失败：{e}"))?;
+
+    // ── 共享状态 + 后台线程 ─────────────────────────────────
+    let shared = Arc::new(Mutex::new(Shared {
+        close_to_tray: cfg.close_to_tray,
+        tray_enabled: cfg.tray_enabled,
+        ..Default::default()
+    }));
+    let signal = Arc::new(Signal::new(cfg.refresh_interval_sec));
+    let sender = notice.sender();
+
+    // ── 历史曲线的后台读取 ─────────────────────────────────
+    //
+    // 单独一条线程，**不复用**下面那个刷新循环：`read_rows()` 冷启动实测 712 ms
+    // （之后 60–70 ms），混进刷新循环会把「第一次读到设备状态」也拖后半秒多。
+    // 两条线程各干一件事，界面首屏最快。
+    //
+    // 每 30 秒重读一次：`history.tsv` 是**别的进程**（托盘轮询）在追加的，
+    // 我们自己不写它；对一条看 8 小时趋势的曲线，30 秒滞后无所谓。
+    // 分段睡 1 秒是为了 shutdown 时能立刻退出 —— 一觉睡 30 秒的话，
+    // 用户点「退出」后进程还要赖在那里。
+    {
+        let shared_c = Arc::clone(&shared);
+        let signal_c = Arc::clone(&signal);
+        let sender_c = sender;
+        std::thread::spawn(move || loop {
+            let rows = crate::history::read_rows();
+            let plot = crate::chart::build(&rows, crate::chart::plot_rect());
+            {
+                let mut s = lock_shared(&shared_c);
+                s.plot = Some(plot);
+            }
+            // 通知 GUI 线程：新点集到了，把曲线区标脏重画。
+            sender_c.notice();
+
+            for _ in 0..30 {
+                if signal_c.shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1000));
+            }
+        });
+    }
+
+    {
+        let shared_t = Arc::clone(&shared);
+        let signal_t = Arc::clone(&signal);
+        let ttl = cfg.cache_ttl_sec;
+        std::thread::spawn(move || {
+            // 内存缓存留在这个线程里跨轮次复用 —— 否则 TTL 设置毫无意义
+            let mut cache = snapshot::SnapshotCache::new(ttl);
+            let mut seen = 0u64;
+            loop {
+                if !signal_t.wait_for_work(&mut seen) {
+                    return;
+                }
+
+                // ① 先看有没有排队等着写的命令。有就先写 ——
+                //    写比读重要，而且写完必须重读，不能拿写之前的旧数据糊弄。
+                let pending = {
+                    let mut s = lock_shared(&shared_t);
+                    s.pending.take()
+                };
+
+                if let Some(cmd) = pending {
+                    {
+                        let mut s = lock_shared(&shared_t);
+                        s.status = Status::Busy;
+                    }
+                    sender.notice();
+
+                    let outcome = run_cmd(&cmd);
+
+                    // ② 不管写成功还是失败，都让缓存失效重读一遍：
+                    //    失败也可能已经改了一半（比如 applied 成功但还原失败），
+                    //    这时界面上显示的必须是设备的真实状态，不是我们以为的状态。
+                    cache.invalidate();
+
+                    let mut s = lock_shared(&shared_t);
+                    s.last_result = Some(outcome);
+                    // 写完要重读，而且必须全量 —— 三页都要跟着更新
+                    s.want_full = true;
+                }
+
+                // ③ 决定这次读多少帧
+                let full = {
+                    let mut s = lock_shared(&shared_t);
+                    // 取走标记：一次全量只服务一次请求，之后回到轻量。
+                    // 否则切过一次页就永远全量读了。
+                    let want = s.want_full;
+                    s.want_full = false;
+                    want
+                };
+
+                let outcome = read_once(&mut cache, full);
+                {
+                    let mut s = lock_shared(&shared_t);
+                    match outcome {
+                        Ok(Some(out)) => apply_outcome(&out, &mut s),
+                        // 缓存和设备都没有结果 → 鼠标多半在睡。这不是错误。
+                        Ok(None) => {
+                            s.full = None;
+                            s.data = None;
+                            s.status = Status::Asleep;
+                            s.from_cache = false;
+                            s.elapsed_ms = 0;
+                        }
+                        Err(e) => {
+                            s.full = None;
+                            s.data = None;
+                            s.status = Status::Error(e);
+                            s.from_cache = false;
+                            s.elapsed_ms = 0;
+                        }
+                    }
+                }
+                sender.notice();
+            }
+        });
+    }
+
+    // ── 事件绑定 ────────────────────────────────────────────
+    // 处理器是 `Fn`，只能对捕获的东西取 `&self`，所以把要更新的控件 move 进来。
+    // 剩下不更新的控件（pages / 各种 Label 等）由 `run` 的栈帧保活 ——
+    // `dispatch_thread_events` 会一直阻塞，函数返回时进程也就要退出了。
+    let wh = window.handle.clone();
+    let h_btn_refresh = btn_refresh.handle.clone();
+    let h_btn_save = btn_save.handle.clone();
+    let h_chk_tray = chk_tray.handle.clone();
+    let h_chk_close = chk_close.handle.clone();
+    let h_chk_autostart = chk_autostart.handle.clone();
+    let h_cb_refresh = cb_refresh.handle.clone();
+    let h_cb_ttl = cb_ttl.handle.clone();
+    let h_tray = tray.handle.clone();
+    let h_mi_show = mi_show.handle.clone();
+    let h_mi_refresh = mi_refresh.handle.clone();
+    let h_mi_quit = mi_quit.handle.clone();
+    let h_notice = notice.handle.clone();
+
+    // 托盘图标：记住「上一次画上去的电量」和「静态图标原句柄」。
+    //
+    // `Cell`/`RefCell` 而不是 `mut` 局部变量：`full_bind_event_handler` 的闭包
+    // 是 `Fn`（不是 `FnMut`），捕获 `&mut` 变量编译不过
+    // （`E0594: cannot assign to ..., as Fn closures cannot mutate their captured variables`）。
+    // `Cell::get/set` 与 `RefCell::borrow_mut` 都只要 `&self`，绕开这个限制。
+    //
+    // `static_icon_handle` 用来在回收旧图标时排除静态图标 ——
+    // 那个句柄归 `nwg::Icon` 自己管（`owned = true`），
+    // 我们 DestroyIcon 它会变成 double free。
+    let tray_level: std::cell::Cell<Option<u8>> = std::cell::Cell::new(None);
+    let static_icon_handle = icon.handle;
+    let icon_cell: std::cell::RefCell<nwg::Icon> = std::cell::RefCell::new(icon);
+
+    // ── 历史曲线的 WM_PAINT 子类过程 ────────────────────────
+    //
+    // 挂在电量页的 `Tab` 窗口上（`page_bat`）。为什么是子类而不是建一个控件：
+    // `chart.rs` 顶部写了 —— nwg 1.0.13 没有可用的绘图控件（`Frame` 需要没开的
+    // `frame` feature，`ExternCanvas` 需要 `extern-canvas` 且是顶层窗口）。
+    //
+    // **handler_id 必须 > 0xFFFF**：nwg 对 ≤ 0xFFFF 的 id 直接 `panic!`
+    // （那是它给自己保留的段，见 nwg 的 `win32\window.rs:301`）。
+    //
+    // 这里只做两件事：
+    // - `WM_PAINT`：`BeginPaint` → 读 `shared.plot`（**不读盘**）→ `chart::paint`
+    //   → `EndPaint`，返回 0。必须自己 `BeginPaint`，否则更新区永不被验证，
+    //   `WM_PAINT` 会无限重发把 CPU 烧满。
+    // - `WM_ERASEBKGND`：**照常交给 DefSubclassProc**。Tab 的类背景刷是
+    //   `COLOR_BTNFACE`（灰），先擦成灰再被我们在绘图区盖白，顺序是对的；
+    //   如果我们返回 1 自己吃下，绘图区之外的陈旧像素会留下来。
+    let chart_hwnd = h_page_bat.hwnd();
+    let chart_hwnd_in_notice = chart_hwnd.map(|h| h as usize);
+    if let Some(hwnd) = chart_hwnd {
+        let shared_p = Arc::clone(&shared);
+        let handler = nwg::bind_raw_event_handler(
+            &h_page_bat,
+            CHART_HANDLER_ID,
+            move |_hwnd, msg, _w, _l| {
+                const WM_PAINT: u32 = 0x000F;
+                if msg != WM_PAINT {
+                    return None;
+                }
+                unsafe {
+                    let mut ps = win32::PaintStruct::default();
+                    let hdc = win32::BeginPaint(hwnd as win32::Handle, &mut ps);
+                    if !hdc.is_null() {
+                        // 拷一份点集再释放锁：`chart::paint` 里几十次 GDI 调用，
+                        // 握着锁画会让后台线程白等（它每轮都要写这个字段）。
+                        let plot = {
+                            let s = lock_shared(&shared_p);
+                            s.plot.clone()
+                        };
+                        crate::chart::paint(hdc, plot.as_ref());
+                        win32::EndPaint(hwnd as win32::Handle, &ps);
+                    }
+                }
+                // 返回 0 = 已处理，别让 DefWindowProc 再擦一遍（会闪）。
+                Some(0)
+            },
+        )
+        .map_err(|e| format!("曲线自绘绑定失败：{e}"))?;
+        // 显式泄漏这份 handler：`RawEventHandler` 没有 `Drop`，
+        // 它的存在期就等于窗口的存在期。**不能**在 dispatch 返回后
+        // `unbind_raw_event_handler`（那时窗口可能已销毁，nwg 会 panic）。
+        std::mem::forget(handler);
+    }
+
+    // 第二批：性能/灯光/按键页的句柄。
+    // 逐个 clone 而不是借用 —— 事件处理器是 `Fn + 'static`，借用活不过它。
+    let h_btn_poll = btn_poll_apply.handle.clone();
+    let h_btn_stage = btn_stage_apply.handle.clone();
+    let h_btn_deb = btn_deb_apply.handle.clone();
+    let h_btn_snap = btn_snap_apply.handle.clone();
+    let h_btn_tune = btn_tune_apply.handle.clone();
+    let h_btn_lod = btn_lod_apply.handle.clone();
+    let h_btn_light = btn_light_apply.handle.clone();
+    let h_dpi_apply: Vec<_> = dpi_apply.iter().map(|b| b.handle.clone()).collect();
+    let h_btn_apply: Vec<_> = btn_apply.iter().map(|b| b.handle.clone()).collect();
+
+    let shared_e = Arc::clone(&shared);
+    let signal_e = Arc::clone(&signal);
+
+    // Busy 期间要禁用的按钮的**句柄**。
+    //
+    // 为什么存句柄不存 `&Button`：`full_bind_event_handler` 要求 `'static`，
+    // 而 `&Button` 借的是 `run` 栈帧上的控件（活不过闭包的要求）。
+    // 句柄是 `usize` 那样的值，拷进闭包没有生命周期问题。
+    //
+    // 空句柄（`handle.hwnd() == None`）直接跳过 —— 理论上不会发生，
+    // 但真发生了也不该 panic 在 GUI 线程上。
+    let perf_button_hwnds: Vec<usize> = [
+        &btn_poll_apply,
+        &dpi_apply[0],
+        &dpi_apply[1],
+        &dpi_apply[2],
+        &dpi_apply[3],
+        &btn_stage_apply,
+        &btn_deb_apply,
+        &btn_snap_apply,
+        &btn_tune_apply,
+        &btn_lod_apply,
+    ]
+    .iter()
+    .filter_map(|b| b.handle.hwnd())
+    .map(|h| h as usize)
+    .collect();
+
+    let light_button_hwnds: Vec<usize> = [&btn_light_apply]
+        .iter()
+        .filter_map(|b| b.handle.hwnd())
+        .map(|h| h as usize)
+        .collect();
+
+    let btn_button_hwnds: Vec<usize> = btn_apply
+        .iter()
+        .filter_map(|b| b.handle.hwnd())
+        .map(|h| h as usize)
+        .collect();
+
+    nwg::full_bind_event_handler(&wh, move |evt, evt_data, handle| {
+        use nwg::Event as E;
+        match evt {
+            // 关窗口：按 close_to_tray 决定「藏起来」还是「真退出」
+            E::OnWindowClose => {
+                let hide = match shared_e.lock() {
+                    Ok(g) => g.close_to_tray,
+                    Err(p) => p.into_inner().close_to_tray,
+                };
+                if hide {
+                    // close(false) 取消关闭（`win32\window.rs:726` 会看这个 bool）
+                    if let nwg::EventData::OnWindowClose(d) = evt_data {
+                        d.close(false);
+                    }
+                    window.set_visible(false);
+                } else {
+                    signal_e.shutdown.store(true, Ordering::Relaxed);
+                    nwg::stop_thread_dispatch();
+                }
+            }
+
+            E::OnButtonClick if handle == h_btn_refresh => signal_e.request_refresh(),
+
+            E::OnButtonClick if handle == h_btn_save => {
+                let s = build_settings(
+                    chk_tray.check_state(),
+                    chk_close.check_state(),
+                    cb_refresh.selection(),
+                    cb_ttl.selection(),
+                );
+                match settings::save(&s) {
+                    Ok(()) => {
+                        lbl_hint.set_text(&format!(
+                            "已保存到 {}",
+                            crate::paths::settings_file().display()
+                        ));
+                        // 让后台线程采用新间隔
+                        signal_e
+                            .interval_ms
+                            .store(s.refresh_interval_sec * 1000, Ordering::Relaxed);
+                        signal_e.request_refresh();
+                        if let Ok(mut g) = shared_e.lock() {
+                            g.close_to_tray = s.close_to_tray;
+                            g.tray_enabled = s.tray_enabled;
+                        }
+                        // 托盘可见性跟着开关走
+                        tray.set_visibility(s.tray_enabled);
+                    }
+                    Err(e) => lbl_hint.set_text(&format!("保存失败：{e}")),
+                }
+            }
+
+            E::OnButtonClick if handle == h_chk_tray => {
+                // 立刻生效（不用等保存），并在提示行说明还没落盘
+                let on = chk_tray.check_state() == nwg::CheckBoxState::Checked;
+                tray.set_visibility(on);
+                if let Ok(mut g) = shared_e.lock() {
+                    g.tray_enabled = on;
+                }
+                lbl_hint.set_text("托盘开关已生效；点「保存设置」才会记住");
+            }
+
+            E::OnButtonClick if handle == h_chk_close => {
+                let on = chk_close.check_state() == nwg::CheckBoxState::Checked;
+                if let Ok(mut g) = shared_e.lock() {
+                    g.close_to_tray = on;
+                }
+                lbl_hint.set_text("关闭行为已生效；点「保存设置」才会记住");
+            }
+
+            // 开机自启：**丢给后台线程**，不在这里直接调 `enable()`。
+            //
+            // `enable()` 会同步等 WinRT 的 `RequestEnableAsync` 或注册表往返
+            // （最坏几百毫秒），在 GUI 线程上调会把窗口卡成假死。
+            // 和 HID 写命令共用 `submit()`：Busy 期间自动禁用按钮，防连点交叉写。
+            //
+            // 勾选状态**先不改**：等后台回读的真实状态回来再定。
+            // 立刻把框打上勾是「假成功」—— `DisabledByUser` 时系统会静默拒绝，
+            // 用户看到勾上了、实际没启用，下次开机才发现。
+            E::OnButtonClick if handle == h_chk_autostart => {
+                let want = chk_autostart.check_state() == nwg::CheckBoxState::Checked;
+                // 先把勾选状态就地回滚成「上一次确认过的状态」，
+                // 免得用户在后台跑完之前看到框已经变了。
+                chk_autostart.set_check_state(bool_to_check(!want));
+                if !submit(&shared_e, &signal_e, Cmd::AutoStart(want)) {
+                    // 后台正在跑别的命令，`submit` 会丢掉这条。
+                    // 自启不碰设备、不该无声消失 —— 必须告诉用户「这次没执行」，
+                    // 否则用户点了勾选框、框弹回去、什么都不显示。
+                    lbl_hint.set_text(
+                        "后台正在执行别的操作，这次开机自启没有提交，请稍后再点一次。",
+                    );
+                }
+            }
+
+            // 下拉框只是记下选择，点「保存设置」才落盘 —— 但要让用户知道有未保存的改动
+            //
+            // 变体名拼成 `ComboxBox`（多一个 x）是 nwg 自己的笔误，
+            // 源码 `events.rs` 里就叫这个名字，不是我们拼错。
+            E::OnComboxBoxSelection if handle == h_cb_refresh || handle == h_cb_ttl => {
+                lbl_hint.set_text("已修改；点「保存设置」才会生效并记住");
+            }
+
+            // 托盘右键 → 弹菜单（必须用屏幕坐标）
+            E::OnContextMenu if handle == h_tray => {
+                let (x, y) = nwg::GlobalCursor::position();
+                menu.popup(x, y);
+            }
+
+            // 切到性能/灯光/按键页 → 这三页要全量数据，触发一次 17 帧读取。
+            //
+            // 只对这三页触发：电量页和设置页用 3 帧就够，
+            // 切过去也读 17 帧等于每次点标签多等 0.5 秒。
+            //
+            // 事件名是 `TabsContainerChanged`（不是 `OnTabSelectionChanged`，
+            // nwg 里没有那个变体），而且**不带下标数据** —— 得问控件自己。
+            E::TabsContainerChanged => {
+                let idx = tabs.selected_tab();
+                if (1..=3).contains(&idx) {
+                    if let Ok(mut g) = shared_e.lock() {
+                        g.want_full = true;
+                    }
+                    signal_e.request_refresh();
+                }
+            }
+
+            // ── 性能页 ──────────────────────────────────────
+            E::OnButtonClick if handle == h_btn_poll => {
+                const HZ: [i32; 4] = [125, 250, 500, 1000];
+                let idx = cb_poll.selection().unwrap_or(3).min(3);
+                submit(&shared_e, &signal_e, Cmd::Poll(HZ[idx]));
+            }
+
+            E::OnButtonClick if handle == h_btn_stage => {
+                let idx = cb_stage.selection().unwrap_or(1);
+                submit(&shared_e, &signal_e, Cmd::Stage((idx + 1) as u8));
+            }
+
+            E::OnButtonClick if handle == h_btn_deb => {
+                let idx = cb_debounce.selection().unwrap_or(2).min(7);
+                submit(&shared_e, &signal_e, Cmd::Debounce(idx as u8));
+            }
+
+            E::OnButtonClick if handle == h_btn_snap => {
+                let idx = cb_snap.selection().unwrap_or(0).min(1);
+                submit(&shared_e, &signal_e, Cmd::Snap(idx as u8));
+            }
+
+            E::OnButtonClick if handle == h_btn_tune => {
+                // 选项是 -20..20 step 5，一共 9 项，下标 0 对应 -20
+                let idx = cb_tuning.selection().unwrap_or(4).min(8);
+                submit(&shared_e, &signal_e, Cmd::Tuning(-20 + (idx as i16) * 5));
+            }
+
+            E::OnButtonClick if handle == h_btn_lod => {
+                let idx = cb_lod.selection().unwrap_or(0).min(1);
+                submit(&shared_e, &signal_e, Cmd::Lod(idx as u8));
+            }
+
+            // DPI：四个按钮共用一段逻辑，靠 index 区分
+            E::OnButtonClick if h_dpi_apply.iter().any(|h| h == &handle) => {
+                if let Some(stage) = h_dpi_apply.iter().position(|h| h == &handle) {
+                    match parse_num(&dpi_inputs[stage].text()) {
+                        Some(v) if v >= proto::DPI_MIN as i64 && v <= proto::DPI_MAX as i64 => {
+                            // 颜色留空 = 只改 DPI，颜色沿用设备当前值
+                            // （`ops::set_dpi` 的 `rgb: None` 就是这个语义）
+                            submit(
+                                &shared_e,
+                                &signal_e,
+                                Cmd::Dpi {
+                                    stage: stage + 1,
+                                    dpi: v as i32,
+                                    rgb: None,
+                                },
+                            );
+                        }
+                        Some(v) => {
+                            lbl_perf_result.set_text(&format!(
+                                "DPI 必须在 {}..{} 之间，收到 {v}（未发送任何命令）",
+                                proto::DPI_MIN,
+                                proto::DPI_MAX
+                            ));
+                        }
+                        None => {
+                            lbl_perf_result
+                                .set_text(&format!("档 {} 的 DPI 输入框是空的", stage + 1));
+                        }
+                    }
+                }
+            }
+
+            // ── 灯光页 ──────────────────────────────────────
+            E::OnButtonClick if handle == h_btn_light => {
+                let idx = cb_light_mode.selection().unwrap_or(2).min(LIGHT_MODES.len() - 1);
+                let mode = LIGHT_MODES[idx].0;
+
+                // `TrackBar::pos()` 返回 `usize`（只有 builder 的 `.pos()` 收 Option）
+                let bright = Some(tb_bright.pos().min(100) as u8);
+                match parse_color(&ti_light_rgb.text()) {
+                    Ok(rgb) => {
+                        submit(
+                            &shared_e,
+                            &signal_e,
+                            // 旧 nwg 控件版没有方向/随机/速度三个控件，
+                            // 传 `None` = 沿用设备当前值（不能传 `Some(0)`，
+                            // 那会把 GearLink 设过的非零值清零）。
+                            Cmd::Light {
+                                mode,
+                                bright,
+                                rgb,
+                                dir: None,
+                                random: None,
+                                speed: None,
+                            },
+                        );
+                    }
+                    Err(e) => lbl_light_result.set_text(&format!("{e}（未发送任何命令）")),
+                }
+            }
+
+            // ── 按键页 ──────────────────────────────────────
+            E::OnButtonClick if h_btn_apply.iter().any(|h| h == &handle) => {
+                if let Some(slot) = h_btn_apply.iter().position(|h| h == &handle) {
+                    // 注意用 parse_button_dst 而不是 parse_num：
+                    // 按键槽的目标值是十六进制，裸写「01F0」必须能解析。
+                    match parse_button_dst(&btn_inputs[slot].text()) {
+                        Ok(Some(dst)) => {
+                            // dst = 0x0000 表示禁用该键。禁用后这个键彻底没反应，
+                            // 恢复只能靠备份文件 —— 所以必须二次确认。
+                            let confirmed = if dst == 0 {
+                                match ask_confirm(
+                                    "禁用这个键？",
+                                    &format!(
+                                        "把「{}」绑到 0x0000 会让它完全没反应。\n\
+                                         恢复只能靠备份文件。\n\n确定要禁用吗？",
+                                        proto::BUTTON_NAME[slot]
+                                    ),
+                                ) {
+                                    true => true,
+                                    false => {
+                                        lbl_btn_result
+                                            .set_text("已取消，未发送任何命令。");
+                                        false
+                                    }
+                                }
+                            } else {
+                                true
+                            };
+                            if confirmed {
+                                submit(
+                                    &shared_e,
+                                    &signal_e,
+                                    Cmd::Button {
+                                        slot,
+                                        dst,
+                                        confirmed: true,
+                                    },
+                                );
+                            }
+                        }
+                        Ok(None) => lbl_btn_result.set_text(&format!(
+                            "槽 {slot} 的输入框是空的 —— 请填目标值，如 01F0（填 0000 等于禁用）"
+                        )),
+                        Err(e) => lbl_btn_result.set_text(&format!("{e}（未发送任何命令）")),
+                    }
+                }
+            }
+
+            E::OnMenuItemSelected if handle == h_mi_show => window.set_visible(true),
+            E::OnMenuItemSelected if handle == h_mi_refresh => signal_e.request_refresh(),
+            E::OnMenuItemSelected if handle == h_mi_quit => {
+                signal_e.shutdown.store(true, Ordering::Relaxed);
+                nwg::stop_thread_dispatch();
+            }
+
+            // 后台线程读完 → 把数据搬上界面
+            E::OnNotice if handle == h_notice => {
+                let (data, full, status, from_cache, elapsed_ms, tray_on, last) = {
+                    let g = lock_shared(&shared_e);
+                    (
+                        g.data.clone(),
+                        g.full.clone(),
+                        status_snapshot(&g.status),
+                        g.from_cache,
+                        g.elapsed_ms,
+                        g.tray_enabled,
+                        g.last_result.as_ref().map(|r| CmdEcho {
+                            label: r.label.clone(),
+                            ok: r.ok.clone(),
+                            warning: r.warning.clone(),
+                            err: r.err.clone(),
+                            auto: r.auto,
+                        }),
+                    )
+                };
+
+                render(
+                    &pb_level,
+                    &lbl_level_text,
+                    &lbl_status,
+                    &lbl_meta,
+                    data.as_ref(),
+                    &status,
+                    from_cache,
+                    elapsed_ms,
+                );
+
+                // 三页的当前值全部来自快照 —— 设备是唯一事实来源，
+                // 不在本地记「我刚设了多少」，否则写失败时会显示一个假值。
+                if let Some(st) = full.as_ref() {
+                    render_perf(st, &perf_ui);
+                    render_light(st, &light_ui);
+                    render_buttons(st, &btn_now_labels);
+                }
+
+                // Busy 期间要禁用：两次写交叉执行会写坏设备。
+                let on = !status.is_busy();
+                for list in [
+                    &perf_button_hwnds,
+                    &light_button_hwnds,
+                    &btn_button_hwnds,
+                ] {
+                    set_hwnds_enabled(list, on);
+                }
+
+                if let Some(r) = last.as_ref() {
+                    let line = match (&r.ok, &r.err) {
+                        (Some(ok), _) => {
+                            let mut s = format!("✔ {} —— {ok}", r.label);
+                            if let Some(w) = &r.warning {
+                                s.push_str("\n注意：");
+                                s.push_str(w);
+                            }
+                            s
+                        }
+                        (None, Some((kind, msg))) => {
+                            format!("✘ {} —— {msg}\n提示：{}", r.label, error_hint(*kind))
+                        }
+                        (None, None) => format!("{} —— 结果未知", r.label),
+                    };
+                    // 结果行按命令种类落到对应页面
+                    if r.label.starts_with("灯光") {
+                        lbl_light_result.set_text(&line);
+                    } else if r.label.starts_with("按键槽") {
+                        lbl_btn_result.set_text(&line);
+                    } else if r.label.starts_with("开机自启") {
+                        // 自启的结果落在设置页的提示行，不是性能页。
+                        lbl_hint.set_text(&line);
+                    } else {
+                        lbl_perf_result.set_text(&line);
+                    }
+
+                    // 自启命令带着**回读**的真实状态 —— 用它校正勾选框。
+                    //
+                    // 这一步不能省：`DisabledByUser` 时 `enable()` 会成功返回
+                    // 但 `enabled == false`，如果我们按用户的点击把框打上勾，
+                    // 用户会以为开了，下次开机才发现没有。
+                    if let Some((st, path)) = r.auto {
+                        chk_autostart.set_check_state(bool_to_check(st.is_enabled()));
+                        lbl_auto_state.set_text(&format!(
+                            "当前：{}（{}）",
+                            auto_state_short(st),
+                            path.short()
+                        ));
+                    }
+                }
+
+                if tray_on {
+                    tray.set_tip(&tray_tip(data.as_ref(), &status));
+
+                    // ── 托盘图标上画电量 ────────────────────────────
+                    //
+                    // 只在**电量真的变了**的时候重画：`render()` 一次要建
+                    // DC + DIB + 位图 + 字体 + HICON 五个对象，而 notice 是
+                    // 刷新循环每 `refresh_interval_sec` 发一次（默认 60 秒）。
+                    // 每次都重建纯属无意义的 GDI churn。
+                    //
+                    // `data=None`（设备睡了 / 刚启动还没读到）→ 回落静态图标。
+                    // 这是任务书的硬要求：不能空白、不能显示 `--`。
+                    let want: Option<u8> = data.as_ref().map(|d| d.level);
+                    let drew_number = tray_level.get().is_some();
+
+                    match want {
+                        Some(level) => {
+                            if tray_level.get() != Some(level) {
+                                if let Some(hicon) = crate::tray_icon::render(level) {
+                                    let mut ic = icon_cell.borrow_mut();
+                                    let old = ic.handle;
+                                    ic.handle = hicon as usize as *mut _;
+                                    tray.set_icon(&ic);
+                                    // 旧的自绘图标必须手工 DestroyIcon ——
+                                    // `Icon.owned` 是 `pub(crate)`，外部改不了，
+                                    // 所以 nwg 的 Drop 不会替我们管这个句柄。
+                                    // 静态图标那份归 nwg 自己（owned=true），
+                                    // 不能碰，否则 double free。
+                                    if !old.is_null() && old != static_icon_handle {
+                                        unsafe { win32::DestroyIcon(old as win32::Handle) };
+                                    }
+                                    tray_level.set(Some(level));
+                                }
+                                // render 返回 None（拿不到 DC）→ 保持原图标。
+                            }
+                        }
+                        None => {
+                            if drew_number {
+                                let mut ic = icon_cell.borrow_mut();
+                                let old = ic.handle;
+                                ic.handle = static_icon_handle;
+                                tray.set_icon(&ic);
+                                if !old.is_null() && old != static_icon_handle {
+                                    unsafe { win32::DestroyIcon(old as win32::Handle) };
+                                }
+                                tray_level.set(None);
+                            }
+                        }
+                    }
+                }
+
+                // 曲线区标脏。
+                //
+                // 后台线程每 30 秒重读 `history.tsv`，读完发一次 notice；
+                // 不标脏的话新点集要等到窗口被遮挡/拖动才重画 —— 曲线会「定住」。
+                // 只标曲线那一块，不 `InvalidateRect(None)` —— 那会连标签页
+                // 一起重画，切页时看得见闪。
+                if let Some(h) = chart_hwnd_in_notice {
+                    unsafe {
+                        let rc = crate::chart::area();
+                        win32::InvalidateRect(h as win32::Handle, &rc, 0);
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    });
+
+    // 显式保活：这些控件不参与更新，但 nwg 的控件 Drop 会销毁窗口，
+    // 所以必须活到 dispatch 结束。写成一行是为了让意图明确。
+    //
+    // 注意 `lbl_hint` / `pb_level` / `tray` / `window` / 各页输入框等**不在这里** ——
+    // 它们被 move 进了上面的事件处理器，生命周期由 nwg 的 handler 表管，
+    // 在这里再引用会报 E0382（borrow of moved value）。
+    let _keep_alive = (
+        &pages,
+        &lbl_level,
+        &lbl_refresh,
+        &lbl_ttl,
+        // 曲线的绘图区不是控件（见 `chart.rs`），所以没有 `lbl_chart` 要保活。
+        //
+        // `chk_autostart` / `lbl_auto_state` 也不在这里：它们被 move 进了
+        // 事件处理器（OnNotice 里要按回读状态校正勾选框），
+        // 生命周期由 nwg 的 handler 表管 —— 在这里再引用会报 E0382。
+        //
+        // `icon` 同理：它被装进 `RefCell` 后 move 进了事件处理器
+        // （托盘自绘要替换 `handle`），保活的是 handler 表，不是这里。
+        &msg_window,
+        &lbl_perf_poll,
+        &lbl_perf_dpi,
+        &lbl_perf_stage,
+        &lbl_perf_deb,
+        &lbl_perf_snap,
+        &lbl_perf_tune,
+        &lbl_perf_lod,
+        &lbl_lod_warn,
+        // `dpi_titles` 没人更新，必须在这里保活。
+        // `dpi_nows` / `perf_ui` / `light_ui` / `btn_now_labels` 不在这里 ——
+        // 它们被 move 进了事件处理器（由 nwg 的 handler 表持有生命周期），
+        // 在这里引用会报 E0382。
+        &dpi_titles,
+        &lbl_light_mode,
+        &lbl_light_bright,
+        &lbl_light_rgb,
+        &lbl_light_warn,
+        &btn_name_labels,
+        &lbl_btn_warn,
+    );
+
+    // 先请后台线程立刻读一次（否则要等满一个间隔才有数字）。
+    //
+    // 首轮必须是全量：三页的「当前值」一打开就该有数字，
+    // 让用户切过去看到一片「当前 --」再等 60 秒是说不通的。
+    {
+        let mut s = lock_shared(&shared);
+        s.want_full = true;
+    }
+    signal.request_refresh();
+
+    nwg::dispatch_thread_events();
+
+    signal.shutdown.store(true, Ordering::Relaxed);
+    signal.cv.notify_all();
+    // 给后台线程一点时间收尾，不要让它带着设备句柄跑没影
+    std::thread::sleep(Duration::from_millis(50));
+    Ok(())
+}
+
+// ==================== 辅助 ====================
+
+/// `Status` 没实现 `Clone`（`Error` 里有 String），单独取一份可 clone 的形态。
+fn status_snapshot(s: &Status) -> Status {
+    match s {
+        Status::Idle => Status::Idle,
+        Status::Ok => Status::Ok,
+        Status::Asleep => Status::Asleep,
+        Status::Busy => Status::Busy,
+        Status::Error(e) => Status::Error(e.clone()),
+    }
+}
+
+fn bool_to_check(v: bool) -> nwg::CheckBoxState {
+    if v {
+        nwg::CheckBoxState::Checked
+    } else {
+        nwg::CheckBoxState::Unchecked
+    }
+}
+
+fn check_to_bool(s: nwg::CheckBoxState) -> bool {
+    matches!(s, nwg::CheckBoxState::Checked)
+}
+
+/// 自启状态的**短**名（勾选框右边那一行）。
+///
+/// 为什么不直接用 `AutoStartState::describe()`：那句最长 23 个汉字，
+/// 275 px 的标签放不下会被截断成「已被用户关闭（需在系统设置…」。
+/// 完整说明由 [`autostart_hint`] 在用户真去点勾选时给。
+fn auto_state_short(s: crate::autostart::AutoStartState) -> &'static str {
+    use crate::autostart::AutoStartState as S;
+    match s {
+        S::Disabled => "未启用",
+        S::DisabledByUser => "已被用户关闭",
+        S::Enabled => "已启用",
+        S::DisabledByPolicy => "组策略禁止",
+        S::EnabledByPolicy => "组策略启用",
+        S::Unknown => "状态未知",
+    }
+}
+
+/// 自启失败/无法生效时给用户的完整解释。
+///
+/// `DisabledByUser` 和 `DisabledByPolicy` 都「没启用」，但**处置办法完全不同**：
+/// - 前者是用户自己在系统设置里关过，WinRT 的 `RequestEnableAsync` 会**静默失败**
+///   （返回 `DisabledByUser` 而不是报错）→ 只能引导用户去系统设置手动开；
+/// - 后者是组策略/管理员禁止，程序无解 → 别让用户白点。
+///
+/// 合并成一句「失败」就是在骗人，用户会一直点下去。
+fn autostart_hint(
+    requested_on: bool,
+    state: crate::autostart::AutoStartState,
+    path: crate::autostart::AutoStartPath,
+) -> String {
+    use crate::autostart::{AutoStartPath as P, AutoStartState as S};
+
+    let where_ = match path {
+        P::WinRt => "系统「设置 → 应用 → 启动」",
+        P::Registry => "系统「设置 → 应用 → 启动」或任务管理器「启动」页",
+        P::Unknown => "系统「设置 → 应用 → 启动」",
+    };
+
+    if requested_on {
+        match state {
+            S::Enabled | S::EnabledByPolicy => format!("已开启开机自启（{}）。", state.describe()),
+            S::DisabledByUser => format!(
+                "系统记着你之前拒绝过自启，程序再请求会被静默忽略。\
+                 请到 {where_} 手动把「ROG 龙鳞 Ace Mini」打开。"
+            ),
+            S::DisabledByPolicy => {
+                "组策略禁止了开机自启，本程序无法绕过。请联系管理员。".to_string()
+            }
+            S::Disabled => format!("系统没有接受这次请求，请到 {where_} 手动打开。"),
+            S::Unknown => format!("读不到自启状态，请到 {where_} 确认。"),
+        }
+    } else {
+        match state {
+            S::Enabled | S::EnabledByPolicy => {
+                format!("没能关掉（{}），请到 {where_} 手动关闭。", state.describe())
+            }
+            _ => format!("已关闭开机自启（{}）。", state.describe()),
+        }
+    }
+}
+
+/// 在候选值里找最接近的下标（配置文件里可能写着不在这几个选项里的数）。
+fn nearest_index(choices: &[u64], value: u64) -> usize {
+    let mut best = 0usize;
+    let mut best_diff = u64::MAX;
+    for (i, c) in choices.iter().enumerate() {
+        let diff = c.abs_diff(value);
+        if diff < best_diff {
+            best_diff = diff;
+            best = i;
+        }
+    }
+    best
+}
+
+/// 从控件当前状态造一份 `Settings`。下拉框没选中时退回默认值。
+fn build_settings(
+    tray: nwg::CheckBoxState,
+    close: nwg::CheckBoxState,
+    refresh_sel: Option<usize>,
+    ttl_sel: Option<usize>,
+) -> Settings {
+    let d = Settings::default();
+    Settings {
+        tray_enabled: check_to_bool(tray),
+        close_to_tray: check_to_bool(close),
+        refresh_interval_sec: refresh_sel
+            .and_then(|i| REFRESH_CHOICES.get(i).copied())
+            .unwrap_or(d.refresh_interval_sec),
+        cache_ttl_sec: ttl_sel
+            .and_then(|i| TTL_CHOICES.get(i).copied())
+            .unwrap_or(d.cache_ttl_sec),
+        // 配色不在这套旧控件里选（新界面用 `ui::Ui::mode` 自己管，改了就落盘）。
+        // 这里**从盘上读回当前值**而不是填默认值，否则在这个页面点一次
+        // 「保存设置」就会把用户选的深色无色无息地改回浅色。
+        theme: settings::load().theme,
+    }
+}
+
+/// 把一次轻量读取的结果搬进 [`Shared`]。
+fn apply_outcome(out: &FetchOutcome, shared: &mut Shared) {
+    // `elapsed` 为零 = 缓存命中（`SnapshotCache::get_light` 的约定）
+    let from_cache = out.elapsed.is_zero();
+    let snap = &out.snapshot;
+
+    if out.frames_read == 0 {
+        // 一帧都没读到。区分「休眠」和「真错」靠 failed 里的原因文字。
+        let reason = snap
+            .failed
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "没有任何帧有应答".to_string());
+        let is_asleep = reason.contains("无应答") || reason.contains("休眠");
+        shared.status = if is_asleep {
+            Status::Asleep
+        } else {
+            Status::Error(reason)
+        };
+        shared.full = None;
+        shared.data = None;
+        shared.from_cache = false;
+        shared.elapsed_ms = 0;
+        return;
+    }
+
+    let st = &snap.state;
+    shared.data = Some(QuickData {
+        level: st.power,
+        voltage_mv: st.voltage_mv,
+        charging: st.charging != 0,
+        poll_code: st.poll_code,
+        active_stage: st.active_stage,
+    });
+    // 全量快照才填 `full`。3 帧轻量读取时 `st` 里 DPI 颜色、按键表都是默认值，
+    // 拿它刷性能/灯光/按键页会把界面刷成假的（颜色全黑、按键全 0）。
+    //
+    // `frames_read` 是 3 或 17，用它区分两种读取。这个耦合很脆，
+    // 所以同时要求 DPI 帧和按键帧都在 —— 少任何一帧都说明不是全量。
+    let is_full = snap.frames.contains_key("12:04:02")
+        && snap.frames.contains_key("12:05:00")
+        && snap.frames.contains_key("12:03:00");
+    if is_full {
+        shared.full = Some(st.clone());
+    }
+
+    shared.status = Status::Ok;
+    shared.from_cache = from_cache;
+    shared.elapsed_ms = out.elapsed.as_millis();
+}
+
+/// 把数据刷到三个标签 + 进度条上。
+fn render(
+    pb: &nwg::ProgressBar,
+    lbl_level_text: &nwg::Label,
+    lbl_status: &nwg::Label,
+    lbl_meta: &nwg::Label,
+    data: Option<&QuickData>,
+    status: &Status,
+    from_cache: bool,
+    elapsed_ms: u128,
+) {
+    match data {
+        Some(d) => {
+            pb.set_pos(d.level.min(100) as u32);
+            lbl_level_text.set_text(&d.level_text());
+            lbl_meta.set_text(&d.meta_text());
+        }
+        None => {
+            pb.set_pos(0);
+            lbl_level_text.set_text("--%");
+            lbl_meta.set_text("电压 -- mV  ·  --  ·  回报率 --  ·  当前档位 --");
+        }
+    }
+
+    let status_line = match status {
+        Status::Idle => "状态    尚未读取".to_string(),
+        Status::Ok => {
+            let src = if from_cache {
+                "缓存".to_string()
+            } else {
+                format!("{elapsed_ms} ms")
+            };
+            format!("状态    正常（{src}）")
+        }
+        // 休眠不是错误，文案要明确告诉用户该怎么办
+        Status::Asleep => "状态    休眠中 —— 移动一下鼠标即可唤醒".to_string(),
+        Status::Busy => "状态    正在写设备 ……".to_string(),
+        Status::Error(e) => format!("状态    读取出错：{e}"),
+    };
+    lbl_status.set_text(&status_line);
+}
+
+/// 托盘悬停提示。**必须是 `&str`**（`set_tip` 不收 `Option`）。
+fn tray_tip(data: Option<&QuickData>, status: &Status) -> String {
+    match (data, status) {
+        (Some(d), _) => format!("{}  {}", d.level_text(), d.charge_text()),
+        (None, Status::Asleep) => "休眠中".to_string(),
+        (None, Status::Error(_)) => "读取出错".to_string(),
+        (None, Status::Busy) => "正在写设备".to_string(),
+        (None, _) => "尚未读取".to_string(),
+    }
+}
+
+/// 写失败时给用户的下一步。与 CLI 的 `cli::error_hint` 同一套口径。
+fn error_hint(kind: crate::ops::ErrorKind) -> &'static str {
+    crate::cli::error_hint(kind)
+}
+
+/// 批量启用/禁用一批按钮（按裸句柄）。`Busy` 期间必须禁用 ——
+/// 两次写交叉会写坏设备。
+///
+/// 走 `EnableWindow` 而不是 nwg 的 `Button::set_enabled`，
+/// 因为闭包是 `'static`，存不了 `&Button`（借用活不过闭包）。
+fn set_hwnds_enabled(hwnds: &[usize], on: bool) {
+    for h in hwnds {
+        unsafe {
+            crate::win32::EnableWindow(*h as crate::win32::Handle, if on { 1 } else { 0 });
+        }
+    }
+}
+
+/// 把性能页各项「当前值」刷成设备上的真实值。
+fn render_perf(st: &proto::State, ui: &PerfUi) {
+    ui.poll_now
+        .set_text(&format!("当前 {}", proto::poll_name(st.poll_code)));
+
+    for (i, lb) in ui.dpi_now.iter().enumerate() {
+        if i < proto::DPI_STAGES {
+            lb.set_text(&format!(
+                "当前 {}  {}",
+                st.dpi(i),
+                st.rgb_hex(i)
+            ));
+        }
+    }
+
+    ui.stage_now
+        .set_text(&format!("当前 档 {}", st.active_stage));
+    ui.deb_now.set_text(&format!(
+        "当前 {} ({})",
+        proto::debounce_name(st.debounce_code),
+        st.debounce_code
+    ));
+    ui.snap_now
+        .set_text(&format!("当前 {}", if st.angle_snap == 0 { "关" } else { "开" }));
+    ui.tune_now
+        .set_text(&format!("当前 {}", st.angle_tuning));
+    ui.lod_now
+        .set_text(&format!("当前 {}", proto::lod_name(st.lod)));
+}
+
+/// 把灯光页「当前值」刷成设备真实值。
+fn render_light(st: &proto::State, ui: &LightUi) {
+    ui.mode_now
+        .set_text(&format!("当前 {}", proto::light_mode_name(st.light_mode)));
+    ui.bright_now
+        .set_text(&format!("当前 {}", st.light_bright));
+    ui.rgb_now
+        .set_text(&format!("当前 {}", st.light_rgb_hex()));
+}
+
+/// 把按键页八个槽位的当前值刷成设备真实值。
+fn render_buttons(st: &proto::State, labels: &[nwg::Label]) {
+    for (slot, lb) in labels.iter().enumerate() {
+        if slot < proto::BUTTON_SLOTS {
+            let dst = st.buttons[slot];
+            lb.set_text(&if dst == 0 {
+                "当前 0x0000（禁用）".to_string()
+            } else {
+                format!("当前 0x{dst:04X}")
+            });
+        }
+    }
+}
+
+/// 后台线程做一次读取。
+///
+/// `full == true` 时读 17 帧（身份 + 性能 + 灯光 + 按键全都有），
+/// `false` 时只读 3 帧（电量 / 回报率 / 档位），够电量页和托盘用。
+///
+/// 为什么要分两种：3 帧约 95 ms，17 帧约 590 ms，差 6 倍。
+/// 周期刷新（默认 60 秒）用全量会把「鼠标慢一点」放大成肉眼可见的卡顿感，
+/// 但只有全量才够渲染性能/灯光/按键三页 —— 所以刷新分两条路。
+///
+/// 每次重新 `open_link` 而不长期持有句柄：鼠标休眠/唤醒、接收器重连都会让
+/// 旧句柄失效，长期持有反而要处理一堆失效重开逻辑。
+fn read_once(
+    cache: &mut snapshot::SnapshotCache,
+    full: bool,
+) -> Result<Option<FetchOutcome>, String> {
+    let api = crate::win32::HidApi::load()?;
+    let link = hid::open_link(&api)?;
+    let mut dev = HidDevice::open(&link.iface)?;
+    Ok(if full {
+        // `get` 会走三层缓存：内存 → 磁盘 → 真读。TTL 内不重复打设备。
+        Some(cache.get(
+            &mut dev,
+            &link.all_interfaces,
+            link.report_id,
+            &link.mode,
+            false,
+        ))
+    } else {
+        cache.get_light(&mut dev, link.report_id, &link.mode)
+    })
+}
+
+/// 取共享状态。**锁中毒也继续用** —— 宁可数据旧一点，也不要整个 UI 停摆。
+fn lock_shared(s: &Arc<Mutex<Shared>>) -> std::sync::MutexGuard<'_, Shared> {
+    match s.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// 提交一条写命令。
+///
+/// 立刻把界面切到 `Busy` 并禁用按钮 —— 用户看到「正在写」就不会连点，
+/// 而连点两次在这个程序里意味着两个 setter 交叉写同一寄存器。
+///
+/// 返回 `false` 表示**这条命令被丢掉了**（上一条还没写完）。
+/// 设备写命令不关心这个（丢掉的本来就是用户等不及的重复点击），
+/// 但开机自启不碰设备、也不该无声消失 —— 那条路径要检查返回值。
+fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
+    {
+        let mut s = lock_shared(shared);
+        if s.pending.is_some() || s.status.is_busy() {
+            // 上一条还没写完。丢掉这一条（而不是排队）——
+            // 排队的第二条多半是用户等不及又点了一次，执行它没有意义。
+            return false;
+        }
+        s.pending = Some(cmd);
+        s.status = Status::Busy;
+    }
+    signal.request_refresh();
+    true
+}
+
+/// 从输入框读一个十进制/十六进制整数。
+///
+/// 空白返回 `None`（调用方据此保留原值，而不是当成 0）。
+fn parse_num(s: &str) -> Option<i64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return i64::from_str_radix(hex, 16).ok();
+    }
+    t.parse::<i64>().ok()
+}
+
+/// 解析按键页的目标值。
+///
+/// **裸写的数字一律当十六进制**，和 CLI 的 `setbutton <slot> <dstHex>` 一致，
+/// 也和输入框占位符「如 01F0」、警告行「填 0000」一致。
+///
+/// 这里不能复用 [`parse_num`]：那个把裸数字当十进制（DPI 需要那样），
+/// 于是 `01F0` 会解析失败 —— 用户照着提示输，程序却说输入框是空的。
+///
+/// 返回值：
+/// - `Err(..)`：填了东西但不是合法十六进制（或超出 u16）
+/// - `Ok(None)`：空输入框（调用方据此提示「请填目标值」）
+fn parse_button_dst(s: &str) -> Result<Option<u16>, String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    match u32::from_str_radix(hex, 16) {
+        Ok(v) if v <= 0xFFFF => Ok(Some(v as u16)),
+        Ok(v) => Err(format!("0x{v:X} 超出 0x0000..0xFFFF")),
+        Err(_) => Err(format!("「{t}」不是合法的十六进制（示例：01F0）")),
+    }
+}
+
+/// 解析用户输入的颜色。允许 `ff1929` / `#ff1929` / `FF1929`。
+fn parse_color(s: &str) -> Result<Option<[u8; 3]>, String> {
+    let t = s.trim().trim_start_matches('#');
+    if t.is_empty() {
+        // 空 = 不改颜色。DPI 和灯光都可以只改值不改色。
+        return Ok(None);
+    }
+    crate::backup::parse_rgb(t).map(Some)
+}
+
+/// 二次确认框。返回 `true` = 用户点了「是」。
+///
+/// 用 `MessageBoxW` 而不是 nwg 的 `MessageDialog`：一来少一个 feature，
+/// 二来这个调用是**阻塞**的，正好符合「用户不回答就不往下走」的语义。
+///
+/// 按钮组合 `MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2`：
+/// - 默认按钮放在**第二个**（否）—— 用户手快按回车时不会误禁用按键
+/// - 图标用警告黄三角
+fn ask_confirm(title: &str, text: &str) -> bool {
+    const MB_YESNO: u32 = 0x0000_0004;
+    const MB_ICONWARNING: u32 = 0x0000_0030;
+    const MB_DEFBUTTON2: u32 = 0x0000_0100;
+    const IDYES: i32 = 6;
+
+    let t = crate::win32::to_wide(text);
+    let c = crate::win32::to_wide(title);
+    let r = unsafe {
+        crate::win32::MessageBoxW(
+            std::ptr::null_mut(),
+            t.as_ptr(),
+            c.as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    r == IDYES
+}
+
+/// 后台线程执行一条写命令。
+///
+/// 这里**不重复任何校验或写入逻辑** —— 全部转调 [`crate::ops`]。
+/// GUI 一旦自己写一遍写入代码，它就必然和 CLI 那份漂移，
+/// 而漂移的那次就是用户设备被改坏的那次。
+///
+/// `--keep` 恒为 `false`：GUI 的写是「用户要这个值」，不是「试一下再还原」，
+/// 所以六步循环走完整的「写 → 读回 → 写回原值」。
+///
+/// `--save` 恒为 `true`：界面上改完点确定，用户预期是记住的；
+/// 不 commit 的话重连就丢，那才是意外行为。
+fn run_cmd(cmd: &Cmd) -> CmdResult {
+    let label = cmd.label();
+
+    // 自启这条路**完全不碰 HID**，所以必须在 `open_link` 之前分叉 ——
+    // 否则用户只是想勾一个注册表项，却要先等 27 ms 的设备往返，
+    // 鼠标休眠时还要等满超时（约 2.4 秒）然后报「休眠中」，纯粹是噪音。
+    if let Cmd::AutoStart(on) = cmd {
+        return run_autostart(*on);
+    }
+
+    // 每次重新开链路：写之前可能已经过了几分钟，旧句柄未必还有效。
+    let mut log = |_line: &str| {};
+    let result = (|| -> Result<crate::ops::ApplyReport, crate::ops::OpsError> {
+        let api = crate::win32::HidApi::load().map_err(crate::ops::OpsError::other)?;
+        let link = hid::open_link(&api).map_err(crate::ops::OpsError::other)?;
+        let mut dev = HidDevice::open(&link.iface).map_err(crate::ops::OpsError::other)?;
+        let rid = link.report_id;
+        let mut reader = crate::ops::DirectReader;
+
+        match cmd {
+            Cmd::Poll(hz) => {
+                crate::ops::set_poll(&mut dev, rid, *hz, false, true, &mut reader, &mut log)
+            }
+            Cmd::Dpi { stage, dpi, rgb } => crate::ops::set_dpi(
+                &mut dev,
+                rid,
+                *stage,
+                *dpi,
+                *rgb,
+                false,
+                true,
+                &mut reader,
+                &mut log,
+            ),
+            Cmd::Stage(s) => {
+                crate::ops::set_stage(&mut dev, rid, *s, false, true, &mut reader, &mut log)
+            }
+            Cmd::Debounce(c) => {
+                crate::ops::set_debounce(&mut dev, rid, *c, false, true, &mut reader, &mut log)
+            }
+            Cmd::Snap(v) => {
+                crate::ops::set_snap(&mut dev, rid, *v, false, true, &mut reader, &mut log)
+            }
+            Cmd::Tuning(v) => {
+                crate::ops::set_tuning(&mut dev, rid, *v, false, true, &mut reader, &mut log)
+            }
+            Cmd::Lod(v) => {
+                crate::ops::set_lod(&mut dev, rid, *v, false, true, &mut reader, &mut log)
+            }
+            Cmd::Light {
+                mode,
+                bright,
+                rgb,
+                dir,
+                random,
+                speed,
+            } => crate::ops::set_light(
+                &mut dev,
+                rid,
+                *mode,
+                *bright,
+                *rgb,
+                *dir,
+                *random,
+                *speed,
+                false,
+                true,
+                &mut reader,
+                &mut log,
+            ),
+            Cmd::Button {
+                slot,
+                dst,
+                confirmed,
+            } => crate::ops::set_button(
+                &mut dev,
+                rid,
+                *slot,
+                *dst,
+                false,
+                true,
+                *confirmed,
+                &mut reader,
+                &mut log,
+            ),
+            // 上面已提前返回。写这一支是为了让 match 保持穷尽 ——
+            // 将来加新 `Cmd` 变体时编译器会在这里提醒。
+            Cmd::AutoStart(_) => unreachable!("AutoStart 在 open_link 之前已分叉"),
+        }
+    })();
+
+    match result {
+        Ok(report) => {
+            // `into_result` 会把「写进去了但读回不一致」也变成 Err ——
+            // 那种情况比 NAK 更该让人看见，不能当成成功。
+            //
+            // 先留一份 warning（`into_result` 会消费 report），
+            // 因为「不一致」时 warning 往往是解释原因的那句话
+            // （比如「DPI 步进 50，437 会变成 400」）。
+            let warning = report.warning.clone();
+            match report.into_result() {
+                Ok(r) => CmdResult {
+                    label,
+                    ok: Some(r.summary()),
+                    warning: r.warning,
+                    err: None,
+                    auto: None,
+                },
+                Err(e) => CmdResult {
+                    label,
+                    ok: None,
+                    warning,
+                    err: Some((e.kind(), e.to_string())),
+                    auto: None,
+                },
+            }
+        }
+        Err(e) => CmdResult {
+            label,
+            ok: None,
+            warning: None,
+            err: Some((e.kind(), e.to_string())),
+            auto: None,
+        },
+    }
+}
+
+/// 执行自启开关（在后台线程上，见 [`Cmd::AutoStart`] 的注释）。
+///
+/// 返回值刻意走和 HID 写命令同一个 [`CmdResult`]：结果行的渲染逻辑
+/// （按 `label` 前缀分流到哪一页、成功加 ✔、失败加 ✘ + `error_hint`）
+/// 已经写好了，再造一套只会多一处会漂移的代码。
+///
+/// 三种「没成功」要区分开，不能都说成失败：
+/// - `DisabledByUser`：系统记着用户拒绝过，`RequestEnableAsync` **静默失败**
+/// - `DisabledByPolicy`：组策略禁止，程序无解
+/// - 其它（`Unknown` / `Disabled`）：读不到或系统没接受
+fn run_autostart(on: bool) -> CmdResult {
+    let label = format!("开机自启 {}", if on { "开启" } else { "关闭" });
+
+    let outcome = if on {
+        crate::autostart::enable()
+    } else {
+        crate::autostart::disable()
+    };
+
+    match outcome {
+        Ok(out) => {
+            let hint = autostart_hint(on, out.state, out.path);
+            // `enabled` 是 enable()/disable() **回读**后的真实状态，
+            // 不是「写成功就代表生效」（WinRT 那条路成功也可能没真启用）。
+            let want = on;
+            let auto = Some((out.state, out.path));
+            if out.enabled == want {
+                CmdResult {
+                    label,
+                    ok: Some(hint),
+                    warning: None,
+                    err: None,
+                    auto,
+                }
+            } else {
+                // 操作没报错，但目标状态没达成 —— 这是**警告不是成功**，
+                // 报成 ✔ 就是在骗人。
+                CmdResult {
+                    label,
+                    ok: None,
+                    warning: None,
+                    err: Some((crate::ops::ErrorKind::Other, hint)),
+                    auto,
+                }
+            }
+        }
+        Err(e) => CmdResult {
+            label,
+            ok: None,
+            warning: None,
+            err: Some((crate::ops::ErrorKind::Other, e)),
+            // 失败时**也要**回读一次：写失败可能已经改了一半
+            // （比如注册表写了但回读发现路径不对），界面必须显示真实状态。
+            auto: Some(crate::autostart::state()),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 按键页的占位符写的是「如 01F0」、警告行写的是「填 0000」，
+    /// 用户照着输就该成功。这条测试锁死「裸十六进制」这个约定 ——
+    /// 之前用十进制解析时，`01F0` 直接失败并误报「输入框是空的」。
+    #[test]
+    fn button_dst_accepts_bare_hex() {
+        assert_eq!(parse_button_dst("01F0"), Ok(Some(0x01F0)));
+        assert_eq!(parse_button_dst("01f0"), Ok(Some(0x01F0)));
+        assert_eq!(parse_button_dst("  01E4  "), Ok(Some(0x01E4)));
+        assert_eq!(parse_button_dst("0x01F0"), Ok(Some(0x01F0)));
+        assert_eq!(parse_button_dst("0X01F0"), Ok(Some(0x01F0)));
+        // 0x0000 = 禁用，必须解析成 0 而不是当成空
+        assert_eq!(parse_button_dst("0000"), Ok(Some(0)));
+        assert_eq!(parse_button_dst("0x0000"), Ok(Some(0)));
+        assert_eq!(parse_button_dst("FFFF"), Ok(Some(0xFFFF)));
+    }
+
+    #[test]
+    fn button_dst_rejects_junk_and_empty() {
+        // 空输入框是 Ok(None) —— 调用方要提示「请填目标值」，
+        // 不能和「填错了」混成一句话。
+        assert_eq!(parse_button_dst(""), Ok(None));
+        assert_eq!(parse_button_dst("   "), Ok(None));
+        // 超出 u16 要报错，不能静默截断（截断会把 1F000 变成 F000）
+        assert!(parse_button_dst("1F000").is_err());
+        assert!(parse_button_dst("ZZZZ").is_err());
+        assert!(parse_button_dst("-1").is_err());
+    }
+
+    /// DPI 走的是十进制，这条不能被上面的十六进制改动带偏。
+    #[test]
+    fn dpi_numbers_stay_decimal() {
+        assert_eq!(parse_num("1600"), Some(1600));
+        assert_eq!(parse_num(" 400 "), Some(400));
+        assert_eq!(parse_num("0x640"), Some(1600));
+        assert_eq!(parse_num(""), None);
+        assert_eq!(parse_num("16OO"), None); // 字母 O 不是零
+    }
+
+    #[test]
+    fn color_parser_forms() {
+        assert_eq!(parse_color("").unwrap(), None);
+        assert_eq!(parse_color("ff1929").unwrap(), Some([0xFF, 0x19, 0x29]));
+        assert_eq!(parse_color("#ff1929").unwrap(), Some([0xFF, 0x19, 0x29]));
+        assert_eq!(parse_color("FF1929").unwrap(), Some([0xFF, 0x19, 0x29]));
+        assert!(parse_color("ff192").is_err());
+        assert!(parse_color("gggggg").is_err());
+    }
+
+    /// 命令标签决定结果行落到哪一页（`OnNotice` 里按前缀分流），
+    /// 改文案时必须同步改分流条件，所以在这里钉死。
+    #[test]
+    fn cmd_labels_route_to_expected_pages() {
+        assert!(Cmd::Light { mode: 0, bright: None, rgb: None }
+            .label()
+            .starts_with("灯光"));
+        assert!(Cmd::Button { slot: 1, dst: 0x01F0, confirmed: true }
+            .label()
+            .starts_with("按键槽"));
+        for c in [
+            Cmd::Poll(1000),
+            Cmd::Stage(2),
+            Cmd::Debounce(2),
+            Cmd::Snap(0),
+            Cmd::Tuning(0),
+            Cmd::Lod(0),
+            Cmd::Dpi { stage: 1, dpi: 400, rgb: None },
+        ] {
+            let l = c.label();
+            assert!(!l.starts_with("灯光") && !l.starts_with("按键槽"), "{l}");
+        }
+    }
+}
