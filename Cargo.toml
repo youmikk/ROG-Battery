@@ -1,8 +1,8 @@
 [package]
 name = "rog-mouse-ctl"
-version = "0.1.0"
+version = "1.1.0"
 edition = "2021"
-description = "ROG 龙鳞 Ace Mini (Harpe Ace Mini) HID 参数控制工具，不依赖 ASUS 驱动"
+description = "通用 ROG 鼠标 HID 参数控制工具（DPI / 回报率 / 按键 / 电量），不依赖 ASUS 驱动"
 
 # HID / Win32 全部手写 FFI，不引 windows-sys / winapi。
 # 唯一的依赖是 GUI 框架 nwg —— 它只 `#[link]` 系统已有 DLL（user32/comctl32/

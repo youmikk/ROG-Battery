@@ -470,7 +470,7 @@ if args.is_empty() || wants_autostart {
 ```
 Start-Process exe -ArgumentList '--autostart'
   → 进程存活 3 秒以上（不再 41ms 退出）
-  → cls=NativeWindowsGuiWindow vis=True title="ROG 龙鳞 Ace Mini"   ✅
+  → cls=NativeWindowsGuiWindow vis=True title="R Battery"   ✅
   → 控制台窗口数 = 0  ✅
 ```
 

@@ -71,7 +71,7 @@ pub fn parse_rgb(s: &str) -> Result<[u8; 3], String> {
 /// 把状态渲染成备份文本。
 pub fn render(st: &State, link_mode: &str, report_id: u8, timestamp: &str) -> String {
     let mut s = String::new();
-    s.push_str("# ROG 龙鳞 Ace Mini (Harpe Ace Mini) 设置备份\r\n");
+    s.push_str("# R Battery (rog-mouse-ctl) 设置备份 —— ROG 鼠标\r\n");
     s.push_str(&format!("# 由 rog-mouse-ctl 生成于 {timestamp}\r\n"));
     s.push_str(&format!(
         "# 链路={link_mode} report_id=0x{report_id:02X}\r\n"

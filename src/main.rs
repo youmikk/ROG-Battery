@@ -1,5 +1,6 @@
-//! rog-mouse-ctl —— ROG 龙鳞 Ace Mini（Harpe Ace Mini）HID 参数控制工具。
+//! rog-mouse-ctl —— 通用 ROG 鼠标 HID 参数控制工具。
 //!
+//! 面向 ROG 鼠标这一套私有 HID 参数协议（真机验证用 ROG HARPE ACE MINI，非型号专属）。
 //! 完全不依赖 ASUS 驱动 / Armoury Crate / GearLink：自己枚举 HID 接口、
 //! 自己拼 64 字节 feature report、自己解析应答。
 //!
@@ -27,7 +28,7 @@ mod win32;
 
 use std::process::ExitCode;
 
-const USAGE: &str = r#"rog-mouse-ctl —— ROG 龙鳞 Ace Mini HID 参数控制（不依赖 ASUS 驱动）
+const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依赖 ASUS 驱动）
 
 用法：
   rog-mouse-ctl info [--fresh]                读全部信息（一次读全，默认吃 30 秒缓存）
@@ -164,7 +165,7 @@ fn check_single_instance() -> Option<win32::Handle> {
     }
     let err = unsafe { win32::GetLastError() };
     if err == ERROR_ALREADY_EXISTS {
-        let title = win32::to_wide("ROG 龙鳞 Ace Mini");
+        let title = win32::to_wide(crate::gui::WINDOW_TITLE);
         let hwnd = unsafe { win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
         if !hwnd.is_null() {
             unsafe {

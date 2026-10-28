@@ -2,7 +2,8 @@
 //!
 //! # 为什么是这条路
 //!
-//! 2026-10-28 实测（`HidP_GetCaps` 遍历所有顶层集合）发现：ROG 龙鳞 Ace Mini
+//! 2026-10-28 实测（`HidP_GetCaps` 遍历所有顶层集合）发现：本机测试设备
+//! （ROG HARPE ACE MINI，USB 0B05:1ACE）
 //! 除了私有命令通道（0xFF00/0xFF01/0xFF02、64 字节 in/out）之外，**还暴露了一个
 //! 标准的 HID LampArray 集合**：
 //!

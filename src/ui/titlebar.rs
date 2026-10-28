@@ -29,7 +29,7 @@ use crate::ui::theme::Theme;
 
 /// 窗口标题（任务栏与系统元数据用）。
 #[allow(dead_code)]
-pub const APP_TITLE: &str = "ROG 龙鳞 Ace Mini";
+pub const APP_TITLE: &str = "R Battery";
 
 /// 标题栏逻辑高度（96 DPI 下的像素）。
 ///

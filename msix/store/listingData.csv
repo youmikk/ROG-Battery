@@ -26,8 +26,8 @@ Rust 静态链接，不需要 .NET、不需要 Python、不需要额外运行库
 在设置页一键开关。绿色版写入当前用户的启动项（不需要管理员权限）；商店版走系统「启动应用」列表，可随时在任务管理器里关掉。
 
 【支持的设备】
-通过 USB HID 直接与鼠标通信，目前完整验证过的型号：
-· ASUS ROG Harpe Ace Mini（2.4G 无线 / 有线两种接法）
+本工具面向 ROG 鼠标这一套私有 HID 参数协议，不是某个型号的专属工具。通过 USB HID 直接与鼠标通信，目前完整验证过的设备：
+· ROG HARPE ACE MINI（2.4G 无线 / 有线两种接法）
 使用 ROG OMNI RECEIVER 的其它型号可能可以读取，但帧格式未经验证，不保证数值准确；读取失败时界面显示「—」，不会给出错误数字。
 
 【系统要求】
@@ -63,8 +63,8 @@ Statically linked Rust. No .NET, no Python, no runtime to install, and no admini
 A single switch in Settings. The portable build writes a per-user startup entry (no admin rights); the Store build uses the system Startup Apps list, which you can turn off in Task Manager at any time.
 
 [Supported devices]
-The app talks to the mouse directly over USB HID. Fully verified with:
-· ASUS ROG Harpe Ace Mini (2.4 GHz wireless and wired)
+This app targets the private HID parameter protocol shared by ROG mice; it is not tied to one model. It talks to the mouse directly over USB HID. Fully verified with:
+· ROG HARPE ACE MINI (2.4 GHz wireless and wired)
 Other models on the ROG OMNI RECEIVER may work, but their frame formats are unverified, so accuracy is not guaranteed. When a reading fails the UI shows a dash rather than a wrong number.
 
 [System requirements]

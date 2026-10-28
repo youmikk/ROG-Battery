@@ -45,9 +45,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------- constants --
-# The window title is 'ROG <U+9F99><U+9CDE> Ace Mini'. Built from code points so
-# this file stays pure ASCII.
-$WindowTitle    = 'ROG ' + [string][char]0x9F99 + [string][char]0x9CDE + ' Ace Mini'
+# The window title is 'R Battery' (plain ASCII, matches the Store display name).
+$WindowTitle    = 'R Battery'
 $SurfaceClass   = 'RogMouseCtlSurface'
 $MsgWindowClass = 'NativeWindowsGuiWindow'
 
