@@ -353,27 +353,42 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\make-upload.ps1
 
 ## 八、GitHub Actions 自动发版
 
-工作流文件：`.github/workflows/msstore.yml`
+两个工作流，各管一件事，互不依赖：
+
+| 文件 | 管什么 | 产物 |
+| --- | --- | --- |
+| `.github/workflows/msstore.yml` | MSIX 打包（+ 按需提交商店） | run artifacts：`.msix` / `.msixupload` |
+| `.github/workflows/release.yml` | 绿色版发版 | GitHub Release：`rog-mouse-ctl.exe` + `.sha256` |
+
+拆开的原因：商店包和绿色版是两条发布线，失败面完全不同（商店那边要账号凭据、要过审，
+绿色版只要 tag）。合在一个工作流里，商店凭据出问题会把绿色版发版一起拖住。
 
 ### 触发方式
 
-| 触发 | 行为 |
-| --- | --- |
-| `git push origin v1.1.2`（tag） | 编译 → 打 `.msix` + `.msixupload` → 绿色版 exe 附到 GitHub Release；**配了产品 ID 才**提交商店 |
-| 手动 `workflow_dispatch` | 同上，可手填版本号，可勾「跳过 cargo test」 |
-| push / PR 到 `main` | 只跑 `cargo test`（并行 job，不挡打包） |
+| 触发 | `msstore.yml` | `release.yml` |
+| --- | --- | --- |
+| `git push origin v1.1.2`（tag） | 打 `.msix` + `.msixupload`；**配了产品 ID 才**提交商店 | 编译绿色版 → 建 / 更新 `v1.1.2` 的 Release |
+| 手动 `workflow_dispatch` | 同上，可手填 MSIX 版本号 | 填了 `tag` 就发到那个 tag；留空只编译留 artifact |
+| push 到 `main` | 不触发 | 不触发 |
+
+### `release.yml` 的两道保险
+
+1. **PE 子系统必须是 `2 (WINDOWS_GUI)`** —— 读 PE 头 `0x18 + 0x44` 校验，不是 2 直接 `throw`。
+   防的就是「黑框回归」：谁把 `windows_subsystem` 改回 console，CI 立刻红。
+2. **已有的 Release 只覆盖附件** —— 先 `gh release view`，存在就 `gh release upload --clobber`，
+   不存在才 `gh release create --generate-notes`。这样手写的更新日志不会被自动生成的内容冲掉。
 
 ### 为什么必须用 gnu 工具链
 
 `vendor/mingw-import-libs/` 里是 **GNU 格式**的导入库（`libdwmapi.a`、`libgdiplus.a` 等），
-MSVC 目标链不上。所以 runner 上要装 `stable-x86_64-pc-windows-gnu` + MSYS2 的 mingw64 gcc（工作流里已经做好），
+MSVC 目标链不上。所以 runner 上要装 `stable-x86_64-pc-windows-gnu` + MSYS2 的 mingw64 gcc（两个工作流里都已经做好），
 产物路径与本地完全一致：`target/release/rog-mouse-ctl.exe`。
 
 ### 商店自动发布是「按需开启」的
 
-微软规定**首个版本必须手动上架**，之后才能走 API。所以工作流用 `vars.MSSTORE_PRODUCT_ID` 门控：
-没配这个变量时只打包 + 发 Release，完全不碰商店；首个版本过审后配上它，
-之后推 tag 就会自动 `msstore publish`。
+微软规定**首个版本必须手动上架**，之后才能走 API。所以 `msstore.yml` 用 `vars.MSSTORE_PRODUCT_ID` 门控：
+没配这个变量时只打包，完全不碰商店；首个版本过审后配上它，之后推 tag 就会自动 `msstore publish`。
+绿色版不受这个变量影响，任何时候推 tag 都会发 Release。
 
 ### 要配的 Secrets
 
