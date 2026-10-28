@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R Battery — 隐私政策 / Privacy Policy</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: "Segoe UI", -apple-system, "Microsoft YaHei", sans-serif;
+    max-width: 760px; margin: 0 auto; padding: 2.5rem 1.25rem 5rem;
+    line-height: 1.75; color: #1a1a1e; background: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e8e8ea; background: #16181d; }
+    a { color: #6fa8ff; }
+    code { background: #24262d; }
+  }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.5rem; border-bottom: 1px solid rgba(128,128,128,.25); padding-bottom: .35rem; }
+  h3 { font-size: 1rem; margin-top: 1.75rem; }
+  .updated { color: #7a7a82; font-size: .875rem; margin-top: 0; }
+  code { background: #f2f2f4; padding: .12em .4em; border-radius: 4px; font-size: .9em; }
+  ul { padding-left: 1.4rem; }
+  li { margin: .3rem 0; }
+  hr { border: 0; border-top: 1px solid rgba(128,128,128,.25); margin: 3.5rem 0; }
+</style>
+</head>
+<body>
+
+<h1>R Battery — 隐私政策 / Privacy Policy</h1>
+<p class="updated">最后更新 / Last updated: 2026-10-21</p>
+
+<!-- ================= 中文 ================= -->
+<h2>中文</h2>
+
+<h3>概述</h3>
+<p>R Battery（以下简称“本应用”）是一个在 Windows 任务栏显示无线鼠标电量的本地工具。本应用<strong>不收集、不上传、不共享任何个人信息</strong>。</p>
+
+<h3>我们不收集什么</h3>
+<ul>
+  <li>不收集姓名、邮箱、账号等任何身份信息</li>
+  <li>不收集设备标识符、硬件序列号</li>
+  <li>不收集使用行为、点击日志、崩溃报告</li>
+  <li>不收集位置信息</li>
+</ul>
+
+<h3>网络访问</h3>
+<p>本应用<strong>不进行任何网络通信</strong>。它没有联网能力，也不会尝试连接任何服务器。</p>
+
+<h3>本机存储的数据</h3>
+<p>本应用会在您电脑上写入以下文件，<strong>全部仅存于本机</strong>：</p>
+<ol>
+  <li><code>%LOCALAPPDATA%\rog-battery\history.tsv</code><br>
+      鼠标电量与充电状态的历史采样，用于估算剩余可用时间和充满时间。保留最近 48 小时，超出自动清理。</li>
+  <li><code>%LOCALAPPDATA%\rog-battery\rog-battery.log</code><br>
+      仅在您手动开启调试模式（设置环境变量 <code>ROG_BATTERY_DEBUG=1</code>）时生成，用于排查问题。默认不创建。</li>
+</ol>
+<p>以上文件您可以随时直接删除，删除后本应用会重新开始累积数据，不影响正常使用。</p>
+
+<h3>注册表</h3>
+<p>若您在右键菜单中选择“开机自动启动”，本应用会写入当前用户的启动项：</p>
+<ul>
+  <li>绿色版：<code>HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run</code></li>
+  <li>商店版：通过 Windows 的 StartupTask 机制注册</li>
+</ul>
+<p>该启动项可在应用内随时取消勾选移除，不需要管理员权限。</p>
+
+<h3>USB 设备访问</h3>
+<p>本应用通过 Windows 提供的 HID 接口与您的鼠标通信，用于读取电量和 DPI。它只读取，不修改设备配置，也不会访问其它 USB 设备的数据。</p>
+
+<h3>儿童隐私</h3>
+<p>本应用不面向儿童，也不收集任何年龄相关信息。</p>
+
+<h3>政策变更</h3>
+<p>若本政策发生变更，我们会更新本页面顶部的日期。由于本应用不收集任何数据，变更的可能性很低。</p>
+
+<h3>联系方式</h3>
+<p>如有疑问，请通过 Microsoft Store 产品页面的“支持”链接联系我们。</p>
+
+<hr>
+
+<!-- ================= English ================= -->
+<h2>English</h2>
+
+<h3>Overview</h3>
+<p>R Battery (“the app”) is a local utility that displays your wireless mouse's battery level on the Windows taskbar. The app <strong>does not collect, transmit, or share any personal information</strong>.</p>
+
+<h3>What we do not collect</h3>
+<ul>
+  <li>No names, email addresses, or account information</li>
+  <li>No device identifiers or hardware serial numbers</li>
+  <li>No usage behavior, click logs, or crash reports</li>
+  <li>No location information</li>
+</ul>
+
+<h3>Network access</h3>
+<p>The app <strong>makes no network connections of any kind</strong>. It has no networking capability and does not attempt to contact any server.</p>
+
+<h3>Data stored on your device</h3>
+<p>The app writes the following files, <strong>all stored locally on your machine</strong>:</p>
+<ol>
+  <li><code>%LOCALAPPDATA%\rog-battery\history.tsv</code><br>
+      Historical samples of mouse battery level and charging state, used to estimate remaining time and time to full. Keeps the most recent 48 hours; older entries are pruned automatically.</li>
+  <li><code>%LOCALAPPDATA%\rog-battery\rog-battery.log</code><br>
+      Created only when you manually enable debug mode (environment variable <code>ROG_BATTERY_DEBUG=1</code>), for troubleshooting. Not created by default.</li>
+</ol>
+<p>You may delete these files at any time. The app will simply start collecting fresh data; nothing breaks.</p>
+
+<h3>Registry</h3>
+<p>If you enable “Start with Windows” from the right-click menu, the app writes a per-user startup entry:</p>
+<ul>
+  <li>Portable build: <code>HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run</code></li>
+  <li>Store build: registered through the Windows StartupTask mechanism</li>
+</ul>
+<p>You can remove it at any time by unchecking the same menu item. No administrator rights are required.</p>
+
+<h3>USB device access</h3>
+<p>The app communicates with your mouse through the HID interface provided by Windows in order to read battery level and DPI. It only reads; it does not modify device configuration and does not access data from other USB devices.</p>
+
+<h3>Children's privacy</h3>
+<p>The app is not directed at children and collects no age-related information.</p>
+
+<h3>Changes to this policy</h3>
+<p>If this policy changes, we will update the date at the top of this page. Because the app collects no data, changes are unlikely.</p>
+
+<h3>Contact</h3>
+<p>For questions, please reach out through the “Support” link on the Microsoft Store product page.</p>
+
+</body>
+</html>
