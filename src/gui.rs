@@ -1831,7 +1831,7 @@ fn tray_tip_full(s: &Shared) -> String {
     let name = s
         .ident
         .as_ref()
-        .map(|i| i.model_name.trim().to_string())
+        .map(|i| i.display_name())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "ROG 鼠标".to_string());
 
