@@ -82,6 +82,20 @@ if (-not (Test-Path $propsPath)) {
 }
 $props = Import-PowerShellDataFile -Path $propsPath
 
+# CI（GitHub Actions）用 Variables 覆盖身份字段；本地不设这些环境变量就完全不生效。
+# 为什么允许覆盖：身份字段跟着账号走，不该写死在一个仓库文件里，但本地又要能一键打包。
+foreach ($pair in @(
+        @{ Env = 'MSSTORE_PACKAGE_IDENTITY_NAME'; Key = 'IdentityName' }
+        @{ Env = 'MSSTORE_PUBLISHER'; Key = 'Publisher' }
+        @{ Env = 'MSSTORE_PUBLISHER_DISPLAY_NAME'; Key = 'PublisherDisplayName' }
+    )) {
+    $override = [Environment]::GetEnvironmentVariable($pair.Env)
+    if ($override) {
+        $props[$pair.Key] = $override
+        Write-Host ("  {0} <- {1}" -f $pair.Key, $pair.Env)
+    }
+}
+
 if ($Version) { $props.Version = $Version }
 
 # 版本号必须是 4 段数字，且第一段不能是 0（Store 要求 >= 1.0.0.0）

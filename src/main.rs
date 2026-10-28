@@ -8,6 +8,13 @@
 //!
 //! 读模型：**一次读全 17 帧 + 缓存**（见 `snapshot.rs`）。
 
+// 子系统设成 `windows`：双击、开始菜单、Microsoft Store 启动都不创建控制台，
+// 所以不会闪一下黑框。命令行用法由 `win32::attach_console()` 在 `main` 开头
+// 把父控制台接回来，`info` / `backup` 这些照旧能打印。
+// `cfg(not(test))` 是必须的：`cargo test` 的测试进程如果也是 GUI 子系统，
+// 测试输出会被直接丢掉。
+#![cfg_attr(not(test), windows_subsystem = "windows")]
+
 mod autostart;
 mod backup;
 mod chart;
@@ -81,6 +88,11 @@ const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依
 "#;
 
 fn main() -> ExitCode {
+    // 子系统是 `windows`，命令行调用时进程默认没有控制台。先把父控制台接回来：
+    // 重定向（`info > report.txt`）走继承句柄，直接跑在终端里走 `CONOUT$`，
+    // 双击启动则两边都没有，函数返回 false、不做事。
+    win32::attach_console();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // ---- 入口分流 ----
@@ -99,7 +111,9 @@ fn main() -> ExitCode {
     let wants_autostart = args.len() == 1 && args[0] == autostart::RUN_ARG;
 
     if args.is_empty() || wants_autostart {
-        // 必须在**创建任何窗口之前**脱离控制台，否则黑框可能已经画出来了。
+        // 子系统是 `windows`，裸跑本来就没有控制台，黑框不会再出现。这里保留
+        // `FreeConsole` 只为一种情况：从终端启动 GUI 时 `attach_console` 已经把
+        // 父控制台接上了，进 GUI 前脱开，免得退出后终端被占着。
         // SAFETY: `FreeConsole` 只影响本进程的控制台关联，无指针参数。
         unsafe {
             win32::FreeConsole();

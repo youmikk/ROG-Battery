@@ -1,4 +1,4 @@
-﻿# rog-mouse-ctl MSIX 打包
+# rog-mouse-ctl MSIX 打包
 
 把 Rust 写的 `rog-mouse-ctl.exe` 打成微软商店可提交的 MSIX 包，同时保留免安装绿色版。
 两种形态来自**同一份编译产物**，只有开机自启的实现方式不同。
@@ -349,4 +349,77 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\make-upload.ps1
 
 1. **exe 仍是 `subsystem=3 (WINDOWS_CUI)`** —— 有控制台子系统。GUI 启动时程序会 `FreeConsole`，但开始菜单启动瞬间可能闪一下黑框。要彻底干净得给 linker 加 `/SUBSYSTEM:WINDOWS` 并在入口 `AttachConsole(ATTACH_PARENT_PROCESS)` 决定是否连回父控制台（程序侧改动，见第一节末尾的说明）。
 2. **exe 没有 VERSIONINFO 资源** —— `FileVersion` 为空字符串。商店不校验，但「应用和功能」里看不到版本号。MSIX 的版本来自 manifest，所以不影响升级。
-3. `Cargo.toml` 的 `version = "0.1.0"` 与 MSIX 的 `1.1.0.0` 没对齐 —— 只是观感问题，改不改都行。
+3. `Cargo.toml` 的 `version = "1.1.0"` 与 MSIX 的 `1.1.x.0` 不必逐字一致 —— 前者是 crate 版本，后者是商店包版本，只是别差太多让人困惑。
+
+## 八、GitHub Actions 自动发版
+
+工作流文件：`.github/workflows/msstore.yml`
+
+### 触发方式
+
+| 触发 | 行为 |
+| --- | --- |
+| `git push origin v1.1.2`（tag） | 编译 → 打 `.msix` + `.msixupload` → 绿色版 exe 附到 GitHub Release；**配了产品 ID 才**提交商店 |
+| 手动 `workflow_dispatch` | 同上，可手填版本号，可勾「跳过 cargo test」 |
+| push / PR 到 `main` | 只跑 `cargo test`（并行 job，不挡打包） |
+
+### 为什么必须用 gnu 工具链
+
+`vendor/mingw-import-libs/` 里是 **GNU 格式**的导入库（`libdwmapi.a`、`libgdiplus.a` 等），
+MSVC 目标链不上。所以 runner 上要装 `stable-x86_64-pc-windows-gnu` + MSYS2 的 mingw64 gcc（工作流里已经做好），
+产物路径与本地完全一致：`target/release/rog-mouse-ctl.exe`。
+
+### 商店自动发布是「按需开启」的
+
+微软规定**首个版本必须手动上架**，之后才能走 API。所以工作流用 `vars.MSSTORE_PRODUCT_ID` 门控：
+没配这个变量时只打包 + 发 Release，完全不碰商店；首个版本过审后配上它，
+之后推 tag 就会自动 `msstore publish`。
+
+### 要配的 Secrets
+
+Settings → Secrets and variables → Actions → **Secrets**
+
+| Name | 取值位置 |
+| --- | --- |
+| `AZURE_AD_TENANT_ID` | Entra ID → 应用注册 → 概览 → 目录（租户）ID |
+| `AZURE_AD_APPLICATION_CLIENT_ID` | 同上 → 应用程序（客户端）ID |
+| `AZURE_AD_APPLICATION_SECRET` | 同上 → 证书和密码 → 新建客户端密码（值只显示一次） |
+| `SELLER_ID` | Partner Center → Account settings → Legal info |
+
+前置条件：Partner Center 关联 Entra ID，并在 Entra ID 里注册应用、授予 Partner Center 的 Manager 角色。
+
+### 要配的 Variables
+
+同一页面 → **Variables**
+
+| Name | 说明 |
+| --- | --- |
+| `MSSTORE_PRODUCT_ID` | 商店产品 ID（本项目是 `9NRC8HCD4BZ7`）。**不配 = 不自动发布** |
+| `MSSTORE_PACKAGE_IDENTITY_NAME` | 可选，覆盖 `package.props.psd1` 的 `IdentityName` |
+| `MSSTORE_PUBLISHER` | 可选，覆盖 `Publisher` |
+| `MSSTORE_PUBLISHER_DISPLAY_NAME` | 可选，覆盖 `PublisherDisplayName` |
+
+身份三项不配也行 —— `build-msix.ps1` 会退回 `package.props.psd1` 里的值；配了则以 Variables 为准
+（脚本用 `[Environment]::GetEnvironmentVariable` 读，本地不设就完全不生效）。
+
+### 版本号从哪来
+
+tag `v1.1.2` → `1.1.2.0`；手动触发可填；两者都没有就用 `Cargo.toml` 的版本补一个 `.0`。
+工作流会当场拦「不是四段数字」和「第一段为 0」。
+
+### 产物去哪
+
+- **GitHub Release**：`rog-mouse-ctl.exe`（绿色版单文件）
+- **Run artifacts**：`msix-<版本>`，内含 `.msix` / `.msixupload` / exe
+- `.msix` 是未签名的，只用于上传商店和本地测试装包，**不放进 Release**
+
+### 本地等价命令（CI 跑的就是这几条）
+
+```powershell
+cargo build --release
+powershell -File msix\build-msix.ps1 -Version 1.1.2.0 -Verify -SkipInstalledVersionCheck
+powershell -File msix\make-upload.ps1 -Version 1.1.2.0
+```
+
+> `-Verify` 在**本机**要先把 `$env:TEMP` 指到仓库内 —— 本机沙箱不允许写 `%TEMP%`，
+> `makeappx unpack` 会报 `0x80070005`。CI 上不需要这个处理。
