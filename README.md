@@ -138,6 +138,7 @@ cargo test                         # 148 项测试
 | 文档 | 内容 |
 | --- | --- |
 | [docs/technical.md](docs/technical.md) | **技术总文档**：私有 HID 协议、编译链、CLI 全量参考、真机实测记录、安全设计、踩坑 |
+| [docs/device-support.md](docs/device-support.md) | 75 个 ROG 外设 PID 的型号对照表（鼠标 / 键盘 / 手柄 + 5 种接收器） |
 | [docs/autostart.md](docs/autostart.md) | 开机自启的两条路径与 MSIX 下的差异 |
 | [docs/gdiplus-rendering.md](docs/gdiplus-rendering.md) | 自绘界面用的 GDI+ 渲染细节 |
 | [docs/gdiplus-window-dc.md](docs/gdiplus-window-dc.md) | 窗口 DC 与双缓冲 |

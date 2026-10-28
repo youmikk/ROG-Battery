@@ -1,7 +1,54 @@
+# 编译产物
 /target
 /scratch
+/msix/scratch
+*.exe
+*.dll
+*.pdb
+obj/
+bin/
+
+# 运行时数据（每台机器自己的历史，不该进仓库）
+history.tsv
+rog-battery.log
+*.log
+*.tsv
+
+# MSIX 产物
 /msix/stage
 /msix/AppPackages
-/msix/scratch
-*.pdb
+AppPackages/
+*.msix
+*.msixupload
+*.appx
+*.appxupload
+msix/*.msix
+msix/Assets/*.png.bak
+
+# 签名证书私钥：绝对不进仓库
+*.pfx
+*.cer
+*.pvk
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini
+
+# 逆向 / 抓帧的临时产物
+_research/
+msix/StoreAssets/burst*/
+msix/StoreAssets/_*.png
+
+# Store 发布会用到的凭据，只能留本机
+msix/store-credentials.psd1
+store-credentials.psd1
+.env
+
+# 用户自己的设置（刷新间隔等），每台机器不同，不入库
+settings.ini
+
+# 早期调试残留
 hwnd.txt
