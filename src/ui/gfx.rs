@@ -70,7 +70,6 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 
 use super::theme::Theme;
-use crate::win32::GetTickCount;
 
 // ==================== 类型 ====================
 
@@ -241,6 +240,7 @@ extern "system" {
     fn GdipSetStringFormatAlign(fmt: *mut c_void, align: i32) -> i32;
     fn GdipSetStringFormatLineAlign(fmt: *mut c_void, align: i32) -> i32;
     fn GdipSetStringFormatTrimming(fmt: *mut c_void, trimming: i32) -> i32;
+    fn GdipSetStringFormatFlags(fmt: *mut c_void, flags: i32) -> i32;
     fn GdipDeleteStringFormat(fmt: *mut c_void) -> i32;
 
     fn GdipDrawString(
@@ -309,7 +309,7 @@ fn gdi_get_pixel(hdc: Gdi, x: i32, y: i32) -> Option<u32> {
 ///
 /// 只在测试里用 —— 生产路径画完就 `BitBlt`，从不需要落盘。
 #[cfg(test)]
-fn save_bmp(path: &str, hdc: Gdi, w: i32, h: i32) {
+pub(crate) fn save_bmp(path: &str, hdc: Gdi, w: i32, h: i32) {
     // 每行字节数必须是 4 的倍数（BMP 规定）。
     let row_bytes = (w * 3 + 3) & !3;
     let pixel_bytes = row_bytes * h;
@@ -902,7 +902,7 @@ impl<'a> Painter<'a> {
     /// 现在这样即使时钟被暂停（系统睡眠后 GetTickCount 不跳），
     /// 最坏情况是彗尾停一下，恢复后自动继续。
     ///
-    /// 每 1200ms 跑完一圈：再快就看不清，再慢会让人以为卡住了。
+    /// 画充电动效：在电量进度弧上叠加呼吸光晕与流光能量波。
     pub fn arc_comet(
         &mut self,
         cx: f32,
@@ -914,7 +914,7 @@ impl<'a> Painter<'a> {
         progress_color: u32,
         track: u32,
     ) {
-        // 静态部分（底环 + 进度弧）先画，和 `ring` 完全一样。
+        // 先画底环和基础电量进度弧
         self.ring(cx, cy, radius, width, frac, progress_color, progress_color, track);
 
         let box_r = R::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
@@ -922,33 +922,96 @@ impl<'a> Painter<'a> {
             return;
         }
 
-        // 彗尾长度固定 60°，不跟电量走 —— 它表达的是「正在充」而不是电量。
-        const TAIL_DEG: f32 = 60.0;
-        const PERIOD_MS: f32 = 1200.0;
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let start = START.get_or_init(std::time::Instant::now);
+        let now = start.elapsed().as_secs_f32() * 1000.0;
+        // 柔和呼吸光晕：沿有效电量弧做柔和的光亮呼吸
+        let breath = (now * 0.0032).sin() * 0.5 + 0.5;
+        let glow_alpha = (0x60 as f32 + breath * 0x70 as f32) as u8;
+        let glow_color = with_alpha(color, glow_alpha);
 
-        // SAFETY: `GetTickCount` 无参数、无副作用，任何线程都能调。
-        let now = unsafe { GetTickCount() } as f32;
-        let phase = (now % PERIOD_MS) / PERIOD_MS;
-        let start = -90.0 + 360.0 * phase;
+        let active_span = frac.clamp(0.06, 1.0) * 360.0;
 
         unsafe {
             let mut brush: *mut c_void = std::ptr::null_mut();
             let mut pen: *mut c_void = std::ptr::null_mut();
-            // 彗尾用实色笔 + 圆头帽：渐变在只有 60° 的短弧上看不出方向，
-            // 反而让两头都变淡。
-            if GdipCreateSolidFill(color, &mut brush) == OK {
-                if GdipCreatePen2(brush, width, 2, &mut pen) == OK {
+            if GdipCreateSolidFill(glow_color, &mut brush) == OK {
+                if GdipCreatePen2(brush, width + 2.0, 2, &mut pen) == OK {
                     GdipSetPenStartCap(pen, 2);
                     GdipSetPenEndCap(pen, 2);
                     let mut path: *mut c_void = std::ptr::null_mut();
                     if GdipCreatePath(0, &mut path) == OK {
-                        GdipAddPathArc(path, box_r.x, box_r.y, box_r.w, box_r.h, start, TAIL_DEG);
+                        GdipAddPathArc(path, box_r.x, box_r.y, box_r.w, box_r.h, -90.0, active_span);
                         GdipDrawPath(self.g, pen, path);
                         GdipDeletePath(path);
                     }
                     GdipDeletePen(pen);
                 }
                 GdipDeleteBrush(brush);
+            }
+
+            // 能量流动光波：沿有效电量弧平滑往复穿行
+            const PERIOD_MS: f32 = 1500.0;
+            let phase = (now % PERIOD_MS) / PERIOD_MS;
+            let wave_len = (active_span * 0.4).clamp(24.0, 64.0);
+            let wave_start = -90.0 + (active_span - wave_len) * phase;
+
+            let mut w_brush: *mut c_void = std::ptr::null_mut();
+            let mut w_pen: *mut c_void = std::ptr::null_mut();
+            if GdipCreateSolidFill(with_alpha(color, 0xF5), &mut w_brush) == OK {
+                if GdipCreatePen2(w_brush, width + 0.5, 2, &mut w_pen) == OK {
+                    GdipSetPenStartCap(w_pen, 2);
+                    GdipSetPenEndCap(w_pen, 2);
+                    let mut path: *mut c_void = std::ptr::null_mut();
+                    if GdipCreatePath(0, &mut path) == OK {
+                        GdipAddPathArc(path, box_r.x, box_r.y, box_r.w, box_r.h, wave_start, wave_len);
+                        GdipDrawPath(self.g, w_pen, path);
+                        GdipDeletePath(path);
+                    }
+                    GdipDeletePen(w_pen);
+                }
+                GdipDeleteBrush(w_brush);
+            }
+        }
+    }
+
+    /// 画实心圆。
+    pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: u32) {
+        let r = R::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
+        self.round(r, radius, color);
+    }
+
+    /// 画圆描边。
+    pub fn circle_stroke(&mut self, cx: f32, cy: f32, radius: f32, color: u32, width: f32) {
+        let r = R::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
+        self.round_stroke(r, radius, color, width);
+    }
+
+    /// 画圆弧（度数顺时针，可用于绘制色环、扇区等）。
+    pub fn arc(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        width: f32,
+        start_deg: f32,
+        sweep_deg: f32,
+        color: u32,
+    ) {
+        let box_r = R::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
+        if !self.visible(box_r) || color >> 24 == 0 {
+            return;
+        }
+        unsafe {
+            let mut pen: *mut c_void = std::ptr::null_mut();
+            if GdipCreatePen1(color, width, 2, &mut pen) == OK {
+                let mut path: *mut c_void = std::ptr::null_mut();
+                if GdipCreatePath(0, &mut path) == OK {
+                    GdipAddPathArc(path, box_r.x, box_r.y, box_r.w, box_r.h, start_deg, sweep_deg);
+                    GdipDrawPath(self.g, pen, path);
+                    GdipDeletePath(path);
+                }
+                GdipDeletePen(pen);
             }
         }
     }
@@ -982,6 +1045,12 @@ impl<'a> Painter<'a> {
                 GdipSetStringFormatLineAlign(fmt, 1);
                 // 3 = EllipsisCharacter：超宽截断加省略号，不换行
                 GdipSetStringFormatTrimming(fmt, 3);
+                // 0x0000_1000 = StringFormatFlagsNoWrap。
+                //
+                // 光设 Trimming **不够**：GDI+ 默认允许自动折行，一串没有空格
+                // 的连续字符（输入框里的 `400900`）会在框宽处硬断成两行，
+                // 第二行还溢出到框外。`text()` 语义就是「画一行」，必须显式禁折行。
+                GdipSetStringFormatFlags(fmt, 0x0000_1000);
             }
             GdipDrawString(self.g, u.as_ptr(), u.len() as i32, font, &layout, fmt, brush);
             if !fmt.is_null() {
@@ -1314,6 +1383,9 @@ impl Canvas {
     ///
     /// - `scale`：DPI 缩放（96 DPI = 1.0）
     /// - `scroll`：内容竖直滚动量（逻辑像素）
+    /// - `oy`：整块的纵向偏移（逻辑像素）。自绘标题栏占了顶部 [`super::titlebar::TITLE_H`]，
+    ///   导航和页面整体要往下让出这块 —— 用世界变换做，页面代码里的坐标仍是
+    ///   「从内容区顶部算起」，不用到处加常数。
     /// - `view_h`：可视区高度（逻辑像素）
     ///
     /// 闭包拿到 `Painter`，坐标全是**逻辑像素、内容坐标**。
@@ -1338,22 +1410,40 @@ impl Canvas {
             }
             // 4 = AntiAlias
             GdipSetSmoothingMode(g, 4);
-            // 3 = AntiAliasGridFit。小字比 ClearType 锐，
-            // 而且 ClearType 会在深色底上留红/青彩边。
-            GdipSetTextRenderingHint(g, 3);
-            // 2 = Half：让 1px 线落在像素中心，不然灰蒙蒙两条
-            GdipSetPixelOffsetMode(g, 2);
 
-            // 世界变换：先缩放，再上移 scroll*scale（内容坐标 → 设备坐标）
-            let mut m: *mut c_void = std::ptr::null_mut();
-            if GdipCreateMatrix2(scale, 0.0, 0.0, scale, 0.0, -scroll * scale, &mut m) == OK
-                && !m.is_null()
-            {
-                GdipSetWorldTransform(g, m);
-                GdipDeleteMatrix(m);
+            // 文字渲染：按底色亮度挑 hint。
+            //   浅色底用 5 = ClearTypeGridFit，256 灰阶 + 像素网格吸附，最锐利；
+            //   深色底用 3 = AntiAliasGridFit，避免 ClearType 次像素在深底上留红/青彩边。
+            // 用 theme.bg 的 0xAARRGGBB 取 RGB 算亮度。
+            let bg = theme.bg;
+            let r = ((bg >> 16) & 0xFF) as u32;
+            let gg = ((bg >> 8) & 0xFF) as u32;
+            let b = (bg & 0xFF) as u32;
+            let lum = (r * 299 + gg * 587 + b * 114) / 1000;
+            let dark = lum < 128;
+            GdipSetTextRenderingHint(g, if dark { 3 } else { 5 });
+
+            // **3 = None**：不再做 0.5px 偏移。原来写 2（注释误标 Half，其实 2 =
+            // HighQuality）会让所有文字整体挪半格、糊成一片；None 才让字落回像素网格。
+            GdipSetPixelOffsetMode(g, 3);
+
+            // 世界变换：先缩放，再按 scroll 上移（内容坐标 → 设备坐标）。
+            //
+            // **单位变换时千万别设**：GDI+ 只要挂了 world transform，就会丢掉文字的
+            // GridFit（哪怕矩阵是单位阵），文字立刻变柔和——这正是"整个软件发糊"的
+            // 主因之一。scale≈1 且 scroll≈0 时本来就不需要变换，直接跳过。
+            let needs_xf = (scale - 1.0).abs() > 1e-3 || scroll.abs() > 1e-3;
+            if needs_xf {
+                let mut m: *mut c_void = std::ptr::null_mut();
+                if GdipCreateMatrix2(scale, 0.0, 0.0, scale, 0.0, -scroll * scale, &mut m) == OK
+                    && !m.is_null()
+                {
+                    GdipSetWorldTransform(g, m);
+                    GdipDeleteMatrix(m);
+                }
             }
 
-            let clip = R::new(0.0, scroll, view_w, view_h);
+            let clip = R::new(0.0, scroll, view_w, view_h + scroll);
             let mut p = Painter { g, fonts, t: theme, clip, scale };
             f(&mut p);
             GdipDeleteGraphics(g);
@@ -1497,7 +1587,7 @@ mod tests {
         assert!(start());
         let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
         let mut canvas = Canvas::new();
-        let dc = unsafe { gdi_create_compatible_dc(0) };
+        let dc = gdi_create_compatible_dc(0);
         assert_ne!(dc, 0);
         let mem = canvas.ensure(dc, 400, 300);
         assert_ne!(mem, 0, "双缓冲位图建不出来");
@@ -1538,7 +1628,7 @@ mod tests {
 
         canvas.release();
         assert_eq!(canvas.size(), (0, 0));
-        unsafe { gdi_delete_dc(dc) };
+        gdi_delete_dc(dc);
     }
 
     /// 开一块**真彩**离屏位图模板，返回屏幕 DC。
@@ -1568,7 +1658,7 @@ mod tests {
         assert!(start());
         let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
         let mut canvas = Canvas::new();
-        let dc = unsafe { gdi_create_compatible_dc(0) };
+        let dc = gdi_create_compatible_dc(0);
         let _ = canvas.ensure(dc, 400, 300);
         let t = &super::super::theme::DARK;
         // 滚到 1500 的位置画，内容坐标远在可视区之外 —— 不该崩，
@@ -1578,7 +1668,7 @@ mod tests {
             p.card(R::new(10.0, 1510.0, 200.0, 60.0), 8.0, t.card, t.border);
         });
         canvas.release();
-        unsafe { gdi_delete_dc(dc) };
+        gdi_delete_dc(dc);
     }
 
     /// 电量环必须真的画出进度弧。
@@ -1768,6 +1858,363 @@ mod tests {
         let mid = gdi_get_pixel(mem, 60, 60).expect("GetPixel 失败");
         // 渐变没画出来时这里会是白底 0x00FFFFFF。
         assert_ne!(mid, 0x00FF_FFFF, "卡片渐变没画出来（还是白底）");
+
+        canvas.release();
+        release_screen_dc(screen);
+    }
+
+    #[test]
+    fn 渲染前端ui效果图() {
+        assert!(start());
+        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
+        let mut canvas = Canvas::new();
+        let screen = test_screen_dc();
+        let w = 1100;
+        let h = 740;
+        let mem = canvas.ensure(screen as Gdi, w, h);
+        assert_ne!(mem, 0);
+
+        let ident = crate::proto::Identity {
+            model_name: "ROG HARPE ACE MINI".to_string(),
+            wired_pid: 0x1B63,
+            wireless_pid: 0x1B65,
+            mouse_sn: "B00000000000".to_string(),
+            dongle_sn: "C00000000001".to_string(),
+            mouse_mac: "00:00:00:00:00:00".to_string(),
+            dongle_mac: "00:00:00:00:00:00".to_string(),
+            dongle_firmware: "7.00.07".to_string(),
+            booster: false,
+        };
+        let state = crate::proto::State {
+            power: 78,
+            charging: 0,
+            sleep_mode: 4,
+            low_warn: 20,
+            poll_code: 3,
+            // 去抖给 4 = 20 ms（出厂默认）。留 0 会显示成「关闭」，快照里像没启用。
+            debounce_code: 4,
+            active_stage: 2,
+            // enc = (dpi - 50) / 50，写真实鼠标的默认四档，快照才看得懂
+            enc: [7, 15, 31, 63], // 400 / 800 / 1600 / 3200
+            rgb: [
+                [0xFF, 0x19, 0x29],
+                [0xFF, 0x00, 0xFF],
+                [0x00, 0x00, 0xFF],
+                [0x00, 0xFF, 0x00],
+            ],
+            // 按键用出厂默认（每个键映射到自己）。留全 0 会让按键页八行都显示
+            // 「无功能」，看着像界面把鼠标按键全废掉了 —— 快照/上架图都不能这样。
+            buttons: crate::proto::BUTTON_SRC,
+            ..Default::default()
+        };
+        let cfg = crate::settings::Settings::default();
+        // 已知结论的估算，快照才看得到「环下方那行」的真实排版。
+        let estimate = crate::history::Estimate {
+            known: true,
+            text: "预计还能用 3 小时 12 分钟".to_string(),
+            percent_per_hour: -6.2,
+            samples: 14,
+            span_minutes: 96.0,
+            hours: 3.2,
+            stale_seconds: 0,
+        };
+        let data = crate::ui::pages::Data {
+            state: Some(&state),
+            ident: Some(&ident),
+            status: String::new(),
+            plot: None,
+            estimate: &estimate,
+            rows: 0,
+            cfg: &cfg,
+            autostart_text: "已开机自启",
+            version: "v0.1.0",
+            frames: 19,
+            elapsed_ms: 588,
+            from_cache: false,
+        };
+
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch");
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let render_full_view = |canvas: &mut Canvas, fonts: &mut Fonts, ui: &mut super::super::widget::Ui, data_ref: &super::super::pages::Data, theme: &super::super::theme::Theme, out_name: &str, draw_extra: Option<&dyn Fn(&mut Painter, &super::super::layout::Frame)>, scroll: f32| {
+            let oy = super::super::titlebar::TITLE_H;
+            let nav_w = ui.nav_width();
+            let mut frame = super::super::layout::Frame::new(w as f32, h as f32, nav_w);
+            frame.content.x += nav_w;
+            frame.content.y += oy;
+            frame.content.h -= oy;
+
+            // ① 整窗铺底
+            canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
+                p.rect(super::R::new(0.0, 0.0, w as f32, h as f32), theme.bg);
+            });
+            // ② 页面
+            canvas.paint(fonts, theme, 1.0, scroll, w as f32, h as f32, |p| {
+                super::super::pages::page(p, ui, data_ref, &frame);
+                if let Some(extra) = draw_extra {
+                    extra(p, &frame);
+                }
+            });
+            // ③ 导航栏
+            canvas.paint(fonts, theme, 1.0, 0.0, nav_w, h as f32, |p| {
+                super::super::pages::nav(p, ui, data_ref, nav_w, h as f32);
+            });
+            // ④ 标题栏
+            canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
+                super::super::titlebar::draw(p, w as f32, nav_w, theme);
+                super::super::titlebar::draw_buttons(p, w as f32, theme, false, ui.hover_btn);
+            });
+            // ⑤ 模态弹窗（若有）
+            if ui.show_close_dialog {
+                canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
+                    super::super::pages::draw_close_dialog(p, ui, w as f32, h as f32);
+                });
+            }
+
+            let out_file = out_dir.join(out_name);
+            save_bmp(out_file.to_str().unwrap(), mem, w, h);
+        };
+
+        // 1. 电量页 浅色模式
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Battery;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-light.bmp", None, 0.0);
+        }
+
+        // 2. 电量页 深色模式
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Battery;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-battery-dark.bmp", None, 0.0);
+        }
+
+        // 3. 性能页 + 预设色盘
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.palette_tab = 0;
+            let extra = |p: &mut Painter, f: &super::super::layout::Frame| {
+                super::super::pages::draw_palette(
+                    p,
+                    &mut super::super::widget::Ui::default(),
+                    0,
+                    super::R::new(320.0, 180.0, 36.0, 24.0),
+                    Some([255, 0, 0]),
+                    f,
+                );
+            };
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-palette-preset.bmp", Some(&extra), 0.0);
+        }
+
+        // 4. 性能页 + 高级自定义色环
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.palette_tab = 1;
+            ui.custom_hue = 330.0;
+            let extra = |p: &mut Painter, f: &super::super::layout::Frame| {
+                let mut ui_p = super::super::widget::Ui::default();
+                ui_p.palette_tab = 1;
+                ui_p.custom_hue = 330.0;
+                super::super::pages::draw_palette(
+                    p,
+                    &mut ui_p,
+                    0,
+                    super::R::new(320.0, 180.0, 36.0, 24.0),
+                    Some([255, 0, 128]),
+                    f,
+                );
+            };
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-palette-ring.bmp", Some(&extra), 0.0);
+        }
+
+        // 5. 电量页 正在充电状态（动效光晕与徽标）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Battery;
+            ui.rail = true;
+            let state_charging = crate::proto::State {
+                charging: 1,
+                power: 58,
+                ..state.clone()
+            };
+            let estimate_charging = crate::history::Estimate {
+                known: true,
+                text: "预计 40 分钟后充满".to_string(),
+                percent_per_hour: 62.0,
+                samples: 9,
+                span_minutes: 41.0,
+                hours: 0.68,
+                stale_seconds: 0,
+            };
+            let data_charging = crate::ui::pages::Data {
+                state: Some(&state_charging),
+                status: String::new(),
+                estimate: &estimate_charging,
+                ..data.clone()
+            };
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data_charging, &super::super::theme::DARK, "ui-battery-charging.bmp", None, 0.0);
+        }
+
+        // 6. 关闭确认模态对话框
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Battery;
+            ui.rail = true;
+            ui.show_close_dialog = true;
+            ui.close_choice = super::super::widget::CloseChoice::Minimize;
+            ui.close_remember = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-close-dialog.bmp", None, 0.0);
+        }
+
+        // 7. 电量页 展开导航（rail=false，验证设备卡不再被标题栏裁切，#1）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Battery;
+            ui.rail = false;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-expanded.bmp", None, 0.0);
+        }
+
+        // 8. 性能页 高级折叠收起（排查折叠区色差）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.adv = [false, false];
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-closed.bmp", None, 560.0);
+        }
+
+        // 9. 性能页 高级折叠展开（排查展开后色差）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.adv = [true, false];
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-open.bmp", None, 560.0);
+        }
+
+        // 10. 按键页（警告条置顶 + 现代行样式）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Keys;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-keys.bmp", None, 0.0);
+        }
+
+        // 11. 按键页 深色
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Keys;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-keys-dark.bmp", None, 0.0);
+        }
+
+        // 12. 成功提示 toast
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.set_status("✔ 回报率已生效");
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-ok.bmp", None, 0.0);
+        }
+
+        // 13. 错误提示 toast
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.set_status("✘ 开机自启失败：权限不足 (错误 5)");
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-err.bmp", None, 0.0);
+        }
+
+        // 14. 深色 toast
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.set_status("✔ 灯光颜色已生效");
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-toast-dark.bmp", None, 0.0);
+        }
+
+        // 15. 性能页 LOD 卡片（警告条在卡片外）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-lod.bmp", None, 620.0);
+        }
+
+        // 16. 去抖下拉框：靠近视口底部时必须向上翻开（否则整块弹层落到窗外）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.set_open_drop(Some(super::super::widget::Drop::Debounce));
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-drop-up.bmp", None, 0.0);
+        }
+
+        // 17. DPI 数值框正在编辑：草稿顶到上限（5 位）也不能溢出框外
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            ui.begin_edit(super::super::widget::Edit::Dpi(0), "42000".into());
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-dpi-edit.bmp", None, 0.0);
+        }
+
+        // 18. 灯光页：交给 Windows 动态光效（方案 A）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Light;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-light-dyn.bmp", None, 0.0);
+        }
+
+        // 19. 设置页：存储路径卡 + 外观「跟随系统/浅色/深色」三段
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Settings;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings.bmp", None, 620.0);
+        }
+
+        // 20. 性能页顶部：DPI 档位每行带「切换」+「应用」
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-top.bmp", None, 0.0);
+        }
+
+        // 21. 设置页顶部（通用设置：开机自启等）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Settings;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-top.bmp", None, 0.0);
+        }
+
+        // 22. 标题栏关闭按钮悬停：红底 + 白叉（必须都可见，不能是透明 alpha）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Battery;
+            ui.rail = true;
+            ui.hover_btn = Some(super::super::titlebar::Btn::Close);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-titlebar-hover.bmp", None, 0.0);
+        }
+
+        // 23. 性能页深色：上架图里的深色主题示例（四档彩色指示灯 + 药丸分段控件）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Perf;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-perf-dark.bmp", None, 0.0);
+        }
 
         canvas.release();
         release_screen_dc(screen);

@@ -18,15 +18,19 @@
 //! | [`gfx`] | GDI+ 基元 + 双缓冲画布 + 字体缓存 | 会（但只有这一个文件） |
 //! | [`layout`] | 布局常量与响应式断点 | 不会 |
 //! | [`widget`] | 控件树 + 命中测试 + 事件 | 不会 |
+//! | [`titlebar`] | 自绘标题栏（图标 / 标题 / 三个按钮） | 不会（只画） |
+//! | [`frame`] | 去掉系统标题栏、命中测试、最大化修正 | 会 |
 //! | [`pages`] | 五个页面的绘制 | 只画，不读设备 |
 //! | [`canvas`] | 子窗口 + 消息循环 + 事件分发 | 会 |
 //!
-//! 中间四层是**纯逻辑**，可以单测；只有 `gfx` 和 `canvas` 碰系统 API。
+//! 中间几层是**纯逻辑**，可以单测；只有 `gfx`、`frame` 和 `canvas` 碰系统 API。
 //! 这样「点了哪一行」这种判断不用起窗口就能验证。
 
 pub mod canvas;
+pub mod frame;
 pub mod gfx;
 pub mod layout;
 pub mod pages;
 pub mod theme;
+pub mod titlebar;
 pub mod widget;

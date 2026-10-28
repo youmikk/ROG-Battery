@@ -45,6 +45,7 @@
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 
 use core::ffi::c_void;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::win32::{self, to_wide};
@@ -209,7 +210,7 @@ pub fn detect_path() -> AutoStartPath {
 // 绿色版：注册表
 // ============================================================
 
-const HKEY_CURRENT_USER: usize = 0x8000_0001;
+const HKEY_CURRENT_USER: usize = 0xFFFF_FFFF_8000_0001;
 const KEY_QUERY_VALUE: u32 = 0x0001;
 const KEY_SET_VALUE: u32 = 0x0002;
 const REG_SZ: u32 = 1;
@@ -300,69 +301,188 @@ fn read_run_value() -> Result<Option<String>, String> {
     }
 }
 
+/// 检查 Windows 系统主题（任务栏/开始菜单/系统托盘）是否为浅色。
+///
+/// 读取注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\SystemUsesLightTheme`。
+/// 值为 1 时系统任务栏为浅色，托盘应显示深黑/深炭色文字；
+/// 值为 0（深色模式）或读取失败时，默认返回 false（深色任务栏，显示白色文字）。
+pub fn system_uses_light_theme() -> bool {
+    let sub = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    let mut hk: usize = 0;
+    let rc = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_QUERY_VALUE, &mut hk) };
+    if rc != ERROR_SUCCESS {
+        return false;
+    }
+    let name = to_wide("SystemUsesLightTheme");
+    let mut ty: u32 = 0;
+    let mut val: u32 = 0;
+    let mut blen: u32 = std::mem::size_of::<u32>() as u32;
+    let rc = unsafe {
+        RegQueryValueExW(
+            hk,
+            name.as_ptr(),
+            core::ptr::null_mut(),
+            &mut ty,
+            &mut val as *mut u32 as *mut u8,
+            &mut blen,
+        )
+    };
+    unsafe { RegCloseKey(hk) };
+    rc == ERROR_SUCCESS && val == 1
+}
+
+fn startup_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|base| base.join(r"Microsoft\Windows\Start Menu\Programs\Startup"))
+}
+
+#[allow(dead_code)]
+fn startup_script_path() -> Option<PathBuf> {
+    startup_dir().map(|d| d.join("RogMouseCtl.vbs"))
+}
+
+/// 启动文件夹里的启动脚本内容。用 VBS 的 `ws.Run ..., 0, False`
+/// 隐藏窗口静默拉起，避免开机时闪一下黑框。
+fn startup_script_body(exe_str: &str) -> String {
+    format!("Set ws = CreateObject(\"WScript.Shell\")\r\nws.Run \"\"\"{exe_str}\"\" {RUN_ARG}\", 0, False\r\n")
+}
+
+fn startup_folder_enable_in(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("取 exe 路径失败：{e}"))?;
+    let exe_str = exe.to_string_lossy().replace('"', "");
+    write_startup_script(dir, &exe_str)
+}
+
+fn write_startup_script(dir: &std::path::Path, exe_str: &str) -> Result<std::path::PathBuf, String> {
+    let script = dir.join("RogMouseCtl.vbs");
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建启动文件夹失败：{e}"))?;
+    std::fs::write(&script, startup_script_body(exe_str))
+        .map_err(|e| format!("写入启动文件夹失败：{e}"))?;
+    Ok(script)
+}
+
+fn startup_folder_enable() -> Result<(), String> {
+    let dir = startup_dir().ok_or("取启动文件夹路径失败")?;
+    startup_folder_enable_in(&dir).map(|_| ())
+}
+
+fn startup_folder_disable() {
+    if let Some(d) = startup_dir() {
+        remove_startup_script_in(&d);
+    }
+}
+
+fn remove_startup_script_in(dir: &std::path::Path) {
+    let _ = std::fs::remove_file(dir.join("RogMouseCtl.vbs"));
+    let _ = std::fs::remove_file(dir.join("RogMouseCtl.cmd"));
+    let _ = std::fs::remove_file(dir.join("RogMouseCtl.bat"));
+}
+
+fn startup_folder_state() -> bool {
+    match startup_dir() {
+        Some(d) => startup_folder_state_in(&d),
+        None => false,
+    }
+}
+
+fn startup_folder_state_in(dir: &std::path::Path) -> bool {
+    let script = dir.join("RogMouseCtl.vbs");
+    if script.exists() {
+        if let Ok(content) = std::fs::read_to_string(&script) {
+            if let Ok(exe) = std::env::current_exe() {
+                let s = exe.to_string_lossy().to_string();
+                if content.contains(&s) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// 绿色版：查状态。
 ///
 /// **不能只看键存在** —— 用户可能改过路径、或者 exe 被移动过。
 /// 要比对命令行里的 exe 路径是否与当前进程一致，否则会出现「显示已启用
 /// 但开机什么也没发生」的情况（旧路径已失效）。
+/// 同时检查注册表 Run 键与用户 Startup 启动文件夹脚本。
 fn registry_state() -> AutoStartState {
     let current = match quoted_exe_path() {
         Ok(s) => s,
         Err(_) => return AutoStartState::Unknown,
     };
     match read_run_value() {
-        Ok(Some(v)) => {
-            if v.trim() == current.trim() {
+        Ok(Some(v)) if v.trim() == current.trim() => AutoStartState::Enabled,
+        _ => {
+            if startup_folder_state() {
                 AutoStartState::Enabled
             } else {
-                // 有旧条目但指向别的路径（exe 被移动/旧版本残留）。
-                // 当成未启用，enable() 会覆盖掉。
                 AutoStartState::Disabled
             }
         }
-        Ok(None) => AutoStartState::Disabled,
-        Err(_) => AutoStartState::Unknown,
     }
 }
 
-/// 绿色版：写入 Run 键。
+/// 绿色版：写入开机自启。
+///
+/// 优先用 `RegOpenKeyExW` 打开已存在的 Run 键。如果注册表受到安全策略、
+/// 杀毒软件拦截或权限限制（Win32 错误码 5 ACCESS_DENIED），自动平滑降级到
+/// Windows 用户的启动文件夹（`shell:startup`，生成无控制台弹窗的后台自启脚本）。
 fn registry_enable() -> Result<(), String> {
-    let cmd = quoted_exe_path()?;
-    unsafe {
-        let sub = to_wide(RUN_SUBKEY);
-        let mut hk: usize = 0;
-        let mut disp: u32 = 0;
-        let rc = RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            sub.as_ptr(),
-            0,
-            core::ptr::null(),
-            0,
-            KEY_QUERY_VALUE | KEY_SET_VALUE,
-            core::ptr::null_mut(),
-            &mut hk,
-            &mut disp,
-        );
-        if rc != ERROR_SUCCESS {
-            return Err(format!("打开 Run 键失败：Win32 错误码 {rc}"));
-        }
+    let reg_result = (|| -> Result<(), String> {
+        let cmd = quoted_exe_path()?;
+        unsafe {
+            let sub = to_wide(RUN_SUBKEY);
+            let mut hk: usize = 0;
 
-        let name = to_wide(RUN_VALUE_NAME);
-        let value = to_wide(&cmd);
-        // REG_SZ 的长度必须**含结尾 NUL**，单位是字节
-        let bytes = (value.len() * 2) as u32;
-        let rc = RegSetValueExW(hk, name.as_ptr(), 0, REG_SZ, value.as_ptr() as *const u8, bytes);
-        RegCloseKey(hk);
+            // ① 优先打开已存在的键（HKCU\...\Run 一定存在）
+            let mut rc = RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut hk);
+            if rc != ERROR_SUCCESS {
+                // ② 键不存在时才创建；显式要求 SET_VALUE 权限
+                let mut disp: u32 = 0;
+                rc = RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    sub.as_ptr(),
+                    0,
+                    core::ptr::null(),
+                    0,
+                    KEY_SET_VALUE,
+                    core::ptr::null_mut(),
+                    &mut hk,
+                    &mut disp,
+                );
+                if rc != ERROR_SUCCESS {
+                    return Err(format!("Win32 错误码 {rc}"));
+                }
+            }
 
-        if rc != ERROR_SUCCESS {
-            return Err(format!("写 Run 键失败：Win32 错误码 {rc}"));
+            let name = to_wide(RUN_VALUE_NAME);
+            let value = to_wide(&cmd);
+            // REG_SZ 的长度必须**含结尾 NUL**，单位是字节
+            let bytes = (value.len() * 2) as u32;
+            let rc = RegSetValueExW(hk, name.as_ptr(), 0, REG_SZ, value.as_ptr() as *const u8, bytes);
+            RegCloseKey(hk);
+
+            if rc != ERROR_SUCCESS {
+                return Err(format!("Win32 错误码 {rc}"));
+            }
         }
+        Ok(())
+    })();
+
+    if reg_result.is_ok() {
+        startup_folder_disable();
+        return Ok(());
     }
-    Ok(())
+
+    // 注册表写入失败（如错误码 5 拦截）：平滑降级到启动文件夹
+    startup_folder_enable()
 }
 
-/// 绿色版：删掉 Run 键里的值。值本来就不存在也视为成功。
+/// 绿色版：删掉自启。同时清理 Run 键与启动文件夹。
 fn registry_disable() -> Result<(), String> {
+    startup_folder_disable();
     unsafe {
         let sub = to_wide(RUN_SUBKEY);
         let mut hk: usize = 0;
@@ -373,19 +493,13 @@ fn registry_disable() -> Result<(), String> {
             KEY_SET_VALUE,
             &mut hk,
         );
-        if rc != ERROR_SUCCESS {
-            // 键都不存在，那本来就没启用
-            return Ok(());
-        }
-        let name = to_wide(RUN_VALUE_NAME);
-        let rc = RegDeleteValueW(hk, name.as_ptr());
-        RegCloseKey(hk);
-
-        match rc {
-            ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
-            other => Err(format!("删 Run 键值失败：Win32 错误码 {other}")),
+        if rc == ERROR_SUCCESS {
+            let name = to_wide(RUN_VALUE_NAME);
+            let _ = RegDeleteValueW(hk, name.as_ptr());
+            RegCloseKey(hk);
         }
     }
+    Ok(())
 }
 
 // ============================================================
@@ -999,6 +1113,39 @@ mod tests {
         // 测试进程是 cargo 起的，没有包身份
         assert!(!is_packaged(), "测试进程不该有包身份");
         assert_eq!(detect_path(), AutoStartPath::Registry);
+    }
+
+    #[test]
+    fn 启动文件夹兜底写入_识别_删除() {
+        // 注意：本机（以及 CI 沙箱）可能禁止往 %TEMP% 写，统一用工程内的
+        // scratch 目录当临时目录，测完删掉。
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("scratch")
+            .join(format!("autostart-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // 一开始没有脚本
+        assert!(!startup_folder_state_in(&dir), "空目录不该判为已启用");
+        // 真写一次（走 startup_folder_enable_in，取真实 exe 路径）
+        let script = startup_folder_enable_in(&dir).expect("写入启动脚本应成功");
+        assert!(script.exists(), "脚本文件应存在");
+        let body = std::fs::read_to_string(&script).unwrap();
+        assert!(body.contains("WScript.Shell"), "应是 VBS：{body}");
+        assert!(body.contains(RUN_ARG), "必须带 --autostart 参数：{body}");
+        assert!(body.contains(", 0, False"), "必须隐藏窗口启动：{body}");
+        // 状态识别
+        assert!(startup_folder_state_in(&dir), "写过之后应判为已启用");
+        // 删除
+        remove_startup_script_in(&dir);
+        assert!(!startup_folder_state_in(&dir), "删掉之后应判为未启用");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 启动脚本内容形状() {
+        let body = startup_script_body(r"C:\a b\rog-mouse-ctl.exe");
+        assert!(body.starts_with("Set ws = CreateObject(\"WScript.Shell\")"));
+        assert!(body.contains(r#""""C:\a b\rog-mouse-ctl.exe"" --autostart""#.trim()),
+            "exe 路径要加引号以容忍空格：{body}");
     }
 
     #[test]

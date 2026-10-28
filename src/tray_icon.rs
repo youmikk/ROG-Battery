@@ -79,15 +79,15 @@ pub fn label(level: u8) -> String {
 
 /// 按位数选字号（**相对 [`ICON_SIZE`] 的 32px 图标**）。
 ///
-/// 一位数（`7`）用 24px，两位数（`82`）用 20px，三位数（`100`）用 15px。
+/// 一位数（`7`）用 28px，两位数（`82`）用 27px（双位分栏紧凑绘制，高度占满），三位数（`100`）用 14px。
 /// 这是纯函数，测试直接断言数字，不需要真的画。
 ///
 /// 实际绘制时按 `icon_size()` 等比缩放 —— 见 [`scaled_font_height`]。
 pub fn font_height(level: u8) -> i32 {
     match label(level).len() {
-        1 => 24,
-        2 => 20,
-        _ => 15,
+        1 => 28,
+        2 => 27,
+        _ => 14,
     }
 }
 
@@ -128,13 +128,283 @@ impl Drop for Gdi {
     }
 }
 
-/// 画一张带电量数字的图标。
+// ==================== GDI+ 透明图标 ====================
+//
+// 用户要求：托盘图标「要透明、只显示数字，像系统自带的字体」。
+// 裸 GDI 那条路做不到真透明（DrawTextW 把 alpha 写成 0，只能整块补回不透明），
+// 所以改用 GDI+ 画到 32bpp ARGB 位图上，再 `GdipCreateHICONFromBitmap` 转 HICON
+// —— alpha 通道原样保留，托盘上就是「透明底白字」。
+
+mod gdiplus {
+    use core::ffi::c_void;
+    // PixelFormat32bppARGB = 10 | (32<<8) | Alpha(0x40000) | GDI(0x20000) | Canonical(0x200000)
+    pub const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
+
+    #[repr(C)]
+    pub struct RectF {
+        pub x: f32,
+        pub y: f32,
+        pub w: f32,
+        pub h: f32,
+    }
+
+    #[link(name = "gdiplus")]
+    extern "system" {
+        pub fn GdipCreateBitmapFromScan0(
+            width: i32,
+            height: i32,
+            stride: i32,
+            format: i32,
+            scan0: *const u8,
+            bitmap: *mut *mut c_void,
+        ) -> i32;
+        pub fn GdipDisposeImage(image: *mut c_void) -> i32;
+        pub fn GdipGetImageGraphicsContext(image: *mut c_void, g: *mut *mut c_void) -> i32;
+        pub fn GdipDeleteGraphics(g: *mut c_void) -> i32;
+        pub fn GdipGraphicsClear(g: *mut c_void, color: u32) -> i32;
+        pub fn GdipSetSmoothingMode(g: *mut c_void, mode: i32) -> i32;
+        pub fn GdipSetTextRenderingHint(g: *mut c_void, hint: i32) -> i32;
+        pub fn GdipCreateFontFamilyFromName(
+            name: *const u16,
+            collection: *mut c_void,
+            family: *mut *mut c_void,
+        ) -> i32;
+        pub fn GdipDeleteFontFamily(family: *mut c_void) -> i32;
+        pub fn GdipCreateFont(
+            family: *mut c_void,
+            size: f32,
+            style: i32,
+            unit: i32,
+            font: *mut *mut c_void,
+        ) -> i32;
+        pub fn GdipDeleteFont(font: *mut c_void) -> i32;
+        pub fn GdipCreateStringFormat(attrs: i32, lang: u16, fmt: *mut *mut c_void) -> i32;
+        pub fn GdipSetStringFormatFlags(fmt: *mut c_void, flags: i32) -> i32;
+        pub fn GdipSetStringFormatAlign(fmt: *mut c_void, align: i32) -> i32;
+        pub fn GdipSetStringFormatLineAlign(fmt: *mut c_void, align: i32) -> i32;
+        pub fn GdipDeleteStringFormat(fmt: *mut c_void) -> i32;
+        pub fn GdipCreateSolidFill(argb: u32, brush: *mut *mut c_void) -> i32;
+        pub fn GdipDeleteBrush(brush: *mut c_void) -> i32;
+        pub fn GdipDrawString(
+            g: *mut c_void,
+            s: *const u16,
+            len: i32,
+            font: *mut c_void,
+            layout: *const RectF,
+            fmt: *mut c_void,
+            brush: *mut c_void,
+        ) -> i32;
+        pub fn GdipCreateHICONFromBitmap(bitmap: *mut c_void, hicon: *mut *mut c_void) -> i32;
+    }
+}
+
+/// 透明背景上数字的颜色：自适应浅色/深色任务栏。
 ///
-/// 失败（拿不到 DC / 建不出位图）返回 `None`，调用方回落到静态图标
-/// —— **不能让托盘空白**，那比显示旧图标糟得多。
+/// 浅色任务栏（Windows 11 默认/当前）：深炭灰 #1F1F1F，匹配输入法与时钟原生字体；低电警示红、中电橙。
+/// 深色任务栏：纯白 #FFFFFF；低电亮红、中电亮橙。
+fn glyph_color(level: u8, is_light: bool) -> [u8; 3] {
+    if is_light {
+        match level {
+            0..=20 => [0xD1, 0x3A, 0x2E],   // 警示红
+            21..=50 => [0xC4, 0x6E, 0x00],  // 稳健橙
+            _ => [0x1F, 0x1F, 0x1F],        // 原生深炭灰（匹配系统输入法及任务栏深色图标）
+        }
+    } else {
+        match level {
+            0..=20 => [0xEA, 0x4B, 0x3C],   // 亮红
+            21..=50 => [0xEA, 0x9A, 0x2E],  // 亮橙
+            _ => [0xFF, 0xFF, 0xFF],        // 纯白
+        }
+    }
+}
+
+/// 画一张**透明底**、带电量数字的图标（GDI+ 32bpp ARGB）。
 ///
+/// 失败返回 `None`，调用方回落到静态图标 —— **不能让托盘空白**。
 /// 成功返回的 `HICON` 由调用方负责 `DestroyIcon`。
 pub fn render(level: u8) -> Option<Handle> {
+    use gdiplus::*;
+    // 基础生成尺寸固定为 ICON_SIZE (32px)，生成高质量 32bpp ARGB 图标。
+    // Windows Shell_NotifyIcon 接收 32x32 图标后，由 DWM 高保真缩放到任务栏托盘，
+    // 无论是 100%、125%、150% 还是 200% 缩放，均能保持大字号饱满清晰、无毛刺。
+    let size = ICON_SIZE;
+    // GDI+ 必须已初始化（gfx::start 是进程级幂等的）。
+    if !crate::ui::gfx::start() {
+        return None;
+    }
+    let is_light = crate::autostart::system_uses_light_theme();
+    unsafe {
+        let mut bmp: *mut c_void = ptr::null_mut();
+        if GdipCreateBitmapFromScan0(
+            size,
+            size,
+            0,
+            PIXEL_FORMAT_32BPP_ARGB,
+            ptr::null(),
+            &mut bmp,
+        ) != 0
+            || bmp.is_null()
+        {
+            return None;
+        }
+        let mut g: *mut c_void = ptr::null_mut();
+        if GdipGetImageGraphicsContext(bmp, &mut g) != 0 || g.is_null() {
+            GdipDisposeImage(bmp);
+            return None;
+        }
+        GdipSetSmoothingMode(g, 4); // AntiAlias
+        GdipSetTextRenderingHint(g, 4); // TextRenderingHintAntiAlias（灰度，不留彩边）
+        GdipGraphicsClear(g, 0x0000_0000); // 全透明
+
+        // 字体：Segoe UI Bold（最接近系统托盘字形）
+        let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+        let mut family: *mut c_void = ptr::null_mut();
+        let mut font: *mut c_void = ptr::null_mut();
+        let fh = scaled_font_height(level, size) as f32;
+        if GdipCreateFontFamilyFromName(face.as_ptr(), ptr::null_mut(), &mut family) == 0 {
+            // style 1 = Bold，unit 2 = UnitPixel
+            let _ = GdipCreateFont(family, fh, 1, 2, &mut font);
+        }
+
+        // 居中排版的 StringFormat，禁止折行（折行会导致两位数被折成两行从而第二位被裁切）
+        const STRING_FORMAT_NO_WRAP: i32 = 0x0000_1000;
+        let mut fmt: *mut c_void = ptr::null_mut();
+        let _ = GdipCreateStringFormat(0, 0, &mut fmt);
+        if !fmt.is_null() {
+            GdipSetStringFormatFlags(fmt, STRING_FORMAT_NO_WRAP);
+            GdipSetStringFormatAlign(fmt, 1); // Center
+            GdipSetStringFormatLineAlign(fmt, 1); // Center
+        }
+
+        let text: Vec<u16> = label(level).encode_utf16().collect();
+        let len = text.len() as i32;
+
+        if !font.is_null() {
+            // 描边/光晕（8 方向偏 1px）：浅色任务栏柔和浅光晕，深色任务栏柔和深暗影
+            let halo_color = if is_light {
+                0x35FF_FFFF // 浅色任务栏：柔和半透明浅白微光
+            } else {
+                0x4500_0000 // 深色任务栏：柔和半透明暗影
+            };
+            let mut shadow: *mut c_void = ptr::null_mut();
+            let _ = GdipCreateSolidFill(halo_color, &mut shadow);
+
+            let c = glyph_color(level, is_light);
+            let argb = 0xFF00_0000 | ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
+            let mut fg: *mut c_void = ptr::null_mut();
+            let _ = GdipCreateSolidFill(argb, &mut fg);
+
+            let offs: [(f32, f32); 8] = [
+                (-1.0, 0.0),
+                (1.0, 0.0),
+                (0.0, -1.0),
+                (0.0, 1.0),
+                (-1.0, -1.0),
+                (1.0, -1.0),
+                (-1.0, 1.0),
+                (1.0, 1.0),
+            ];
+
+            if text.len() == 2 {
+                // 两位数：将两个数字分左右栏绘制，消除单串过长被 GDI+ 折行/裁切的问题，字号拉大至 27px 占满高度
+                let half = size as f32 / 2.0;
+                let d1 = [text[0]];
+                let d2 = [text[1]];
+                let rc1 = RectF {
+                    x: -1.2,
+                    y: -0.5,
+                    w: half + 2.4,
+                    h: size as f32,
+                };
+                let rc2 = RectF {
+                    x: half - 1.2,
+                    y: -0.5,
+                    w: half + 2.4,
+                    h: size as f32,
+                };
+
+                if !shadow.is_null() {
+                    for (dx, dy) in offs {
+                        let r1 = RectF {
+                            x: rc1.x + dx,
+                            y: rc1.y + dy,
+                            w: rc1.w,
+                            h: rc1.h,
+                        };
+                        let r2 = RectF {
+                            x: rc2.x + dx,
+                            y: rc2.y + dy,
+                            w: rc2.w,
+                            h: rc2.h,
+                        };
+                        GdipDrawString(g, d1.as_ptr(), 1, font, &r1, fmt, shadow);
+                        GdipDrawString(g, d2.as_ptr(), 1, font, &r2, fmt, shadow);
+                    }
+                }
+                if !fg.is_null() {
+                    GdipDrawString(g, d1.as_ptr(), 1, font, &rc1, fmt, fg);
+                    GdipDrawString(g, d2.as_ptr(), 1, font, &rc2, fmt, fg);
+                }
+            } else {
+                let rc = RectF {
+                    x: 0.0,
+                    y: -0.5,
+                    w: size as f32,
+                    h: size as f32,
+                };
+                if !shadow.is_null() {
+                    for (dx, dy) in offs {
+                        let r = RectF {
+                            x: rc.x + dx,
+                            y: rc.y + dy,
+                            w: rc.w,
+                            h: rc.h,
+                        };
+                        GdipDrawString(g, text.as_ptr(), len, font, &r, fmt, shadow);
+                    }
+                }
+                if !fg.is_null() {
+                    GdipDrawString(g, text.as_ptr(), len, font, &rc, fmt, fg);
+                }
+            }
+
+            if !shadow.is_null() {
+                GdipDeleteBrush(shadow);
+            }
+            if !fg.is_null() {
+                GdipDeleteBrush(fg);
+            }
+        }
+
+        // 清理绘图对象（必须在取 HICON 之前把 Graphics 从位图上摘掉）
+        if !fmt.is_null() {
+            GdipDeleteStringFormat(fmt);
+        }
+        if !font.is_null() {
+            GdipDeleteFont(font);
+        }
+        if !family.is_null() {
+            GdipDeleteFontFamily(family);
+        }
+        GdipDeleteGraphics(g);
+
+        let mut hicon: Handle = ptr::null_mut();
+        let st = GdipCreateHICONFromBitmap(bmp, &mut hicon);
+        GdipDisposeImage(bmp);
+        if st == 0 && !hicon.is_null() {
+            Some(hicon)
+        } else {
+            if std::env::var_os("ROG_TRAY_DEBUG").is_some() {
+                eprintln!("[tray_icon] GdipCreateHICONFromBitmap 失败 status={st}");
+            }
+            None
+        }
+    }
+}
+
+/// 【旧实现，保留供对照】不透明 GDI 版本。
+#[allow(dead_code)]
+fn render_gdi_legacy(level: u8) -> Option<Handle> {
     let size = icon_size();
     unsafe {
         // 用屏幕 DC 作模板：`CreateCompatibleDC(null)` 得到的内存 DC
@@ -192,7 +462,142 @@ pub fn render(level: u8) -> Option<Handle> {
             0,
             0,
             0,
-            700, // FW_BOLD
+            500, // FW_MEDIUM
+            0,
+            0,
+            0,
+            1, // DEFAULT_CHARSET
+            0,
+            0,
+            4, // ANTIALIASED_QUALITY
+            0,
+            face.as_ptr(),
+        );
+        if !font.is_null() {
+            gdi.objects.push(font);
+            let old_font = win32::SelectObject(mem, font);
+            win32::SetBkMode(mem, 1); // TRANSPARENT
+            win32::SetTextColor(mem, colorref(FG));
+
+            let text = win32::to_wide(&label(level));
+            let len = text.len() as i32 - 1;
+            let mut rc = win32::Rect::new(0, 0, size, size);
+            const DT_CENTER: u32 = 0x0000_0001;
+            const DT_VCENTER: u32 = 0x0000_0004;
+            const DT_SINGLELINE: u32 = 0x0000_0020;
+            win32::DrawTextW(
+                mem,
+                text.as_ptr(),
+                len,
+                &mut rc,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+
+            if !old_font.is_null() {
+                win32::SelectObject(mem, old_font);
+            }
+        }
+
+        for i in 0..(size * size) as usize {
+            *px.add(i) = (*px.add(i) & 0x00FF_FFFF) | 0xFF00_0000;
+        }
+
+        let mask = win32::CreateBitmap(size, size, 1, 1, ptr::null_mut());
+        if !mask.is_null() {
+            gdi.objects.push(mask);
+        }
+
+        win32::SelectObject(mem, old);
+
+        let info = win32::IconInfo {
+            is_icon: 1,
+            x_hotspot: 0,
+            y_hotspot: 0,
+            mask,
+            color: dib,
+        };
+        let hicon = win32::CreateIconIndirect(&info);
+
+        if hicon.is_null() {
+            if std::env::var_os("ROG_TRAY_DEBUG").is_some() {
+                eprintln!(
+                    "[tray_icon] CreateIconIndirect 失败 GetLastError={}",
+                    win32::GetLastError()
+                );
+            }
+            None
+        } else {
+            Some(hicon)
+        }
+    }
+}
+
+/// 画一张带电量数字的图标。
+///
+/// 失败（拿不到 DC / 建不出位图）返回 `None`，调用方回落到静态图标
+/// —— **不能让托盘空白**，那比显示旧图标糟得多。
+///
+/// 成功返回的 `HICON` 由调用方负责 `DestroyIcon`。
+#[allow(dead_code)]
+fn render_old2(level: u8) -> Option<Handle> {
+    let size = icon_size();
+    unsafe {
+        // 用屏幕 DC 作模板：`CreateCompatibleDC(null)` 得到的内存 DC
+        // 格式跟当前显示设置一致，颜色不会偏。
+        let screen = win32::GetDC(ptr::null_mut());
+        if screen.is_null() {
+            return None;
+        }
+        let mem = win32::CreateCompatibleDC(screen);
+        win32::ReleaseDC(ptr::null_mut(), screen);
+        if mem.is_null() {
+            return None;
+        }
+
+        let mut gdi = Gdi {
+            objects: Vec::new(),
+            dc: mem,
+        };
+
+        // 32bpp 的 DIB：每像素 BGRA，alpha 由我们自己写。
+        let mut bmi = win32::BitmapInfo::default();
+        bmi.header.size = core::mem::size_of::<win32::BitmapInfoHeader>() as u32;
+        bmi.header.width = size;
+        // **负数 = 自上而下**。正数会让 DIB 从下往上存，
+        // 于是 `SetPixel(x, y)` 的 y 轴和 `DrawTextW` 的矩形不一致，图会上下颠倒。
+        bmi.header.height = -size;
+        bmi.header.planes = 1;
+        bmi.header.bit_count = 32;
+        bmi.header.compression = 0; // BI_RGB
+        bmi.header.size_image = (size * size * 4) as u32;
+
+        let mut bits: *mut c_void = ptr::null_mut();
+        let dib = win32::CreateDIBSection(mem, &bmi, 0, &mut bits, ptr::null_mut(), 0);
+        if dib.is_null() || bits.is_null() {
+            return None;
+        }
+        gdi.objects.push(dib);
+
+        let old = win32::SelectObject(mem, dib);
+        if old.is_null() {
+            return None;
+        }
+
+        // 背景：整块填底色。alpha 一并写 0xFF（不透明）。
+        let px = bits as *mut u32;
+        let bg = colorref(level_color(level));
+        for i in 0..(size * size) as usize {
+            *px.add(i) = bg | 0xFF00_0000;
+        }
+
+        // 文字
+        let face = win32::to_wide("Segoe UI");
+        let font = win32::CreateFontW(
+            -scaled_font_height(level, size),
+            0,
+            0,
+            0,
+            500, // FW_MEDIUM（原来是 700 粗体，字太"重"不像系统原生字体）
             0,
             0,
             0,
@@ -357,10 +762,10 @@ mod tests {
 
     #[test]
     fn scrolled_font_height_stays_inside_the_icon() {
-        // 16px（系统实际尺寸）上两位数必须是可读的，且不能顶出边界。
-        assert_eq!(scaled_font_height(82, 16), 10); // 20 * 16 / 32
-        assert_eq!(scaled_font_height(7, 16), 12); // 24 * 16 / 32
-        assert_eq!(scaled_font_height(100, 16), 7); // 15 * 16 / 32 = 7（截断）
+        // 16px 上两位数必须是可读的，且不能顶出边界。
+        assert_eq!(scaled_font_height(82, 16), 13); // 27 * 16 / 32 = 13
+        assert_eq!(scaled_font_height(7, 16), 14); // 28 * 16 / 32 = 14
+        assert_eq!(scaled_font_height(100, 16), 7); // 14 * 16 / 32 = 7
         for lv in [0u8, 7, 42, 82, 99, 100] {
             for size in [16, 20, 24, 32] {
                 let h = scaled_font_height(lv, size);

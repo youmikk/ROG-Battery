@@ -79,6 +79,10 @@ const DWMWA_BORDER_COLOR: u32 = 34;
 const DWMWA_CAPTION_COLOR: u32 = 35;
 /// 标题栏文字颜色，Win11 22000+。
 const DWMWA_TEXT_COLOR: u32 = 36;
+/// 窗口圆角偏好，Win11 22000+（`DWMWA_WINDOW_CORNER_PREFERENCE`）。
+const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+/// `DWMWCP_ROUND`：四角微圆，跟系统原生窗口同一档手感。
+const DWMWCP_ROUND: u32 = 2;
 
 /// `DWMWA_COLOR_DEFAULT`：「不指定颜色，用系统默认」。
 /// 注意它是 `0xFFFFFFFF`，不是黑色 —— 传 0 会得到纯黑标题栏。
@@ -499,10 +503,23 @@ pub fn refresh_titlebar(hwnd: Handle, dark: bool) {
     }
 }
 
+/// 给无边框窗口开系统原生圆角。Win11 22000+ 生效，老系统静默返回 false。
+///
+/// 为什么要开：我们是自绘无边框窗口（`go_frameless` 去掉了标题栏），DWM 默认
+/// 把它当普通矩形合成，四角是直角，窗口边缘与桌面之间是一条硬切的直线 ——
+/// 用户的原话是「下方边框没有衔接，很生硬」。设置 `DWMWCP_ROUND` 后由 DWM
+/// 负责按系统风格裁出圆角并补上阴影，比自绘 `SetWindowRgn` 更贴合 Win11 观感
+/// （自绘 region 会把阴影一起裁掉，反而更生硬）。
+pub fn set_round_corners(hwnd: Handle) -> bool {
+    if hwnd.is_null() {
+        return false;
+    }
+    dwm_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_ROUND)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn scale_matches_windows_dpi_steps() {
         // Windows 的缩放档位都是 96 的整数倍分之一，这里挑几档常见的。

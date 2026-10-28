@@ -12,6 +12,7 @@ mod backup;
 mod chart;
 mod cli;
 mod dwm;
+mod dynlight;
 mod gui;
 mod hid;
 mod history;
@@ -101,7 +102,7 @@ fn main() -> ExitCode {
         unsafe {
             win32::FreeConsole();
         }
-        return run_gui();
+        return run_gui(wants_autostart);
     }
     let _ = wants_help; // 参数非空时由下面的 CLI 分支统一处理
 
@@ -149,9 +150,56 @@ fn main() -> ExitCode {
     }
 }
 
+const SINGLE_INSTANCE_MUTEX: &str = "Local\\RogMouseCtl_SingleInstance_Mutex";
+const ERROR_ALREADY_EXISTS: u32 = 183;
+const SW_RESTORE: i32 = 9;
+const SW_SHOW: i32 = 5;
+
+/// 单实例互斥检查。如果已有实例运行，激活前台窗口并返回 None。
+fn check_single_instance() -> Option<win32::Handle> {
+    let name = win32::to_wide(SINGLE_INSTANCE_MUTEX);
+    let handle = unsafe { win32::CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
+    if handle.is_null() {
+        return None;
+    }
+    let err = unsafe { win32::GetLastError() };
+    if err == ERROR_ALREADY_EXISTS {
+        let title = win32::to_wide("ROG 龙鳞 Ace Mini");
+        let hwnd = unsafe { win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
+        if !hwnd.is_null() {
+            unsafe {
+                win32::ShowWindow(hwnd, SW_RESTORE);
+                win32::ShowWindow(hwnd, SW_SHOW);
+                win32::SetForegroundWindow(hwnd);
+            }
+        }
+        unsafe { win32::CloseHandle(handle) };
+        return None;
+    }
+    Some(handle)
+}
+
+struct MutexGuard(win32::Handle);
+
+impl Drop for MutexGuard {
+    fn drop(&mut self) {
+        unsafe {
+            win32::ReleaseMutex(self.0);
+            win32::CloseHandle(self.0);
+        }
+    }
+}
+
 /// GUI 入口。控制台已经在上面的 [`main`] 里脱离干净，这里**不能**再 `println!`
 /// —— 没有地方会接住它。需要日志就写 [`paths::cache_dir`] 下的文件。
-fn run_gui() -> ExitCode {
+fn run_gui(wants_autostart: bool) -> ExitCode {
+    // 单实例互斥锁：防止多开造成 HID 设备冲突与多托盘图标堆叠
+    let mutex = match check_single_instance() {
+        Some(h) => h,
+        None => return ExitCode::SUCCESS,
+    };
+    let _guard = MutexGuard(mutex);
+
     // DPI 感知必须在**任何窗口创建之前**声明，否则 Windows 会先按 96 DPI 建窗口，
     // 再把整窗当位图拉伸到实际缩放比 —— 那就是「字体发虚」的根因（GDI+ 画出来的
     // 抗锯齿文字被整体插值放大，边缘糊掉）。
@@ -163,7 +211,7 @@ fn run_gui() -> ExitCode {
     // 降级链，全失败也只是退回模糊状态，不该因此拒绝启动。
     let _ = dwm::enable_dpi_awareness();
 
-    match gui::run() {
+    match gui::run(wants_autostart) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // GUI 起不来时控制台已经没了，唯一的告知途径是消息框 + 日志文件。

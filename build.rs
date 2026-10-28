@@ -30,6 +30,50 @@ fn main() {
         );
     }
 
+    link_app_icon();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/mingw-import-libs");
+}
+
+/// 把 `assets\app.o`（编译好的图标资源）链进 exe。
+///
+/// # 为什么用预编译的 `.o` 而不是在这里调 `windres`
+///
+/// 资源脚本 `assets\app.rc` 需要 `windres` 编译成 COFF 才能链接。rustlib 的
+/// `x86_64-w64-mingw32-gcc.exe` 旁边**没有** windres，本机唯一可用的是
+/// LLVM-MinGW 的 `llvm-windres.exe`（在 winget 包目录里）。
+///
+/// 但**在这里调它行不通**：`Command::new(windres)` 报
+/// `Unable to create temp file: Permission denied` —— 构建脚本派生的子进程
+/// 拿到的是受限令牌（Low 完整性 + 受限 SID），`%TEMP%` 不可写；
+/// 把 `TMP`/`TEMP` 指到项目内目录也没用（令牌限制，不是路径问题）。
+///
+/// 所以：**`.o` 预先生成好并提交进仓**，构建脚本只负责把路径告诉链接器。
+/// 重新生成的方式（在普通 powershell 里跑，不要在 cargo 派生的进程里跑）：
+///
+/// ```text
+/// llvm-windres -O coff -I assets -i assets\app.rc -o assets\app.o
+/// ```
+///
+/// # 为什么 `rustc-link-arg` 而不是 `rustc-link-lib`
+///
+/// 这是个 `.o` 文件不是库，链接器要的是**绝对路径**。`rustc-link-arg`
+/// 把参数原样透传给链接器 —— 注意它只对**当前 crate 的最终产物**生效，
+/// 对这个纯 bin crate 正好。
+fn link_app_icon() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let obj = root.join("assets/app.o");
+    if obj.is_file() {
+        println!("cargo:rustc-link-arg={}", obj.display());
+    } else {
+        // 不 panic：没有图标程序照样能跑（Windows 会给个通用占位图标），
+        // 不该因为一个图标挡住整个构建。
+        println!(
+            "cargo:warning=assets/app.o 不存在，exe 将没有图标资源。\
+             生成方式: llvm-windres -O coff -I assets -i assets/app.rc -o assets/app.o"
+        );
+    }
+    println!("cargo:rerun-if-changed=assets/app.o");
+    println!("cargo:rerun-if-changed=assets/app.rc");
+    println!("cargo:rerun-if-changed=assets/tray.ico");
 }

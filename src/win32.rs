@@ -157,6 +157,7 @@ extern "system" {
     /// 为什么不用 `Instant::now()`：动效只需要「每帧不重样」，用单调时钟更省事，
     /// 但 `std::time::Instant` 在某些老平台上走的是不保证单调的路径。这里只取模
     /// 算相位，回绕一次会让彗尾跳一下，无感。
+    #[allow(dead_code)]
     pub fn GetTickCount() -> u32;
 
     /// 本地时间。备份文件名用它，避免出现 UTC `14:26` 与本地 `22:26` 不一致的困惑。
@@ -328,11 +329,40 @@ pub struct BitmapInfo {
     pub colors: [u32; 3],
 }
 
+/// `MONITORINFO`。`GetMonitorInfoW` 用它返回显示器的工作区（去掉任务栏那块）。
+///
+/// 无边框窗口最大化时必须自己算工作区：`WS_THICKFRAME` 让系统以为有 8px 边框，
+/// 最大化后右侧/底部会各多出 8px 跑到屏幕外，任务栏也被盖掉。
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MonitorInfo {
+    /// **必须先填** `size_of::<MonitorInfo>()`，否则 `GetMonitorInfoW` 直接返回 0。
+    pub cb_size: u32,
+    /// 整个显示器矩形（含任务栏区域）。
+    pub rc_monitor: Rect,
+    /// 工作区矩形（去掉任务栏、去掉停靠的工具栏）。
+    pub rc_work: Rect,
+    /// `MONITORINFOF_PRIMARY` = 1。
+    pub flags: u32,
+}
+
 // ============ user32 ============
 #[link(name = "user32")]
-extern "system" {    /// 简单的消息框。GUI 还没成型时用来告诉用户「这里还没做好」，
+extern "system" {    /// 查找顶层窗口（单实例检测用）。
+    pub fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
+    /// 把已有窗口置顶激活。
+    pub fn SetForegroundWindow(hwnd: Handle) -> i32;
+    /// 显示/还原窗口。
+    pub fn ShowWindow(hwnd: Handle, cmd: i32) -> i32;
+
+    /// 简单的消息框。GUI 还没成型时用来告诉用户「这里还没做好」，
     /// 免得双击 exe 后什么都不发生。
     pub fn MessageBoxW(hwnd: Handle, text: *const u16, caption: *const u16, flags: u32) -> i32;
+
+    /// 取离窗口最近的显示器。无边框窗口最大化要它来查工作区。
+    pub fn MonitorFromWindow(hwnd: Handle, flags: u32) -> Handle;
+    /// 读显示器信息。**`MonitorInfo.cb_size` 必须先填**，否则返回 0。
+    pub fn GetMonitorInfoW(monitor: Handle, out: *mut MonitorInfo) -> i32;
 
     // ---- 自绘（托盘图标）----
     //
