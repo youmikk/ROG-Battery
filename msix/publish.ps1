@@ -86,7 +86,8 @@ if (-not $cli) {
     exit 2
 }
 
-$cliArgs = @('publish', '-id', $ProductId, '-i', $upload)
+$uploadDir = Split-Path -Parent $upload
+$cliArgs = @('publish', '-id', $ProductId, '-i', $uploadDir)
 if ($DryRun) { $cliArgs += '--noCommit' }   # 只建提交、不点提交认证，方便先核对
 
 Write-Host ''

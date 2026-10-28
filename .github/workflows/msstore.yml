@@ -214,7 +214,8 @@ jobs:
           $up = Get-ChildItem dist\*.msixupload | Select-Object -First 1
           if (-not $up) { throw 'dist 里没有 .msixupload，先确认上一步成功' }
           Write-Host "上传：$($up.FullName)"
-          msstore publish $up.FullName -id ${{ vars.MSSTORE_PRODUCT_ID }}
+          # 注意：publish 的 -i/--inputDirectory 要的是「目录」，不是文件路径
+          msstore publish -i dist -id ${{ vars.MSSTORE_PRODUCT_ID }}
 
       - name: 等待商店校验结果
         if: vars.MSSTORE_PRODUCT_ID != ''

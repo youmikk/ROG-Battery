@@ -394,12 +394,15 @@ MSVC 目标链不上。所以 runner 上要装 `stable-x86_64-pc-windows-gnu` + 
 
 Settings → Secrets and variables → Actions → **Secrets**
 
+> 逐步操作（每一步点哪里、容易拿错的地方、常见报错对照）见 **[docs/store-publishing-setup.md](../docs/store-publishing-setup.md)**。
+> 仓库里还有一键写入脚本：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\setup-store-secrets.ps1`（先加 `-DryRun` 看一眼）。
+
 | Name | 取值位置 |
 | --- | --- |
 | `AZURE_AD_TENANT_ID` | Entra ID → 应用注册 → 概览 → 目录（租户）ID |
 | `AZURE_AD_APPLICATION_CLIENT_ID` | 同上 → 应用程序（客户端）ID |
 | `AZURE_AD_APPLICATION_SECRET` | 同上 → 证书和密码 → 新建客户端密码（值只显示一次） |
-| `SELLER_ID` | Partner Center → Account settings → Legal info |
+| `SELLER_ID` | Partner Center → 设置 → 帐户设置 → 标识符 → 发布者 ID |
 
 前置条件：Partner Center 关联 Entra ID，并在 Entra ID 里注册应用、授予 Partner Center 的 Manager 角色。
 

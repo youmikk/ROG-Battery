@@ -211,6 +211,7 @@ cargo test                         # 148 项测试
 | [docs/gdiplus-window-dc.md](docs/gdiplus-window-dc.md) | 窗口 DC 与双缓冲 |
 | [docs/nwg-gotchas.md](docs/nwg-gotchas.md) | GUI 框架选型与踩坑记录 |
 | [docs/startup-modes.md](docs/startup-modes.md) | 启动形态（GUI / CLI / 自启） |
+| [docs/store-publishing-setup.md](docs/store-publishing-setup.md) | 商店自动发布的凭据配置（Entra 应用 + 卖家 ID + GitHub Secrets） |
 | [docs/tray-icon.md](docs/tray-icon.md) | 托盘图标的绘制与自适应配色 |
 | [msix/store/submission-notes.md](msix/store/submission-notes.md) | 商店提审所需的能力说明与认证备注 |
 
