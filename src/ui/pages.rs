@@ -1486,7 +1486,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         .ident
         .map(|i| i.model_name.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("ROG 龙鳞 Ace Mini");
+        .unwrap_or("未检测到设备");
     c.h1_with_model(p, "电量", model);
 
     let st = d.state;

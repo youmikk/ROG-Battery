@@ -68,7 +68,9 @@ use crate::win32;
 /// install 目录只读、`Icon::from_file` 在 strict=false 时读不到会 panic。
 static TRAY_ICON: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/tray.ico"));
 
-const WINDOW_TITLE: &str = "ROG 龙鳞 Ace Mini";
+/// 窗口标题。用产品名，不写具体型号 —— 这是个通用 ROG 鼠标工具。
+/// `main.rs` 的单实例检查靠这个标题找已有窗口，两处必须一致。
+pub const WINDOW_TITLE: &str = "R Battery";
 
 /// 侧栏左下角显示的版本号。
 ///
