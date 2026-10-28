@@ -25,6 +25,13 @@ pub const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 pub const OPEN_EXISTING: u32 = 3;
 pub const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
 
+// ---- 标准设备 / 控制台 ----
+/// `AttachConsole` 的参数：接到父进程的控制台上。
+pub const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+pub const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
+pub const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
+pub const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4;
+
 // ---- SetupDi 标志 ----
 pub const DIGCF_PRESENT: u32 = 0x0000_0002;
 pub const DIGCF_DEVICEINTERFACE: u32 = 0x0000_0010;
@@ -175,11 +182,17 @@ extern "system" {
 
     /// 脱离当前控制台。GUI 模式启动时调一次，双击 exe 才不会挂一个黑框。
     ///
-    /// 为什么是这里而不是把 `subsystem` 改成 `windows`：实测 `subsystem=windows`
-    /// 之后 `rog-mouse-ctl info > report.txt` 重定向会产出 **0 字节**空文件
-    /// —— 没有控制台可 attach 时 `CONOUT$` 拿不到用户的管道句柄，所有脚本化
-    /// 用法全废。保持 console subsystem + GUI 路径上 `FreeConsole`，两者兼得。
+    /// 子系统已经是 `windows`（见 `src/main.rs` 的 `windows_subsystem`），所以
+    /// 裸跑时进程本来就没有控制台；这里保留调用只是为了「从终端启动 GUI」这一
+    /// 种情况：那时 `attach_console` 已经把父控制台接上了，进 GUI 前要脱开。
     pub fn FreeConsole() -> i32;
+
+    /// 把本进程接到指定进程的控制台上（`ATTACH_PARENT_PROCESS` = 父进程）。
+    pub fn AttachConsole(process_id: u32) -> i32;
+
+    pub fn GetStdHandle(which: u32) -> Handle;
+
+    pub fn SetStdHandle(which: u32, h: Handle) -> i32;
 
     /// 命名互斥体。`history.tsv` 的跨进程保护用它。
     ///
@@ -570,4 +583,68 @@ pub fn to_wide(s: &str) -> Vec<u16> {
 /// 取 last-error 并清掉（格式化成人类可读的错误码）。
 pub fn last_error() -> u32 {
     unsafe { GetLastError() }
+}
+
+/// 句柄是否可用（既不是 NULL 也不是 `INVALID_HANDLE_VALUE`）。
+fn handle_ok(h: Handle) -> bool {
+    !h.is_null() && h != INVALID_HANDLE_VALUE
+}
+
+/// 把父进程（cmd / PowerShell）的控制台接到本进程上，让 CLI 的输出能看见。
+///
+/// 本程序的子系统是 `windows`（见 `src/main.rs` 的 `windows_subsystem`）——
+/// 双击、从开始菜单、从商店启动时**根本不会创建控制台**，所以不会闪黑框。
+/// 代价是命令行调用时进程默认没有控制台，`println!` 无处可写。这里在 `main`
+/// 最开头补回来，顺序很关键：
+///
+/// 1. 先看 `GetStdHandle(STD_OUTPUT_HANDLE)` 是否有效。`cmd /c "x info > r.txt"`
+///    这类重定向、`| Out-File`、`Start-Process -RedirectStandardOutput` 都会把
+///    句柄继承下来，此时**不能**用 `CONOUT$` 覆盖它，否则那些用法全写成空文件。
+/// 2. 没有继承句柄时才 `AttachConsole(ATTACH_PARENT_PROCESS)`，接上父控制台后
+///    再把 `CONOUT$` / `CONIN$` 设成标准句柄，`println!` 就落到那个窗口里。
+///
+/// 双击启动时没有父控制台，第 1、2 步都失败，函数返回 `false`，什么也不做。
+///
+/// 已知限制（实测，非本函数的锅）：PowerShell 自己的 `>` 操作符把 GUI 子系统
+/// 程序的标准输出接成一个**写不进去**的句柄 —— `& x --help > f.txt` 得到 0 字节，
+/// 而 `cmd /c "x --help > f.txt"`、`& x --help | Out-File f.txt`、
+/// `Start-Process -RedirectStandardOutput` 三种都正常。脚本里重定向请用后三者。
+pub fn attach_console() -> bool {
+    unsafe {
+        if handle_ok(GetStdHandle(STD_OUTPUT_HANDLE)) {
+            return true;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return false;
+        }
+        let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        let out = to_wide("CONOUT$");
+        let h_out = CreateFileW(
+            out.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            share,
+            core::ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            core::ptr::null_mut(),
+        );
+        if handle_ok(h_out) {
+            SetStdHandle(STD_OUTPUT_HANDLE, h_out);
+            SetStdHandle(STD_ERROR_HANDLE, h_out);
+        }
+        let inp = to_wide("CONIN$");
+        let h_in = CreateFileW(
+            inp.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            share,
+            core::ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            core::ptr::null_mut(),
+        );
+        if handle_ok(h_in) {
+            SetStdHandle(STD_INPUT_HANDLE, h_in);
+        }
+        true
+    }
 }
