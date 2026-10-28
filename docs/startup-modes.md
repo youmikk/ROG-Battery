@@ -1,8 +1,10 @@
 # 双形态启动方案（GUI 无黑框 + CLI 可重定向）
 
-**结论：保持 `subsystem=console` 不变，GUI 路径开头调 `FreeConsole()`。**
+**结论：子系统用 `windows`（PE `subsystem=2`），命令行由 `win32::attach_console()` 在 `main` 开头把父控制台接回来 —— 但只在没有继承句柄时才接。**
 
-这篇记录为什么不是另一种做法，以及实测数据。改动只涉及 `main.rs` 十几行和 `win32.rs` 一个 FFI 声明。
+本文在 2026-10-29 被推翻重写过一次。早前的结论是「保持 `subsystem=console` + GUI 路径 `FreeConsole()`」，那是错的：
+`FreeConsole` 只是事后把控制台赶走，窗口已经画出来了，从 Microsoft Store 启动时用户照样看得见黑框。
+真正难的那一半是重定向，而它可以用「先看有没有继承句柄」这一个分支解决。
 
 ---
 
@@ -13,103 +15,89 @@
 1. 命令行工具：`rog-mouse-ctl info` 要往控制台打印，要能被 `> report.txt`、`| Select-String` 捕获
 2. 图形界面：双击 exe 要弹窗口，**不能闪一个黑框**
 
-console subsystem 的程序双击运行时，Windows 会自动配一个控制台窗口 —— 这就是黑框的来源。
-
 ---
 
-## 两条路的实测对比
+## 三条路的实测对比
 
-### 方案 A：`#![windows_subsystem = "windows"]` + `AttachConsole(ATTACH_PARENT_PROCESS)`
+### 方案 A（旧版，失败）：`windows_subsystem = "windows"` + 无条件 `CONOUT$`
 
-思路是反过来：编成 Windows 子系统（双击无黑框），需要输出时主动挂回父进程的控制台。
-
-探针 `scratch/consoletest.rs` 实测（`rustc -O` 编译，5,089,401 B）：
+探针 `scratch/consoletest.rs` 实测（`rustc -O` 编译）：
 
 ```
 AttachConsole = 1                                    ← 挂上了
 GetConsoleWindow = 1509564                           ← 拿到窗口
 CreateFileW(CONOUT$) = 260                           ← 句柄有效
-SetStdHandle(out) = 1                                ← 重定向成功
-SetStdHandle(err) = 1
+SetStdHandle(out) = 1                                ← "重定向成功"
 WriteFile = 1, written = 43                          ← 直写成功
 ```
 
-**看起来全成功，但：**
+看起来全成功，但：
 
 ```
 $ cmd /c "consoletest.exe > redirect.txt 2>&1"
 redirect.txt 长度: 0        ← 空文件！
 ```
 
-`PowerShell ... | Out-File out.txt` 同样是 **0 字节**。
+**当年记下的原因是错的。** 当时写的是「重定向时没有控制台可以 attach，`CONOUT$` 拿不到用户的管道」，
+真正的原因更简单：**父进程已经把目标句柄（文件或管道）继承给子进程了，探针却用 `CONOUT$` 把
+`STD_OUTPUT_HANDLE` 覆盖掉了** —— 于是输出进了控制台，用户的文件当然收不到字节。
+换句话说，方案 A 不是走不通，是少了「有继承句柄就别动它」这一步。
 
-**原因**：重定向的时候根本没有控制台可以 attach。`CONOUT$` 是「当前控制台」的符号名，进程没有控制台时 `CreateFileW("CONOUT$")` 要么失败、要么拿到一个和用户管道无关的句柄。`WriteFile` 返回成功（写进了一个没有接收者的地方），用户的文件收不到任何字节。
-
-**这条路会废掉所有脚本化用法**：`info > report.txt`、`| Select-String`、CI 里抓输出，全部变成空。
-
-### 方案 B：保持 console subsystem + GUI 路径调 `FreeConsole()`
-
-探针 `scratch/freeconsole.rs` 实测：
+### 方案 B（过渡，有黑框）：console subsystem + `FreeConsole()`
 
 | 场景 | 结果 |
 |---|---|
 | CLI（带参数）`cmd /c "freeconsole.exe --version > fc-cli.txt"` | ✅ 39 字节正常捕获 |
 | GUI（无参数）`GetConsoleWindow` 前 | 984974（有黑框） |
-| GUI（无参数）调 `FreeConsole()` 后 | **0（窗口消失）** |
+| GUI（无参数）调 `FreeConsole()` 后 | 0（窗口消失） |
+
+CLI 完全正常，但黑框**先被创建再被赶走**。本机进程快，多数时候看不见；Store 版启动路径更长，
+用户就能看见一下。这是本次改回方案 C 的直接原因。
+
+### 方案 C（现在采用）：`windows_subsystem = "windows"` + 条件接控制台
 
 ```rust
-unsafe {
-    FreeConsole();                    // 1 = 成功脱离
+// src/main.rs 顶部
+#![cfg_attr(not(test), windows_subsystem = "windows")]
+```
+
+`cfg(not(test))` 不能省：`cargo test` 的测试进程如果也是 GUI 子系统，测试输出会被直接丢掉。
+
+```rust
+// src/main.rs
+fn main() -> ExitCode {
+    win32::attach_console();          // 第一件事，早于任何 println!
+    ...
 }
 ```
 
-两条都满足，没有取舍。
+`attach_console` 的顺序是关键：
+
+1. `GetStdHandle(STD_OUTPUT_HANDLE)` 有效 → **直接返回，什么也不做**。
+   `cmd /c "x info > r.txt"`、`x info | Out-File f.txt`、`Start-Process -RedirectStandardOutput`
+   都走这条路，句柄是父进程继承来的文件/管道。
+2. 没有继承句柄 → `AttachConsole(ATTACH_PARENT_PROCESS)`。成功则把 `CONOUT$` / `CONIN$`
+   设成标准句柄，`println!` 落到父控制台窗口里。
+3. 两步都失败（双击 / 开始菜单 / 商店 / 计划任务）→ 返回 `false`，进程没有控制台，也就没有黑框。
 
 ---
 
-## 实现
+## 实测（2026-10-29，本机）
 
-### `main.rs` 入口
+PE 头：`machine = 0x8664`，`subsystem = 2 (WINDOWS_GUI)`，exe 1,032,704 B。
 
-```rust
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+| 启动 / 输出方式 | 结果 |
+|---|---|
+| 双击、开始菜单、MSIX 商店入口 | 无控制台窗口，无黑框 |
+| `cmd /c "rog-mouse-ctl.exe --help > f.txt"` | ✅ 3,033 字节 |
+| `rog-mouse-ctl.exe --help \| Out-File f.txt` | ✅ 3,085 字节 |
+| `Start-Process -RedirectStandardOutput` | ✅ 2,273 字符 |
+| `rog-mouse-ctl.exe --help > f.txt`（**PowerShell 的 `>`**） | ❌ 0 字节 |
+| `cargo test` | 152 passed（输出可见，证明 `cfg(not(test))` 生效） |
 
-    // 特例：帮助必须留在 CLI，否则命令行敲 --help 会弹窗
-    let wants_help = matches!(args.first().map(|s| s.as_str()), Some("-h" | "--help" | "help"));
-
-    // 双击 exe 时没有任何参数 -> GUI
-    if args.is_empty() {
-        // SAFETY: FreeConsole 只影响本进程的控制台关联，无指针参数、无失败副作用。
-        // 必须在创建任何窗口之前调用，否则控制台窗口会先画出来再消失（可见闪烁）。
-        unsafe { win32::FreeConsole(); }
-        return run_gui();
-    }
-
-    if wants_help {
-        print_usage();
-        return ExitCode::SUCCESS;
-    }
-
-    run_cli(&args)
-}
-```
-
-### `win32.rs` 声明
-
-```rust
-#[link(name = "kernel32")]
-extern "system" {
-    /// 把本进程从控制台脱离。GUI 模式下调用，让 console subsystem 的
-    /// 黑框窗口消失。
-    ///
-    /// 为什么不用 `#![windows_subsystem = "windows"]` + `AttachConsole`
-    /// 见 `docs/startup-modes.md`：那条路会让 `> file` 重定向产出 0 字节。
-    pub fn FreeConsole() -> i32;
-}
-```
-
-`libkernel32.a` 在 rustlib 自带的 `self-contained` 目录里，不需要 dlltool，`x86_64-pc-windows-gnu` 直接能链。
+**PowerShell `>` 那条是已知限制，不是本程序的 bug**：实测进程拿到的 `out=2500` 是有效句柄，
+但写进去的字节进不了文件（PowerShell 5.1 给 GUI 子系统程序的这个句柄没有接收者）。
+脚本里请用上面三种能用的写法。
 
 ---
 
@@ -127,26 +115,35 @@ extern "system" {
 
 **`--help` 是唯一例外**：用户在终端敲 `rog-mouse-ctl --help` 时期望在终端看到帮助，不是弹窗。
 
+`--autostart`（开机自启专用参数，见 `src/autostart.rs` 的 `RUN_ARG`）必须和裸跑走同一条 GUI 路径：
+开机时没有控制台，落到 CLI 分支只会打印用法然后退出，用户看到的是「勾了自启但什么也没发生」。
+
 ---
 
 ## 验证清单（改动后必须全过）
 
 ```powershell
-# ① 裸跑 -> GUI，进程存活，有窗口，无控制台
-Start-Process .\rog-mouse-ctl.exe
-# 进程存活、MainWindowHandle != 0、GetConsoleWindow == 0
+# ① 子系统必须是 GUI
+# 读 PE 头 Optional Header 的 Subsystem 字段：0x18 + 0x44（PE32+）
+# 期望 2 (WINDOWS_GUI)
 
-# ② --help 仍走 CLI
+# ② 裸跑 -> GUI，进程存活，有窗口，无控制台
+# MainWindowHandle != 0 且 GetConsoleWindow == 0
+
+# ③ --help 仍走 CLI
 .\rog-mouse-ctl.exe --help        # exit 0，输出 42 行
 
-# ③ 重定向必须非空
-.\rog-mouse-ctl.exe info | Out-File r.txt    # r.txt > 0 字节
+# ④ 三种重定向都必须非空
+cmd /c ".\rog-mouse-ctl.exe --help > a.txt 2>&1"    # 3,033 字节
+.\rog-mouse-ctl.exe --help | Out-File b.txt          # 3,085 字节
+# Start-Process -RedirectStandardOutput               # 2,273 字符
 
-# ④ GUI 分支不许 println!
+# ⑤ cargo test 的输出必须看得见
+# 看不见就是漏了 cfg(not(test))
+
+# ⑥ GUI 分支不许 println!
 # 所有日志写 %LOCALAPPDATA%\rog-mouse-ctl\gui.log（UTF-8 无 BOM）
 ```
-
-实测结果（2026-10-21 23:21）：① 进程存活 `MainWindowHandle=1049404`；② exit=0；③ **1407 字节**（不是 0）。
 
 ---
 

@@ -43,12 +43,12 @@ Rust 静态链接产物，导入表里只有系统自带的 `KERNEL32.dll` / `hi
 不需要 ASUS 驱动、不需要管理员权限、不需要注册表写入之外的任何前置准备。
 配置/缓存/备份全部落在用户目录，见下方差异表。
 
-> PE 头现状：`machine = 0x8664 (x64)`，`subsystem = 3 (WINDOWS_CUI)`。
-> 后者意味着**它会带一个控制台窗口**。作为 CLI 工具这是对的（`info` / `backup` /
-> `setdpi` 都要输出）；但它同时在 tray 里跑 GUI，双形态下都带控制台会有点吵。
-> 若将来想做成纯 GUI 无控制台，要给 linker 加
-> `/SUBSYSTEM:WINDOWS` 并在入口自己 `AttachConsole(ATTACH_PARENT_PROCESS)`
-> 决定要不要连回父控制台 —— 这是程序侧改动，不在打包范围内，此处仅记录现状。
+> PE 头现状：`machine = 0x8664 (x64)`，`subsystem = 2 (WINDOWS_GUI)`。
+> 子系统是 GUI，**启动时不会创建控制台窗口**，所以双击、开始菜单、商店启动都没有黑框。
+> 命令行能力由 `win32::attach_console()` 在 `main` 开头把父控制台接回来：
+> `cmd /c "x info > r.txt"`、`x info | Out-File f.txt`、`Start-Process -RedirectStandardOutput`
+> 三种重定向都实测正常。唯一例外是 PowerShell 自己的 `>` 操作符——它给 GUI 子系统
+> 程序的句柄写不进去（实测 `out=2500` 有效但产出 0 字节），脚本里请改用上面三种。
 
 > 别名做全局命令：把 exe 所在目录加进 `PATH`，或在 `%USERPROFILE%` 下放一个
 > `rog.cmd` 转发。程序本身不需要任何同目录文件 —— 所以随便放哪都行，
@@ -347,7 +347,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\make-upload.ps1
 
 ### 提交前的两个已知项（不阻塞，但建议处理）
 
-1. **exe 仍是 `subsystem=3 (WINDOWS_CUI)`** —— 有控制台子系统。GUI 启动时程序会 `FreeConsole`，但开始菜单启动瞬间可能闪一下黑框。要彻底干净得给 linker 加 `/SUBSYSTEM:WINDOWS` 并在入口 `AttachConsole(ATTACH_PARENT_PROCESS)` 决定是否连回父控制台（程序侧改动，见第一节末尾的说明）。
+1. ~~exe 仍是 `subsystem=3 (WINDOWS_CUI)`~~ —— **已修**：子系统改为 `windows`（`subsystem=2`），启动不再创建控制台，黑框消失；命令行由 `win32::attach_console()` 接回父控制台。见第一节末尾的说明。
 2. **exe 没有 VERSIONINFO 资源** —— `FileVersion` 为空字符串。商店不校验，但「应用和功能」里看不到版本号。MSIX 的版本来自 manifest，所以不影响升级。
 3. `Cargo.toml` 的 `version = "1.1.0"` 与 MSIX 的 `1.1.x.0` 不必逐字一致 —— 前者是 crate 版本，后者是商店包版本，只是别差太多让人困惑。
 

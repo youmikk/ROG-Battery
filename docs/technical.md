@@ -888,8 +888,13 @@ Armoury Crate / GearLink 开着的时候可能：
 这两块各自有一个「看起来能用、实际会坏」的陷阱，单独成文：
 
 - **[`docs/startup-modes.md`](docs/startup-modes.md)** —— GUI 无黑框 + CLI 可重定向
-  为什么不用 `#![windows_subsystem = "windows"]`：那条路会让 `> file` 重定向产出 **0 字节空文件**（实测），废掉所有脚本化用法。
-  正确做法是保持 console subsystem，GUI 路径开头调 `FreeConsole()`（实测 `GetConsoleWindow` 984974 → 0）。
+  子系统是 `windows`（`#![cfg_attr(not(test), windows_subsystem = "windows")]`），
+  双击 / 开始菜单 / 商店启动都不创建控制台，所以没有黑框；命令行由
+  `win32::attach_console()` 在 `main` 开头处理：句柄已继承（重定向）就直接用，
+  否则 `AttachConsole(ATTACH_PARENT_PROCESS)` + `CONOUT$` 接父控制台。
+  唯一限制是 PowerShell 自己的 `>` 操作符（实测给 GUI 子系统程序的句柄写不进，
+  产出 0 字节），脚本里用 `cmd /c "x > f"`、`| Out-File` 或
+  `Start-Process -RedirectStandardOutput`。
 
 - **[`docs/tray-icon.md`](docs/tray-icon.md)** —— 托盘图标
   `TrayNotification` 的 icon 为 `None` 会 **panic**，而 `OemIcon` 没有「应用图标」变体。
