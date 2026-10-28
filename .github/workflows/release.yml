@@ -1,0 +1,144 @@
+name: 绿色版 Release
+
+# ─────────────────────────────── 触发方式 ───────────────────────────────
+#   push tag v1.1.2          → 编译绿色版（单文件 exe）+ 建/更新该 tag 的 Release
+#   workflow_dispatch + tag  → 同上；手填 tag 就发到那个 tag（没有就新建）
+#   workflow_dispatch 留空   → 只编译并留 run artifact，不碰 Release
+#
+# 和 `msstore.yml` 的分工：那边只管 MSIX 打包（+ 按需提交商店），这边只管绿色版发版。
+# 两个工作流互不依赖，任何一个挂了都不影响另一个。
+#
+# 产物：`rog-mouse-ctl.exe`（约 1 MB，单文件、零依赖）+ `rog-mouse-ctl.exe.sha256`。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布到哪个 tag（如 v1.1.2）。留空则只编译、不建 Release'
+        required: false
+        default: ''
+      skip_tests:
+        description: '跳过 cargo test'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# 本工程用 gnu 目标 + 自带的 mingw 导入库（vendor/mingw-import-libs），
+# 所以 runner 上必须装 gnu host 工具链，且链接器 gcc 要在 PATH 里。
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    if: inputs.skip_tests != true
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 MSYS2 / mingw64 gcc
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+
+      - name: mingw64 加进 PATH
+        shell: pwsh
+        run: '"C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8'
+
+      - name: 装 Rust（gnu host）
+        shell: pwsh
+        run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --all-targets
+
+  release:
+    needs: test
+    # test 被跳过时 needs 的结果是 skipped，这里用 always() 兜住
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 MSYS2 / mingw64 gcc
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+
+      - name: mingw64 加进 PATH
+        shell: pwsh
+        run: '"C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8'
+
+      - name: 装 Rust（gnu host）
+        shell: pwsh
+        run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: 校验 PE 子系统必须是 GUI（防黑框回归）
+        shell: pwsh
+        run: |
+          $exe = 'target\release\rog-mouse-ctl.exe'
+          $b = [System.IO.File]::ReadAllBytes((Resolve-Path $exe))
+          $pe = [BitConverter]::ToInt32($b, 0x3C)
+          $sub = [BitConverter]::ToUInt16($b, $pe + 0x18 + 0x44)
+          "size      = {0:N0} B" -f $b.Length
+          "subsystem = $sub  (2 = WINDOWS_GUI, 3 = WINDOWS_CUI)"
+          if ($sub -ne 2) {
+            throw "子系统不是 GUI（$sub）—— 启动会闪黑框，见 docs/startup-modes.md"
+          }
+
+      - name: 汇总产物 + 算 sha256
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\rog-mouse-ctl.exe dist\
+          $h = (Get-FileHash dist\rog-mouse-ctl.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  rog-mouse-ctl.exe" | Out-File -FilePath dist\rog-mouse-ctl.exe.sha256 -Encoding ascii
+          "sha256 = $h"
+          Get-ChildItem dist | ForEach-Object { '{0}  {1:N0} B' -f $_.Name, $_.Length }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-${{ github.ref_name }}-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+
+      # tag push 或手填了 tag 才发 Release；已有的 Release 只覆盖附件，不动正文
+      - name: 建 / 更新 Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ inputs.tag }}".Trim()
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          $ver = $tag -replace '^v', ''
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            "Release $tag 已存在，只覆盖附件"
+            gh release upload $tag dist\rog-mouse-ctl.exe dist\rog-mouse-ctl.exe.sha256 --clobber
+          } else {
+            "Release $tag 不存在，新建"
+            gh release create $tag dist\rog-mouse-ctl.exe dist\rog-mouse-ctl.exe.sha256 `
+              --title "R Battery $ver" --generate-notes
+          }
+          gh release view $tag --json tagName,assets | Out-File -FilePath release-info.json -Encoding utf8
+          Get-Content release-info.json -Raw

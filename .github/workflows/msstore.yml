@@ -1,11 +1,14 @@
-name: MSIX & Release
+name: MSIX 打包
 
 # ─────────────────────────────── 触发方式 ───────────────────────────────
-#   push tag v1.1.1     → 编译 + 打 msix / msixupload + 绿色版附到 GitHub Release
+#   push tag v1.1.1     → 编译 + 打 msix / msixupload
 #   workflow_dispatch   → 同上，可手填版本号
 #
+#   绿色版（单文件 exe）由 `release.yml` 单独负责发 Release —— 两个工作流各管一件事，
+#   互不牵连：这里失败不影响绿色版发版，反之亦然。
+#
 # ─────────────────────── 商店自动发布是「按需开启」的 ───────────────────────
-#   仓库 Variables 里没有 MSSTORE_PRODUCT_ID 时，本工作流只做打包 + 发 Release，
+#   仓库 Variables 里没有 MSSTORE_PRODUCT_ID 时，本工作流只做打包，
 #   完全不碰商店。首个版本必须手动上架（微软硬性规定），过审后再配上这个变量，
 #   之后的 tag 就会自动提交到商店。
 #
@@ -43,9 +46,9 @@ on:
         type: boolean
         default: false
 
-# Release 需要写权限；其余默认只读
+# 只读即可：本工作流不再建 Release，产物走 run artifacts
 permissions:
-  contents: write
+  contents: read
 
 # 本工程用 gnu 目标 + 自带的 mingw 导入库（vendor/mingw-import-libs），
 # 所以 runner 上必须装 gnu host 工具链，且链接器 gcc 要在 PATH 里。
@@ -179,7 +182,6 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\rog-mouse-ctl.exe dist\
           Copy-Item "msix\AppPackages\*_${{ steps.ver.outputs.version }}_x64.msix" dist\
           Copy-Item "msix\AppPackages\*_${{ steps.ver.outputs.version }}_x64.msixupload" dist\
           Get-ChildItem dist | ForEach-Object { '{0}  {1:N0} B' -f $_.Name, $_.Length }
@@ -189,15 +191,6 @@ jobs:
           name: msix-${{ steps.ver.outputs.version }}
           path: dist/*
           if-no-files-found: error
-
-      # 绿色版（单文件 exe）挂到 Release；.msix / .msixupload 留在 run artifacts
-      - name: 附到 GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/rog-mouse-ctl.exe
-          fail_on_unmatched_files: true
-          generate_release_notes: true
 
       # ─────────── 以下仅在配了 MSSTORE_PRODUCT_ID 时执行 ───────────
       - name: 装 Microsoft Store CLI
