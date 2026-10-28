@@ -68,6 +68,11 @@ const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+/// 非客户区命中测试。内容区铺满整个客户区，所以这个也发到我们这里。
+const WM_NCHITTEST: u32 = 0x0084;
+const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+const WM_NCLBUTTONDBLCLK: u32 = 0x00A3;
 
 const VK_BACK: usize = 0x08;
 const VK_TAB: usize = 0x09;
@@ -77,6 +82,11 @@ const VK_ESCAPE: usize = 0x1B;
 const IDC_ARROW: usize = 32512;
 const IDC_IBEAM: usize = 32513;
 const IDC_HAND: usize = 32649;
+// 边框缩放光标（系统自带）
+const IDC_SIZEWE: usize = 32644;
+const IDC_SIZENS: usize = 32645;
+const IDC_SIZENWSE: usize = 32642;
+const IDC_SIZENESW: usize = 32643;
 
 const GWLP_USERDATA: i32 = -21;
 /// `DLGC_WANTCHARS | DLGC_WANTALLKEYS`。
@@ -172,6 +182,61 @@ extern "system" {
 const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
 
+// 主窗口那边（`frame.rs`）要用的几个只读查询和消息投递。
+//
+// 放在 canvas 里是因为 `frame.rs` 不该自己声明 extern —— 它要调的都是
+// 「窗口」层面的函数，而 canvas 是全工程唯一管窗口的地方。
+#[link(name = "user32")]
+extern "system" {
+    /// 取窗口矩形（**屏幕坐标**，含边框）。命中测试要拿它把屏幕坐标换成客户区坐标。
+    pub fn GetWindowRect(hwnd: Handle, out: *mut Rect) -> i32;
+    /// 异步投递消息。用于 `WM_CLOSE` / `WM_SYSCOMMAND` —— **必须异步**：
+    /// 在 `WM_NCLBUTTONDOWN` 的处理里同步销毁窗口，会导致后续的消息发到
+    /// 已释放的窗口上。
+    pub fn PostMessageW(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> i32;
+}
+
+/// 读窗口样式/扩展样式的 `index`（`GWL_STYLE = -16`、`GWL_EXSTYLE = -20` …）。
+///
+/// 收 `&self` 外的裸句柄：`frame.rs` 在主窗口句柄上调用，
+/// 那个句柄不归 canvas 管。
+pub fn get_window_long(hwnd: Handle, index: i32) -> isize {
+    unsafe { GetWindowLongPtrW(hwnd, index) }
+}
+
+/// 改窗口样式。`frame::go_frameless` 用它去掉 `WS_CAPTION`。
+pub fn set_window_long(hwnd: Handle, index: i32, value: isize) {
+    unsafe { SetWindowLongPtrW(hwnd, index, value) };
+}
+
+/// 读窗口矩形（屏幕坐标）。
+pub fn get_window_rect(hwnd: Handle, out: &mut Rect) {
+    unsafe { GetWindowRect(hwnd, out) };
+}
+
+/// 读客户区矩形（尺寸单位物理像素，左上角恒为 0,0）。
+pub fn get_client_rect(hwnd: Handle, out: &mut Rect) {
+    unsafe { GetClientRect(hwnd, out) };
+}
+
+/// 投递一条消息，不等它被处理。
+pub fn post_message(hwnd: Handle, msg: u32, wp: usize, lp: isize) {
+    unsafe { PostMessageW(hwnd, msg, wp, lp) };
+}
+
+/// 调 `SetWindowPos`。改完窗口样式后必须用它发一次 `SWP_FRAMECHANGED`，
+/// 否则系统还按旧的边框宽度算客户区。
+pub fn set_window_pos(
+    hwnd: Handle,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    flags: u32,
+) {
+    unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), x, y, cx, cy, flags) };
+}
+
 /// 充电动效定时器的 ID。`SetTimer` 的 id 只要在**这个窗口**内唯一即可，
 /// 取 1 是因为本窗口只有一个定时器。注意必须 >0：传 0 会让系统自动分配 id
 /// 并返回它，那样 `KillTimer(0)` 就杀不掉，定时器一直跑。
@@ -200,6 +265,12 @@ pub struct PaintArgs {
     pub view_h: f32,
     /// 逻辑像素 → 物理像素。
     pub scale: f32,
+    /// 内容区子窗口句柄。
+    ///
+    /// 绘制时要用它查「父窗口是否最大化」（标题栏上的最大化按钮图标要据此
+    /// 在「最大化」和「还原」之间切换），临时再 `GetParent` 一次也行，
+    /// 但 `WM_PAINT` 里能省一次系统调用就省一次。
+    pub hwnd: Handle,
 }
 
 /// 一帧的绘制过程，由 gui.rs 提供。
@@ -258,26 +329,26 @@ pub fn draw_frame(
     let page = ui.page;
     let scroll = ui.scroll_y(page);
 
+    // 自绘标题栏占了顶部一条，页面和导航整体下移 —— 用 `oy` 交给世界变换，
+    // 页面代码里的坐标仍然「从内容区顶部算起」。
+    let oy = crate::ui::titlebar::TITLE_H;
+
     // `Frame::new` 算的是「相对页面区域」的边距（它会先把导航栏宽度从
     // 可用宽度里刨掉），所以把导航栏宽度补回 `content.x`，让页面和导航
     // 共用同一个坐标系 —— 世界变换只需要一个。
     let mut frame = Frame::new(a.view_w, a.view_h, nav_w);
     frame.content.x += nav_w;
+    // 内容区顶部也要让出标题栏：页面从 `oy` 开始排
+    frame.content.y += oy;
+    frame.content.h -= oy;
 
-    inner.paint(
-        fonts,
-        theme,
-        a.scale,
-        scroll,
-        a.view_w,
-        a.view_h,
-        |p: &mut Painter| {
-            // 整页铺底：不铺的话滚动区域会残留上一帧的像素
-            p.rect(R::new(0.0, scroll, a.view_w, a.view_h), theme.bg);
-            pages::page(p, ui, data, &frame);
-        },
-    );
-    // 导航不滚动 → 滚动量传 0
+    // 最大化状态要问**父窗口**：canvas 是 `WS_CHILD`，它自己没有
+    // `WS_MAXIMIZE` 位，查它恒为 false，标题栏上的按钮图标就永远画成「最大化」。
+    let parent = unsafe { GetParent(a.hwnd) };
+    let is_max = !parent.is_null() && crate::ui::frame::is_maximized(parent);
+    let hover_btn = ui.hover_btn;
+
+    // ① 整窗底色铺底：从 0 开始铺满整个可视区，绝无未绘制黑框
     inner.paint(
         fonts,
         theme,
@@ -286,9 +357,64 @@ pub fn draw_frame(
         a.view_w,
         a.view_h,
         |p: &mut Painter| {
+            p.rect(R::new(0.0, 0.0, a.view_w, a.view_h), theme.bg);
+        },
+    );
+
+    // ② 页面内容（带滚动，纯世界平移 -scroll）
+    inner.paint(
+        fonts,
+        theme,
+        a.scale,
+        scroll,
+        a.view_w,
+        a.view_h,
+        |p: &mut Painter| {
+            pages::page(p, ui, data, &frame);
+        },
+    );
+
+    // ③ 导航侧栏（不滚动，固定在左侧）
+    inner.paint(
+        fonts,
+        theme,
+        a.scale,
+        0.0,
+        nav_w,
+        a.view_h,
+        |p: &mut Painter| {
             pages::nav(p, ui, data, nav_w, a.view_h);
         },
     );
+
+    // ④ 标题栏（不滚动，固定在顶层）
+    inner.paint(
+        fonts,
+        theme,
+        a.scale,
+        0.0,
+        a.view_w,
+        a.view_h,
+        |p: &mut Painter| {
+            crate::ui::titlebar::draw(p, a.view_w, nav_w, theme);
+            crate::ui::titlebar::draw_buttons(p, a.view_w, theme, is_max, hover_btn);
+        },
+    );
+
+    // ⑤ 模态弹窗（若有）
+    if ui.show_close_dialog {
+        inner.paint(
+            fonts,
+            theme,
+            a.scale,
+            0.0,
+            a.view_w,
+            a.view_h,
+            |p: &mut Painter| {
+                pages::draw_close_dialog(p, ui, a.view_w, a.view_h);
+            },
+        );
+    }
     mem
 }
 
@@ -310,8 +436,9 @@ struct Ctx {
     damage: Rc<dyn Fn()>,
     /// 逻辑像素 → 物理像素的缩放（125% 屏 = 1.25）。
     scale: f32,
-    /// 上一次设的光标，避免每次 `WM_SETCURSOR` 都 `LoadCursorW` 一遍。
-    cursor: Cell<Cursor>,
+    /// 上一次设的光标 **id**（`IDC_*`），避免每次 `WM_SETCURSOR` 都 `LoadCursorW` 一遍。
+    /// 存 id 而不是 `Cursor` 枚举：边框缩放码不在 `Cursor` 里，用 id 才能统一缓存。
+    cursor: Cell<usize>,
     /// 双缓冲的内存画布。和 [`Canvas`] 共享同一个对象。
     inner: Rc<RefCell<GfxCanvas>>,
     /// 字体缓存（`GpFont*` 每帧重建会让首帧多花 20ms）。
@@ -328,6 +455,7 @@ struct Ctx {
 
 
 /// 自绘内容区。
+#[derive(Clone)]
 pub struct Canvas {
     hwnd: Handle,
     inner: Rc<RefCell<GfxCanvas>>,
@@ -442,7 +570,7 @@ impl Canvas {
             fonts: Rc::clone(&me.fonts),
             paint: Rc::clone(&me.paint),
             scale: me.scale,
-            cursor: Cell::new(Cursor::Arrow),
+            cursor: Cell::new(IDC_ARROW),
             anim_wanted: Rc::clone(&me.anim_wanted),
         });
         let raw = Box::into_raw(ctx);
@@ -536,8 +664,13 @@ impl Canvas {
     /// 而 `InvalidateRect` 只是标脏，真正的 `WM_PAINT` 要等消息队列排到，
     /// 拖动滑块时会明显滞后。
     pub fn repaint_now(&self) {
-        // SAFETY: 传空矩形 = 整个客户区。
-        unsafe { UpdateWindow(self.hwnd) };
+        repaint_hwnd(self.hwnd);
+    }
+
+    /// 拿到子窗口句柄。`gui.rs` 需要在 `Canvas` 被 move 进闭包之前
+    /// 留一份句柄，供「显示窗口前先画首帧」用。
+    pub fn hwnd(&self) -> Handle {
+        self.hwnd
     }
 }
 
@@ -547,6 +680,18 @@ impl Drop for Canvas {
         // 但位图和 DC 是 GDI 对象，进程退出前不释放会让 GDI 句柄数持续上涨
         //（默认上限 10000，反复开关窗口能撞到）。
         self.inner.borrow_mut().release();
+    }
+}
+
+/// 立刻把整块客户区重画一遍（同步，不等消息队列）。
+///
+/// 必须先 `InvalidateRect` 再 `UpdateWindow`：`UpdateWindow` 只在**更新区
+/// 非空**时才真的发一次 `WM_PAINT`，光调它、没有失效区，什么都不会画。
+/// 开机首帧之所以一直是黑框，就是这里只调了 `UpdateWindow`（见 git 历史）。
+pub fn repaint_hwnd(hwnd: Handle) {
+    unsafe {
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+        UpdateWindow(hwnd);
     }
 }
 
@@ -560,6 +705,21 @@ fn cursor_id(c: Cursor) -> usize {
         Cursor::Arrow => IDC_ARROW,
         Cursor::Hand => IDC_HAND,
         Cursor::IBeam => IDC_IBEAM,
+    }
+}
+
+/// 把 `WM_NCHITTEST` 的缩放命中码映射成系统缩放光标 id。
+///
+/// `WM_SETCURSOR` 的 `lparam` 低 16 位就是命中测试码 —— 边框上它会是
+/// `HTLEFT/HTTOP/…`，以前完全没处理，所以边框永远是箭头。现在按方向给对应光标。
+fn resize_cursor_id(hit: isize) -> Option<usize> {
+    use crate::ui::frame::*;
+    match hit {
+        HTLEFT | HTRIGHT => Some(IDC_SIZEWE),
+        HTTOP | HTBOTTOM => Some(IDC_SIZENS),
+        HTTOPLEFT | HTBOTTOMRIGHT => Some(IDC_SIZENWSE),
+        HTTOPRIGHT | HTBOTTOMLEFT => Some(IDC_SIZENESW),
+        _ => None,
     }
 }
 
@@ -655,6 +815,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                                 view_w: pw as f32 / c.scale,
                                 view_h: ph as f32 / c.scale,
                                 scale: c.scale,
+                                hwnd,
                             };
                             let mem = f(
                                 &mut c.inner.borrow_mut(),
@@ -750,6 +911,21 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 ui.pointer.x = x;
                 ui.pointer.y = y;
                 if moved {
+                    // 标题栏按钮的悬停也在这里刷一遍：
+                    // `hover_btn` 原本只在 `WM_NCHITTEST` 里更新，而命中测试
+                    // 消息在某些输入路径（远程桌面、触控、合成消息）下不一定
+                    // 每次都来，表现就是「鼠标移上去按钮不高亮」。这里补一次。
+                    let hb = if y <= crate::ui::titlebar::TITLE_H && y >= 0.0 {
+                        let (pw, _) = client_pixel_size(hwnd);
+                        crate::ui::titlebar::hit(x, y, pw as f32 / c.scale)
+                    } else {
+                        None
+                    };
+                    let mut hb_changed = false;
+                    if ui.hover_btn != hb {
+                        ui.hover_btn = hb;
+                        hb_changed = true;
+                    }
                     // 正在拖滑块时，先把「这一帧该显示的值」写进 `live`，
                     // 页面下一帧就按它画 —— 这是滑块跟手的**唯一**来源。
                     //
@@ -761,12 +937,14 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                             ui.set_live_frac(s, frac);
                         }
                         drop(ui);
+                        unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
                         (c.damage)();
                     } else {
                         // 悬停态变了才重画（悬停高亮），否则每次移动都重绘整页
                         let hover_changed = ui.refresh_hover();
-                        if hover_changed {
+                        if hover_changed || hb_changed {
                             drop(ui);
+                            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
                             (c.damage)();
                         }
                     }
@@ -780,6 +958,31 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 SetFocus(hwnd);
                 let x = lo_word(lp) as f32 / c.scale;
                 let y = hi_word(lp) as f32 / c.scale;
+                // 标题栏三按钮的**兜底命中**。
+                //
+                // 正常路径是 WM_NCHITTEST 返回 HTCLOSE/HTMINBUTTON/HTMAXBUTTON，
+                // 再由 WM_NCLBUTTONDOWN 交给系统。但子窗口的 NC 命中码并非所有
+                // 情况下都被系统采纳（窗口未激活时的首次点击、命中码在按下与
+                // 抬起之间被重算、以及某些远程/触控输入下），表现就是用户说的
+                // 「有时候能点有时候点不动」。这里再判一次，保证只要点在按钮
+                // 矩形里就一定能触发，双保险（重复触发会被 WM_CLOSE 幂等消化）。
+                {
+                    let (pw, _) = client_pixel_size(hwnd);
+                    let cw = pw as f32 / c.scale;
+                    if y >= 0.0 && y <= crate::ui::titlebar::TITLE_H {
+                        if let Some(b) = crate::ui::titlebar::hit(x, y, cw) {
+                            let target = unsafe { GetParent(hwnd) };
+                            let target = if target.is_null() { hwnd } else { target };
+                            let code = match b {
+                                crate::ui::titlebar::Btn::Minimize => crate::ui::frame::HTMINBUTTON,
+                                crate::ui::titlebar::Btn::Maximize => crate::ui::frame::HTMAXBUTTON,
+                                crate::ui::titlebar::Btn::Close => crate::ui::frame::HTCLOSE,
+                            };
+                            crate::ui::frame::on_sys_button(target, code);
+                            return 0;
+                        }
+                    }
+                }
                 let scroll;
                 let slide;
                 {
@@ -851,20 +1054,131 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 let vh = r.height() as f32 / c.scale;
                 let changed = c.ui.borrow_mut().wheel(delta, vh);
                 if changed {
+                    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
                     (c.damage)();
                 }
             }
             0
         }
 
+        // ── 自绘标题栏的窗口行为 ──────────────────────────────
+        //
+        // 内容区子窗口铺满整个客户区，所以**鼠标消息全先到这里**，主窗口
+        // 收不到 `WM_NCHITTEST`。这就是为什么标题栏的命中测试必须在这里做。
+        //
+        // 我第一版把子类挂到主窗口上（`nwg::bind_raw_event_handler`），
+        // 结果整个标题栏拖不动、三条按钮点不动 —— 消息压根没到主窗口。
+        WM_NCHITTEST => {
+            let c = match ctx_of(hwnd) {
+                Some(c) => c,
+                None => return crate::ui::frame::HTCLIENT,
+            };
+            // lparam 是**屏幕坐标**的 16 位有符号对，要换成客户区逻辑坐标
+            let sx = lo_word(lp) as f32;
+            let sy = hi_word(lp) as f32;
+            let mut wr = Rect::default();
+            GetWindowRect(hwnd, &mut wr);
+            let x = (sx - wr.left as f32) / c.scale;
+            let y = (sy - wr.top as f32) / c.scale;
+            let (pw, ph) = client_pixel_size(hwnd);
+            let cw = pw as f32 / c.scale;
+            let ch = ph as f32 / c.scale;
+            let hit = crate::ui::frame::logical_hit(
+                x,
+                y,
+                cw,
+                ch,
+                crate::ui::titlebar::TITLE_H,
+                crate::ui::frame::is_maximized(hwnd),
+            );
+            // 悬停高亮：命中变化时重画一帧
+            let want_btn = crate::ui::titlebar::hit(x, y, cw);
+            let mut ui = c.ui.borrow_mut();
+            if ui.hover_btn != want_btn {
+                ui.hover_btn = want_btn;
+                drop(ui);
+                (c.damage)();
+            }
+            hit
+        }
+
+        // 拖动 / 边缘缩放：把意图交回系统。
+        //
+        // `DefWindowProc(WM_NCLBUTTONDOWN)` 收到 `HTCAPTION` / `HTLEFT` … 之后
+        // 会自己接管鼠标、自己 `SetWindowPos` —— Aero Snap、双击最大化、
+        // 高 DPI 跟手全在里面。自己实现会把这些统统丢掉。
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
+            // 注意：这里的 `wp` 是**命中码**（不是坐标），`lp` 才是坐标。
+            if crate::ui::frame::is_sys_button(wp as isize) {
+                // 按钮：发系统命令。要问**父窗口**的最大化状态和各段句柄。
+                let target = unsafe { GetParent(hwnd) };
+                let target = if target.is_null() { hwnd } else { target };
+                crate::ui::frame::on_sys_button(target, wp as isize);
+                return 0;
+            }
+            if msg == WM_NCLBUTTONDBLCLK && wp as isize == crate::ui::frame::HTCAPTION {
+                let target = unsafe { GetParent(hwnd) };
+                let target = if target.is_null() { hwnd } else { target };
+                crate::ui::frame::toggle_maximize(target);
+                return 0;
+            }
+            // 拖动/缩放：必须交给**顶层窗口**的 `DefWindowProc`，
+            // 子窗口自己做不了非客户区拖动 —— 拖标题栏时窗口纹丝不动。
+            //
+            // 只有拖动/缩放码才转交；其他码不转，否则 `DefWindowProc` 会按
+            // 「非客户区点击」再走一遍默认处理（比如把 `HTCLIENT` 当成无效值
+            // 去 `WM_NCHITTEST` 重算），表现为点内容区偶尔闪一下焦点。
+            let target = unsafe { GetParent(hwnd) };
+            let target = if target.is_null() { hwnd } else { target };
+            if crate::ui::frame::is_nc_drag(wp as isize) {
+                DefWindowProcW(target, msg, wp, lp)
+            } else {
+                0
+            }
+        }
+
+        WM_LBUTTONDBLCLK => {
+            // 双击标题栏最大化。`WM_LBUTTONDBLCLK` 只在 class 有 `CS_DBLCLKS`
+            // 时才会发（本类已设），且它先于 `WM_LBUTTONDOWN` 到达。
+            if let Some(c) = ctx_of(hwnd) {
+                let x = lo_word(lp) as f32 / c.scale;
+                let y = hi_word(lp) as f32 / c.scale;
+                let hwnd_parent = unsafe { GetParent(hwnd) };
+                let target = if hwnd_parent.is_null() { hwnd } else { hwnd_parent };
+                let hit = crate::ui::frame::logical_hit(
+                    x,
+                    y,
+                    client_pixel_size(hwnd).0 as f32 / c.scale,
+                    client_pixel_size(hwnd).1 as f32 / c.scale,
+                    crate::ui::titlebar::TITLE_H,
+                    crate::ui::frame::is_maximized(target),
+                );
+                if hit == crate::ui::frame::HTCAPTION {
+                    crate::ui::frame::toggle_maximize(target);
+                    return 0;
+                }
+            }
+            // 不是标题栏就按普通点击处理（让页面拿到这次点击）
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+
         WM_KEYDOWN => {
             if let Some(c) = ctx_of(hwnd) {
-                let changed = match wp {
-                    VK_BACK => c.ui.borrow_mut().backspace(),
-                    VK_ESCAPE => c.ui.borrow_mut().cancel_edit(),
-                    VK_RETURN | VK_TAB => c.ui.borrow_mut().commit_focus(),
-                    _ => false,
-                };
+                let mut changed = false;
+                match wp {
+                    VK_BACK => changed = c.ui.borrow_mut().backspace(),
+                    VK_ESCAPE => changed = c.ui.borrow_mut().cancel_edit(),
+                    // 回车 = 点「应用」：把草稿交给页面去校验并写设备。
+                    // 制表符只收焦点，不提交（用户还在往下填）。
+                    VK_RETURN => {
+                        if let Some(e) = c.ui.borrow_mut().commit_focus() {
+                            c.acts.borrow_mut().push(Act::ApplyEdit(e));
+                            changed = true;
+                        }
+                    }
+                    VK_TAB => changed = c.ui.borrow_mut().commit_focus().is_some(),
+                    _ => {}
+                }
                 if changed {
                     (c.damage)();
                 }
@@ -889,16 +1203,31 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
             0
         }
 
-        // 悬停在可点项上换手型，输入框上换 I 型
+        // 悬停换光标：边框上是缩放箭头；内容里是手型/输入 I 型。
+        //
+        // `lparam` 低 16 位 = 命中测试码（就是 `WM_NCHITTEST` 的返回值）。
+        // 边框拖拽区会传 `HTLEFT/HTTOP/…`，以前这里只按内容提示设光标，
+        // 于是边框上的鼠标一直保持箭头 —— 这就是"边框上鼠标不变缩放图标"的原因。
         WM_SETCURSOR => {
             if let Some(c) = ctx_of(hwnd) {
-                let want = c.ui.borrow().cursor_hint();
-                if c.cursor.get() != want {
-                    c.cursor.set(want);
-                    let cur = LoadCursorW(std::ptr::null_mut(), idc(cursor_id(want)));
-                    if !cur.is_null() {
-                        SetCursor(cur);
-                    }
+                let hit = lo_word(lp) as isize;
+                let id = match resize_cursor_id(hit) {
+                    Some(id) => id,
+                    None => cursor_id(c.ui.borrow().cursor_hint()),
+                };
+                // **每次都 SetCursor**，不做「id 没变就跳过」的缓存。
+                //
+                // 踩过的坑：Explorer 在我们启动慢的时候会把光标设成
+                // `IDC_APPSTARTING`（箭头 + 转圈）。我们的缓存里记的还是
+                // `IDC_ARROW`，于是判断「没变」直接跳过 `SetCursor`，
+                // 那个转圈光标就一直留在屏幕上 —— 正是用户说的「进入软件后
+                // 鼠标一直转圈，移到侧边栏可点的地方才恢复」（因为那里
+                // `cursor_hint` 变成手型，id 变了才走到 `SetCursor`）。
+                // `LoadCursorW` 对系统光标只是查表，不分配，开销可忽略。
+                c.cursor.set(id);
+                let cur = LoadCursorW(std::ptr::null_mut(), idc(id));
+                if !cur.is_null() {
+                    SetCursor(cur);
                 }
             }
             // 返回 1 = 已处理，别让 `DefWindowProc` 再改回箭头
@@ -956,6 +1285,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(non_snake_case)]
     fn 资源ID按指针传() {
         // `IDC_ARROW` 是 `MAKEINTRESOURCE(32512)`，即把整数当地址
         assert_eq!(idc(IDC_ARROW) as usize, 32512);

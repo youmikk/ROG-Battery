@@ -27,6 +27,8 @@ pub struct Settings {
     pub tray_enabled: bool,
     /// 点关闭按钮时最小化到托盘（true）还是直接退出（false）。
     pub close_to_tray: bool,
+    /// 窗口关闭时的行为："ask"（每次询问）、"minimize"（最小化到托盘）、"quit"（直接退出）。
+    pub close_mode: String,
     /// 界面配色：`"light"` 或 `"dark"`。
     ///
     /// 存成 `String` 而不是 [`crate::ui::theme::Mode`] 有两个原因：
@@ -46,7 +48,8 @@ impl Default for Settings {
             refresh_interval_sec: 60,
             tray_enabled: true,
             close_to_tray: true,
-            theme: "light".to_string(),
+            close_mode: "ask".to_string(),
+            theme: "system".to_string(),
         }
     }
 }
@@ -85,11 +88,18 @@ impl Settings {
                         s.close_to_tray = b;
                     }
                 }
-                "theme" => {
-                    // 只认 light/dark，其它一律当默认（不报错 —— 手改文件打错字
-                    // 不该让程序起不来）。写成 Light/Dark 也认，省得用户猜大小写。
+                "close_mode" => {
                     let want = v.trim().to_ascii_lowercase();
-                    if want == "light" || want == "dark" {
+                    if want == "ask" || want == "minimize" || want == "quit" {
+                        s.close_to_tray = want == "minimize";
+                        s.close_mode = want;
+                    }
+                }
+                "theme" => {
+                    // 认 system/light/dark，其它一律当默认（不报错 —— 手改文件打错字
+                    // 不该让程序起不来）。写成 Light/Dark/System 也认，省得用户猜大小写。
+                    let want = v.trim().to_ascii_lowercase();
+                    if want == "light" || want == "dark" || want == "system" {
                         s.theme = want;
                     }
                 }
@@ -117,10 +127,17 @@ impl Settings {
         s.push_str("# 点窗口关闭按钮时：true=最小化到托盘，false=直接退出。\n");
         s.push_str("# 只在 tray_enabled=true 时才有意义。\n");
         s.push_str(&format!("close_to_tray={}\n\n", self.close_to_tray));
-        s.push_str("# 界面配色：light（默认，浅色）或 dark（深色）。\n");
+        s.push_str("# 关闭窗口动作：ask=每次询问，minimize=最小化到系统托盘，quit=直接退出。\n");
+        s.push_str(&format!("close_mode={}\n\n", self.close_mode));
+        s.push_str("# 界面配色：system（默认，跟随系统深浅色）/ light（浅色）/ dark（深色）。\n");
         s.push_str("# 程序里也能切换，切换后这里会被回写。\n");
         s.push_str(&format!("theme={}\n", self.theme));
         s
+    }
+
+    /// 把设置渲染成 ini 文本（供「更改设置文件位置」时把当前配置写到新位置）。
+    pub fn render(s: &Settings) -> String {
+        s.to_text()
     }
 
     /// 写出默认配置文件。GUI 首次启动 / `cache` 子命令会用到。
@@ -286,6 +303,7 @@ mod tests {
             refresh_interval_sec: 20,
             tray_enabled: false,
             close_to_tray: false,
+            close_mode: "quit".to_string(),
             theme: "dark".to_string(),
         };
         let back = Settings::parse(&s.to_text());
@@ -293,6 +311,7 @@ mod tests {
         assert_eq!(back.refresh_interval_sec, 20);
         assert!(!back.tray_enabled);
         assert!(!back.close_to_tray);
+        assert_eq!(back.close_mode, "quit");
         assert_eq!(back.theme, "dark", "配色没有往返成功");
     }
 
@@ -302,11 +321,13 @@ mod tests {
         assert_eq!(Settings::parse("theme=Dark").theme, "dark");
         assert_eq!(Settings::parse("theme=DARK").theme, "dark");
         assert_eq!(Settings::parse("theme= light ").theme, "light");
-        // 打错字不能把程序搞崩，退回默认浅色
-        assert_eq!(Settings::parse("theme=blue").theme, "light");
-        assert_eq!(Settings::parse("theme=").theme, "light");
-        // 旧文件没有这个键也是浅色
-        assert_eq!(Settings::parse("cache_ttl_sec=30").theme, "light");
+        // 打错字不能把程序搞崩，退回默认「跟随系统」
+        assert_eq!(Settings::parse("theme=blue").theme, "system");
+        assert_eq!(Settings::parse("theme=").theme, "system");
+        // 旧文件没有这个键也是默认「跟随系统」
+        assert_eq!(Settings::parse("cache_ttl_sec=30").theme, "system");
+        // system 也要能往返
+        assert_eq!(Settings::parse("theme=System").theme, "system");
     }
 
     #[test]

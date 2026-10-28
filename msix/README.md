@@ -1,4 +1,4 @@
-# rog-mouse-ctl MSIX 打包
+﻿# rog-mouse-ctl MSIX 打包
 
 把 Rust 写的 `rog-mouse-ctl.exe` 打成微软商店可提交的 MSIX 包，同时保留免安装绿色版。
 两种形态来自**同一份编译产物**，只有开机自启的实现方式不同。
@@ -295,3 +295,58 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Verify
 `build-msix.ps1` **只读 `package.props.psd1`**，不读 `Cargo.toml`。所以 `package.props.psd1`
 是身份的唯一真源，`Cargo.toml` 里的 `[package.metadata.msix]` 只是给
 `cargo metadata` / 未来 build.rs 用的副本，改身份时两处都要动。
+---
+
+## 七、上架交付件（2026-10-29 重出）
+
+```powershell
+cd D:\codex\rog-mouse-ctl\msix
+$env:TEMP="$PWD\scratch\tmp"                       # 本机 makeappx 解包需要可写 TEMP
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-msix.ps1 -Verify
+powershell -NoProfile -ExecutionPolicy Bypass -File .\make-upload.ps1
+```
+
+产物（均在 `AppPackages\`）：
+
+| 文件 | 大小 | 用途 |
+|---|---|---|
+| `Sonder.RBattery_1.1.0.0_x64.msix` | 689,121 B | 未签名包；`Add-AppxPackage` 前需自签 |
+| `Sonder.RBattery_1.1.0.0_x64.msixupload` | 686,947 B | **提交 Partner Center 就传这个** |
+
+`.msixupload` 由 `make-upload.ps1` 生成，本质是 ZIP，**里面只有包本体** `<包名>.msix`。
+
+> 早前版本还往里塞了 `Assets\StoreLogo.png` 等三张商店图标，被 Partner Center 的包接受验证直接打回：
+> `The file StoreLogo.png is not supported. Remove or update this file and then try again.`（三张全报）。
+> 按文档那三张图只在「包内没有」时才需要放进 .msixupload；我们的 manifest 已经声明了它们、图就在 msix 里，
+> 所以多余的那份必须删掉。万一反过来提示缺图标，用 `make-upload.ps1 -WithStoreLogos` 重出 ——
+> 那种情况下三张图要放 ZIP **根目录**，不是 `Assets\` 子目录。
+
+### 商店页素材在 `store\`
+
+包只管「装什么」，列表页管「怎么卖」，两套东西分开：
+
+| 位置 | 内容 |
+|---|---|
+| `store\listingData.csv` | 直接导入 Partner Center 的列表表（430 行，字段顺序与图片 URL 全部沿用原导出表） |
+| `store\screenshots\01..06*.png` | 1920×1080 桌面截图 |
+| `store\make-listing.py` | 生成上面的 CSV；改文案改这里 |
+| `store\make-screenshots.py` | 由 `scratch\` 的界面渲染图合成截图 |
+| `store\README.md` | 上传步骤、文案事实口径、两条踩过的坑 |
+
+### 图标尺寸合规（这次修的坑）
+
+`gen_icon.py` 早前把 256px 的图直接覆盖到了三个槽位，尺寸不合规会被认证打回：
+
+| 文件 | 要求 | 修复前 |
+|---|---|---|
+| `StoreLogo.png` | 50×50 | 256×256 ✗ |
+| `Square44x44Logo.png` | 44×44 | 256×256 ✗ |
+| `Square150x150Logo.png` | 150×150 | 256×256 ✗ |
+
+修复脚本 `scratch\fix_msix_assets.py`：从 1024 母图 LANCZOS 缩放（≤48px 加一次 UnsharpMask），非正方形（`Wide310x150`、`SplashScreen 620x300`）按最小边缩放后居中贴透明画布。
+
+### 提交前的两个已知项（不阻塞，但建议处理）
+
+1. **exe 仍是 `subsystem=3 (WINDOWS_CUI)`** —— 有控制台子系统。GUI 启动时程序会 `FreeConsole`，但开始菜单启动瞬间可能闪一下黑框。要彻底干净得给 linker 加 `/SUBSYSTEM:WINDOWS` 并在入口 `AttachConsole(ATTACH_PARENT_PROCESS)` 决定是否连回父控制台（程序侧改动，见第一节末尾的说明）。
+2. **exe 没有 VERSIONINFO 资源** —— `FileVersion` 为空字符串。商店不校验，但「应用和功能」里看不到版本号。MSIX 的版本来自 manifest，所以不影响升级。
+3. `Cargo.toml` 的 `version = "0.1.0"` 与 MSIX 的 `1.1.0.0` 没对齐 —— 只是观感问题，改不改都行。

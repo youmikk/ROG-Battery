@@ -9,6 +9,7 @@
 //! 另起炉灶等于把过去几天的样本扔掉。
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::win32;
 
@@ -20,8 +21,14 @@ pub const HIST_KEEP_HOURS: i64 = 48;
 pub const HIST_MAX_LINES: usize = 2000;
 /// 电量变化时，两条采样至少隔 60 秒。
 pub const HIST_MIN_GAP_SEC: i64 = 60;
-/// 电量没变时，每 10 分钟记一条心跳。
-pub const HIST_SAME_GAP_SEC: i64 = 600;
+/// 电量没变时，每 2 分钟记一条心跳。
+///
+/// 原来是 600 秒（10 分钟）。真机上电量是整 1% 一跳，10 分钟一条心跳要攒够
+/// 「3 条 + 跨度 ≥1%」往往得等一两个小时，于是界面长期停在「估算中」。
+/// 改成 120 秒后同样的时长能多 5 倍样本点，斜率收敛明显更快；48 小时窗口
+/// 内的行数仍远低于 [`HIST_MAX_LINES`]（心跳行 1440 条/48h，加上电量变化
+/// 行也还在 2000 以内，超了会自动裁剪最旧的）。
+pub const HIST_SAME_GAP_SEC: i64 = 120;
 /// 相邻样本间隔超过这个值就认为「中间没在观察」，回归不能用这段跨度。
 ///
 /// 取 2 小时：正常心跳 10 分钟一条，就算把刷新间隔调到 30 分钟也远不到这里；
@@ -33,11 +40,20 @@ pub const MUTEX_NAME: &str = "Local\\RogBatteryHistory";
 /// 等锁上限。拿不到就放弃本次写入，不阻塞调用方。
 pub const MUTEX_TIMEOUT_MS: u32 = 3000;
 
-/// 外推上限。原来的阈值是 30 天（720h），形同虚设：鼠标闲置时斜率能小到
-/// 0.1 %/h，外推出来就是几百小时，于是界面上会出现「预计还能用 137 小时」
-/// 这种没人信的数字。超过 100 小时不是「能用 4 天」，而是「这么算根本没意义」
-/// —— 闲置功耗和实际使用差太远。
-const MAX_PREDICT_HOURS: f64 = 100.0;
+/// 外推上限（小时）。
+///
+/// 原来取 100 小时，本意是不让界面出现「还能用 137 小时」这种没人信的数字。
+/// 但真机实测：这只鼠标 1 小时 48 分才掉 1%（≈0.55 %/h），按 97% 外推就是
+/// **176 小时** —— 完全正常的数据被这个上限判成「异常（请忽略）」，用户看到的
+/// 就是永远的「估算中」。所以放到 1000 小时（≈41 天），再由 [`COARSE_HOURS`]
+/// 用「10 天以上」这种粗粒度表达「很久」，而不是报错。
+const MAX_PREDICT_HOURS: f64 = 1000.0;
+
+/// 超过这个小时数就只说「N 天以上」。
+///
+/// 早期外推误差极大（2% 的跌幅推剩下 97%，真实值可能差三倍），显示到「小时」
+/// 是假装精确。粗粒度既诚实又不吓人。
+const COARSE_HOURS: f64 = 240.0;
 
 // ==================== 数据行 ====================
 
@@ -78,7 +94,9 @@ impl HistoryRow {
 /// `%LOCALAPPDATA%\rog-battery\history.tsv`
 ///
 /// 目录名沿用 C# 版的名字，为了读它攒下的数据。
-pub fn history_path() -> PathBuf {
+///
+/// 这是**首选**路径，纯函数、不做 IO。真正用哪个由 [`history_path`] 决定。
+pub fn primary_history_path() -> PathBuf {
     if let Some(base) = std::env::var_os("LOCALAPPDATA") {
         let base = PathBuf::from(base);
         if !base.as_os_str().is_empty() {
@@ -86,6 +104,130 @@ pub fn history_path() -> PathBuf {
         }
     }
     crate::paths::cache_dir().join("history.tsv")
+}
+
+/// 本次进程实际使用的历史文件路径（首次调用时定下来，之后不变）。
+///
+/// 为什么要探测：`%LOCALAPPDATA%` 在某些受限环境里对普通进程只读
+/// （写入一律 `os error 5 拒绝访问`，连在同一目录新建文件都不行）。
+/// 那时如果还死守着它，采样一条也写不进去，续航估算就永远停在
+/// 「样本不足」—— 用户看到的是功能坏了，其实是路径不可写。
+///
+/// 顺序：`%LOCALAPPDATA%\rog-battery\` → 程序所在目录 → 缓存目录。
+/// 只有前一个**真的写不进去**才往后掉，正常机器上永远是第一个。
+pub fn history_path() -> PathBuf {
+    if let Ok(guard) = resolved_cell().lock() {
+        if let Some(p) = guard.as_ref() {
+            return p.clone();
+        }
+    }
+    let p = match read_custom_history_path() {
+        Some(custom) => custom,
+        None => resolve_history_path_default(),
+    };
+    if let Ok(mut guard) = resolved_cell().lock() {
+        *guard = Some(p.clone());
+    }
+    p
+}
+
+fn custom_history_pointer() -> PathBuf {
+    crate::paths::config_dir().join("custom_history_path.txt")
+}
+
+/// 用户在设置里点「更改」时随时改历史文件路径（进程内立即生效）。
+pub fn set_custom_history_path(new_path: Option<PathBuf>) -> Result<(), String> {
+    let pointer = custom_history_pointer();
+    let resolved = match new_path {
+        Some(p) => {
+            let _ = crate::paths::ensure_dir(&crate::paths::config_dir());
+            std::fs::write(&pointer, p.to_string_lossy().as_bytes())
+                .map_err(|e| format!("写入历史文件重定向记录失败：{e}"))?;
+            p
+        }
+        None => {
+            let _ = std::fs::remove_file(&pointer);
+            resolve_history_path_default()
+        }
+    };
+    set_resolved_history_path(resolved)
+}
+
+/// 用全局静态变量保存当前实际路径，支持运行时热更新。
+fn resolved_cell() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn set_resolved_history_path(p: PathBuf) -> Result<(), String> {
+    let mut guard = resolved_cell().lock().map_err(|_| "历史路径锁中毒".to_string())?;
+    *guard = Some(p);
+    Ok(())
+}
+
+fn read_custom_history_path() -> Option<PathBuf> {
+    if let Ok(text) = std::fs::read_to_string(custom_history_pointer()) {
+        let t = text.trim();
+        if !t.is_empty() {
+            return Some(PathBuf::from(t));
+        }
+    }
+    None
+}
+
+/// 当前用到的路径是不是降级路径（不是 `%LOCALAPPDATA%\rog-battery`）。
+pub fn history_path_is_fallback() -> bool {
+    !history_path_is_custom() && history_path() != primary_history_path()
+}
+
+/// 用户是否手动指定了历史文件路径。
+pub fn history_path_is_custom() -> bool {
+    read_custom_history_path().is_some()
+}
+
+fn probe_writable(p: &std::path::Path) -> bool {
+    if let Some(dir) = p.parent() {
+        let _ = crate::paths::ensure_dir(dir);
+    }
+    // create+append 能打开就认为可写。打不开会顺手留下一个空文件，
+    // 这是有意的：空的 history.tsv 和不存在等价，`read_rows` 读出来就是空表。
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+        .is_ok()
+}
+
+fn resolve_history_path_default() -> PathBuf {
+    let primary = primary_history_path();
+    if probe_writable(&primary) {
+        return primary;
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("history.tsv"));
+        }
+    }
+    candidates.push(crate::paths::cache_dir().join("history.tsv"));
+
+    for c in candidates {
+        if c == primary {
+            continue;
+        }
+        if probe_writable(&c) {
+            // 首选路径里已有的历史不能丢：搬一份过来（探测会先把文件建成空文件，
+            // 所以这里用长度判断"原本有没有数据"）。
+            let empty = std::fs::metadata(&c).map(|m| m.len() == 0).unwrap_or(true);
+            if primary.exists() && empty {
+                let _ = std::fs::copy(&primary, &c);
+            }
+            return c;
+        }
+    }
+    // 都不行：还报首选路径，让错误信息指向用户预期的位置
+    primary
 }
 
 /// 给诊断输出用：当前解析到的历史文件路径。
@@ -286,15 +428,29 @@ pub fn record_sample_at(
         return Ok(false);
     }
 
-    let line = HistoryRow::new(now_sec, level, charging, mode).to_line();
+    let new_row = HistoryRow::new(now_sec, level, charging, mode);
+    let line = new_row.to_line();
     append_line(&path, &line)?;
 
-    // 先追加再裁剪：万一裁剪失败，至少样本已经落盘了
-    let outcome = prune_rows(&rows, now_sec);
+    // 先追加再裁剪：万一裁剪失败，至少样本已经落盘了。
+    //
+    // ⚠️ 裁剪必须拿**含刚追加那条**的列表去算。以前这里传的是 `&rows`（追加前的
+    // 快照），于是每次 rewrite 都会把刚写进去的那条覆盖掉；如果 `rows` 已经全部
+    // 超出 48 小时窗口，裁剪结果就是空表 —— 文件被改写成 0 字节，样本永远攒不起来，
+    // 界面上就永远显示「样本不足」。
+    let outcome = prune_after_append(&rows, new_row, now_sec);
     if outcome.rewrite {
         write_all(&path, &outcome.rows)?;
     }
     Ok(true)
+}
+
+/// 追加一条之后的裁剪：把新样本并进列表再算，避免「刚写的被裁剪覆盖掉」。
+fn prune_after_append(rows: &[HistoryRow], new_row: HistoryRow, now_sec: i64) -> PruneOutcome {
+    let mut all = Vec::with_capacity(rows.len() + 1);
+    all.extend_from_slice(rows);
+    all.push(new_row);
+    prune_rows(&all, now_sec)
 }
 
 /// 写一条采样，用真实当前时间。
@@ -361,6 +517,78 @@ pub struct Estimate {
     pub percent_per_hour: f64,
     pub samples: usize,
     pub span_minutes: f64,
+    /// 剩余（放电）或充满（充电）所需小时数；仅 `known == true` 时有意义。
+    pub hours: f64,
+    /// 这条结论是「沿用」来的：距上一次成功估算过了多少秒。0 = 本次新鲜算出的。
+    pub stale_seconds: i64,
+}
+
+impl Estimate {
+    /// 环下方那行短结论。`text` 是给「明细」用的整句（"预计还能用 3 小时 12 分钟"），
+    /// 环下面那格横向只有 ~150px，放整句会挤，所以另出一版紧凑文案。
+    pub fn short_text(&self) -> String {
+        if !self.known {
+            return if self.text == "已充满" {
+                "已充满".to_string()
+            } else {
+                "估算中…".to_string()
+            };
+        }
+        let d = dur_short(self.hours);
+        if self.percent_per_hour > 0.0 {
+            format!("约 {d}后充满")
+        } else {
+            format!("约 {d}")
+        }
+    }
+}
+
+/// 「沿用」的上限：30 分钟内有过可信结论才继续显示。
+///
+/// 再久就不该拿旧斜率骗人了 —— 中间可能插过线、换过档、休眠过。
+const STICKY_MAX_AGE_SEC: i64 = 1800;
+
+/// 最近一次成功估算。用于 [`predict_sticky`] 的「沿用」。
+static LAST_GOOD: Mutex<Option<(Estimate, i64)>> = Mutex::new(None);
+
+/// 把秒数说成人话（"刚刚" / "12 分钟" / "1 小时"）。
+pub fn ago_text(sec: i64) -> String {
+    if sec < 60 {
+        "刚刚".to_string()
+    } else if sec < 3600 {
+        format!("{} 分钟", sec / 60)
+    } else {
+        format!("{} 小时", sec / 3600)
+    }
+}
+
+/// 带「沿用」的预测：计算本身仍交给 [`predict_from_rows`]，这里只加一层缓存。
+///
+/// 为什么需要：一次刷新里算不出来（刚跳变 / 刚插拔 / 一瞬间读不到设备）时，
+/// 界面会立刻从「约 7 天」掉回「估算中…」，观感上就是"随时都在估算"。
+/// 30 分钟内有过结论就继续用那一条，并用 `stale_seconds` 如实标注，不假装是新的。
+pub fn predict_sticky(
+    rows: &[HistoryRow],
+    now_level: u8,
+    now_charging: bool,
+    now_mode: i32,
+    now_sec: i64,
+) -> Estimate {
+    let fresh = predict_from_rows(rows, now_level, now_charging, now_mode, now_sec);
+    let mut slot = LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner());
+    if fresh.known {
+        *slot = Some((fresh.clone(), now_sec));
+        return fresh;
+    }
+    if let Some((cached, at)) = slot.as_ref() {
+        let age = now_sec - *at;
+        if (0..=STICKY_MAX_AGE_SEC).contains(&age) {
+            let mut e = cached.clone();
+            e.stale_seconds = age;
+            return e;
+        }
+    }
+    fresh
 }
 
 /// 从历史行推算续航/充满时间，**不做文件 IO**。
@@ -552,7 +780,11 @@ fn predict_from_series(
         };
     }
 
-    let dur = dur_text(hours);
+    let dur = if hours >= COARSE_HOURS {
+        "10 天以上".to_string()
+    } else {
+        dur_text(hours)
+    };
     Estimate {
         known: true,
         text: if now_charging {
@@ -563,6 +795,8 @@ fn predict_from_series(
         percent_per_hour: slope,
         samples: sel.len(),
         span_minutes,
+        hours,
+        stale_seconds: 0,
     }
 }
 
@@ -614,14 +848,47 @@ fn dur_text(hours: f64) -> String {
     if total_min < 1 {
         total_min = 1;
     }
-    let h = total_min / 60;
-    let m = total_min % 60;
-    if h == 0 {
+    let days = total_min / (24 * 60);
+    let rem = total_min % (24 * 60);
+    let h = rem / 60;
+    let m = rem % 60;
+    if days > 0 {
+        if h == 0 {
+            format!("{days} 天")
+        } else {
+            format!("{days} 天 {h} 小时")
+        }
+    } else if h == 0 {
         format!("{m} 分钟")
     } else if m == 0 {
         format!("{h} 小时")
     } else {
         format!("{h} 小时 {m} 分钟")
+    }
+}
+
+/// `dur_text` 的紧凑版：环下面那格只有一百多像素，省掉「钟」字就够用。
+fn dur_short(hours: f64) -> String {
+    let mut total_min = (hours * 60.0).round() as i64;
+    if total_min < 1 {
+        total_min = 1;
+    }
+    let days = total_min / (24 * 60);
+    let rem = total_min % (24 * 60);
+    let h = rem / 60;
+    let m = rem % 60;
+    if days > 0 {
+        if h == 0 {
+            format!("{days} 天")
+        } else {
+            format!("{days} 天 {h} 小时")
+        }
+    } else if h == 0 {
+        format!("{m} 分钟")
+    } else if m == 0 {
+        format!("{h} 小时")
+    } else {
+        format!("{h} 小时 {m} 分")
     }
 }
 
@@ -751,10 +1018,10 @@ mod tests {
     #[test]
     fn dedupe_same_level() {
         let rows = vec![row(T0, 84, false)];
-        // 电量没变，5 分钟内不写
-        assert!(!should_record(&rows, 84, false, T0 + 300));
-        // 超过 600 秒才记心跳
-        assert!(should_record(&rows, 84, false, T0 + 601));
+        // 电量没变，2 分钟内不写
+        assert!(!should_record(&rows, 84, false, T0 + 60));
+        // 超过 120 秒（HIST_SAME_GAP_SEC）才记心跳
+        assert!(should_record(&rows, 84, false, T0 + 121));
     }
 
     #[test]
@@ -808,6 +1075,20 @@ mod tests {
         let out = prune_rows(&rows, T0 + 600);
         assert!(!out.rewrite, "没什么可删的时候不应该重写文件");
         assert_eq!(out.rows.len(), 10);
+    }
+
+    #[test]
+    fn prune_after_append_keeps_the_new_sample() {
+        // 回归：历史里的行全部超出 48 小时窗口时，裁剪结果里**必须**还有刚追加的
+        // 那条。以前传的是追加前的快照，裁剪出来是空表，于是文件被改写成 0 字节，
+        // 采样永远攒不下来，界面永远「样本不足」。
+        let rows = vec![row(T0 - 50 * 3600, 76, false), row(T0 - 49 * 3600, 76, false)];
+        let fresh = row(T0, 98, false);
+        let out = prune_after_append(&rows, fresh, T0);
+        assert!(out.rewrite);
+        assert_eq!(out.rows.len(), 1, "只剩新的那条");
+        assert_eq!(out.rows[0].ts, T0);
+        assert_eq!(out.rows[0].level, 98);
     }
 
     #[test]
@@ -919,12 +1200,74 @@ mod tests {
         assert_eq!(dur_text(0.0), "1 分钟");
         assert_eq!(dur_text(1.0), "1 小时");
         assert_eq!(dur_text(1.5), "1 小时 30 分钟");
+        // 天：鼠标这种设备本来就该按天说
+        assert_eq!(dur_text(30.0), "1 天 6 小时");
+        assert_eq!(dur_text(48.0), "2 天");
+        assert_eq!(dur_short(30.0), "1 天 6 小时");
+        assert_eq!(dur_short(0.68), "41 分钟");
+    }
+
+    /// 真机现场：98% → 97% 用了 1 小时 48 分（≈0.55 %/h），外推 176 小时。
+    /// 旧上限 100 小时把它判成「异常（请忽略）」，界面永远「估算中」。
+    /// 用户报的就是这个：不能持久计算，随时都是估算中。
+    #[test]
+    fn slow_drain_still_gives_an_answer() {
+        let rows = vec![
+            row(T0, 98, false),
+            row(T0 + 3600, 98, false),
+            row(T0 + 6480, 97, false),
+        ];
+        let e = predict_from_rows(&rows, 97, false, 2, T0 + 6480);
+        assert!(e.known, "慢放电必须能给出结论，实际 text={}", e.text);
+        assert!(
+            e.hours > 150.0 && e.hours < 220.0,
+            "外推应约 176 小时，实际 {}",
+            e.hours
+        );
+        assert!(e.text.contains("天"), "超过一天要按天说：{}", e.text);
+        assert!(!e.text.contains("异常"), "不该再说异常：{}", e.text);
+        assert!(e.short_text().starts_with("约 "), "{}", e.short_text());
+    }
+
+    /// 超过 10 天就只说「10 天以上」——早期外推装精确是骗人。
+    #[test]
+    fn very_long_estimate_is_coarse() {
+        let rows = vec![
+            row(T0, 99, false),
+            row(T0 + 6000, 99, false),
+            row(T0 + 12000, 99, false),
+            row(T0 + 18000, 98, false),
+        ];
+        let e = predict_from_rows(&rows, 98, false, 2, T0 + 18000);
+        assert!(e.known, "{}", e.text);
+        assert!(e.hours > COARSE_HOURS, "{}", e.hours);
+        assert_eq!(e.text, "预计还能用 10 天以上");
+    }
+
+    /// 「沿用」：本次算不出来时，30 分钟内的旧结论继续给，但要用 stale_seconds 标注。
+    #[test]
+    fn sticky_keeps_last_good_estimate() {
+        let rows = vec![
+            row(T0, 98, false),
+            row(T0 + 3600, 98, false),
+            row(T0 + 6480, 97, false),
+        ];
+        let first = predict_sticky(&rows, 97, false, 2, T0 + 6480);
+        assert!(first.known && first.stale_seconds == 0, "{:?}", first);
+
+        // 样本全没了（相当于刚清空历史 / 一瞬间读不到）—— 应沿用刚才那条
+        let again = predict_sticky(&[], 97, false, 2, T0 + 6480 + 600);
+        assert!(again.known, "应沿用上一条，实际 text={}", again.text);
+        assert_eq!(again.stale_seconds, 600);
+        assert_eq!(again.hours, first.hours);
     }
 
     #[test]
     fn history_path_uses_rog_battery_dir() {
-        // 目录名故意不是 rog-mouse-ctl —— 要复用 C# 版的数据
-        let p = history_path_display();
+        // 目录名故意不是 rog-mouse-ctl —— 要复用 C# 版的数据。
+        // 用 primary_history_path：history_path 会按可写性降级，单测环境里
+        // %LOCALAPPDATA% 可能不可写，拿它断言会误报。
+        let p = primary_history_path().display().to_string();
         assert!(p.contains("rog-battery"), "{}", p);
         assert!(p.ends_with("history.tsv"), "{}", p);
     }

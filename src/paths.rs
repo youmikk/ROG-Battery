@@ -48,7 +48,41 @@ pub fn backup_dir() -> PathBuf {
 
 /// 配置文件路径（窗口位置、托盘开关、缓存有效期等）
 pub fn settings_file() -> PathBuf {
+    if let Some(custom) = custom_settings_file() {
+        return custom;
+    }
     config_dir().join("settings.ini")
+}
+
+fn custom_settings_pointer() -> PathBuf {
+    config_dir().join("custom_settings_path.txt")
+}
+
+/// 读取用户自定义的配置文件路径（若已配置且非空）。
+pub fn custom_settings_file() -> Option<PathBuf> {
+    if let Ok(text) = std::fs::read_to_string(custom_settings_pointer()) {
+        let t = text.trim();
+        if !t.is_empty() {
+            return Some(PathBuf::from(t));
+        }
+    }
+    None
+}
+
+/// 设定或重置自定义配置文件路径。
+pub fn set_custom_settings_file(new_path: Option<PathBuf>) -> Result<(), String> {
+    let pointer = custom_settings_pointer();
+    match new_path {
+        Some(p) => {
+            let _ = ensure_dir(&config_dir());
+            std::fs::write(&pointer, p.to_string_lossy().as_bytes())
+                .map_err(|e| format!("写入配置文件重定向记录失败：{e}"))
+        }
+        None => {
+            let _ = std::fs::remove_file(&pointer);
+            Ok(())
+        }
+    }
 }
 
 /// 快照缓存文件（跨进程复用，省掉 690ms 的全量读取）

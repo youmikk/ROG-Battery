@@ -181,7 +181,7 @@ impl Cmd {
             Cmd::Sleep(c) => format!("自动休眠 {}", proto::sleep_mode_name(*c)),
             Cmd::LowBatt(p) => format!("低电量阈值 {p}%"),
             Cmd::FullEffect(v) => format!("充满效果 {}", if *v != 0 { "开" } else { "关" }),
-            Cmd::AutoStart(on) => format!("开机自启 {}", if *on { "开启" } else { "关闭" }),
+            Cmd::AutoStart(on) => if *on { "开机自启开启".to_string() } else { "开机自启关闭".to_string() },
             Cmd::Backup(_) => "导出配置".to_string(),
             Cmd::Restore(_) => "还原配置".to_string(),
         }
@@ -196,19 +196,28 @@ struct CmdResult {
     label: String,
     ok: Option<String>,
     err: Option<String>,
+    #[allow(dead_code)]
     hint: &'static str,
 }
 
 impl CmdResult {
-    /// 变成界面底部那条浮层提示。
+    /// 变成界面底部那条浮层提示（精简文案）。
     fn toast(&self) -> String {
         match (&self.ok, &self.err) {
-            (Some(m), _) => format!("✔ {}：{m}", self.label),
+            (Some(m), _) => {
+                if m == "已生效" {
+                    format!("✔ {}已生效", self.label)
+                } else {
+                    format!("✔ {}：{m}", self.label)
+                }
+            }
             (None, Some(m)) => {
-                if self.hint.is_empty() {
+                if m.contains("错误码 5") || m.contains("Win32 错误码 5") {
+                    format!("✘ {}失败：权限不足 (错误 5)", self.label)
+                } else if m.starts_with("无法写入") || m.starts_with("打开") {
                     format!("✘ {}：{m}", self.label)
                 } else {
-                    format!("✘ {}：{m}（{}）", self.label, self.hint)
+                    format!("✘ {}失败：{m}", self.label)
                 }
             }
             (None, None) => format!("✔ {}", self.label),
@@ -396,7 +405,8 @@ impl<'a> UiEnv<'a> {
     /// 在界面底部浮层显示一条提示，并立刻重画。
     fn say(&self, text: impl Into<String>) {
         let t = text.into();
-        self.canvas.with_ui_mut(|u| u.status = t);
+        self.canvas.with_ui_mut(|u| u.set_status(t));
+        self.canvas.set_animating(true);
         self.canvas.repaint_now();
     }
 
@@ -439,7 +449,7 @@ fn handle_act(a: Act, env: &UiEnv) {
     // 任何新动作都先把上一条提示清掉：否则写完设备的「✔ 已生效」会一直挂着，
     // 用户接着点别的东西时还以为是这次的结果。
     if !matches!(a, Act::None) {
-        env.canvas.with_ui_mut(|u| u.status.clear());
+        env.canvas.with_ui_mut(|u| u.clear_status());
     }
 
     match a {
@@ -459,17 +469,79 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.canvas.repaint_now();
         }
 
+        Act::SelectCloseChoice(c) => {
+            env.canvas.with_ui_mut(|u| u.close_choice = c);
+            env.canvas.repaint_now();
+        }
+
+        Act::ToggleCloseRemember => {
+            env.canvas.with_ui_mut(|u| u.close_remember = !u.close_remember);
+            env.canvas.repaint_now();
+        }
+
+        Act::CancelCloseDialog => {
+            env.canvas.with_ui_mut(|u| u.show_close_dialog = false);
+            env.canvas.repaint_now();
+        }
+
+        Act::ConfirmCloseDialog => {
+            let (choice, remember) = env.canvas.with_ui(|u| (u.close_choice, u.close_remember));
+            env.canvas.with_ui_mut(|u| u.show_close_dialog = false);
+            env.canvas.repaint_now();
+
+            if remember {
+                let mode = if choice == crate::ui::widget::CloseChoice::Minimize {
+                    "minimize"
+                } else {
+                    "quit"
+                };
+                env.set_cfg(|c| {
+                    c.close_mode = mode.to_string();
+                    c.close_to_tray = mode == "minimize";
+                });
+            }
+
+            if choice == crate::ui::widget::CloseChoice::Minimize {
+                env.window.set_visible(false);
+            } else {
+                env.signal.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+                env.signal.cv.notify_all();
+                nwg::stop_thread_dispatch();
+            }
+        }
+
+        Act::SetCloseMode(idx) => {
+            let mode = match idx {
+                1 => "minimize",
+                2 => "quit",
+                _ => "ask",
+            };
+            let is_min = mode == "minimize";
+            env.set_cfg(|c| {
+                c.close_mode = mode.to_string();
+                c.close_to_tray = is_min;
+            });
+        }
+
         Act::ToggleRail => {
             env.canvas.with_ui_mut(|u| u.rail = !u.rail);
             env.canvas.repaint_now();
         }
 
         Act::ToggleTheme => {
+            // 标题栏小按钮：在显式浅色/深色之间来回切（不参与「跟随系统」）。
             let m = env.canvas.with_ui(|u| u.mode.flipped());
-            apply_theme(env, m);
+            apply_theme_pref(env, m.as_str());
         }
 
-        Act::SetTheme(m) => apply_theme(env, m),
+        Act::SetTheme(idx) => {
+            let pref = match idx {
+                1 => crate::ui::theme::PREF_LIGHT,
+                2 => crate::ui::theme::PREF_DARK,
+                _ => crate::ui::theme::PREF_SYSTEM,
+            };
+            apply_theme_pref(env, pref);
+        }
 
         Act::Refresh => {
             env.signal.request_refresh();
@@ -483,6 +555,16 @@ fn handle_act(a: Act, env: &UiEnv) {
 
         Act::CloseDrop => {
             env.canvas.with_ui_mut(|u| u.set_open_drop(None));
+            env.canvas.repaint_now();
+        }
+
+        Act::SetPaletteTab(tab) => {
+            env.canvas.with_ui_mut(|u| u.palette_tab = tab);
+            env.canvas.repaint_now();
+        }
+
+        Act::SetCustomHue(_d, hue) => {
+            env.canvas.with_ui_mut(|u| u.custom_hue = hue);
             env.canvas.repaint_now();
         }
 
@@ -532,11 +614,36 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::OpenHistoryFolder => {
             let p = crate::history::history_path();
             let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or(p);
-            match std::process::Command::new("explorer.exe").arg(&dir).spawn() {
-                Ok(_) => {}
-                Err(e) => env.say(format!("✘ 打不开文件夹：{e}")),
+            open_in_explorer(env, &dir);
+        }
+
+        Act::OpenSettingsFolder => {
+            let p = crate::paths::settings_file();
+            let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or(p);
+            open_in_explorer(env, &dir);
+        }
+
+        Act::ChangeHistoryPath => pick_save_path(env, SavePathKind::History),
+        Act::ChangeSettingsPath => pick_save_path(env, SavePathKind::Settings),
+        Act::ResetHistoryPath => reset_custom_path(env, SavePathKind::History),
+        Act::ResetSettingsPath => reset_custom_path(env, SavePathKind::Settings),
+
+        Act::OpenLightingSettings => {
+            if let Err(e) = crate::dynlight::open_settings() {
+                env.say(format!("✘ {e}"));
             }
         }
+
+        // 重新探测 LampArray。这里会真的枚举 HID（约几十毫秒），
+        // 但只在用户点按钮时发生，不是每帧，也不会在绘制路径上。
+        Act::RefreshLighting => match crate::dynlight::refresh() {
+            Some(l) => env.say(format!(
+                "✔ 已检测到灯效设备（{} 个灯 · {}）",
+                l.lamp_count,
+                l.kind_name()
+            )),
+            None => env.say("✘ 未检测到 HID LampArray 灯效设备"),
+        },
 
         Act::ClearHistory => {
             let p = crate::history::history_path();
@@ -564,16 +671,68 @@ fn handle_act(a: Act, env: &UiEnv) {
     }
 }
 
-/// 换配色：改 `Ui`、改 `settings.ini`、改标题栏，三处必须同时改。
+/// 换配色偏好：改 `Ui`、改 `settings.ini`、改标题栏，三处必须同时改。
 ///
-/// 只改 `Ui` → 重启后配色回到浅色；只改 `Settings` → 当次切换不生效。
-fn apply_theme(env: &UiEnv, m: crate::ui::theme::Mode) {
-    env.canvas.with_ui_mut(|u| u.mode = m);
-    env.set_cfg(|c| c.theme = m.as_str().to_string());
+/// `pref` 是 `system` / `light` / `dark`。`system` 时按系统深浅色实时换算。
+/// 只改 `Ui` → 重启后配色回到默认；只改 `Settings` → 当次切换不生效。
+fn apply_theme_pref(env: &UiEnv, pref: &str) {
+    let pref = crate::ui::theme::normalize_pref(pref);
+    let m = crate::ui::theme::resolve(pref);
+    let idx = match pref {
+        crate::ui::theme::PREF_LIGHT => 1u8,
+        crate::ui::theme::PREF_DARK => 2,
+        _ => 0,
+    };
+    env.canvas.with_ui_mut(|u| {
+        u.mode = m;
+        u.theme_pref = idx;
+    });
+    env.set_cfg(|c| c.theme = pref.to_string());
     if let Some(h) = env.window.handle.hwnd() {
         crate::dwm::set_dark_titlebar(h as crate::win32::Handle, m == crate::ui::theme::Mode::Dark);
     }
     env.canvas.repaint_now();
+}
+
+/// 色盘选中一个颜色。`slot` 是 `LIGHT_COLOR_SLOT`（灯光）或 0..3（DPI 档位）。
+///
+/// `idx` 在预设模式下是颜色下标，在色环模式下是打包的 24-bit RGB ——
+/// `palette_color` 两种都认。
+fn pick_palette(env: &UiEnv, slot: u8, idx: usize) {
+    let Some(rgb) = pages::palette_color(idx) else {
+        return;
+    };
+    if slot == crate::ui::widget::LIGHT_COLOR_SLOT {
+        let st = env.state();
+        let mode = st.as_ref().map(|s| s.light_mode).unwrap_or(1);
+        // 颜色变了要把草稿清掉：输入框里留着旧色号的话，
+        // 用户接着点「应用」会把刚挑的颜色又改回去。
+        drop_draft(env, Edit::LightColor);
+        env.submit(Cmd::Light {
+            mode,
+            bright: None,
+            rgb: Some(rgb),
+            dir: None,
+            random: None,
+            speed: None,
+        });
+    } else {
+        let i = (slot as usize) & 3;
+        // 读不到设备就**不写**：`Cmd::Dpi` 必须给一整套值，拿不到当前 DPI
+        // 就只能猜（以前猜 800），猜错就是把用户那一档的 DPI 一起改掉 ——
+        // 用户点的是颜色，结果灵敏度变了，这是最糟的一种「顺手改坏」。
+        let Some(st) = env.state() else {
+            env.say("✘ 读不到设备，先动一下鼠标再选颜色");
+            return;
+        };
+        let dpi = st.dpi(i);
+        drop_draft(env, Edit::DpiColor(i as u8));
+        env.submit(Cmd::Dpi {
+            stage: i + 1,
+            dpi,
+            rgb: Some(rgb),
+        });
+    }
 }
 
 /// 下拉框选中一项。
@@ -595,6 +754,21 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
             random: None,
             speed: None,
         });
+        return;
+    }
+
+    // 色盘**必须先于** `option_value` 分叉。
+    //
+    // 色盘的「值」不是 `option_value` 那套「下标 → 协议值」映射：
+    // 预设模式下 `idx` 是 0..36 的颜色下标，要查表换成 RGB；
+    // 色环模式下 `idx` 本身就是打包好的 24-bit RGB。
+    //
+    // 原来这段写在下面 `match d` 里，而 `option_value(Palette, _)` 恒返回
+    // `None`（`raw_options` 对 Palette 故意返回空表），于是 `let Some(code)
+    // = ... else { return }` 直接把它挡掉了 —— `Drop::Palette` 那一支是
+    // **永远走不到的死代码**。表现就是「点颜色完全没反应，弹层还照常关掉」。
+    if let Drop::Palette(slot) = d {
+        pick_palette(env, slot, idx);
         return;
     }
 
@@ -679,6 +853,22 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
                 slot,
                 dst,
                 confirmed,
+            });
+        }
+        Drop::Palette(_) => {
+            // 已在函数开头分叉处理（见那里的注释），这里只为让 match 穷尽。
+            unreachable!("Palette 在 option_value 之前已分叉")
+        }
+        Drop::CloseMode => {
+            let mode = match idx {
+                1 => "minimize",
+                2 => "quit",
+                _ => "ask",
+            };
+            let is_min = mode == "minimize";
+            env.set_cfg(|c| {
+                c.close_mode = mode.to_string();
+                c.close_to_tray = is_min;
             });
         }
     }
@@ -996,6 +1186,124 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
     };
     if !env.submit(cmd) {
         env.say("✘ 后台正在执行别的操作，请稍后再试");
+    }
+}
+
+/// 用系统 shell 打开一个文件夹（`explorer.exe` 的 spawn 在部分受限环境下
+/// 返回 Ok 但窗口并不出现，`ShellExecuteW` 走的是真正的 shell 激活，可靠）。
+fn open_in_explorer(env: &UiEnv, dir: &std::path::Path) {
+    let _ = crate::paths::ensure_dir(dir);
+    if let Err(e) = crate::dynlight::shell_open(&dir.to_string_lossy()) {
+        env.say(format!("✘ 打不开文件夹：{e}"));
+    }
+}
+
+/// 设置页里「更改保存位置」的两类目标。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SavePathKind {
+    History,
+    Settings,
+}
+
+impl SavePathKind {
+    fn label(self) -> &'static str {
+        match self {
+            SavePathKind::History => "历史文件",
+            SavePathKind::Settings => "设置文件",
+        }
+    }
+    #[allow(dead_code)]
+    fn default_file(self) -> &'static str {
+        match self {
+            SavePathKind::History => "history.tsv",
+            SavePathKind::Settings => "settings.ini",
+        }
+    }
+    fn current(self) -> std::path::PathBuf {
+        match self {
+            SavePathKind::History => crate::history::history_path(),
+            SavePathKind::Settings => crate::paths::settings_file(),
+        }
+    }
+    fn filters(self) -> &'static str {
+        match self {
+            SavePathKind::History => "历史记录(*.tsv)|所有文件(*.*)",
+            SavePathKind::Settings => "配置文件(*.ini)|所有文件(*.*)",
+        }
+    }
+}
+
+/// 让用户选一个新的保存位置，并把旧数据搬过去。
+fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
+    let mut fd = nwg::FileDialog::default();
+    let old = kind.current();
+    let default_folder = old
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if let Err(e) = nwg::FileDialog::builder()
+        .title(format!("选择{}的保存位置", kind.label()))
+        .action(nwg::FileDialogAction::Save)
+        .filters(kind.filters())
+        .default_folder(default_folder)
+        .build(&mut fd)
+    {
+        env.say(format!("✘ 打开文件对话框失败：{e}"));
+        return;
+    }
+    if !fd.run(Some(env.window)) {
+        return;
+    }
+    let Ok(item) = fd.get_selected_item() else {
+        env.say("✘ 没拿到选中的路径");
+        return;
+    };
+    let new_path = std::path::PathBuf::from(item);
+    if new_path == old {
+        env.say("位置没变");
+        return;
+    }
+    // 旧文件有内容、新位置还是空的 → 搬过去，别让用户丢历史/配置。
+    let old_has = std::fs::metadata(&old).map(|m| m.len() > 0).unwrap_or(false);
+    let new_empty = std::fs::metadata(&new_path).map(|m| m.len() == 0).unwrap_or(true);
+    if let Some(parent) = new_path.parent() {
+        let _ = crate::paths::ensure_dir(parent);
+    }
+    if old_has && new_empty {
+        let _ = std::fs::copy(&old, &new_path);
+    }
+    let res = match kind {
+        SavePathKind::History => crate::history::set_custom_history_path(Some(new_path.clone())),
+        SavePathKind::Settings => {
+            // 先把当前配置写到新位置，再切换指针，避免切换后读到空文件。
+            let cur = crate::settings::load();
+            let _ = std::fs::write(&new_path, crate::settings::Settings::render(&cur));
+            crate::paths::set_custom_settings_file(Some(new_path.clone()))
+        }
+    };
+    match res {
+        Ok(()) => {
+            env.say(format!("✔ {}已改到 {}", kind.label(), new_path.display()));
+            env.signal.request_refresh();
+            env.canvas.repaint_now();
+        }
+        Err(e) => env.say(format!("✘ {e}")),
+    }
+}
+
+/// 恢复默认保存位置。
+fn reset_custom_path(env: &UiEnv, kind: SavePathKind) {
+    let res = match kind {
+        SavePathKind::History => crate::history::set_custom_history_path(None),
+        SavePathKind::Settings => crate::paths::set_custom_settings_file(None),
+    };
+    match res {
+        Ok(()) => {
+            env.say(format!("✔ {}已恢复默认位置", kind.label()));
+            env.signal.request_refresh();
+            env.canvas.repaint_now();
+        }
+        Err(e) => env.say(format!("✘ {e}")),
     }
 }
 
@@ -1516,6 +1824,48 @@ fn autostart_hint(
     }
 }
 
+/// 托盘悬停提示（多行）：鼠标名称 / 连接方式 / 电量 / 当前 DPI 与档位。
+fn tray_tip_full(s: &Shared) -> String {
+    let name = s
+        .ident
+        .as_ref()
+        .map(|i| i.model_name.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "ROG 鼠标".to_string());
+
+    let conn = match s.ident.as_ref() {
+        Some(i) if i.dongle_sn.trim().is_empty() => "有线",
+        Some(_) => "2.4G 无线",
+        None => "连接未知",
+    };
+
+    let battery = match s.quick {
+        Some(q) => {
+            if q.charging {
+                format!("电量 {}%（充电中）", q.level)
+            } else {
+                format!("电量 {}%", q.level)
+            }
+        }
+        None => match &s.status {
+            Status::Asleep => "电量 —（休眠中，动一下鼠标）".to_string(),
+            Status::Error(_) => "电量 —（读取出错）".to_string(),
+            _ => "电量 —".to_string(),
+        },
+    };
+
+    let dpi = match (s.quick, s.full.as_ref()) {
+        (Some(q), Some(st)) => {
+            let idx = (q.active_stage as usize).saturating_sub(1).min(3);
+            format!("{} DPI · 第 {} 档", st.dpi(idx), q.active_stage.max(1))
+        }
+        (Some(q), None) => format!("第 {} 档", q.active_stage.max(1)),
+        _ => "DPI —".to_string(),
+    };
+
+    format!("{name}\n{conn}\n{battery}\n{dpi}")
+}
+
 /// 托盘悬停提示。**必须是 `&str`**（`set_tip` 不收 `Option`）。
 fn tray_tip(q: Option<Quick>, status: &Status) -> String {
     match (q, status) {
@@ -1598,14 +1948,14 @@ fn ask_confirm(title: &str, text: &str) -> bool {
 // ==================== 入口 ====================
 
 /// 启动 GUI。返回时进程就要退出了。
-pub fn run() -> Result<(), String> {
+pub fn run(wants_autostart: bool) -> Result<(), String> {
     nwg::init().map_err(|e| format!("nwg 初始化失败：{e}"))?;
 
     let cfg = settings::load();
     Settings::write_default_if_missing();
     // 盘上写的配色和界面默认值必须一开始就一致，否则首帧是浅色、
-    // 用户一拖窗口就变成深色。
-    let mode = crate::ui::theme::Mode::parse(&cfg.theme);
+    // 用户一拖窗口就变成深色。`system` 在这里按系统深浅色换算成具体配色。
+    let mode = crate::ui::theme::resolve(&cfg.theme);
 
     // 缩放比要自己算：nwg 没开 `high-dpi` feature 时 `scale_factor()` 恒返 1.0，
     // 传给 `CreateWindowExW` 的尺寸就是物理像素。
@@ -1614,12 +1964,21 @@ pub fn run() -> Result<(), String> {
         scale = 1.0;
     }
 
+    // 灯光页要显示「有没有 HID LampArray 设备」。枚举 HID 要几十毫秒，
+    // 绝不能落在第一次 WM_PAINT 里，所以在这里（消息循环之前）先探一次。
+    crate::dynlight::init();
+
     // ── 主窗口 ──────────────────────────────────────────────
     let mut window = nwg::Window::default();
     nwg::Window::builder()
         .title(WINDOW_TITLE)
         .size(((WIN_W * scale) as i32, (WIN_H * scale) as i32))
         .center(true)
+        // **先隐藏**：全部初始化（读设置/托盘图标/字体/画布/后台线程）都在主线程
+        // 同步做完才开消息循环，这期间窗口若可见就是"显示着但不响应"，
+        // Explorer 会把鼠标转成转圈。`MAIN_WINDOW` = WS_OVERLAPPEDWINDOW **但不含 WS_VISIBLE**，
+        // 初始化完、dispatch 前再 ShowWindow。
+        .flags(nwg::WindowFlags::MAIN_WINDOW)
         .build(&mut window)
         .map_err(|e| format!("建主窗口失败：{e}"))?;
 
@@ -1630,6 +1989,78 @@ pub fn run() -> Result<(), String> {
 
     // 深色标题栏要和界面配色一起决定，否则浅色界面配深色标题栏很割裂。
     crate::dwm::set_dark_titlebar(hwnd, mode == crate::ui::theme::Mode::Dark);
+
+    // ── 去掉系统标题栏 ──────────────────────────────────────
+    //
+    // 顺序是**承重的**，不能调换：
+    //   ① 先挂子类拦 `WM_NCCALCSIZE` / `WM_GETMINMAXINFO`；
+    //   ② 再改窗口样式（`go_frameless` 内部的 `SWP_FRAMECHANGED` 会立刻触发
+    //      一次非客户区重算，没挂子类的话那一次会按旧样式算出带标题栏的客户区，
+    //      内容区一启动就少 39 像素高）；
+    //   ③ 最后按「窗口比客户区多出来的部分」把窗口补到正好 1100×740。
+    //
+    // 为什么不是 `WS_POPUP` 重建窗口：那会连 `WS_THICKFRAME` 一起丢掉，
+    // 边缘缩放、Aero Snap、最大化动画、任务栏右键菜单全要自己实现。
+    // 只拿掉 caption、保留 thickframe，这些系统行为一个都不丢。
+    let raw_handler = {
+        const ID_NCCALCSIZE: usize = 0x10001;
+        const ID_MINMAXINFO: usize = 0x10002;
+        const ID_NCACTIVATE: usize = 0x10003;
+        const ID_NCPAINT: usize = 0x10004;
+        // handler_id 必须 > 0xFFFF，否则 nwg 直接 panic（那是它自己保留的区间）
+        let nccalcs = nwg::bind_raw_event_handler(&window.handle, ID_NCCALCSIZE, |_h, msg, wp, _lp| {
+            const WM_NCCALCSIZE: u32 = 0x0083;
+            if msg == WM_NCCALCSIZE {
+                // 返回 0 = 客户区铺满整个窗口矩形，标题栏视觉上消失，
+                // 但 DWM 的圆角/投影/动画照旧
+                return crate::ui::frame::on_nccalcsize(wp).map(|r| r as isize);
+            }
+            None
+        })
+        .map_err(|e| format!("绑定客户区重算子类失败：{e}"))?;
+
+        let minmax = nwg::bind_raw_event_handler(&window.handle, ID_MINMAXINFO, |h, msg, _wp, lp| {
+            const WM_GETMINMAXINFO: u32 = 0x0024;
+            if msg == WM_GETMINMAXINFO {
+                // nwg 的 `h` 是 winapi 的 `HWND`，我们自己的签名用 `*mut c_void`
+                // —— 两者都是指针，`as` 转一下就对了。
+                crate::ui::frame::on_getminmaxinfo(h as crate::win32::Handle, lp);
+            }
+            None
+        })
+        .map_err(|e| format!("绑定最大化尺寸子类失败：{e}"))?;
+
+        let ncact = nwg::bind_raw_event_handler(&window.handle, ID_NCACTIVATE, |_h, msg, _wp, _lp| {
+            const WM_NCACTIVATE: u32 = 0x0086;
+            if msg == WM_NCACTIVATE {
+                // 返回 Some(1) 阻止 DefWindowProcW 绘制系统默认非客户区（经典蓝条标题栏）
+                return Some(1);
+            }
+            None
+        })
+        .map_err(|e| format!("绑定非客户区激活子类失败：{e}"))?;
+
+        let ncpaint = nwg::bind_raw_event_handler(&window.handle, ID_NCPAINT, |_h, msg, _wp, _lp| {
+            const WM_NCPAINT: u32 = 0x0085;
+            if msg == WM_NCPAINT {
+                // 返回 Some(0) 阻止系统绘制默认外边框
+                return Some(0);
+            }
+            None
+        })
+        .map_err(|e| format!("绑定非客户区绘制子类失败：{e}"))?;
+
+        (nccalcs, minmax, ncact, ncpaint)
+    };
+    let (_raw_nccalcs, _raw_minmax, _raw_ncact, _raw_ncpaint) = raw_handler;
+
+    crate::ui::frame::go_frameless(hwnd);
+    // 客户区要从 1100×740 起算。改样式之后客户区已经变成「整个窗口」，
+    // 所以这一步是把窗口本身收到「客户区正好 1100×740」。
+    crate::ui::frame::keep_client_size(hwnd, WIN_W, WIN_H, scale);
+    // 无边框窗口默认是直角硬边，开系统原生圆角让它和桌面柔和衔接（#5）。
+    // Win10 等老系统上这一步静默失败，退回直角，属于正常降级。
+    crate::dwm::set_round_corners(hwnd);
 
     // ── 托盘 ────────────────────────────────────────────────
     // parent 必须是 MessageWindow
@@ -1696,15 +2127,18 @@ pub fn run() -> Result<(), String> {
     let signal = Arc::new(Signal::new(cfg.refresh_interval_sec));
     let sender = notice.sender();
 
-    // 自启状态开机时读一次。
+    // 自启状态开机时读一次 —— **放到后台线程**。
     //
-    // 不放进刷新循环：`autostart::state()` 在未打包时读一次注册表、
-    // 在 MSIX 包里要走一遍 WinRT 异步（可能几百毫秒），跟着 60 秒轮询跑是浪费。
-    // 更重要的是**它不会自己变** —— 只有用户去系统设置里改，或者本程序
-    // 自己 enable/disable 才会变，那两种情况下面都会主动刷新。
+    // `autostart::state()` 在 MSIX 包里要走一遍 WinRT 异步（实测几百毫秒），
+    // 放主线程会在窗口"该出来了"之前卡住启动（表现为一进去就转圈）。
+    // 读到后写进 shared 并 notice 一次，界面自己会刷新这一行。
     {
-        let st = crate::autostart::state();
-        lock_shared(&shared).autostart = st;
+        let shared_a = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            let st = crate::autostart::state();
+            lock_shared(&shared_a).autostart = st;
+            sender.notice();
+        });
     }
 
     // ── 内容区 ──────────────────────────────────────────────
@@ -1716,8 +2150,19 @@ pub fn run() -> Result<(), String> {
     let (cw, ch) = window.size();
     let canvas = Canvas::create(hwnd, 0, 0, cw as i32, ch as i32, scale, damage)
         .map_err(|e| format!("建自绘内容区失败：{e}"))?;
-    // 首帧就带上配色：`Ui::default()` 里是 Light，盘上可能是 Dark。
-    canvas.with_ui_mut(|u| u.mode = mode);
+    // 句柄先留一份：`canvas` 后面会被 move 进事件闭包，但「显示窗口前先画
+    // 首帧」那一步在闭包外，只能靠这个裸句柄。
+    let canvas_hwnd = canvas.hwnd();
+    // 首帧就带上配色：`Ui::default()` 里是 Light，盘上可能是 Dark/system。
+    let theme_pref = match crate::ui::theme::normalize_pref(&cfg.theme) {
+        crate::ui::theme::PREF_LIGHT => 1u8,
+        crate::ui::theme::PREF_DARK => 2,
+        _ => 0,
+    };
+    canvas.with_ui_mut(|u| {
+        u.mode = mode;
+        u.theme_pref = theme_pref;
+    });
 
     {
         let shared_p = Arc::clone(&shared);
@@ -1900,7 +2345,7 @@ pub fn run() -> Result<(), String> {
 
                     let est = {
                         let s = lock_shared(&shared_t);
-                        crate::history::predict_from_rows(
+                        crate::history::predict_sticky(
                             &s.rows,
                             q.level,
                             q.charging,
@@ -1930,26 +2375,34 @@ pub fn run() -> Result<(), String> {
 
     let shared_e = Arc::clone(&shared);
     let signal_e = Arc::clone(&signal);
+    let canvas_e = canvas.clone();
 
     // 闭包要 `move` 走 `window`，而 `full_bind_event_handler` 又要借用它的
     // 句柄 —— 先克隆一份句柄再绑，否则报 E0505（不能一边借一边移）。
     let wh = window.handle.clone();
-    let handler = nwg::full_bind_event_handler(&wh, move |evt, evt_data, handle| {
+    let handler = nwg::full_bind_event_handler(&wh, move |evt, evt_data, _handle| {
         use nwg::Event as E;
 
         match evt {
             E::OnWindowClose => {
-                // 只有「托盘真的在」才允许把窗口藏起来。
-                //
-                // 单看 `close_to_tray` 会踩一个死局：`tray_enabled=false` +
-                // `close_to_tray=true`（手改 ini、或先关托盘再点 ×）
-                // → 窗口消失、托盘没有、进程还活着，用户在桌面上什么都找不到，
-                // 只能去任务管理器。托盘关掉时直接退出才是对的。
                 let s = lock_shared(&shared_e);
-                let hide = s.cfg.close_to_tray && s.cfg.tray_enabled;
+                let mode = s.cfg.close_mode.clone();
+                let tray_on = s.cfg.tray_enabled;
                 drop(s);
-                if hide {
-                    // close(false) 取消关闭；窗口藏起来，托盘还在。
+
+                if mode == "ask" {
+                    // 取消直接关闭，弹出模态确认对话框
+                    if let nwg::EventData::OnWindowClose(d) = evt_data {
+                        d.close(false);
+                    }
+                    canvas_e.with_ui_mut(|u| {
+                        u.show_close_dialog = true;
+                        u.close_choice = crate::ui::widget::CloseChoice::Minimize;
+                        u.close_remember = false;
+                    });
+                    canvas_e.repaint_now();
+                } else if mode == "minimize" && tray_on {
+                    // 最小化到托盘
                     if let nwg::EventData::OnWindowClose(d) = evt_data {
                         d.close(false);
                     }
@@ -1980,7 +2433,9 @@ pub fn run() -> Result<(), String> {
                     let on_battery = canvas.with_ui(|u| {
                         u.page == crate::ui::widget::Page::Battery
                     });
-                    on_battery && s.quick.map(|q| q.charging).unwrap_or(false)
+                    let charging = on_battery && s.quick.map(|q| q.charging).unwrap_or(false);
+                    let toast_active = canvas.with_ui(|u| !u.status.is_empty());
+                    charging || toast_active
                 };
                 canvas.set_animating(want_anim);
 
@@ -2003,7 +2458,8 @@ pub fn run() -> Result<(), String> {
                 let result = { lock_shared(&shared_e).last.take() };
                 if let Some(r) = result {
                     let text = r.toast();
-                    canvas.with_ui_mut(|u| u.status = text);
+                    canvas.with_ui_mut(|u| u.set_status(text));
+                    canvas.set_animating(true);
                     canvas.repaint_now();
                 }
 
@@ -2015,7 +2471,7 @@ pub fn run() -> Result<(), String> {
                 // `set_tip` 只收 `&str`，所以每次都要造一个新 String。
                 let tip = {
                     let s = lock_shared(&shared_e);
-                    tray_tip(s.quick, &s.status)
+                    tray_tip_full(&s)
                 };
                 tray.set_tip(&tip);
                 // 休眠时不要显示上一次的电量数字，那会误导（用户以为还是 84%）
@@ -2056,35 +2512,77 @@ pub fn run() -> Result<(), String> {
                 canvas.invalidate();
             }
 
-            // 托盘右键菜单
-            E::OnContextMenu if handle == h_tray => {
-                let (x, y) = nwg::GlobalCursor::position();
-                menu.popup(x, y);
-            }
-
-            E::OnMenuItemSelected if handle == h_mi_show => {
-                window.set_visible(true);
-                window.set_focus();
-            }
-            E::OnMenuItemSelected if handle == h_mi_refresh => {
-                signal_e.request_refresh();
-            }
-            E::OnMenuItemSelected if handle == h_mi_quit => {
-                signal_e.shutdown.store(true, Ordering::Relaxed);
-                signal_e.cv.notify_all();
-                nwg::stop_thread_dispatch();
-            }
-
             _ => {}
         }
     });
 
-    // 首轮一定要读全量：性能/灯光/按键三页都等着它。
+    // ── 托盘 / 菜单事件处理器 ────────────────────────────────
+    //
+    // 关键：`TrayNotification` 与 `Menu` 的 parent 都是 `msg_window`（见上，
+    // nwg 要求托盘必须挂在 MessageWindow 上）。Windows 把 `NWG_TRAY` 回调消息
+    // 和菜单的 `WM_COMMAND` 都投递给 **msg_window**，而不是主窗口 `window`。
+    // 之前只在 `window` 上绑了事件处理器，于是托盘点击/菜单选择全部进入黑洞
+    // —— 这就是「点托盘没反应」的根因。这里单独给 `msg_window` 绑一个处理器。
+    let h_tray_m = h_tray;
+    let signal_m = Arc::clone(&signal);
+    let msg_handler = nwg::full_bind_event_handler(&msg_window.handle, move |evt, _evt_data, handle| {
+        use nwg::Event as E;
+        match evt {
+            // 右键菜单（Windows 惯例）。
+            E::OnContextMenu if handle == h_tray_m => {
+                let (x, y) = nwg::GlobalCursor::position();
+                menu.popup(x, y);
+            }
+            // 左键单击也弹同一菜单（用户要求：单击托盘图标应显示 退出/立即刷新）。
+            E::OnMousePress(nwg::MousePressEvent::MousePressLeftUp) if handle == h_tray_m => {
+                let (x, y) = nwg::GlobalCursor::position();
+                menu.popup(x, y);
+            }
+            E::OnMenuItemSelected if handle == h_mi_show => {
+                // 用裸句柄恢复，不用 `window`（它已被上面的主处理器 move 走）。
+                // SW_RESTORE = 9：既显示窗口、又取消最小化。
+                unsafe {
+                    let _ = crate::win32::ShowWindow(hwnd, 9);
+                    let _ = crate::win32::SetForegroundWindow(hwnd);
+                }
+            }
+            E::OnMenuItemSelected if handle == h_mi_refresh => {
+                signal_m.request_refresh();
+            }
+            E::OnMenuItemSelected if handle == h_mi_quit => {
+                signal_m.shutdown.store(true, Ordering::Relaxed);
+                signal_m.cv.notify_all();
+                nwg::stop_thread_dispatch();
+            }
+            _ => {}
+        }
+    });
+
+
     {
         let mut s = lock_shared(&shared);
         s.want_full = true;
     }
     signal.request_refresh();
+
+    // 初始化全部就绪、消息循环马上开始 —— 这一刻才把窗口显示出来。
+    // 若是由开机自启动拉起且托盘已开启，则保持在托盘后台运行，不弹窗打扰用户。
+    // SW_SHOWNORMAL = 1。
+    if !(wants_autostart && cfg.tray_enabled) {
+        unsafe {
+            let _ = crate::win32::ShowWindow(hwnd, 1);
+        }
+        // 显示之后**在同一条线程里立刻**把首帧画完，再进消息循环。
+        //
+        // 为什么不能放在 ShowWindow 之前：`WM_PAINT` 只会投递给**可见**的
+        // 窗口，父窗口还藏着的时候对子窗口 `UpdateWindow` 是空操作，画不出来。
+        // 而放在这里，窗口刚可见、消息循环还没转，中间只隔一条语句，
+        // 用户看不到那个「黑框之后再变正常」的闪跳。
+        crate::ui::canvas::repaint_hwnd(canvas_hwnd);
+        unsafe {
+            let _ = crate::win32::SetForegroundWindow(hwnd);
+        }
+    }
 
     nwg::dispatch_thread_events();
 
@@ -2094,6 +2592,7 @@ pub fn run() -> Result<(), String> {
     std::thread::sleep(Duration::from_millis(50));
 
     nwg::unbind_event_handler(&handler);
+    nwg::unbind_event_handler(&msg_handler);
     Ok(())
 }
 

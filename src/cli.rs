@@ -788,6 +788,9 @@ pub fn cmd_estimate(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
     let rows = crate::history::read_rows();
 
     println!("历史文件    {}", crate::history::history_path_display());
+    if crate::history::history_path_is_fallback() {
+        println!("            （首选位置 %LOCALAPPDATA%\\rog-battery 不可写，已自动换到上面这个可写位置）");
+    }
     println!(
         "已记录      {} 条{}{}",
         rows.len(),

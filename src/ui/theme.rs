@@ -173,10 +173,101 @@ impl Mode {
     }
 
     /// 从 `settings.ini` 读回来。认不出的一律当浅色（默认）。
+    ///
+    /// 注意：`"system"` 在这里**不**解析成具体配色 —— 那需要一个注册表
+    /// 查询，属于运行期行为。用 [`resolve`] 得到实际配色。
     pub fn parse(s: &str) -> Mode {
         match s.trim().to_ascii_lowercase().as_str() {
             "dark" => Mode::Dark,
             _ => Mode::Light,
+        }
+    }
+}
+
+/// 配色偏好（`settings.ini` 的 `theme` 键）。
+///
+/// 三种值：`system` / `light` / `dark`。默认 `system`。
+pub const PREF_SYSTEM: &str = "system";
+pub const PREF_LIGHT: &str = "light";
+pub const PREF_DARK: &str = "dark";
+
+/// 把偏好归一化成合法的三段值。认不出的一律当「跟随系统」。
+pub fn normalize_pref(s: &str) -> &'static str {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "light" => PREF_LIGHT,
+        "dark" => PREF_DARK,
+        _ => PREF_SYSTEM,
+    }
+}
+
+/// 读系统「应用」深浅色（`AppsUseLightTheme`，缺省回落到 `SystemUsesLightTheme`）。
+///
+/// 值为 1 → 浅色。读不到默认深色（Windows 默认是深色任务栏/深色应用）。
+pub fn system_is_light() -> bool {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegOpenKeyExW(key: usize, sub: *const u16, opts: u32, sam: u32, out: *mut usize) -> i32;
+        fn RegQueryValueExW(
+            key: usize,
+            name: *const u16,
+            reserved: *mut u32,
+            ty: *mut u32,
+            data: *mut u8,
+            len: *mut u32,
+        ) -> i32;
+        fn RegCloseKey(key: usize) -> i32;
+    }
+    const HKCU: usize = 0xFFFF_FFFF_8000_0001;
+    const KEY_QUERY_VALUE: u32 = 0x0001;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    fn read_u32(value_name: &str) -> Option<u32> {
+        let sub = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        let mut hk: usize = 0;
+        unsafe {
+            if RegOpenKeyExW(HKCU, sub.as_ptr(), 0, KEY_QUERY_VALUE, &mut hk) != 0 {
+                return None;
+            }
+            let name = wide(value_name);
+            let mut ty: u32 = 0;
+            let mut val: u32 = 0;
+            let mut blen: u32 = std::mem::size_of::<u32>() as u32;
+            let rc = RegQueryValueExW(
+                hk,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut ty,
+                &mut val as *mut u32 as *mut u8,
+                &mut blen,
+            );
+            RegCloseKey(hk);
+            if rc == 0 {
+                Some(val)
+            } else {
+                None
+            }
+        }
+    }
+
+    match read_u32("AppsUseLightTheme").or_else(|| read_u32("SystemUsesLightTheme")) {
+        Some(v) => v == 1,
+        None => false,
+    }
+}
+
+/// 偏好 → 实际配色。
+pub fn resolve(pref: &str) -> Mode {
+    match normalize_pref(pref) {
+        PREF_LIGHT => Mode::Light,
+        PREF_DARK => Mode::Dark,
+        _ => {
+            if system_is_light() {
+                Mode::Light
+            } else {
+                Mode::Dark
+            }
         }
     }
 }

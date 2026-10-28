@@ -1,0 +1,504 @@
+﻿Field,ID,Type (类型),default,zh-cn,en-us
+Description,2,文本,,"R Battery 是一款轻量的 ROG 鼠标参数工具：任务栏上直接显示剩余电量与预计续航，界面里能改 DPI、回报率、去抖和按键，灯效则交给 Windows 动态光效统一管理。
+
+■ 任务栏上直接看电量
+托盘图标就是电量数字本身，字色自动跟随任务栏深浅（浅色任务栏深炭灰、深色任务栏纯白），大小与系统时钟、输入法一致。≤50% 转橙、≤20% 转红，一眼就知道该不该充电。鼠标移上去还能看到型号、连接方式（2.4G / 有线）、电量与充电状态、当前 DPI 档位。
+
+■ 电量页：不只看百分比
+环内是实时电量，环下是「预计还能用多久 / 约多久充满」—— 按最近 48 小时的真实采样做线性外推；样本不够时宁可显示「估算中」，也不给一个瞎猜的数字。再下面是 48 小时电量曲线，掉电快慢一目了然。
+
+■ 性能页：DPI 四档、回报率、去抖、LOD、角度吸附
+每档 DPI 都能单独设数值与指示灯颜色（100–42000，步进 50）。数值填好后点「切换」才真正切档，和「应用」分开，避免误触。回报率 125 / 250 / 500 / 1000 Hz 可选；按键去抖 0–32 ms；抬起距离 Low / High；角度吸附开关。
+
+■ 按键页：改键与厂商默认对照
+列出每个按键当前的映射，可以从下拉里改成别的功能；绑成「无功能」会二次确认，避免把键彻底废掉。支持导出当前配置、从备份恢复。
+
+■ 灯光页：交给 Windows 动态光效
+本机鼠标是标准 HID LampArray 设备，纯色 / 呼吸 / 渐变 / 波浪 / 闪烁都由 Windows 11「设置 → 个性化 → 动态光效」提供。本程序不再写厂商私有报文，避免和系统抢设备导致闪烁，只提供一键跳转与灯效设备检测。
+
+■ 不打扰，也不折腾鼠标
+电量默认每 60 秒读一次（可在设置里改）；DPI 只在打开页面或悬停时读取，其余时间不碰设备。
+
+■ 一个约 1 MB 的程序，零依赖
+Rust 静态链接，不需要 .NET、不需要 Python、不需要额外运行库，也不需要管理员权限。配置写在 %APPDATA%（商店版由系统重定向到应用数据目录），卸载即清理。
+
+■ 开机自启
+在设置页一键开关。绿色版写入当前用户的启动项（不需要管理员权限）；商店版走系统「启动应用」列表，可随时在任务管理器里关掉。
+
+【支持的设备】
+通过 USB HID 直接与鼠标通信，目前完整验证过的型号：
+· ASUS ROG Harpe Ace Mini（2.4G 无线 / 有线两种接法）
+使用 ROG OMNI RECEIVER 的其它型号可能可以读取，但帧格式未经验证，不保证数值准确；读取失败时界面显示「—」，不会给出错误数字。
+
+【系统要求】
+Windows 10 版本 1809（build 17763）或更高。灯效跳转与动态光效需要 Windows 11。
+
+【隐私】
+不联网、不收集任何数据。所有信息仅保存在本机。
+
+本应用为第三方工具，与 ASUSTeK Computer Inc. 无隶属关系。ASUS、ROG 是其注册商标，此处仅用于说明兼容性。","R Battery is a portable settings tool for ROG mice: it puts your remaining battery and estimated runtime right on the Windows taskbar, lets you change DPI, polling rate, debounce and button mappings, and hands lighting over to Windows Dynamic Lighting.
+
+■ Battery percentage, right in the taskbar
+The tray icon is the number itself, drawn in charcoal on a light taskbar and white on a dark one, matching the size of the system clock. It turns orange at 50% and red at 20%, so you know at a glance whether to plug in. Hover it for the model, connection type (2.4 GHz / wired), charge level and charging state, and the current DPI stage.
+
+■ Battery page: more than a percentage
+The ring shows the live level; right below it you get ""about N days left"" or ""about N minutes to full"", extrapolated from up to 48 hours of real samples. When there is not enough data it says ""estimating"" instead of inventing a number. Below that is a 48-hour chart so you can see how fast the battery is actually draining.
+
+■ Performance page: four DPI stages, polling rate, debounce, LOD, angle snapping
+Each DPI stage has its own value and indicator colour (100–42000, step 50). You fill in the value and press ""Apply"", then press ""Switch"" to actually change stage — the two are separate so you cannot change stage by accident. Polling rate 125 / 250 / 500 / 1000 Hz, button debounce 0–32 ms, lift-off distance Low / High, angle snapping on/off.
+
+■ Buttons page: remap, and compare with vendor defaults
+Every button is listed with its current mapping and can be reassigned from a dropdown. Binding a button to ""no function"" asks for confirmation first, so you cannot disable a button by accident. You can export the current configuration and restore from a backup.
+
+■ Lighting page: delegated to Windows Dynamic Lighting
+This mouse is a standard HID LampArray device, so solid / breathing / gradient / wave / blink patterns all come from Windows 11 Settings → Personalisation → Dynamic Lighting. The app deliberately does not write vendor-private lighting packets, which would fight the system over the device and cause flicker. It offers a one-click shortcut and device detection.
+
+■ Quiet by default
+Battery is read once every 60 seconds (configurable in Settings). DPI is only read when you open the page or hover the tray icon; the rest of the time the device is left alone.
+
+■ One ~1 MB program, no dependencies
+Statically linked Rust. No .NET, no Python, no runtime to install, and no administrator rights required. Settings live in %APPDATA% (redirected to the app data folder for the Store build), so uninstalling cleans up after itself.
+
+■ Start with Windows
+A single switch in Settings. The portable build writes a per-user startup entry (no admin rights); the Store build uses the system Startup Apps list, which you can turn off in Task Manager at any time.
+
+[Supported devices]
+The app talks to the mouse directly over USB HID. Fully verified with:
+· ASUS ROG Harpe Ace Mini (2.4 GHz wireless and wired)
+Other models on the ROG OMNI RECEIVER may work, but their frame formats are unverified, so accuracy is not guaranteed. When a reading fails the UI shows a dash rather than a wrong number.
+
+[System requirements]
+Windows 10 version 1809 (build 17763) or later. The Dynamic Lighting shortcut and lighting control require Windows 11.
+
+[Privacy]
+No network access, no data collection. Everything stays on your machine.
+
+This is a third-party tool and is not affiliated with ASUSTeK Computer Inc. ASUS and ROG are their trademarks, referenced here only to describe compatibility."
+ReleaseNotes,3,文本,,,
+Title,4,文本,,R Battery,R Battery
+ShortTitle,5,文本,,,
+SortTitle,6,文本,,,
+VoiceTitle,7,文本,,,
+ShortDescription,8,文本,,轻量的 ROG 鼠标工具：任务栏直接显示电量与预计续航，还能改 DPI、回报率、去抖和按键；灯效交给 Windows 动态光效。,"Portable ROG mouse tool: battery and runtime estimate in the taskbar, plus DPI, polling rate, debounce and button remapping. Lighting is delegated to Windows Dynamic Lighting."
+DevStudio,9,文本,,Sonder,Sonder
+CopyrightTrademarkInformation,12,文本,,© 2026 Sonder。与 ASUSTeK Computer Inc. 无隶属关系。ASUS、ROG 为其注册商标，仅用于说明兼容性。,"© 2026 Sonder. Not affiliated with ASUSTeK Computer Inc. ASUS and ROG are trademarks of their respective owners, referenced only to describe compatibility."
+AdditionalLicenseTerms,13,文本,,,
+DesktopScreenshot1,100,相对路径(或指向合作伙伴中心文件的 URL),,https://developer.microsoft.com/en-us/dashboard/apps/9NRC8HCD4BZ7/submissions/1152921505702254904/listings/1152922700028642839/listingassets/3054542475571406941,https://developer.microsoft.com/en-us/dashboard/apps/9NRC8HCD4BZ7/submissions/1152921505702254904/listings/1152922700028642810/listingassets/3059730085240160114
+DesktopScreenshot2,101,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot3,102,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot4,103,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot5,104,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot6,105,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot7,106,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot8,107,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot9,108,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot10,109,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot11,110,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot12,111,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot13,112,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot14,113,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot15,114,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot16,115,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot17,116,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot18,117,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot19,118,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot20,119,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot21,120,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot22,121,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot23,122,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot24,123,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot25,124,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot26,125,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot27,126,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot28,127,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot29,128,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshot30,129,相对路径(或指向合作伙伴中心文件的 URL),,,
+DesktopScreenshotCaption1,150,文本,,电量页：实时电量、预计可用时间与 48 小时曲线,"Battery page: live level, estimated runtime and a 48-hour chart"
+DesktopScreenshotCaption2,151,文本,,性能页：DPI 四档、回报率与按键去抖,"Performance page: four DPI stages, polling rate and debounce"
+DesktopScreenshotCaption3,152,文本,,按键页：按键映射、导出与备份恢复,Buttons page: remapping with export and backup restore
+DesktopScreenshotCaption4,153,文本,,灯光页：交给 Windows 动态光效,Lighting page: delegated to Windows Dynamic Lighting
+DesktopScreenshotCaption5,154,文本,,设置页：跟随系统配色、开机自启与存储路径,"Settings page: system theme, start with Windows, storage location"
+DesktopScreenshotCaption6,155,文本,,深色主题：随系统自动切换,Dark theme that follows the system automatically
+DesktopScreenshotCaption7,156,文本,,,
+DesktopScreenshotCaption8,157,文本,,,
+DesktopScreenshotCaption9,158,文本,,,
+DesktopScreenshotCaption10,159,文本,,,
+DesktopScreenshotCaption11,160,文本,,,
+DesktopScreenshotCaption12,161,文本,,,
+DesktopScreenshotCaption13,162,文本,,,
+DesktopScreenshotCaption14,163,文本,,,
+DesktopScreenshotCaption15,164,文本,,,
+DesktopScreenshotCaption16,165,文本,,,
+DesktopScreenshotCaption17,166,文本,,,
+DesktopScreenshotCaption18,167,文本,,,
+DesktopScreenshotCaption19,168,文本,,,
+DesktopScreenshotCaption20,169,文本,,,
+DesktopScreenshotCaption21,170,文本,,,
+DesktopScreenshotCaption22,171,文本,,,
+DesktopScreenshotCaption23,172,文本,,,
+DesktopScreenshotCaption24,173,文本,,,
+DesktopScreenshotCaption25,174,文本,,,
+DesktopScreenshotCaption26,175,文本,,,
+DesktopScreenshotCaption27,176,文本,,,
+DesktopScreenshotCaption28,177,文本,,,
+DesktopScreenshotCaption29,178,文本,,,
+DesktopScreenshotCaption30,179,文本,,,
+MobileScreenshot1,200,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot2,201,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot3,202,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot4,203,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot5,204,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot6,205,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot7,206,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot8,207,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot9,208,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot10,209,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot11,210,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot12,211,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot13,212,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot14,213,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot15,214,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot16,215,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot17,216,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot18,217,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot19,218,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot20,219,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot21,220,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot22,221,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot23,222,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot24,223,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot25,224,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot26,225,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot27,226,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot28,227,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot29,228,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshot30,229,相对路径(或指向合作伙伴中心文件的 URL),,,
+MobileScreenshotCaption1,250,文本,,,
+MobileScreenshotCaption2,251,文本,,,
+MobileScreenshotCaption3,252,文本,,,
+MobileScreenshotCaption4,253,文本,,,
+MobileScreenshotCaption5,254,文本,,,
+MobileScreenshotCaption6,255,文本,,,
+MobileScreenshotCaption7,256,文本,,,
+MobileScreenshotCaption8,257,文本,,,
+MobileScreenshotCaption9,258,文本,,,
+MobileScreenshotCaption10,259,文本,,,
+MobileScreenshotCaption11,260,文本,,,
+MobileScreenshotCaption12,261,文本,,,
+MobileScreenshotCaption13,262,文本,,,
+MobileScreenshotCaption14,263,文本,,,
+MobileScreenshotCaption15,264,文本,,,
+MobileScreenshotCaption16,265,文本,,,
+MobileScreenshotCaption17,266,文本,,,
+MobileScreenshotCaption18,267,文本,,,
+MobileScreenshotCaption19,268,文本,,,
+MobileScreenshotCaption20,269,文本,,,
+MobileScreenshotCaption21,270,文本,,,
+MobileScreenshotCaption22,271,文本,,,
+MobileScreenshotCaption23,272,文本,,,
+MobileScreenshotCaption24,273,文本,,,
+MobileScreenshotCaption25,274,文本,,,
+MobileScreenshotCaption26,275,文本,,,
+MobileScreenshotCaption27,276,文本,,,
+MobileScreenshotCaption28,277,文本,,,
+MobileScreenshotCaption29,278,文本,,,
+MobileScreenshotCaption30,279,文本,,,
+XboxScreenshot1,300,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot2,301,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot3,302,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot4,303,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot5,304,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot6,305,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot7,306,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot8,307,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot9,308,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot10,309,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot11,310,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot12,311,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot13,312,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot14,313,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot15,314,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot16,315,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot17,316,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot18,317,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot19,318,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot20,319,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot21,320,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot22,321,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot23,322,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot24,323,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot25,324,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot26,325,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot27,326,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot28,327,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot29,328,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshot30,329,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxScreenshotCaption1,350,文本,,,
+XboxScreenshotCaption2,351,文本,,,
+XboxScreenshotCaption3,352,文本,,,
+XboxScreenshotCaption4,353,文本,,,
+XboxScreenshotCaption5,354,文本,,,
+XboxScreenshotCaption6,355,文本,,,
+XboxScreenshotCaption7,356,文本,,,
+XboxScreenshotCaption8,357,文本,,,
+XboxScreenshotCaption9,358,文本,,,
+XboxScreenshotCaption10,359,文本,,,
+XboxScreenshotCaption11,360,文本,,,
+XboxScreenshotCaption12,361,文本,,,
+XboxScreenshotCaption13,362,文本,,,
+XboxScreenshotCaption14,363,文本,,,
+XboxScreenshotCaption15,364,文本,,,
+XboxScreenshotCaption16,365,文本,,,
+XboxScreenshotCaption17,366,文本,,,
+XboxScreenshotCaption18,367,文本,,,
+XboxScreenshotCaption19,368,文本,,,
+XboxScreenshotCaption20,369,文本,,,
+XboxScreenshotCaption21,370,文本,,,
+XboxScreenshotCaption22,371,文本,,,
+XboxScreenshotCaption23,372,文本,,,
+XboxScreenshotCaption24,373,文本,,,
+XboxScreenshotCaption25,374,文本,,,
+XboxScreenshotCaption26,375,文本,,,
+XboxScreenshotCaption27,376,文本,,,
+XboxScreenshotCaption28,377,文本,,,
+XboxScreenshotCaption29,378,文本,,,
+XboxScreenshotCaption30,379,文本,,,
+HolographicScreenshot1,400,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot2,401,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot3,402,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot4,403,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot5,404,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot6,405,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot7,406,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot8,407,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot9,408,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot10,409,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot11,410,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot12,411,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot13,412,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot14,413,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot15,414,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot16,415,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot17,416,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot18,417,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot19,418,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot20,419,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot21,420,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot22,421,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot23,422,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot24,423,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot25,424,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot26,425,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot27,426,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot28,427,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot29,428,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshot30,429,相对路径(或指向合作伙伴中心文件的 URL),,,
+HolographicScreenshotCaption1,450,文本,,,
+HolographicScreenshotCaption2,451,文本,,,
+HolographicScreenshotCaption3,452,文本,,,
+HolographicScreenshotCaption4,453,文本,,,
+HolographicScreenshotCaption5,454,文本,,,
+HolographicScreenshotCaption6,455,文本,,,
+HolographicScreenshotCaption7,456,文本,,,
+HolographicScreenshotCaption8,457,文本,,,
+HolographicScreenshotCaption9,458,文本,,,
+HolographicScreenshotCaption10,459,文本,,,
+HolographicScreenshotCaption11,460,文本,,,
+HolographicScreenshotCaption12,461,文本,,,
+HolographicScreenshotCaption13,462,文本,,,
+HolographicScreenshotCaption14,463,文本,,,
+HolographicScreenshotCaption15,464,文本,,,
+HolographicScreenshotCaption16,465,文本,,,
+HolographicScreenshotCaption17,466,文本,,,
+HolographicScreenshotCaption18,467,文本,,,
+HolographicScreenshotCaption19,468,文本,,,
+HolographicScreenshotCaption20,469,文本,,,
+HolographicScreenshotCaption21,470,文本,,,
+HolographicScreenshotCaption22,471,文本,,,
+HolographicScreenshotCaption23,472,文本,,,
+HolographicScreenshotCaption24,473,文本,,,
+HolographicScreenshotCaption25,474,文本,,,
+HolographicScreenshotCaption26,475,文本,,,
+HolographicScreenshotCaption27,476,文本,,,
+HolographicScreenshotCaption28,477,文本,,,
+HolographicScreenshotCaption29,478,文本,,,
+HolographicScreenshotCaption30,479,文本,,,
+SurfaceHubScreenshot11,510,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot12,511,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot13,512,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot14,513,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot15,514,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot16,515,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot17,516,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot18,517,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot19,518,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot20,519,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot21,520,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot22,521,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot23,522,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot24,523,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot25,524,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot26,525,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot27,526,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot28,527,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot29,528,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshot30,529,相对路径(或指向合作伙伴中心文件的 URL),,,
+SurfaceHubScreenshotCaption11,560,文本,,,
+SurfaceHubScreenshotCaption12,561,文本,,,
+SurfaceHubScreenshotCaption13,562,文本,,,
+SurfaceHubScreenshotCaption14,563,文本,,,
+SurfaceHubScreenshotCaption15,564,文本,,,
+SurfaceHubScreenshotCaption16,565,文本,,,
+SurfaceHubScreenshotCaption17,566,文本,,,
+SurfaceHubScreenshotCaption18,567,文本,,,
+SurfaceHubScreenshotCaption19,568,文本,,,
+SurfaceHubScreenshotCaption20,569,文本,,,
+SurfaceHubScreenshotCaption21,570,文本,,,
+SurfaceHubScreenshotCaption22,571,文本,,,
+SurfaceHubScreenshotCaption23,572,文本,,,
+SurfaceHubScreenshotCaption24,573,文本,,,
+SurfaceHubScreenshotCaption25,574,文本,,,
+SurfaceHubScreenshotCaption26,575,文本,,,
+SurfaceHubScreenshotCaption27,576,文本,,,
+SurfaceHubScreenshotCaption28,577,文本,,,
+SurfaceHubScreenshotCaption29,578,文本,,,
+SurfaceHubScreenshotCaption30,579,文本,,,
+StoreLogo720x1080,600,相对路径(或指向合作伙伴中心文件的 URL),,,
+StoreLogo1080x1080,601,相对路径(或指向合作伙伴中心文件的 URL),,,
+StoreLogo300x300,602,相对路径(或指向合作伙伴中心文件的 URL),,,
+OverrideLogosForWin10,603,True/False,,False,False
+StoreLogoOverride150x150,604,相对路径(或指向合作伙伴中心文件的 URL),,,
+StoreLogoOverride71x71,605,相对路径(或指向合作伙伴中心文件的 URL),,,
+PromoImage1920x1080,606,相对路径(或指向合作伙伴中心文件的 URL),,,
+PromoImage2400x1200,607,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxBrandedKeyArt584x800,608,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxTitledHero1920x1080,609,相对路径(或指向合作伙伴中心文件的 URL),,,
+XboxFeaturedPromo1080x1080,610,相对路径(或指向合作伙伴中心文件的 URL),,,
+OptionalPromo358x358,611,相对路径(或指向合作伙伴中心文件的 URL),,,
+OptionalPromo1000x800,612,相对路径(或指向合作伙伴中心文件的 URL),,,
+OptionalPromo414x180,613,相对路径(或指向合作伙伴中心文件的 URL),,,
+Feature1,700,文本,,任务栏图标直接显示电量百分比，自动适配深浅任务栏；≤50% 转橙、≤20% 转红,"Battery percentage drawn directly in the taskbar, adapting to light and dark taskbars; orange at 50%, red at 20%"
+Feature2,701,文本,,电量页：环内实时电量 + 环下预计可用 / 预计充满时间 + 48 小时历史曲线,"Battery page: live level in the ring, estimated runtime or time to full below it, and a 48-hour history chart"
+Feature3,702,文本,,DPI 四档可改（100–42000，步进 50），每档可设指示灯颜色，「切换」与「应用」分离防误触,"Four editable DPI stages (100–42000, step 50) each with its own indicator colour; Switch and Apply are separate"
+Feature4,703,文本,,回报率 125/250/500/1000 Hz、按键去抖 0–32 ms、抬起距离 Low/High、角度吸附,"Polling rate 125/250/500/1000 Hz, debounce 0–32 ms, lift-off distance Low/High, angle snapping"
+Feature5,704,文本,,按键映射可改，可导出配置、从备份恢复；绑成「无功能」前二次确认,"Button remapping with export and restore-from-backup; binding to ""no function"" asks for confirmation"
+Feature6,705,文本,,灯效交给 Windows 11 动态光效，本程序不抢设备、不写私有报文,Lighting delegated to Windows 11 Dynamic Lighting — the app never fights the system for the device
+Feature7,706,文本,,约 1 MB、零依赖、不需要管理员权限（Rust 静态链接）,"About 1 MB, no dependencies, no administrator rights (statically linked Rust)"
+Feature8,707,文本,,不联网、不收集数据；电量默认每 60 秒刷新，DPI 只在需要时读取,"No network access, no telemetry; battery refreshed every 60 s, DPI read only when needed"
+Feature9,708,文本,,,
+Feature10,709,文本,,,
+Feature11,710,文本,,,
+Feature12,711,文本,,,
+Feature13,712,文本,,,
+Feature14,713,文本,,,
+Feature15,714,文本,,,
+Feature16,715,文本,,,
+Feature17,716,文本,,,
+Feature18,717,文本,,,
+Feature19,718,文本,,,
+Feature20,719,文本,,,
+MinimumHardwareReq1,800,文本,,操作系统：Windows 10 版本 1809（build 17763）或更高,OS: Windows 10 version 1809 (build 17763) or later
+MinimumHardwareReq2,801,文本,,USB 端口，或 ROG OMNI RECEIVER 无线接收器,"A USB port, or the ROG OMNI RECEIVER wireless dongle"
+MinimumHardwareReq3,802,文本,,支持 USB HID 的 ROG 鼠标（已验证 Harpe Ace Mini）,A ROG mouse exposing USB HID (verified: Harpe Ace Mini)
+MinimumHardwareReq4,803,文本,,,
+MinimumHardwareReq5,804,文本,,,
+MinimumHardwareReq6,805,文本,,,
+MinimumHardwareReq7,806,文本,,,
+MinimumHardwareReq8,807,文本,,,
+MinimumHardwareReq9,808,文本,,,
+MinimumHardwareReq10,809,文本,,,
+MinimumHardwareReq11,810,文本,,,
+RecommendedHardwareReq1,850,文本,,,
+RecommendedHardwareReq2,851,文本,,,
+RecommendedHardwareReq3,852,文本,,,
+RecommendedHardwareReq4,853,文本,,,
+RecommendedHardwareReq5,854,文本,,,
+RecommendedHardwareReq6,855,文本,,,
+RecommendedHardwareReq7,856,文本,,,
+RecommendedHardwareReq8,857,文本,,,
+RecommendedHardwareReq9,858,文本,,,
+RecommendedHardwareReq10,859,文本,,,
+RecommendedHardwareReq11,860,文本,,,
+SearchTerm1,900,文本,,鼠标电量,mouse battery
+SearchTerm2,901,文本,,ROG,ROG
+SearchTerm3,902,文本,,鼠标 DPI,mouse DPI
+SearchTerm4,903,文本,,任务栏电量,taskbar battery
+SearchTerm5,904,文本,,外设工具,peripheral tool
+SearchTerm6,905,文本,,轻量工具,portable
+SearchTerm7,906,文本,,,
+TrailerToPlayAtTopOfListing,999,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer1,1000,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer2,1001,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer3,1002,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer4,1003,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer5,1004,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer6,1005,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer7,1006,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer8,1007,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer9,1008,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer10,1009,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer11,1010,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer12,1011,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer13,1012,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer14,1013,相对路径(或指向合作伙伴中心文件的 URL),,,
+Trailer15,1014,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerTitle1,1020,文本,,,
+TrailerTitle2,1021,文本,,,
+TrailerTitle3,1022,文本,,,
+TrailerTitle4,1023,文本,,,
+TrailerTitle5,1024,文本,,,
+TrailerTitle6,1025,文本,,,
+TrailerTitle7,1026,文本,,,
+TrailerTitle8,1027,文本,,,
+TrailerTitle9,1028,文本,,,
+TrailerTitle10,1029,文本,,,
+TrailerTitle11,1030,文本,,,
+TrailerTitle12,1031,文本,,,
+TrailerTitle13,1032,文本,,,
+TrailerTitle14,1033,文本,,,
+TrailerTitle15,1034,文本,,,
+TrailerThumbnail1,1040,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail2,1041,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail3,1042,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail4,1043,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail5,1044,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail6,1045,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail7,1046,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail8,1047,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail9,1048,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail10,1049,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail11,1050,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail12,1051,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail13,1052,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail14,1053,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerThumbnail15,1054,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption1,1055,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption2,1056,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption3,1057,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption4,1058,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption5,1059,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption6,1060,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption7,1061,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption8,1062,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption9,1063,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption10,1064,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption11,1065,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption12,1066,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption13,1067,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption14,1068,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerClosedCaption15,1069,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription1,1070,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription2,1071,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription3,1072,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription4,1073,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription5,1074,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription6,1075,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription7,1076,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription8,1077,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription9,1078,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription10,1079,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription11,1080,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription12,1081,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription13,1082,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription14,1083,相对路径(或指向合作伙伴中心文件的 URL),,,
+TrailerAudioDescription15,1084,相对路径(或指向合作伙伴中心文件的 URL),,,
