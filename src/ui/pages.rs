@@ -856,11 +856,11 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
         p.card(dc, 8.0, t.card, t.border);
         let model = d
             .ident
-            .map(|i| i.model_name.as_str())
+            .map(|i| i.display_name())
             .filter(|s| !s.is_empty())
-            .unwrap_or("ROG 鼠标");
+            .unwrap_or_else(|| "ROG 鼠标".to_string());
         p.text(
-            model,
+            &model,
             R::new(dc.x + 12.0, dc.y + 10.0, dc.w - 24.0, 18.0),
             13.0,
             true,
@@ -1484,10 +1484,10 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     let t = p.t;
     let model = d
         .ident
-        .map(|i| i.model_name.as_str())
+        .map(|i| i.display_name())
         .filter(|s| !s.is_empty())
-        .unwrap_or("未检测到设备");
-    c.h1_with_model(p, "电量", model);
+        .unwrap_or_else(|| "未检测到设备".to_string());
+    c.h1_with_model(p, "电量", &model);
 
     let st = d.state;
     let level = st.map(|s| s.power).unwrap_or(0);
@@ -1733,7 +1733,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
             Align::Left,
         );
         p.text(
-            model,
+            &model,
             R::new(sx, sy + 15.0, inner_w, 18.0),
             13.5,
             true,
@@ -1743,7 +1743,16 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
 
         let mut ly = sy + 38.0;
         let ident = d.ident;
-        let lines: [(&str, String); 3] = [
+        // 设备大类：PID 在对照表里就能说出是鼠标 / 键盘 / 手柄。
+        let kind_text = {
+            let pid = ident
+                .map(|i| if i.wired_pid != 0 { i.wired_pid } else { i.wireless_pid })
+                .unwrap_or(0);
+            crate::devices::find(pid)
+                .map(|dv| dv.kind.as_str().to_string())
+                .unwrap_or_else(|| "—".to_string())
+        };
+        let lines: [(&str, String); 4] = [
             (
                 "序列号",
                 ident.map(|i| i.mouse_sn.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "—".to_string()),
@@ -1759,6 +1768,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
                 "连接方式",
                 if d.state.is_some() { "2.4G 无线".to_string() } else { "离线 / 休眠".to_string() },
             ),
+            ("设备类型", kind_text),
         ];
         for (k, v) in lines.iter() {
             p.text(k, R::new(sx, ly, 74.0, 16.0), 12.0, false, t.text3, Align::Left);

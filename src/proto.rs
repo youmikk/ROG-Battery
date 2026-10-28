@@ -463,6 +463,13 @@ pub struct Identity {
     pub booster: bool,
 }
 
+impl Identity {
+    /// 界面上显示的型号名：PID 对照表优先，其次固件自报名（见 [`crate::devices`]）。
+    pub fn display_name(&self) -> String {
+        crate::devices::display_name(&self.model_name, self.wired_pid, self.wireless_pid)
+    }
+}
+
 fn ascii_at(bytes: &[u8], from: usize) -> String {
     if from >= bytes.len() {
         return String::new();
@@ -850,7 +857,17 @@ pub fn print_identity(id: &Identity, mode: &str, rid: u8, product: &str, serial:
         println!("  HID 序列号  {serial}");
     }
     if !id.model_name.is_empty() {
-        println!("  型号名      {}", id.model_name);
+        println!("  型号名      {}", id.display_name());
+        // 对照表里有统一译名时，把英文型号也印出来，方便对照厂商页面。
+        if let Some(d) = [id.wired_pid, id.wireless_pid]
+            .iter()
+            .filter(|p| **p != 0)
+            .find_map(|p| crate::devices::find(*p))
+        {
+            println!("  英文型号    {}", d.name_en);
+            println!("  设备类型    {}", d.kind.as_str());
+        }
+        println!("  固件自报    {}", id.model_name);
     }
     if id.wired_pid != 0 {
         println!("  有线 PID    0x{:04X}", id.wired_pid);
