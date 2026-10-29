@@ -127,28 +127,50 @@ Write-Host "  id=$($sub.id)  status=$($sub.status)" -ForegroundColor DarkGray
 
 $pkgs = @($sub.applicationPackages)
 if ($pkgs.Count -eq 0) { throw '草稿里没有 applicationPackages 槽位，无法挂包' }
-Write-Host "  现有包槽：$($pkgs[0].fileName)  fileStatus=$($pkgs[0].fileStatus)" -ForegroundColor DarkGray
+Write-Host "  现有包槽：$($pkgs.Count) 个，第一个 $($pkgs[0].fileName)  fileStatus=$($pkgs[0].fileStatus)" -ForegroundColor DarkGray
+Write-Host "  槽字段：$(($pkgs[0].PSObject.Properties | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor DarkGray
 
-# ── 4. 换包：改 fileName + 把 fileStatus 退回 PendingUpload 再 PUT ─────
-# 坑（2026-10-29 实测）：POST /submissions 会把上一次提交的包槽整份克隆过来，
-# 若克隆到的槽 fileStatus 已经是 Uploaded，**只改 fileName 会被 API 静默忽略**，
-# commit 时仍然发布旧的那个包 —— 结果就是「跑绿了，但商店版本没变」。
-# 必须同时把 fileStatus 置回 PendingUpload 并清掉旧的 fileUploadUrl，才拿得到新地址。
-$pkgs[0].fileName = $pkgName
-$pkgs[0].fileStatus = 'PendingUpload'
-if ($pkgs[0].PSObject.Properties['fileUploadUrl']) { $pkgs[0].fileUploadUrl = $null }
-$sub.applicationPackages = $pkgs
-$body = $sub | ConvertTo-Json -Depth 32
-$sub2 = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
+# ── 4. 换包 ───────────────────────────────────────────────────────────
+# 坑（2026-10-29 实测两次）：POST /submissions 会把上一次提交的 applicationPackages
+# 整份克隆过来。如果克隆到的槽 fileStatus 已经是 Uploaded，**只改 fileName 会被 API
+# 静默忽略**，commit 时仍然发布旧包 —— 现象是「CI 全绿、商店版本没变」。
+# 但直接清 fileUploadUrl 又会报 InvalidParameterValue: Please keep all file entries。
+# 所以这里依次试几种改法，取第一个能让 API 真的把 fileName 换成新包名的。
+$variants = @(
+    @{ name = 'fileName + fileStatus=PendingUpload'
+       apply = { param($s) $s.applicationPackages[0].fileName = $pkgName
+                          $s.applicationPackages[0].fileStatus = 'PendingUpload' } },
+    @{ name = '仅改 fileName'
+       apply = { param($s) $s.applicationPackages[0].fileName = $pkgName } },
+    @{ name = 'fileName + fileStatus=PendingUpload + 清 fileUploadUrl'
+       apply = { param($s) $s.applicationPackages[0].fileName = $pkgName
+                          $s.applicationPackages[0].fileStatus = 'PendingUpload'
+                          if ($s.applicationPackages[0].PSObject.Properties['fileUploadUrl']) {
+                              $s.applicationPackages[0].fileUploadUrl = $null } } }
+)
 
-$slot2 = @($sub2.applicationPackages)[0]
-Write-Host "  PUT 之后：$($slot2.fileName)  fileStatus=$($slot2.fileStatus)" -ForegroundColor DarkGray
-if ($slot2.fileName -ne $pkgName) {
-    # 宁可失败也不要发错包：出现这种情况说明商店不肯改这个槽，
-    # 去 Partner Center 把这个提交删掉再重跑（或直接换个更大的版本号）。
-    throw "商店没有接受包名改动：期望 $pkgName，实际 $($slot2.fileName)。请去 Partner Center 删掉这个提交后重跑。"
+$sub2 = $null
+foreach ($v in $variants) {
+    $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
+    $cur.applicationPackages = @($cur.applicationPackages)
+    & $v.apply $cur
+    $body = $cur | ConvertTo-Json -Depth 32
+    try {
+        $try = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
+    } catch {
+        Write-Host "  [$($v.name)] PUT 被拒：$($_.Exception.Message)" -ForegroundColor Yellow
+        continue
+    }
+    $got = @($try.applicationPackages)[0]
+    Write-Host "  [$($v.name)] -> $($got.fileName)  fileStatus=$($got.fileStatus)" -ForegroundColor DarkGray
+    if ($got.fileName -eq $pkgName) { $sub2 = $try; break }
 }
 
+if (-not $sub2) {
+    throw "试了 $($variants.Count) 种改法都没能让 API 接受新包名（目标 $pkgName）。去 Partner Center 手动删掉这个提交后重跑。"
+}
+
+$slot2 = @($sub2.applicationPackages)[0]
 $uploadUrl = $slot2.fileUploadUrl
 if (-not $uploadUrl) { $uploadUrl = $sub2.fileUploadUrl }
 if (-not $uploadUrl) { throw 'PUT 之后没拿到 fileUploadUrl' }
@@ -164,6 +186,17 @@ $upHeaders = @{
 }
 Invoke-WebRequest -Method Put -Uri $uploadUrl -Headers $upHeaders -Body $bytes -UseBasicParsing | Out-Null
 Write-Host "  已上传 $([math]::Round($bytes.Length / 1MB, 2)) MB" -ForegroundColor DarkGray
+
+# 上传后再核对一次：确认商店记下的就是这个包，且已经标成 Uploaded。
+$afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
+$slotUp = @($afterUp.applicationPackages)[0]
+Write-Host "  上传后核对：$($slotUp.fileName)  fileStatus=$($slotUp.fileStatus)  version=$($slotUp.version)" -ForegroundColor DarkGray
+if ($slotUp.fileName -ne $pkgName) {
+    throw "上传后商店记的包名是 $($slotUp.fileName)，不是 $pkgName —— 停止提交，避免把旧包发出去。"
+}
+if ($slotUp.fileStatus -ne 'Uploaded') {
+    Write-Host "::warning::包状态是 $($slotUp.fileStatus) 而不是 Uploaded，提交可能失败"
+}
 
 # ── 6. commit ─────────────────────────────────────────────────────────
 if ($DryRun) {
