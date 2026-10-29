@@ -387,8 +387,44 @@ MSVC 目标链不上。所以 runner 上要装 `stable-x86_64-pc-windows-gnu` + 
 ### 商店自动发布是「按需开启」的
 
 微软规定**首个版本必须手动上架**，之后才能走 API。所以 `msstore.yml` 用 `vars.MSSTORE_PRODUCT_ID` 门控：
-没配这个变量时只打包，完全不碰商店；首个版本过审后配上它，之后推 tag 就会自动 `msstore publish`。
+没配这个变量时只打包，完全不碰商店；首个版本过审后配上它，之后推 tag 就会自动提交商店。
 绿色版不受这个变量影响，任何时候推 tag 都会发 Release。
+
+### 商店提交走 REST API，不用 `msstore publish`
+
+`msstore publish` 要一个「能被识别的项目目录」，并从项目里读出发布者身份（`Publisher=CN=...`）。
+我们没有 `.csproj`；往目录里塞一份 `Package.appxmanifest` 会让它当成 **UWP 项目**去
+`MSBuild restore`，在装了 Visual Studio 的 runner 上直接抛：
+
+```
+Unhandled exception: MSStore.API.MSStoreException: Failed to restore packages.
+   at MSStore.CLI.ProjectConfigurators.UWPProjectConfigurator.RestorePackagesAsync
+```
+
+所以改成直接调 **Store 提交 API**，见 `tools/msstore-publish.ps1`：
+
+```
+取令牌 → 删掉旧草稿（只删 PendingCommit）→ POST 建草稿 → PUT 改 fileName
+→ PUT 传包体到 fileUploadUrl → POST commit
+```
+
+三个只有踩过才知道的细节（脚本里都注了）：
+
+1. `POST /submissions` **不能带请求体** —— 带 `{}` 会报
+   `InvalidParameterValue: The size of Listings must be 1 or more`。
+2. 但 `Content-Type` **必须是** `application/json`，否则报 `Only JSON content is accepted`。
+3. 删除旧提交前必须先判 `status -eq 'PendingCommit'`，**绝不能**删已发布或认证中的提交。
+
+本机想手动提交，直接跑：
+
+```powershell
+$env:AZURE_AD_TENANT_ID = '<租户 ID>'
+$env:AZURE_AD_APPLICATION_CLIENT_ID = '<客户端 ID>'
+$env:AZURE_AD_APPLICATION_SECRET = '<客户端密码值>'
+powershell -File tools\msstore-publish.ps1 -ProductId 9NRC8HCD4BZ7 -PackagePath msix\AppPackages\<包>.msixupload
+```
+
+加 `-DryRun` 只建草稿、不点提交，可以先去 Partner Center 核对。
 
 ### 要配的 Secrets
 
@@ -437,6 +473,8 @@ tag `v1.1.2` → `1.1.2.0`；手动触发可填；两者都没有就用 `Cargo.t
 cargo build --release
 powershell -File msix\build-msix.ps1 -Version 1.1.2.0 -Verify -SkipInstalledVersionCheck
 powershell -File msix\make-upload.ps1 -Version 1.1.2.0
+# 提交商店（要三个环境变量，见上一节）
+powershell -File tools\msstore-publish.ps1 -ProductId 9NRC8HCD4BZ7 -PackagePath msix\AppPackages\<包>.msixupload
 ```
 
 > `-Verify` 在**本机**要先把 `$env:TEMP` 指到仓库内 —— 本机沙箱不允许写 `%TEMP%`，

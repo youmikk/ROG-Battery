@@ -211,7 +211,10 @@ msstore publish 的第一个位置参数 <pathOrUrl> 是**项目目录**，它�
 \\powershell
 msstore publish <放包的目录> -i <放包的目录> -id 9NRC8HCD4BZ7
 \
-CI 的 \.github/workflows/msstore.yml\ 与本机 \msix/publish.ps1\ 都已自动做这一步（从 \.msix\ 里解压取 \AppxManifest.xml\）。
+> **这条路已废弃（2026-10-29）**：塞 `Package.appxmanifest` 会让 `msstore publish` 把目录
+> 当成 UWP 项目去 `MSBuild restore`，在装了 Visual Studio 的 runner 上直接崩。
+> 现在 CI 与本机都改为直接调 Store 提交 API，见 `tools/msstore-publish.ps1` 与
+> `msix/README.md` 第八节「商店提交走 REST API」。
 
 ### 2. 商店里不能留着「网页上手工创建」的待提交草稿
 
@@ -228,3 +231,21 @@ and create one using the API
 > 已上线版本不受影响：删掉的只是草稿。
 
 > 附带一条：\msstore submission delete\ 默认要交互确认，非交互环境要加 \--no-confirm\。
+
+---
+
+## 附：实际跑通的方式（2026-10-29）
+
+`msstore publish` 走不通（见上），最终改用 Store 提交 API：
+
+```
+tools/msstore-publish.ps1
+  取令牌 → 删旧草稿（只删 PendingCommit）→ POST 建草稿 → PUT 改 fileName
+  → PUT 传包体 → POST commit
+```
+
+CI 里就是一步：`.github/workflows/msstore.yml` 的「上传并提交到商店」，
+凭据从 Secrets 读，产品 ID 从 `vars.MSSTORE_PRODUCT_ID` 读。
+
+首次跑通记录：run `40854169786`（版本 1.1.9.0），提交 id `1152921505702265885`，
+状态 `CommitStarted`，包 `Sonder.RBattery_1.1.9.0_x64.msixupload`。
