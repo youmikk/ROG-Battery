@@ -165,22 +165,40 @@ Write-Host "  现有包槽：$($pkgs.Count) 个，第一个 $($pkgs[0].fileName)
 Write-Host "  槽字段：$(($pkgs[0].PSObject.Properties | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor DarkGray
 
 # ── 4. 换包 ───────────────────────────────────────────────────────────
-# 坑（2026-10-29 实测两次）：POST /submissions 会把上一次提交的 applicationPackages
-# 整份克隆过来。如果克隆到的槽 fileStatus 已经是 Uploaded，**只改 fileName 会被 API
-# 静默忽略**，commit 时仍然发布旧包 —— 现象是「CI 全绿、商店版本没变」。
-# 但直接清 fileUploadUrl 又会报 InvalidParameterValue: Please keep all file entries。
-# 所以这里依次试几种改法，取第一个能让 API 真的把 fileName 换成新包名的。
+# 坑（2026-10-29 实测三次，记清楚）：
+#   POST /submissions 会把上一次提交的 applicationPackages 整份克隆过来。
+#   克隆到的槽 fileStatus 已经是 Uploaded 时：
+#     · 只改 fileName → PUT 返回 200，看着改成功了，但 **commit 之后槽又变回旧包名/旧版本**
+#       （商店把 Uploaded 当成"已定稿"，改名和重传都被丢弃）→ 现象「CI 全绿、商店版本没变」。
+#     · 改 fileName + fileStatus=PendingUpload → 400 Bad Request（枚举值/字段组合不被接受）。
+#     · 清 fileUploadUrl → InvalidParameterValue: Please keep all file entries。
+#   所以这里依次试几种改法，取第一个 PUT 之后 fileName 和 version **都对**的。
+$verFromName = if ($pkgName -match '_(\d+\.\d+\.\d+\.\d+)_') { $matches[1] } else { $null }
+Write-Host "  目标包：$pkgName  version=$verFromName" -ForegroundColor DarkGray
+
 $variants = @(
+    @{ name = '整条替换成新槽（fileName + fileStatus=PendingUpload）'
+       apply = { param($s) $s.applicationPackages = @([pscustomobject]@{
+                    fileName   = $pkgName
+                    fileStatus = 'PendingUpload' }) } },
+    @{ name = '整条替换成新槽（保留元数据，去 id，改 fileName/version，fileStatus=PendingUpload）'
+       apply = { param($s)
+                    $old = $s.applicationPackages[0]
+                    $n = [ordered]@{}
+                    foreach ($k in 'fileName','fileStatus','version','architecture','targetPlatform','languages','capabilities','minimumDirectXVersion','minimumSystemRam','targetDeviceFamilies') {
+                        if ($old.PSObject.Properties[$k]) { $n[$k] = $old.$k }
+                    }
+                    $n['fileName'] = $pkgName
+                    $n['fileStatus'] = 'PendingUpload'
+                    if ($verFromName) { $n['version'] = $verFromName }
+                    $s.applicationPackages = @([pscustomobject]$n) } },
     @{ name = 'fileName + fileStatus=PendingUpload'
        apply = { param($s) $s.applicationPackages[0].fileName = $pkgName
-                          $s.applicationPackages[0].fileStatus = 'PendingUpload' } },
-    @{ name = '仅改 fileName'
-       apply = { param($s) $s.applicationPackages[0].fileName = $pkgName } },
-    @{ name = 'fileName + fileStatus=PendingUpload + 清 fileUploadUrl'
-       apply = { param($s) $s.applicationPackages[0].fileName = $pkgName
                           $s.applicationPackages[0].fileStatus = 'PendingUpload'
-                          if ($s.applicationPackages[0].PSObject.Properties['fileUploadUrl']) {
-                              $s.applicationPackages[0].fileUploadUrl = $null } } }
+                          if ($verFromName) { $s.applicationPackages[0].version = $verFromName } } },
+    @{ name = '仅改 fileName + version'
+       apply = { param($s) $s.applicationPackages[0].fileName = $pkgName
+                          if ($verFromName) { $s.applicationPackages[0].version = $verFromName } } }
 )
 
 $sub2 = $null
@@ -192,16 +210,19 @@ foreach ($v in $variants) {
     try {
         $try = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
     } catch {
-        Write-Host "  [$($v.name)] PUT 被拒：$($_.Exception.Message)" -ForegroundColor Yellow
+        $detail = $_.ErrorDetails.Message
+        if (-not $detail) { $detail = $_.Exception.Message }
+        Write-Host "  [$($v.name)] PUT 被拒：$detail" -ForegroundColor Yellow
         continue
     }
     $got = @($try.applicationPackages)[0]
-    Write-Host "  [$($v.name)] -> $($got.fileName)  fileStatus=$($got.fileStatus)" -ForegroundColor DarkGray
-    if ($got.fileName -eq $pkgName) { $sub2 = $try; break }
+    Write-Host "  [$($v.name)] -> $($got.fileName)  version=$($got.version)  fileStatus=$($got.fileStatus)" -ForegroundColor DarkGray
+    if ($got.fileName -eq $pkgName -and (-not $verFromName -or $got.version -eq $verFromName)) { $sub2 = $try; break }
+    Write-Host '    → 商店没接受（PUT 返回 200 但字段没变），换下一种改法' -ForegroundColor DarkGray
 }
 
 if (-not $sub2) {
-    throw "试了 $($variants.Count) 种改法都没能让 API 接受新包名（目标 $pkgName）。去 Partner Center 手动删掉这个提交后重跑。"
+    throw "试了 $($variants.Count) 种改法都没能让 API 接受新包（目标 $pkgName / $verFromName）。去 Partner Center 手动换包后重跑。"
 }
 
 $slot2 = @($sub2.applicationPackages)[0]
@@ -221,12 +242,16 @@ $upHeaders = @{
 Invoke-WebRequest -Method Put -Uri $uploadUrl -Headers $upHeaders -Body $bytes -UseBasicParsing | Out-Null
 Write-Host "  已上传 $([math]::Round($bytes.Length / 1MB, 2)) MB" -ForegroundColor DarkGray
 
-# 上传后再核对一次：确认商店记下的就是这个包，且已经标成 Uploaded。
+# 上传后再核对一次：确认商店记下的就是这个包（名字和版本都要对），才允许 commit。
+# 只对 fileName 是不够的 —— 实测「PUT 200 但 commit 后槽又变回旧包」，所以两个都查。
 $afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
 $slotUp = @($afterUp.applicationPackages)[0]
-Write-Host "  上传后核对：$($slotUp.fileName)  fileStatus=$($slotUp.fileStatus)  version=$($slotUp.version)" -ForegroundColor DarkGray
+Write-Host "  上传后核对：$($slotUp.fileName)  version=$($slotUp.version)  fileStatus=$($slotUp.fileStatus)" -ForegroundColor DarkGray
 if ($slotUp.fileName -ne $pkgName) {
     throw "上传后商店记的包名是 $($slotUp.fileName)，不是 $pkgName —— 停止提交，避免把旧包发出去。"
+}
+if ($verFromName -and $slotUp.version -ne $verFromName) {
+    throw "上传后商店记的版本是 $($slotUp.version)，不是 $verFromName —— 停止提交，避免发出去还是旧版本。"
 }
 if ($slotUp.fileStatus -ne 'Uploaded') {
     Write-Host "::warning::包状态是 $($slotUp.fileStatus) 而不是 Uploaded，提交可能失败"
