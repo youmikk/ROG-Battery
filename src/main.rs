@@ -39,6 +39,7 @@ use std::process::ExitCode;
 const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依赖 ASUS 驱动）
 
 用法：
+  rog-mouse-ctl version                       打印版本号（和 GitHub tag 一致）
   rog-mouse-ctl info [--fresh]                读全部信息（一次读全，默认吃 30 秒缓存）
   rog-mouse-ctl backup [文件]                 备份全部 31 项设置（默认 %USERPROFILE%\Documents\rog-mouse-ctl\backups\）
   rog-mouse-ctl restore <文件> [--save]       从备份还原（能量块最后单独重写并断言）
@@ -60,6 +61,7 @@ const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依
 
   rog-mouse-ctl cache                         查看快照缓存状态
   rog-mouse-ctl cache clear                   删除快照缓存
+  rog-mouse-ctl dump                          列出所有 ASUS HID 接口（排障用，不打开链路）
 
   rog-mouse-ctl estimate                      电量历史 + 续航/充满时间估算（顺手记一条采样）
 
@@ -263,7 +265,33 @@ fn run(
     // 参数校验先做，避免为了一个拼错的字去动设备
     validate(cmd, pos)?;
 
+    // `version` 只打印版本号，不碰设备 —— CI 用它断言「二进制自报的版本 == tag」。
+    if cmd == "version" {
+        println!("{}", crate::gui::APP_VERSION);
+        return Ok(());
+    }
+
     let api = win32::HidApi::load()?;
+
+    // `dump` 只列接口，不打开链路 —— 有线/无线模式下暴露的 usage page 完全不同，
+    // 链路开不起来时靠它定位。
+    if cmd == "dump" {
+        let all = hid::enumerate(&api)?;
+        println!("共 {} 个 ASUS HID 接口", all.len());
+        for i in &all {
+            println!(
+                "  PID 0x{:04X}  usage_page 0x{:04X}  usage 0x{:04X}  命令通道={}  {}",
+                i.product_id,
+                i.usage_page,
+                i.usage,
+                if i.is_command_channel() { "是" } else { "否" },
+                i.product
+            );
+            println!("      {}", i.path);
+        }
+        return Ok(());
+    }
+
     let link = hid::open_link(&api)?;
     let mut dev = hid::HidDevice::open(&link.iface)?;
 
@@ -556,7 +584,7 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
     };
 
     match cmd {
-        "info" | "save" | "estimate" | "quick" => Ok(()),
+        "info" | "save" | "estimate" | "quick" | "dump" | "version" => Ok(()),
         "backup" => Ok(()),                    // 文件可选，默认落到备份目录
         "restore" => need(2),
         "raw" => {

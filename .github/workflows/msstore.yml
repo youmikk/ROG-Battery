@@ -153,10 +153,14 @@ jobs:
           if ($four -match '^0\.') { throw "版本号第一段不能为 0：$four（商店要求 >= 1.0.0.0）" }
 
           "version=$four" >> $env:GITHUB_OUTPUT
+          "semver=" + ($p[0..2] -join '.') >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
           Write-Host "MSIX 版本 = $four（来源：$src）"
 
+      # 二进制里显示的版本号也吃这次算出来的三段号，避免和 MSIX 版本各说一套
       - name: cargo build --release
+        env:
+          ROG_BUILD_VERSION: ${{ steps.ver.outputs.semver }}
         run: cargo build --release
 
       # makeappx 来自 Windows SDK，不在 PATH 里；找出来交给打包脚本

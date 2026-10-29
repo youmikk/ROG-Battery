@@ -1,4 +1,4 @@
-﻿# MSIX 打包用的可变参数。build-msix.ps1 读这个文件填 AppxManifest.xml.template。
+# MSIX 打包用的可变参数。build-msix.ps1 读这个文件填 AppxManifest.xml.template。
 #
 # 为什么单独一个 psd1 而不是塞进脚本：这些值每次发布/每次换身份都要动，
 # 而脚本逻辑不该跟着动。改这里不会有改坏逻辑的风险。
@@ -42,7 +42,10 @@
     #   - Rust 重写是功能大改（灯光/按键/性能全参数可写 + 历史曲线），
     #     按语义化版本属于 minor 升级；1.0.1.0 会让人误以为只是修 bug。
     # build-msix.ps1 会拿本机已装版本做前置比对，忘了升版本会被当场拦住。
-    Version      = '1.1.0.0'
+    #
+    # 2026-10-29：商店侧已经提交过 1.1.9.0（CI 测试跑上去的），所以这里必须
+    # 大于它，顺手对齐成 1.2.0.0 —— 与 Cargo.toml / tag 的主次号一致。
+    Version      = '1.2.0.0'
 
     # ---------- 可执行文件 ----------
     # 相对包根的路径。.exe 由 build-msix.ps1 从 ..\target\release\ 拷进 stage 根目录，

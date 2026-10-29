@@ -223,6 +223,30 @@ fn glyph_color(level: u8, is_light: bool) -> [u8; 3] {
 /// 失败返回 `None`，调用方回落到静态图标 —— **不能让托盘空白**。
 /// 成功返回的 `HICON` 由调用方负责 `DestroyIcon`。
 pub fn render(level: u8) -> Option<Handle> {
+    let is_light = crate::autostart::system_uses_light_theme();
+    render_glyph(
+        &label(level),
+        scaled_font_height(level, ICON_SIZE),
+        glyph_color(level, is_light),
+        is_light,
+    )
+}
+
+/// 读不到电量（休眠 / 未连接 / 首次启动）时的占位图标：一条短横线。
+///
+/// 以前这种情况退回 `assets/tray.ico`（应用图标），任务栏上会突然只剩一个
+/// 图标、看不出是电量 —— 用户报过「托盘短暂出现只显示图标而不是数字」。
+pub fn render_unknown() -> Option<Handle> {
+    let is_light = crate::autostart::system_uses_light_theme();
+    let c = if is_light {
+        [0x5A, 0x5A, 0x5A]
+    } else {
+        [0xD8, 0xD8, 0xD8]
+    };
+    render_glyph("—", (ICON_SIZE as f32 * 0.46) as i32, c, is_light)
+}
+
+fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) -> Option<Handle> {
     use gdiplus::*;
     // 基础生成尺寸固定为 ICON_SIZE (32px)，生成高质量 32bpp ARGB 图标。
     // Windows Shell_NotifyIcon 接收 32x32 图标后，由 DWM 高保真缩放到任务栏托盘，
@@ -232,7 +256,6 @@ pub fn render(level: u8) -> Option<Handle> {
     if !crate::ui::gfx::start() {
         return None;
     }
-    let is_light = crate::autostart::system_uses_light_theme();
     unsafe {
         let mut bmp: *mut c_void = ptr::null_mut();
         if GdipCreateBitmapFromScan0(
@@ -260,7 +283,7 @@ pub fn render(level: u8) -> Option<Handle> {
         let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
         let mut family: *mut c_void = ptr::null_mut();
         let mut font: *mut c_void = ptr::null_mut();
-        let fh = scaled_font_height(level, size) as f32;
+        let fh = font_height as f32;
         if GdipCreateFontFamilyFromName(face.as_ptr(), ptr::null_mut(), &mut family) == 0 {
             // style 1 = Bold，unit 2 = UnitPixel
             let _ = GdipCreateFont(family, fh, 1, 2, &mut font);
@@ -276,7 +299,7 @@ pub fn render(level: u8) -> Option<Handle> {
             GdipSetStringFormatLineAlign(fmt, 1); // Center
         }
 
-        let text: Vec<u16> = label(level).encode_utf16().collect();
+        let text: Vec<u16> = text.encode_utf16().collect();
         let len = text.len() as i32;
 
         if !font.is_null() {
@@ -289,7 +312,7 @@ pub fn render(level: u8) -> Option<Handle> {
             let mut shadow: *mut c_void = ptr::null_mut();
             let _ = GdipCreateSolidFill(halo_color, &mut shadow);
 
-            let c = glyph_color(level, is_light);
+            let c = color;
             let argb = 0xFF00_0000 | ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
             let mut fg: *mut c_void = ptr::null_mut();
             let _ = GdipCreateSolidFill(argb, &mut fg);

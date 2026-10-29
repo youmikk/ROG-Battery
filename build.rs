@@ -31,8 +31,29 @@ fn main() {
     }
 
     link_app_icon();
+    app_version();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/mingw-import-libs");
+}
+
+/// 把「这个二进制到底是谁」的版本号烧进编译期常量 `ROG_APP_VERSION`。
+///
+/// 平时取 `Cargo.toml` 的 `version`；CI 发版时用环境变量 `ROG_BUILD_VERSION`
+/// 覆盖成 tag 的版本号。
+///
+/// # 为什么要有这层
+///
+/// 以前界面上的版本号是手写常量，`Cargo.toml` 又是另一个数，release 的 tag
+/// 是第三个数 —— 结果 GitHub 上发到 v1.1.2 了，软件里还写着 1.1.0。
+/// 现在 CI 用 tag 覆盖，二进制自己报的版本和 tag 不可能再对不上；
+/// `release.yml` 里还有一条 `rog-mouse-ctl.exe version` 的断言兜着。
+fn app_version() {
+    println!("cargo:rerun-if-env-changed=ROG_BUILD_VERSION");
+    let ver = match std::env::var("ROG_BUILD_VERSION") {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => env!("CARGO_PKG_VERSION").to_string(),
+    };
+    println!("cargo:rustc-env=ROG_APP_VERSION={ver}");
 }
 
 /// 把 `assets\app.o`（编译好的图标资源）链进 exe。

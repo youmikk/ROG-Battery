@@ -32,6 +32,11 @@ use crate::ui::widget::{
     Act, Drop, Edit, Icon, Page, Pref, Slide, Ui,
 };
 
+/// 设置页「关于」里的开源仓库地址。
+const REPO_URL: &str = "https://github.com/youmikk/ROG-Battery";
+/// 设置页「关于」里的商店产品页地址。
+const STORE_URL: &str = "https://apps.microsoft.com/detail/9NRC8HCD4BZ7";
+
 /// 页面要显示的数据。由 `gui.rs` 从 `Shared` 里凑出来。
 #[derive(Clone)]
 pub struct Data<'a> {
@@ -39,6 +44,11 @@ pub struct Data<'a> {
     pub state: Option<&'a crate::proto::State>,
     /// 设备身份（型号、SN、固件）。
     pub ident: Option<&'a crate::proto::Identity>,
+    /// 实测链路模式（`"Wired"` / `"Wireless24G"`，空串 = 还没读到）。
+    ///
+    /// 不能用 `ident.dongle_sn` 是否为空来判有线无线 —— 2.4G 下那个字段
+    /// 也可能读成空串，会把无线误显示成有线。
+    pub link_mode: &'a str,
     /// 状态行文字（「已连接 · 84%」「鼠标休眠中，移动一下即可唤醒」…）。
     pub status: String,
     /// 曲线数据。`None` = 还没读完第一遍（该画「正在读取」而不是「样本不足」）。
@@ -61,6 +71,26 @@ pub struct Data<'a> {
 }
 
 // ───────────────────────── 通用小工具 ─────────────────────────
+
+/// 连接方式文字。优先用实测链路模式（`hid::open_link` 给的 `Wired` /
+/// `Wireless24G`），只有还没读到实测值时才退回 `dongle_sn` 判据。
+fn link_text(d: &Data) -> &'static str {
+    match d.link_mode {
+        "Wired" => "有线",
+        "Wireless24G" => "2.4G 无线",
+        _ => {
+            let has_dongle = d
+                .ident
+                .map(|i| !i.dongle_sn.trim().is_empty())
+                .unwrap_or(false);
+            if has_dongle {
+                "2.4G 无线"
+            } else {
+                "有线"
+            }
+        }
+    }
+}
 
 /// 垂直推进游标。页面的所有 y 都靠它往前走。
 ///
@@ -868,7 +898,7 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
             Align::Left,
         );
         p.text(
-            "无线 · 2.4G",
+            link_text(d),
             R::new(dc.x + 12.0, dc.y + 28.0, dc.w - 24.0, 14.0),
             font::TINY,
             false,
@@ -1007,7 +1037,7 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
                 Align::Left,
             );
             p.text(
-                d.version,
+                &format!("v{}", d.version),
                 R::new(pad, stat_y, nav_w - pad * 2.0 - 4.0, 14.0),
                 font::TINY,
                 false,
@@ -1766,7 +1796,11 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
             ),
             (
                 "连接方式",
-                if d.state.is_some() { "2.4G 无线".to_string() } else { "离线 / 休眠".to_string() },
+                if d.state.is_some() {
+                    link_text(d).to_string()
+                } else {
+                    "离线 / 休眠".to_string()
+                },
             ),
             ("设备类型", kind_text),
         ];
@@ -2942,6 +2976,68 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     c.y = card.bottom();
 
+    // ---- 关于 ----
+    c.h2(p, "关于", false);
+    let card = c.card(p, layout::ROW_H * 3.0);
+    {
+        // 版本：值右对齐，版本号来自 Cargo.toml（不再手写常量）
+        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        row_label(
+            p,
+            area,
+            "版本",
+            Some("R Battery · 不依赖 ASUS 驱动的 ROG 鼠标参数工具"),
+            96.0,
+        );
+        p.text(
+            &format!("v{}", d.version),
+            R::new(area.right() - 140.0, area.y, 140.0, area.h),
+            12.5,
+            true,
+            t.text,
+            Align::Right,
+        );
+        p.hline(card.x, card.right(), area.bottom(), t.border);
+    }
+    {
+        // 开源仓库
+        let area = R::new(
+            card.x + 18.0,
+            card.y + layout::ROW_H,
+            card.w - 36.0,
+            layout::ROW_H,
+        );
+        let ctl = row_label(p, area, "开源仓库", Some(REPO_URL), 64.0);
+        button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
+            "打开",
+            false,
+            Act::OpenRepo,
+        );
+        p.hline(card.x, card.right(), area.bottom(), t.border);
+    }
+    {
+        // 商店页
+        let area = R::new(
+            card.x + 18.0,
+            card.y + layout::ROW_H * 2.0,
+            card.w - 36.0,
+            layout::ROW_H,
+        );
+        let ctl = row_label(p, area, "Microsoft Store", Some(STORE_URL), 64.0);
+        button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
+            "打开",
+            false,
+            Act::OpenStore,
+        );
+    }
+    c.y = card.bottom();
+
     let _ = Breakpoint::Wide;
 }
 
@@ -3057,6 +3153,7 @@ mod tests {
         let d = Data {
             state: None,
             ident: None,
+            link_mode: "",
             status: String::new(),
             plot: None,
             estimate: &est,
@@ -3116,6 +3213,7 @@ mod tests {
         let d = Data {
             state: None,
             ident: None,
+            link_mode: "",
             status: String::new(),
             plot: None,
             estimate: &est,

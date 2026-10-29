@@ -176,6 +176,9 @@ impl Mode {
     ///
     /// 注意：`"system"` 在这里**不**解析成具体配色 —— 那需要一个注册表
     /// 查询，属于运行期行为。用 [`resolve`] 得到实际配色。
+    ///
+    /// 现在运行期走 [`resolve`]，这个只剩单测在用，留着当解析规则的说明书。
+    #[allow(dead_code)]
     pub fn parse(s: &str) -> Mode {
         match s.trim().to_ascii_lowercase().as_str() {
             "dark" => Mode::Dark,

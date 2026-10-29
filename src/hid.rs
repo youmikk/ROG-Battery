@@ -614,7 +614,11 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
         return Err("没有找到任何 ASUS HID 接口（VID 0x0B05）".to_string());
     }
 
-    // 1) 有线模式：直接是 0xFF01 且能回答电量帧
+    // 1) 有线模式：直接是 0xFF01 且能回答电量帧。
+    //
+    // report id 必须试两个：实测有线（PID 0x1B63）走 **report id 0**（无编号帧，
+    // 回复首字节 00），无线才走 1 / 配对表给的 id。原来只试 1，有线模式一律超时，
+    // 于是链路开不起来、界面只能显示上一次的缓存值。
     for iface in &all {
         if iface.product_id == PID_DONGLE || !iface.is_command_channel() {
             continue;
@@ -625,14 +629,19 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
         let Ok(mut dev) = HidDevice::open(iface) else {
             continue;
         };
-        if let Some(m) = dev.xfer(1, 0x12, 0x07, &[0, 0], DEFAULT_TIMEOUT_MS) {
-            if !is_nak(&m) && m.len() >= 12 {
-                return Ok(Link {
-                    mode: "Wired".to_string(),
-                    report_id: 1,
-                    iface: iface.clone(),
-                    all_interfaces: all.clone(),
-                });
+        for rid in [1u8, 0u8] {
+            if let Some(m) = dev.xfer(rid, 0x12, 0x07, &[0, 0], DEFAULT_TIMEOUT_MS) {
+                if !is_nak(&m) && m.len() >= 12 {
+                    if std::env::var_os("ROG_HID_DEBUG").is_some() {
+                        eprintln!("[hid] 有线命中 report id {rid}：{}", iface.path);
+                    }
+                    return Ok(Link {
+                        mode: "Wired".to_string(),
+                        report_id: rid,
+                        iface: iface.clone(),
+                        all_interfaces: all.clone(),
+                    });
+                }
             }
         }
     }

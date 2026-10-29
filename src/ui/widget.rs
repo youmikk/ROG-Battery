@@ -260,6 +260,10 @@ pub enum Act {
     OpenSettingsFolder,
     /// 设置页：清空历史记录。
     ClearHistory,
+    /// 设置页「关于」：打开开源仓库。
+    OpenRepo,
+    /// 设置页「关于」：打开 Microsoft Store 产品页。
+    OpenStore,
     /// 灯光页：打开 Windows「动态光效」设置页（`ms-settings:personalization-lighting`）。
     OpenLightingSettings,
     /// 灯光页：重新探测 HID LampArray 设备。

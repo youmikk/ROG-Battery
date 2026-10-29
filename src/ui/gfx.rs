@@ -1921,13 +1921,14 @@ mod tests {
         let data = crate::ui::pages::Data {
             state: Some(&state),
             ident: Some(&ident),
+            link_mode: "Wireless24G",
             status: String::new(),
             plot: None,
             estimate: &estimate,
             rows: 0,
             cfg: &cfg,
             autostart_text: "已开机自启",
-            version: "v0.1.0",
+            version: crate::gui::APP_VERSION,
             frames: 19,
             elapsed_ms: 588,
             from_cache: false,
@@ -2197,6 +2198,14 @@ mod tests {
             ui.page = super::super::widget::Page::Settings;
             ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-top.bmp", None, 0.0);
+        }
+
+        // 21b. 设置页底部「关于」卡：版本号 / 开源仓库 / 商店页
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Settings;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-about.bmp", None, 700.0);
         }
 
         // 22. 标题栏关闭按钮悬停：红底 + 白叉（必须都可见，不能是透明 alpha）
