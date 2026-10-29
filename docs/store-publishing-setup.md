@@ -249,3 +249,36 @@ CI 里就是一步：`.github/workflows/msstore.yml` 的「上传并提交到商
 
 首次跑通记录：run `40854169786`（版本 1.1.9.0），提交 id `1152921505702265885`，
 状态 `CommitStarted`，包 `Sonder.RBattery_1.1.9.0_x64.msixupload`。
+
+## 附二：换包为什么一直不生效（2026-10-30 定位）
+
+现象：CI 全绿、日志里 `已提交的包：Sonder.RBattery_1.2.0.0_x64.msixupload version=1.2.0.0`，
+但商店里版本一直停在 `1.1.2.0`。
+
+根因有三条，叠在一起：
+
+1. **`applicationPackages` 的对象形状不对。**
+   官方[管理应用提交](https://learn.microsoft.com/zh-cn/windows/uwp/monetize/manage-app-submissions)
+   写明：调用「更新应用提交」时，这个对象**只需**提供
+   `fileName`、`fileStatus`、`minimumDirectXVersion`、`minimumSystemRam`，
+   其余字段（`id`、`version`、`architecture`、`languages`、`capabilities`、
+   `targetDeviceFamilies`）由合作伙伴中心填充。之前把克隆来的整份槽原样 PUT 回去，
+   带 `fileStatus=PendingUpload` 就被 400 拒。
+2. **`fileName` 指的是上传 ZIP 里的 `.msix` 名，不是 `.msixupload` 名。**
+   `.msixupload` 本身就是「内含 `.msix` 的 ZIP」，所以把它整份 PUT 到 SAS 地址正好，
+   但 `fileName` 必须写 `Sonder.RBattery_X.Y.Z.0_x64.msix`。
+3. **`minimumDirectXVersion` / `minimumSystemRam` 的枚举值不能写 `None`。**
+   它们分别是 `DirectXVersion`（`NotSet`/`DirectX9`…`DirectX12`）与
+   `MemoryRAM`（`NotSet`/`RAM_300MB`…），要写 `NotSet`。
+
+之前的「只改 fileName」之所以看着成功：PUT 返回 200，但商店把 `fileStatus=Uploaded`
+当成已定稿，`commit` 之后又把槽换回旧包 —— 于是又一次把 1.1.2.0 发出去。
+
+现在的做法（`tools/msstore-publish.ps1`）：按文档形状从完整到精简试四种
+（`fileName + PendingUpload + NotSet×2` → `+ PendingUpload` → `+ NotSet×2` → 仅 `fileName`），
+取第一个商店接受 `fileName` 的；上传后再核对 `fileName` 与 `version` 都等于目标值，
+否则**直接失败并拒绝 commit**，不再静默把旧包发出去。
+
+另外：商店同一时间只允许一个在途提交。上一次提交还在
+`CommitStarted`/`Certification`/`Release` 时，脚本会打 warning 并跳过（`exit 0`），
+MSIX 包照常作为 artifact 上传，等前一个走完再重跑即可。
