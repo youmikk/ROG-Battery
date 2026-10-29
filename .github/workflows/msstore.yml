@@ -193,67 +193,26 @@ jobs:
           if-no-files-found: error
 
       # ─────────── 以下仅在配了 MSSTORE_PRODUCT_ID 时执行 ───────────
-      - name: 装 Microsoft Store CLI
-        if: vars.MSSTORE_PRODUCT_ID != ''
-        uses: microsoft/microsoft-store-apppublisher@v1.1
-
-      - name: 配置商店凭据
-        if: vars.MSSTORE_PRODUCT_ID != ''
-        shell: pwsh
-        run: |
-          msstore reconfigure `
-            --tenantId ${{ secrets.AZURE_AD_TENANT_ID }} `
-            --sellerId ${{ secrets.SELLER_ID }} `
-            --clientId ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }} `
-            --clientSecret ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
-
+      # 不用 msstore publish：它要先找一个「项目目录」并从中读发布者身份，
+      # 我们没有 .csproj；塞 Package.appxmanifest 会被当成 UWP 项目去
+      # MSBuild restore，在装了 VS 的 runner 上直接抛 Failed to restore packages。
+      # 所以直接走 Store 提交 REST API，见 tools/msstore-publish.ps1。
       - name: 上传并提交到商店
         if: vars.MSSTORE_PRODUCT_ID != ''
         shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
         run: |
-          $id = '${{ vars.MSSTORE_PRODUCT_ID }}'
           $up = Get-ChildItem dist\*.msixupload | Select-Object -First 1
           if (-not $up) { throw 'dist 里没有 .msixupload，先确认上一步成功' }
-          Write-Host "上传：$($up.FullName)"
+          ./tools/msstore-publish.ps1 -ProductId '${{ vars.MSSTORE_PRODUCT_ID }}' -PackagePath $up.FullName
 
-          # msstore publish 不是「丢一个包进去就行」：它要先找到一个「项目」，
-          # 从项目里读出发布者身份（Publisher CN=...），再拿它去校验包。
-          # 我们没有 .csproj / .appxmanifest 项目，于是把包内真正的 AppxManifest.xml
-          # 取出来，另存成 Package.appxmanifest 放在 dist 里 —— 这就够了。
-          # 失败原话：We could not find a project publisher for the project at '...'
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $msix = Get-ChildItem dist\*.msix | Select-Object -First 1
-          if (-not $msix) { throw 'dist 里没有 .msix（提取 AppxManifest 需要它）' }
-          $zip = [System.IO.Compression.ZipFile]::OpenRead($msix.FullName)
-          try {
-            $entry = $zip.Entries | Where-Object { $_.FullName -eq 'AppxManifest.xml' } | Select-Object -First 1
-            if (-not $entry) { throw "$($msix.Name) 里没有 AppxManifest.xml" }
-            $sr = New-Object System.IO.StreamReader($entry.Open())
-            try { $text = $sr.ReadToEnd() } finally { $sr.Close() }
-          } finally { $zip.Dispose() }
-          $manifestOut = Join-Path (Split-Path -Parent $up.FullName) 'Package.appxmanifest'
-          [System.IO.File]::WriteAllText($manifestOut, $text, (New-Object System.Text.UTF8Encoding($false)))
-          Write-Host "已提取清单：$manifestOut"
-
-          # 第一个位置参数 <pathOrUrl> 是「项目目录」——publish 从它读发布者身份，
-          # 不传就默认当前目录（CI 里是仓库根）→ 报
-          #   We could not find a project publisher for the project at '<仓库根>'
-          # 所以要显式传放 manifest 的 dist；-i 也指同一个目录。
-          msstore publish dist -i dist -id $id
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host ''
-            Write-Host '提示：如果上面报 “Ingestion API can only update, delete, and commit' -NoNewline
-            Write-Host ' submissions that are created through the API”，'
-            Write-Host '说明商店里还有一个「在网页上手工创建」的待提交草稿（PendingCommit）。'
-            Write-Host '去 Partner Center → 该产品 → 提交 → 删掉那个草稿，再重跑本工作流即可；'
-            Write-Host '之后所有草稿都由 API 创建，不会再出现这个错。'
-            exit 1
-          }
-
-      - name: 等待商店校验结果
+      - name: 商店提交状态
         if: vars.MSSTORE_PRODUCT_ID != ''
         shell: pwsh
-        timeout-minutes: 90
-        # 校验要排队，超时不算失败 —— 结果到 Partner Center 看
-        continue-on-error: true
-        run: msstore submission poll ${{ vars.MSSTORE_PRODUCT_ID }}
+        run: |
+          Write-Host '提交已发出。认证通常几小时到一天，结果会发邮件。'
+          Write-Host '状态页：https://partner.microsoft.com/dashboard/products/${{ vars.MSSTORE_PRODUCT_ID }}/submissions'
+          Write-Host '（本步骤不轮询，避免长时间占用 runner；要查就点上面的链接。）'
