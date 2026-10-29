@@ -129,12 +129,27 @@ $pkgs = @($sub.applicationPackages)
 if ($pkgs.Count -eq 0) { throw '草稿里没有 applicationPackages 槽位，无法挂包' }
 Write-Host "  现有包槽：$($pkgs[0].fileName)  fileStatus=$($pkgs[0].fileStatus)" -ForegroundColor DarkGray
 
-# ── 4. 改 fileName 再 PUT（这一步返回 fileUploadUrl）───────────────────
+# ── 4. 换包：改 fileName + 把 fileStatus 退回 PendingUpload 再 PUT ─────
+# 坑（2026-10-29 实测）：POST /submissions 会把上一次提交的包槽整份克隆过来，
+# 若克隆到的槽 fileStatus 已经是 Uploaded，**只改 fileName 会被 API 静默忽略**，
+# commit 时仍然发布旧的那个包 —— 结果就是「跑绿了，但商店版本没变」。
+# 必须同时把 fileStatus 置回 PendingUpload 并清掉旧的 fileUploadUrl，才拿得到新地址。
 $pkgs[0].fileName = $pkgName
+$pkgs[0].fileStatus = 'PendingUpload'
+if ($pkgs[0].PSObject.Properties['fileUploadUrl']) { $pkgs[0].fileUploadUrl = $null }
 $sub.applicationPackages = $pkgs
 $body = $sub | ConvertTo-Json -Depth 32
 $sub2 = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
-$uploadUrl = @($sub2.applicationPackages)[0].fileUploadUrl
+
+$slot2 = @($sub2.applicationPackages)[0]
+Write-Host "  PUT 之后：$($slot2.fileName)  fileStatus=$($slot2.fileStatus)" -ForegroundColor DarkGray
+if ($slot2.fileName -ne $pkgName) {
+    # 宁可失败也不要发错包：出现这种情况说明商店不肯改这个槽，
+    # 去 Partner Center 把这个提交删掉再重跑（或直接换个更大的版本号）。
+    throw "商店没有接受包名改动：期望 $pkgName，实际 $($slot2.fileName)。请去 Partner Center 删掉这个提交后重跑。"
+}
+
+$uploadUrl = $slot2.fileUploadUrl
 if (-not $uploadUrl) { $uploadUrl = $sub2.fileUploadUrl }
 if (-not $uploadUrl) { throw 'PUT 之后没拿到 fileUploadUrl' }
 Write-Host '  已登记文件名，拿到上传地址' -ForegroundColor DarkGray
@@ -160,5 +175,18 @@ if ($DryRun) {
 
 Write-Host '提交认证…' -ForegroundColor DarkGray
 Invoke-RestMethod -Method Post -Uri "$subsUri/$($sub.id)/commit" -Headers $headers -Body '{}' -ContentType 'application/json' | Out-Null
+
+# 提交后再核对一次，防止「跑绿了但发出去的是旧包」这种静默错误。
+try {
+    $check = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
+    $gotPkg = @($check.applicationPackages)[0]
+    Write-Host "  已提交的包：$($gotPkg.fileName)  version=$($gotPkg.version)  status=$($check.status)" -ForegroundColor DarkGray
+    if ($gotPkg.fileName -and $gotPkg.fileName -ne $pkgName) {
+        Write-Host "::warning::提交里挂的包名是 $($gotPkg.fileName)，不是 $pkgName —— 去 Partner Center 核对一下"
+    }
+} catch {
+    Write-Host "  （提交后核对失败，不影响提交本身：$($_.Exception.Message)）" -ForegroundColor DarkGray
+}
+
 Write-Host ''
 Write-Host "已提交。状态页：https://partner.microsoft.com/dashboard/products/$ProductId/submissions" -ForegroundColor Green
