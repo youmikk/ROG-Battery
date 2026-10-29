@@ -89,9 +89,10 @@ foreach ($s in @($subs)) {
 
 # ── 3. 建新草稿 ───────────────────────────────────────────────────────
 Write-Host '创建草稿…' -ForegroundColor DarkGray
-# 文档明确：这个方法不要请求体。带 {} 会被判 InvalidParameterValue
-# "The size of Listings must be 1 or more"。
-$sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers
+# 文档明确：这个方法不要请求体 —— 带 {} 会被判
+#   InvalidParameterValue: The size of Listings must be 1 or more
+# 但 Content-Type 必须是 application/json，否则报 Only JSON content is accepted。
+$sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
 Write-Host "  id=$($sub.id)  status=$($sub.status)" -ForegroundColor DarkGray
 
 $pkgs = @($sub.applicationPackages)
