@@ -193,3 +193,38 @@ msstore submission delete 9NRC8HCD4BZ7 --no-confirm
 - 有效期到了会突然全部失败；到期前重建密码 → `gh secret set` 覆盖。
 - 想彻底不用密码：`msstore reconfigure` 支持证书方式（`-ct/--certificateThumbprint`、`-cfp/--certificateFilePath`），适合自托管 runner，公共 runner 上不推荐。
 - 建议只给这个应用 Partner Center 的「管理者」，不要用你自己日常账号的凭据。
+
+---
+
+## 自动提交的两个前置条件（踩过的坑）
+
+自动提交（GitHub Actions 或本机 publish.ps1）走的是 **Ingestion API**，比网页多两条硬限制。
+
+### 1. 必须有一个「项目」用来读发布者身份
+
+msstore publish 的第一个位置参数 <pathOrUrl> 是**项目目录**，它从里面读 Publisher（CN=1307ADA3-...）。不传就默认当前目录，于是报：
+
+\We could not find a project publisher for the project at '<目录>'
+\
+我们没有 \.csproj\，解决办法是把**包内真正的 \AppxManifest.xml\** 取出来，另存为同一目录下的 \Package.appxmanifest\，并把该目录作为第一个参数传进去：
+
+\\powershell
+msstore publish <放包的目录> -i <放包的目录> -id 9NRC8HCD4BZ7
+\
+CI 的 \.github/workflows/msstore.yml\ 与本机 \msix/publish.ps1\ 都已自动做这一步（从 \.msix\ 里解压取 \AppxManifest.xml\）。
+
+### 2. 商店里不能留着「网页上手工创建」的待提交草稿
+
+API 只能改、删、提交**由 API 创建**的草稿。若 Partner Center 里存在一个手工创建的 \PendingCommit\ 草稿，会报：
+
+\Ingestion API can only update, delete, and commit submissions that are
+created through the API. Please delete the current in-progress submission
+and create one using the API
+\
+处理办法（一次性）：打开
+<https://partner.microsoft.com/dashboard/products/9NRC8HCD4BZ7/submissions>
+→ 删除那个待提交草稿 → 重跑工作流。之后草稿都由 API 创建，不会再出现。
+
+> 已上线版本不受影响：删掉的只是草稿。
+
+> 附带一条：\msstore submission delete\ 默认要交互确认，非交互环境要加 \--no-confirm\。
