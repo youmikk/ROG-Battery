@@ -88,39 +88,21 @@ if (-not $cli) {
 
 $uploadDir = Split-Path -Parent $upload
 
-# msstore publish 不是「丢个包进去就行」：它要先找一个「项目」，从项目里读出
-# 发布者身份（Publisher CN=...），再拿它校验包。我们没有 .csproj / .appxmanifest
-# 项目，所以把包里真正的 AppxManifest.xml 取出来，存成 Package.appxmanifest
-# 放在同一目录即可。否则报：
-#   We could not find a project publisher for the project at '...'
-$msixFile = Get-ChildItem $uploadDir -Filter *.msix | Select-Object -First 1
-if ($msixFile) {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($msixFile.FullName)
-    try {
-        $entry = $zip.Entries | Where-Object { $_.FullName -eq 'AppxManifest.xml' } | Select-Object -First 1
-        if ($entry) {
-            $sr = New-Object System.IO.StreamReader($entry.Open())
-            try { $manifestText = $sr.ReadToEnd() } finally { $sr.Close() }
-            $manifestOut = Join-Path $uploadDir 'Package.appxmanifest'
-            [System.IO.File]::WriteAllText($manifestOut, $manifestText, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Host "已提取清单：$manifestOut" -ForegroundColor DarkGray
-        }
-    }
-    finally { $zip.Dispose() }
-}
+# 走 Store 提交 REST API（tools/msstore-publish.ps1）。
+# 不用 msstore publish 的原因：它要先找一个「项目目录」读发布者身份；
+# 我们没有 .csproj，塞 Package.appxmanifest 会被当成 UWP 项目去 MSBuild
+# restore，在装了 Visual Studio 的机器上直接抛 Failed to restore packages。
+$restScript = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\msstore-publish.ps1'
+if (-not (Test-Path $restScript)) { throw "找不到 $restScript" }
 
-# 注意第一个位置参数 <pathOrUrl>：publish 拿它当「项目目录」，从中读发布者身份。
-# 不传就默认用当前工作目录 → 在仓库根跑会报
-#   We could not find a project publisher for the project at '<仓库根>'
-# 所以这里必须把「放了 Package.appxmanifest 的那个目录」显式传进去。
-$cliArgs = @('publish', $uploadDir, '-id', $ProductId, '-i', $uploadDir)
-if ($DryRun) { $cliArgs += '--noCommit' }   # 只建提交、不点提交认证，方便先核对
+$restArgs = @{ ProductId = $ProductId; PackagePath = $upload }
+if ($DryRun) { $restArgs['DryRun'] = $true }
 
 Write-Host ''
-Write-Host ('执行：msstore ' + ($cliArgs -join ' ')) -ForegroundColor Cyan
-& $cli @cliArgs
-$rc = $LASTEXITCODE
+Write-Host ('执行：tools/msstore-publish.ps1 -ProductId ' + $ProductId + ' -PackagePath ' + (Split-Path -Leaf $upload)) -ForegroundColor Cyan
+& $restScript @restArgs
+$rc = if ($?) { 0 } else { 1 }
+
 Write-Host ''
 if ($rc -eq 0) {
     Write-Host '已提交。去 Partner Center 看「提交」页状态；认证通常几小时到一天。' -ForegroundColor Green
