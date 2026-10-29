@@ -70,6 +70,11 @@ try {
 }
 foreach ($s in @($subs)) {
     if ($null -eq $s -or -not $s.id) { continue }
+    # 只删草稿。已发布/正在认证的提交绝不能删。
+    if ($s.status -ne 'PendingCommit') {
+        Write-Host "跳过提交 $($s.id)（状态 $($s.status)，不是草稿）" -ForegroundColor DarkGray
+        continue
+    }
     Write-Host "删除旧草稿 $($s.id)（状态 $($s.status)）…" -ForegroundColor DarkGray
     try {
         Invoke-RestMethod -Method Delete -Uri "$subsUri/$($s.id)" -Headers $headers | Out-Null
@@ -84,7 +89,9 @@ foreach ($s in @($subs)) {
 
 # ── 3. 建新草稿 ───────────────────────────────────────────────────────
 Write-Host '创建草稿…' -ForegroundColor DarkGray
-$sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -Body '{}' -ContentType 'application/json'
+# 文档明确：这个方法不要请求体。带 {} 会被判 InvalidParameterValue
+# "The size of Listings must be 1 or more"。
+$sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers
 Write-Host "  id=$($sub.id)  status=$($sub.status)" -ForegroundColor DarkGray
 
 $pkgs = @($sub.applicationPackages)
@@ -97,6 +104,7 @@ $sub.applicationPackages = $pkgs
 $body = $sub | ConvertTo-Json -Depth 32
 $sub2 = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
 $uploadUrl = @($sub2.applicationPackages)[0].fileUploadUrl
+if (-not $uploadUrl) { $uploadUrl = $sub2.fileUploadUrl }
 if (-not $uploadUrl) { throw 'PUT 之后没拿到 fileUploadUrl' }
 Write-Host '  已登记文件名，拿到上传地址' -ForegroundColor DarkGray
 
