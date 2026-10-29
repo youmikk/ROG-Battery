@@ -118,7 +118,8 @@ jobs:
         env:
           EXPECT: ${{ steps.ver.outputs.version }}
         run: |
-          $got = (& target\release\rog-mouse-ctl.exe version).Trim()
+          # GUI 子系统二进制在 pwsh 里直调会拿到不可写 stdout 句柄；经 cmd 包一层可稳定取到输出。
+          $got = (cmd /c "target\release\rog-mouse-ctl.exe version").Trim()
           "二进制自报 = $got    tag 版本 = $EXPECT"
           if ($got -ne $EXPECT) {
             throw "版本号不一致：二进制说 $got，tag 说 $EXPECT —— 检查 build.rs 的 ROG_APP_VERSION 有没有被 ROG_BUILD_VERSION 覆盖"
