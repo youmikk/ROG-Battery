@@ -199,26 +199,46 @@ $innerName = ([System.IO.Path]::GetFileNameWithoutExtension($pkgName)) + '.msix'
 Write-Host "  目标包：$innerName  version=$verFromName（上传档案：$pkgName）" -ForegroundColor DarkGray
 
 $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
-$cur.applicationPackages = @([pscustomobject]@{
-    fileName              = $innerName
-    fileStatus            = 'PendingUpload'
-    minimumDirectXVersion = 'None'
-    minimumSystemRam      = 'None'
-})
-$body = $cur | ConvertTo-Json -Depth 32
-try {
-    $sub2 = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
-} catch {
-    $detail = Get-HttpErrorBody $_
-    if (-not $detail) { $detail = $_.Exception.Message }
-    throw "登记新包失败：$detail"
+
+# 枚举值不能乱填：minimumDirectXVersion 属于 DirectXVersion（NotSet/DirectX9/…/DirectX12），
+# minimumSystemRam 属于 MemoryRAM（NotSet/RAM_300MB/…），写 'None' 会被 400 拒。
+# 按「文档形状」从最完整到最精简依次试，取第一个商店真的接受了 fileName 的形状。
+$shapes = @(
+    @{ name = 'fileName + PendingUpload + NotSet×2'
+       pkg  = { param($n) [pscustomobject]@{ fileName = $n; fileStatus = 'PendingUpload'; minimumDirectXVersion = 'NotSet'; minimumSystemRam = 'NotSet' } } },
+    @{ name = 'fileName + PendingUpload'
+       pkg  = { param($n) [pscustomobject]@{ fileName = $n; fileStatus = 'PendingUpload' } } },
+    @{ name = 'fileName + NotSet×2'
+       pkg  = { param($n) [pscustomobject]@{ fileName = $n; minimumDirectXVersion = 'NotSet'; minimumSystemRam = 'NotSet' } } },
+    @{ name = '仅 fileName'
+       pkg  = { param($n) [pscustomobject]@{ fileName = $n } } }
+)
+
+$sub2 = $null
+$acceptedShape = $null
+foreach ($s in $shapes) {
+    $cur.applicationPackages = @((& $s.pkg $innerName))
+    $body = $cur | ConvertTo-Json -Depth 32
+    try {
+        $try = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
+    } catch {
+        $detail = Get-HttpErrorBody $_
+        if (-not $detail) { $detail = $_.Exception.Message }
+        Write-Host "  [$($s.name)] PUT 被拒：$detail" -ForegroundColor Yellow
+        continue
+    }
+    $got = @($try.applicationPackages)[0]
+    Write-Host "  [$($s.name)] -> $($got.fileName)  fileStatus=$($got.fileStatus)  version=$($got.version)" -ForegroundColor DarkGray
+    if ($got.fileName -eq $innerName) { $sub2 = $try; $acceptedShape = $s.name; break }
+    Write-Host '    → 商店没接受这个包名，换下一种形状' -ForegroundColor DarkGray
 }
 
-$slot2 = @($sub2.applicationPackages)[0]
-Write-Host "  PUT 之后：$($slot2.fileName)  fileStatus=$($slot2.fileStatus)  id=$($slot2.id)" -ForegroundColor DarkGray
-if ($slot2.fileName -ne $innerName) {
-    throw "商店没有接受包名：期望 $innerName，实际 $($slot2.fileName)"
+if (-not $sub2) {
+    throw "试了 $($shapes.Count) 种形状都没能让 API 接受 $innerName。去 Partner Center 手动换包后重跑。"
 }
+Write-Host "  已接受形状：$acceptedShape" -ForegroundColor DarkGray
+
+$slot2 = @($sub2.applicationPackages)[0]
 
 $uploadUrl = $sub2.fileUploadUrl
 if (-not $uploadUrl) { $uploadUrl = $slot2.fileUploadUrl }
