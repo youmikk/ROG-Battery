@@ -68,11 +68,18 @@ try {
 } catch {
     $subs = @()
 }
+# 只有草稿/失败态可以删；正在认证或发布的提交删不掉，也不能并存第二个提交。
+$deletable = @('PendingCommit', 'CommitFailed')
+$busyStatuses = @('CommitStarted', 'Certification', 'Publishing', 'PreProcessing', 'PendingDelete')
+$busy = $null
 foreach ($s in @($subs)) {
     if ($null -eq $s -or -not $s.id) { continue }
-    # 只删草稿。已发布/正在认证的提交绝不能删。
-    if ($s.status -ne 'PendingCommit') {
-        Write-Host "跳过提交 $($s.id)（状态 $($s.status)，不是草稿）" -ForegroundColor DarkGray
+    if ($s.status -in $busyStatuses) {
+        $busy = $s
+        continue
+    }
+    if ($s.status -notin $deletable) {
+        Write-Host "跳过提交 $($s.id)（状态 $($s.status)）" -ForegroundColor DarkGray
         continue
     }
     Write-Host "删除旧草稿 $($s.id)（状态 $($s.status)）…" -ForegroundColor DarkGray
@@ -87,12 +94,35 @@ foreach ($s in @($subs)) {
     }
 }
 
+# 商店同一时间只允许一个提交。上一个提交还在认证/发布时，这里只能等，
+# 不该把整条 CI 判红 —— MSIX 已经作为 artifact 上传了，认证完成后重跑一次即可。
+if ($busy) {
+    Write-Host ''
+    Write-Host "商店已有提交正在进行：id=$($busy.id) status=$($busy.status)" -ForegroundColor Yellow
+    Write-Host "等它结束后重跑本步骤即可（或去这里手动提交）：" -ForegroundColor Yellow
+    Write-Host "  https://partner.microsoft.com/dashboard/products/$ProductId/submissions" -ForegroundColor Yellow
+    Write-Host "::warning::商店已有提交正在进行（$($busy.status)），本次跳过自动提交；MSIX 包已上传为 artifact"
+    exit 0
+}
+
 # ── 3. 建新草稿 ───────────────────────────────────────────────────────
 Write-Host '创建草稿…' -ForegroundColor DarkGray
 # 文档明确：这个方法不要请求体 —— 带 {} 会被判
 #   InvalidParameterValue: The size of Listings must be 1 or more
 # 但 Content-Type 必须是 application/json，否则报 Only JSON content is accepted。
-$sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
+try {
+    $sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
+} catch {
+    $msg = $_.Exception.Message
+    # 409 Conflict / InvalidState：多半是刚被别的途径占用了提交位，按「跳过」处理而不是判红。
+    if ($msg -match 'Conflict' -or $msg -match 'InvalidState') {
+        Write-Host ''
+        Write-Host "创建草稿被拒（提交位被占用）：$msg" -ForegroundColor Yellow
+        Write-Host "::warning::商店提交位被占用，本次跳过自动提交；MSIX 包已上传为 artifact"
+        exit 0
+    }
+    throw
+}
 Write-Host "  id=$($sub.id)  status=$($sub.status)" -ForegroundColor DarkGray
 
 $pkgs = @($sub.applicationPackages)

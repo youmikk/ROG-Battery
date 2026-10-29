@@ -118,10 +118,24 @@ jobs:
         env:
           EXPECT: ${{ steps.ver.outputs.version }}
         run: |
-          $got = (& target\release\rog-mouse-ctl.exe version).Trim()
-          "二进制自报 = $got    tag 版本 = $EXPECT"
-          if ($got -ne $EXPECT) {
-            throw "版本号不一致：二进制说 $got，tag 说 $EXPECT —— 检查 build.rs 的 ROG_APP_VERSION 有没有被 ROG_BUILD_VERSION 覆盖"
+          # 别用 & 捕获输出：exe 是 GUI 子系统，PowerShell 不等它结束就关掉管道，
+          # 子进程写 stdout 会 panic（实测：failed printing to stdout: The pipe is being closed. os error 232），
+          # 结果 $got 拿到 null。改成 Start-Process -Wait + 重定向到文件再读。
+          $exe = Join-Path (Get-Location) 'target\release\rog-mouse-ctl.exe'
+          $outFile = Join-Path $env:RUNNER_TEMP 'ver.txt'
+          $errFile = Join-Path $env:RUNNER_TEMP 'ver.err.txt'
+          $proc = Start-Process -FilePath $exe -ArgumentList 'version' -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+          $got = if (Test-Path $outFile) { (Get-Content $outFile -Raw).Trim() } else { '' }
+          # 注意：GitHub 的 env: 只会变成环境变量，PowerShell 里必须写 $env:EXPECT；
+          # 直接写 $EXPECT 是 $null，比较恒为不等，会误报版本不一致。
+          $expect = $env:EXPECT
+          "二进制自报 = '$got'    期望版本 = '$expect'    exit = $($proc.ExitCode)"
+          if (-not $got -and (Test-Path $errFile)) {
+            "stderr: " + (Get-Content $errFile -Raw)
+          }
+          if ($got -ne $expect) {
+            throw "版本号不一致：二进制说 '$got'，期望 '$expect' —— 检查 build.rs 的 ROG_APP_VERSION 有没有被 ROG_BUILD_VERSION 覆盖"
           }
 
       - name: 校验 PE 子系统必须是 GUI（防黑框回归）
