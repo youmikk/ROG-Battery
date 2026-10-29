@@ -63,11 +63,22 @@ Write-Host '  OK' -ForegroundColor DarkGray
 
 # ── 2. 清掉已有草稿（API 只能删 API 建的草稿）──────────────────────────
 $subsUri = "$api/applications/$ProductId/submissions"
+
+# GET /submissions 的形状文档没写清楚：实测可能是裸数组，也可能包一层 { value: [...] }。
+# 之前只按裸数组解析，遇到包装形状就一个都拿不到 → 旧草稿删不掉 → 建新草稿 409。
+function Get-Submissions {
+    $resp = Invoke-RestMethod -Method Get -Uri $subsUri -Headers $headers
+    if ($resp -is [array]) { return @($resp) }
+    if ($resp.PSObject.Properties['value']) { return @($resp.value) }
+    return @($resp)
+}
+
 try {
-    $subs = Invoke-RestMethod -Method Get -Uri $subsUri -Headers $headers
+    $subs = Get-Submissions
 } catch {
     $subs = @()
 }
+Write-Host "  已列到 $(@($subs).Count) 个提交：$((@($subs) | ForEach-Object { "$($_.id)/$($_.status)" }) -join '  ')" -ForegroundColor DarkGray
 # 只有草稿/失败态可以删；正在认证或发布的提交删不掉，也不能并存第二个提交。
 $deletable = @('PendingCommit', 'CommitFailed')
 $busyStatuses = @('CommitStarted', 'Certification', 'Publishing', 'PreProcessing', 'PendingDelete')
@@ -114,15 +125,38 @@ try {
     $sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
 } catch {
     $msg = $_.Exception.Message
-    # 409 Conflict / InvalidState：多半是刚被别的途径占用了提交位，按「跳过」处理而不是判红。
     if ($msg -match 'Conflict' -or $msg -match 'InvalidState') {
-        Write-Host ''
-        Write-Host "创建草稿被拒（提交位被占用）：$msg" -ForegroundColor Yellow
-        Write-Host "::warning::商店提交位被占用，本次跳过自动提交；MSIX 包已上传为 artifact"
-        exit 0
+        # 上一次跑挂在半路，留下一个 PendingCommit 草稿，但上面的列表没删掉它。
+        # 这里再清一遍再试一次，别把整条 CI 判红。
+        Write-Host "  提交位被占用（$msg），再清一次草稿后重试…" -ForegroundColor Yellow
+        try {
+            foreach ($x in @(Get-Submissions)) {
+                if ($x.id -and $x.status -in $deletable) {
+                    Write-Host "    删除 $($x.id)（$($x.status)）…" -ForegroundColor DarkGray
+                    try {
+                        Invoke-RestMethod -Method Delete -Uri "$subsUri/$($x.id)" -Headers $headers | Out-Null
+                        Write-Host '      已删除' -ForegroundColor DarkGray
+                    } catch {
+                        Write-Host "      删除失败：$($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
+            }
+        } catch { }
+        Start-Sleep -Seconds 5
+        try {
+            $sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
+        } catch {
+            $msg2 = $_.Exception.Message
+            Write-Host ''
+            Write-Host "创建草稿仍被拒：$msg2" -ForegroundColor Yellow
+            Write-Host "::warning::商店提交位被占用，本次跳过自动提交；MSIX 包已上传为 artifact"
+            exit 0
+        }
+    } else {
+        throw
     }
-    throw
 }
+if (-not $sub) { throw '创建草稿失败（没有返回提交对象）' }
 Write-Host "  id=$($sub.id)  status=$($sub.status)" -ForegroundColor DarkGray
 
 $pkgs = @($sub.applicationPackages)
