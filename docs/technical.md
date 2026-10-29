@@ -19,6 +19,21 @@
   灯效能力另有一个标准 **HID LampArray** 集合（UsagePage `0x59` / Usage `0x01`）。
 - 读写都要「发一帧 → 读回一帧」并校验，写完要 `commit` 才落 flash（RAM 与 flash 分离）。
 
+**Report ID 随链路模式变化（实测，踩过坑）**：
+
+| 链路 | 命令通道 | Report ID |
+|------|----------|-----------|
+| 有线（鼠标 PID `0x1B63`） | `MI_00`，UsagePage `0xFF01` / Usage `0x01` | **`0x00`**（无编号帧，回帧首字节也是 `00`） |
+| 2.4G（接收器 PID `0x1ACE`） | `0xFF02` 配对表给出的 id | `0x03`（部分固件 `0x01`） |
+
+有线模式下用 `report id 1` 发 `0x12 0x07` 会**直接超时**（设备不应答），
+旧代码只试 `1`，结果有线模式整条链路开不起来、界面只能显示上一次的缓存值
+（表现为「插着线还显示 2.4G 无线」）。现在 `hid::open_link` 在有线分支依次
+试 `1` 和 `0`，命中哪个就把哪个记进 `Link.report_id`，后续所有帧都用它。
+
+`rog-mouse-ctl dump` 可以列出当前状态下所有 ASUS HID 接口（PID / UsagePage /
+Usage / 是否命令通道 / 路径），链路开不起来时先跑它。
+
 ### 0.2 读（`cmd = 0x12`）
 
 帧形如 `{rid, 0x12, sub, p0, p1, ...}`，回帧里带对齐后的数据。
@@ -570,7 +585,7 @@ cycle(..., |st| format!("{} (code {})", name(st.sleep_mode), st.sleep_mode),
   无线 PID    0x1B65
   鼠标 SN     B00000000000
   接收器固件  7.00.07
-  鼠标端 MAC  {{MAC_fake02}}
+  鼠标端 MAC  {{MAC_fake01}}
   接收器 MAC  {{MAC_fake01}}
   高回报率    不支持（仅 125/250/500/1000）
   命令通道    in=64 out=64 字节，report id 0x03

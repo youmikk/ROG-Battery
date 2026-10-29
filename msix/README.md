@@ -363,6 +363,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\make-upload.ps1
 拆开的原因：商店包和绿色版是两条发布线，失败面完全不同（商店那边要账号凭据、要过审，
 绿色版只要 tag）。合在一个工作流里，商店凭据出问题会把绿色版发版一起拖住。
 
+### 版本号规则（2026-10-29 统一）
+
+一共三个地方出现版本号，以前各写各的，结果 GitHub 发到 `v1.1.2` 了、软件「关于」里
+还写着 `1.1.0`。现在的规则：
+
+| 位置 | 谁决定 | 当前值 |
+| --- | --- | --- |
+| 软件里显示（「关于」卡 / 侧栏底部 / `rog-mouse-ctl version`） | `build.rs` 烧进 `ROG_APP_VERSION`：平时取 `Cargo.toml` 的 `version`，**CI 发版时用 tag 覆盖** | `1.2.0` |
+| GitHub Release / tag | 手动 `git tag v1.2.0` | `v1.2.0` |
+| MSIX / 商店（四段号） | `msix/package.props.psd1` 的 `Version`，CI 用「tag + `.0`」覆盖 | `1.2.0.0` |
+
+- `release.yml` 里有一条断言：编完立刻跑 `rog-mouse-ctl.exe version`，和 tag 版本不一致就
+  `throw` —— 版本号再也不可能悄悄漂掉。
+- 商店侧必须**严格递增**：已提交过 `1.1.9.0`（CI 测试跑上去的），所以下一个包至少
+  `1.2.0.0`；这就是这次从 `1.1.x` 直接跳到 `1.2.0` 的原因。
+- 发版流程：改 `Cargo.toml` 的 `version` 和 `package.props.psd1` 的 `Version` → 提交 →
+  `git tag v1.2.0 && git push origin v1.2.0`。两个工作流会同时起，绿色版进 Release、
+  MSIX 进商店。
+
 ### 触发方式
 
 | 触发 | `msstore.yml` | `release.yml` |

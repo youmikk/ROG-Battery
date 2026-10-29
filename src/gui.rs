@@ -74,10 +74,10 @@ pub const WINDOW_TITLE: &str = "R Battery";
 
 /// 侧栏左下角显示的版本号。
 ///
-/// 不用 `env!("CARGO_PKG_VERSION")`：`Cargo.toml` 里是 `0.1.0`（内部版本），
-/// 而对 user 发布的是 MSIX 的 `1.1.0.0`，两者对不上会让用户报版本时说错。
-const APP_VERSION: &str = "1.1.0";
-
+/// 来源是 `build.rs` 烧进来的 `ROG_APP_VERSION`：平时等于 `Cargo.toml` 的
+/// `version`，CI 发版时被 `ROG_BUILD_VERSION` 覆盖成 tag 的版本号。
+/// 以前这里是手写常量，结果 GitHub 发到 v1.1.2 了、软件里还写着 1.1.0。
+pub const APP_VERSION: &str = env!("ROG_APP_VERSION");
 /// 窗口逻辑尺寸（用户定的 1100×740）。
 ///
 /// 逻辑像素 —— 真正传给 `CreateWindowExW` 时要乘 `scale`
@@ -236,6 +236,12 @@ struct Shared {
     full: Option<proto::State>,
     /// 全量快照里的身份信息（型号、SN、固件）。
     ident: Option<proto::Identity>,
+    /// `hid::open_link` 实测出来的链路：`Wired` / `Wireless24G`。
+    ///
+    /// **不能用 `ident.dongle_sn` 判有线无线** —— 那个字段来自设备自己回报的
+    /// 接收器 SN，2.4G 下也可能读成空串，于是界面把无线显示成「有线」。
+    /// 这个字段来自枚举到的 HID 接口本身，是实测值。
+    link_mode: String,
     /// 每轮都会更新的那几项。叠在 `full` 上，电量才是活的。
     quick: Option<Quick>,
     status: Status,
@@ -272,6 +278,7 @@ impl Shared {
         Shared {
             full: None,
             ident: None,
+            link_mode: String::new(),
             quick: None,
             status: Status::Idle,
             frames: 0,
@@ -670,6 +677,10 @@ fn handle_act(a: Act, env: &UiEnv) {
             }
             env.say("✔ 历史记录已清空");
         }
+
+        Act::OpenRepo => open_url(env, "https://github.com/youmikk/ROG-Battery"),
+
+        Act::OpenStore => open_url(env, "https://apps.microsoft.com/detail/9NRC8HCD4BZ7"),
     }
 }
 
@@ -1200,6 +1211,13 @@ fn open_in_explorer(env: &UiEnv, dir: &std::path::Path) {
     }
 }
 
+/// 用默认浏览器打开一个 http(s) 链接（「关于」里的仓库 / 商店页）。
+fn open_url(env: &UiEnv, url: &str) {
+    if let Err(e) = crate::dynlight::shell_open(url) {
+        env.say(format!("✘ 打不开链接：{e}"));
+    }
+}
+
 /// 设置页里「更改保存位置」的两类目标。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SavePathKind {
@@ -1334,6 +1352,10 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
     // `elapsed` 为零 = 缓存命中（`SnapshotCache` 的约定）
     let from_cache = out.elapsed.is_zero();
     let snap = &out.snapshot;
+    // 链路模式跟着快照一起更新（`fetch` / `fetch_light` 都会写这个字段）。
+    if !snap.link_mode.is_empty() {
+        s.link_mode = snap.link_mode.clone();
+    }
 
     if out.frames_read == 0 {
         // 一帧都没读到。区分「休眠」和「真错」靠 failed 里的原因文字。
@@ -1826,6 +1848,38 @@ fn autostart_hint(
     }
 }
 
+/// 当前链路的中文说法。
+///
+/// 优先用 `hid::open_link` 实测出来的 [`Shared::link_mode`]；只有在还没读到
+/// 实测值时才退回「接收器 SN 是否为空」的旧判据 —— 那个判据在 2.4G 下会
+/// 误判成有线，是用户报过的 bug。
+fn conn_text(s: &Shared) -> &'static str {
+    match s.link_mode.as_str() {
+        "Wired" => "有线",
+        "Wireless24G" => "2.4G 无线",
+        _ => match s.ident.as_ref() {
+            Some(i) if i.dongle_sn.trim().is_empty() => "有线",
+            Some(_) => "2.4G 无线",
+            None => "连接未知",
+        },
+    }
+}
+
+/// 历史文件第四列的链路编码：有线 = 1，2.4G = 2（C# 版就是这个编码）。
+fn link_code(s: &Shared) -> i32 {
+    match s.link_mode.as_str() {
+        "Wired" => 1,
+        "Wireless24G" => 2,
+        _ => {
+            if s.ident.as_ref().map(|i| i.dongle_sn.is_empty()).unwrap_or(true) {
+                1
+            } else {
+                2
+            }
+        }
+    }
+}
+
 /// 托盘悬停提示（多行）：鼠标名称 / 连接方式 / 电量 / 当前 DPI 与档位。
 fn tray_tip_full(s: &Shared) -> String {
     let name = s
@@ -1835,11 +1889,7 @@ fn tray_tip_full(s: &Shared) -> String {
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "ROG 鼠标".to_string());
 
-    let conn = match s.ident.as_ref() {
-        Some(i) if i.dongle_sn.trim().is_empty() => "有线",
-        Some(_) => "2.4G 无线",
-        None => "连接未知",
-    };
+    let conn = conn_text(s);
 
     let battery = match s.quick {
         Some(q) => {
@@ -2086,21 +2136,10 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
         .build(&mut menu)
         .map_err(|e| format!("建托盘菜单失败：{e}"))?;
 
-    // Menu 没有 append()，每个 MenuItem 都要显式 parent
-    let mut mi_show = nwg::MenuItem::default();
-    nwg::MenuItem::builder()
-        .text("显示主窗口")
-        .parent(&menu)
-        .build(&mut mi_show)
-        .map_err(|e| format!("菜单项：{e}"))?;
-
-    let mut mi_refresh = nwg::MenuItem::default();
-    nwg::MenuItem::builder()
-        .text("立即刷新")
-        .parent(&menu)
-        .build(&mut mi_refresh)
-        .map_err(|e| format!("菜单项：{e}"))?;
-
+    // Menu 没有 append()，每个 MenuItem 都要显式 parent。
+    //
+    // 菜单里只留「退出」：左键单击托盘图标已经是「打开主窗口」，
+    // 「显示主窗口 / 立即刷新」两个菜单项就没有存在意义了。
     let mut mi_quit = nwg::MenuItem::default();
     nwg::MenuItem::builder()
         .text("退出")
@@ -2171,11 +2210,24 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
         canvas.set_painter(Box::new(move |inner, fonts, ui, args| {
             // 只在锁里拷一份数据，**不在锁里画** —— 画一帧要几毫秒，
             // 握着锁会让后台线程写结果时多等这段。
-            let (state, ident, plot, estimate, cfg, autostart_text, frames, elapsed, rows_n, err_text) = {
+            let (
+                state,
+                ident,
+                link_mode,
+                plot,
+                estimate,
+                cfg,
+                autostart_text,
+                frames,
+                elapsed,
+                rows_n,
+                err_text,
+            ) = {
                 let s = lock_shared(&shared_p);
                 (
                     s.ui_state(),
                     s.ident.clone(),
+                    s.link_mode.clone(),
                     s.plot.clone(),
                     s.estimate.clone(),
                     s.cfg.clone(),
@@ -2190,6 +2242,7 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
             let data = pages::Data {
                 state: state.as_ref(),
                 ident: ident.as_ref(),
+                link_mode: &link_mode,
                 // 常驻错误文字（读不到设备的原因 / 正在写设备）。
                 // 瞬时提示走 `ui.status`，由 `pages::draw_toast` 优先显示。
                 status: err_text,
@@ -2334,15 +2387,7 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
                 // `Shared` 的锁去调** —— 另一个实例正在写的时候这里会白等 3 秒，
                 // 期间界面完全刷不出来。
                 if let Some(q) = sample {
-                    let mode_code = {
-                        let s = lock_shared(&shared_t);
-                        // 有线 = 1，2.4G = 2（历史文件的第四列，C# 版就是这个编码）
-                        if s.ident.as_ref().map(|i| i.dongle_sn.is_empty()).unwrap_or(true) {
-                            1
-                        } else {
-                            2
-                        }
-                    };
+                    let mode_code = link_code(&lock_shared(&shared_t));
                     let _ = crate::history::record_sample(q.level, q.charging, mode_code);
 
                     let est = {
@@ -2371,8 +2416,6 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
     let icon_cell: RefCell<nwg::Icon> = RefCell::new(icon);
 
     let h_tray = tray.handle.clone();
-    let h_mi_show = mi_show.handle.clone();
-    let h_mi_refresh = mi_refresh.handle.clone();
     let h_mi_quit = mi_quit.handle.clone();
 
     let shared_e = Arc::clone(&shared);
@@ -2476,38 +2519,29 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
                     tray_tip_full(&s)
                 };
                 tray.set_tip(&tip);
-                // 休眠时不要显示上一次的电量数字，那会误导（用户以为还是 84%）
+                // 休眠时不要显示上一次的电量数字，那会误导（用户以为还是 84%）。
+                // 但也不能退回应用图标 —— 那样任务栏上只剩一个图标，看不出是电量，
+                // 用户报过「托盘短暂出现只显示图标而不是数字」。所以读不到就画一条
+                // 短横线占位。
                 let want: Option<u8> = if asleep { None } else { q.map(|v| v.level) };
                 if want != tray_level.get() {
-                    match want {
-                        Some(level) => {
-                            if let Some(hicon) = crate::tray_icon::render(level) {
-                                let mut ic = icon_cell.borrow_mut();
-                                let old = ic.handle;
-                                ic.handle = hicon as usize as *mut _;
-                                tray.set_icon(&ic);
-                                // 旧的自绘图标必须手工 DestroyIcon —— `Icon.owned`
-                                // 是 `pub(crate)`，外部改不了，nwg 的 Drop 不管这个
-                                // 句柄。静态图标那份归 nwg 自己（owned=true），
-                                // 不能碰，否则 double free。
-                                if !old.is_null() && old != static_icon_handle {
-                                    unsafe { win32::DestroyIcon(old as win32::Handle) };
-                                }
-                                tray_level.set(Some(level));
-                            }
+                    let hicon = match want {
+                        Some(level) => crate::tray_icon::render(level),
+                        None => crate::tray_icon::render_unknown(),
+                    };
+                    if let Some(hicon) = hicon {
+                        let mut ic = icon_cell.borrow_mut();
+                        let old = ic.handle;
+                        ic.handle = hicon as usize as *mut _;
+                        tray.set_icon(&ic);
+                        // 旧的自绘图标必须手工 DestroyIcon —— `Icon.owned`
+                        // 是 `pub(crate)`，外部改不了，nwg 的 Drop 不管这个
+                        // 句柄。静态图标那份归 nwg 自己（owned=true），
+                        // 不能碰，否则 double free。
+                        if !old.is_null() && old != static_icon_handle {
+                            unsafe { win32::DestroyIcon(old as win32::Handle) };
                         }
-                        None => {
-                            if tray_level.get().is_some() {
-                                let mut ic = icon_cell.borrow_mut();
-                                let old = ic.handle;
-                                ic.handle = static_icon_handle;
-                                tray.set_icon(&ic);
-                                if !old.is_null() && old != static_icon_handle {
-                                    unsafe { win32::DestroyIcon(old as win32::Handle) };
-                                }
-                                tray_level.set(None);
-                            }
-                        }
+                        tray_level.set(want);
                     }
                 }
 
@@ -2530,26 +2564,21 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
     let msg_handler = nwg::full_bind_event_handler(&msg_window.handle, move |evt, _evt_data, handle| {
         use nwg::Event as E;
         match evt {
-            // 右键菜单（Windows 惯例）。
+            // 右键：弹菜单（现在只剩「退出」）。
             E::OnContextMenu if handle == h_tray_m => {
                 let (x, y) = nwg::GlobalCursor::position();
                 menu.popup(x, y);
             }
-            // 左键单击也弹同一菜单（用户要求：单击托盘图标应显示 退出/立即刷新）。
+            // 左键单击：直接打开主窗口（用户要求：单击托盘图标就回主页面，
+            // 不要再弹「显示主窗口 / 立即刷新」那套菜单）。
+            //
+            // 用裸句柄恢复，不用 `window`（它已被主处理器 move 走）。
+            // SW_RESTORE = 9：既显示窗口、又取消最小化。
             E::OnMousePress(nwg::MousePressEvent::MousePressLeftUp) if handle == h_tray_m => {
-                let (x, y) = nwg::GlobalCursor::position();
-                menu.popup(x, y);
-            }
-            E::OnMenuItemSelected if handle == h_mi_show => {
-                // 用裸句柄恢复，不用 `window`（它已被上面的主处理器 move 走）。
-                // SW_RESTORE = 9：既显示窗口、又取消最小化。
                 unsafe {
                     let _ = crate::win32::ShowWindow(hwnd, 9);
                     let _ = crate::win32::SetForegroundWindow(hwnd);
                 }
-            }
-            E::OnMenuItemSelected if handle == h_mi_refresh => {
-                signal_m.request_refresh();
             }
             E::OnMenuItemSelected if handle == h_mi_quit => {
                 signal_m.shutdown.store(true, Ordering::Relaxed);
@@ -2710,5 +2739,56 @@ mod tests {
             "读取出错"
         );
         assert_eq!(tray_tip(None, &Status::Idle), "尚未读取");
+    }
+
+    /// 2.4G 下不能再显示成「有线」——用户报过的 bug。
+    ///
+    /// 旧判据是「接收器 SN 是否为空」，但那个字段由设备自己回报，
+    /// 2.4G 下也可能是空串。现在以 `hid::open_link` 实测的 `link_mode` 为准。
+    #[test]
+    fn conn_text_follows_measured_link_mode() {
+        let mut s = Shared::new(crate::settings::Settings::default());
+
+        // 实测无线：即使接收器 SN 读成空，也必须显示 2.4G 无线。
+        s.link_mode = "Wireless24G".to_string();
+        s.ident = Some(proto::Identity {
+            dongle_sn: String::new(),
+            ..Default::default()
+        });
+        assert_eq!(conn_text(&s), "2.4G 无线");
+        assert_eq!(link_code(&s), 2);
+
+        // 实测有线：即使接收器 SN 非空，也必须有线。
+        s.link_mode = "Wired".to_string();
+        s.ident = Some(proto::Identity {
+            dongle_sn: "C00000000001".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(conn_text(&s), "有线");
+        assert_eq!(link_code(&s), 1);
+
+        // 还没读到实测值时才退回旧判据。
+        s.link_mode.clear();
+        assert_eq!(conn_text(&s), "2.4G 无线");
+        s.ident = None;
+        assert_eq!(conn_text(&s), "连接未知");
+    }
+
+    /// 链路模式必须从快照真正抄进 `Shared`，否则托盘提示永远拿不到实测值。
+    #[test]
+    fn apply_outcome_carries_link_mode() {
+        let mut s = Shared::new(crate::settings::Settings::default());
+        assert!(s.link_mode.is_empty());
+
+        let mut snap = snapshot::Snapshot::default();
+        snap.link_mode = "Wireless24G".to_string();
+        let out = snapshot::FetchOutcome {
+            snapshot: snap,
+            elapsed: std::time::Duration::from_millis(120),
+            frames_read: 0, // 走「一帧都没读到」的早退分支，链路模式仍要抄进去
+        };
+        let _ = apply_outcome(&out, &mut s);
+        assert_eq!(s.link_mode, "Wireless24G");
+        assert_eq!(conn_text(&s), "2.4G 无线");
     }
 }

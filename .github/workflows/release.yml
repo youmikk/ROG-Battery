@@ -89,8 +89,40 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 版本号以 tag 为准（没有 tag 就退回 Cargo.toml），并烧进二进制
+      - name: 算版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ inputs.tag }}".Trim()
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          if ($tag -match '^v\d') {
+            $ver = $tag -replace '^v', ''
+            $src = "tag $tag"
+          } else {
+            $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+            $src = 'Cargo.toml'
+            $tag = ''
+          }
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "版本号 = $ver（来源：$src）"
+
       - name: cargo build --release
+        env:
+          ROG_BUILD_VERSION: ${{ steps.ver.outputs.version }}
         run: cargo build --release
+
+      - name: 校验二进制自报版本 == tag 版本
+        shell: pwsh
+        env:
+          EXPECT: ${{ steps.ver.outputs.version }}
+        run: |
+          $got = (& target\release\rog-mouse-ctl.exe version).Trim()
+          "二进制自报 = $got    tag 版本 = $EXPECT"
+          if ($got -ne $EXPECT) {
+            throw "版本号不一致：二进制说 $got，tag 说 $EXPECT —— 检查 build.rs 的 ROG_APP_VERSION 有没有被 ROG_BUILD_VERSION 覆盖"
+          }
 
       - name: 校验 PE 子系统必须是 GUI（防黑框回归）
         shell: pwsh

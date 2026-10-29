@@ -1,6 +1,9 @@
 [package]
 name = "rog-mouse-ctl"
-version = "1.1.0"
+# 界面「关于」里显示的版本号就来自这里（经 build.rs 烧成 ROG_APP_VERSION）。
+# 规则：**和 GitHub 的 tag 保持一致**；CI 发版时还会用 tag 覆盖一次。
+# 注意 MSIX / 商店是另一套四段号（`1.2.0.0`），必须比上一次已发布的号大。
+version = "1.2.0"
 edition = "2021"
 description = "通用 ROG 鼠标 HID 参数控制工具（DPI / 回报率 / 按键 / 电量），不依赖 ASUS 驱动"
 
