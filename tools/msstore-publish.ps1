@@ -277,34 +277,74 @@ Write-Host "  已接受形状：$acceptedShape" -ForegroundColor DarkGray
 
 $slot2 = @($sub2.applicationPackages)[0]
 
-$uploadUrl = $sub2.fileUploadUrl
-if (-not $uploadUrl) { $uploadUrl = $slot2.fileUploadUrl }
-if (-not $uploadUrl) { throw 'PUT 之后没拿到 fileUploadUrl' }
-Write-Host '  已登记文件名，拿到上传地址' -ForegroundColor DarkGray
-
 # ── 5. 传包（把 .msixupload 当作"内含 .msix 的 ZIP"整份 PUT 到 SAS）──
-Write-Host '上传包体…' -ForegroundColor DarkGray
+#
+# 关键疑点：SAS 地址有两种形态 ——
+#   · 指向具体 blob（.../xxx.zip?sv=...）→ 直接 PUT
+#   · 指向容器（.../container?restype=container&...）→ 必须自己拼上 blob 名
+# 另外 POST 响应里的 fileUploadUrl 与 PUT 响应里的可能不是同一个。
+# 这里把候选地址全列出来，逐个上传并回读 submission，谁的版本对上了就用谁。
+$maskUrl = {
+    param($u)
+    if (-not $u) { return '(空)' }
+    $base, $q = $u -split '\?', 2
+    $q2 = if ($q) { ($q -split '&' | Where-Object { $_ -notmatch '^sig=' }) -join '&' } else { '' }
+    if ($q2) { "$base`?$q2&sig=***" } else { $base }
+}
+
+$cands = @()
+if ($sub.fileUploadUrl) { $cands += @{ n = 'POST 的 fileUploadUrl'; u = $sub.fileUploadUrl } }
+if ($sub2.fileUploadUrl -and $sub2.fileUploadUrl -ne $sub.fileUploadUrl) {
+    $cands += @{ n = 'PUT 的 fileUploadUrl'; u = $sub2.fileUploadUrl }
+}
+$extra = @()
+foreach ($c in $cands) {
+    if ($c.u -match '\?') {
+        $base, $q = $c.u -split '\?', 2
+        if ($base.EndsWith('/')) {
+            $extra += @{ n = ($c.n + ' + 拼包名'); u = ($base + $innerName + '?' + $q) }
+        }
+    }
+}
+$cands = $cands + $extra
+if ($cands.Count -eq 0) { throw '拿不到任何 fileUploadUrl' }
+
+Write-Host "  候选上传地址 $($cands.Count) 个：" -ForegroundColor DarkGray
+foreach ($c in $cands) { Write-Host "    - $($c.n): $(& $maskUrl $c.u)" -ForegroundColor DarkGray }
+
 $bytes = [System.IO.File]::ReadAllBytes($pkg)
 $upHeaders = @{
     'x-ms-blob-type' = 'BlockBlob'
     'x-ms-version'   = '2020-04-08'
     'Content-Type'   = 'application/octet-stream'
 }
-Invoke-WebRequest -Method Put -Uri $uploadUrl -Headers $upHeaders -Body $bytes -UseBasicParsing | Out-Null
-Write-Host "  已上传 $([math]::Round($bytes.Length / 1MB, 2)) MB" -ForegroundColor DarkGray
 
-# 上传后再核对：商店应该已经把 ZIP 里的 .msix 解出来，填好 version 并标成 Uploaded。
-$afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
-$slotUp = @($afterUp.applicationPackages)[0]
-Write-Host "  上传后核对：$($slotUp.fileName)  version=$($slotUp.version)  fileStatus=$($slotUp.fileStatus)" -ForegroundColor DarkGray
-if ($slotUp.fileName -ne $innerName) {
-    throw "上传后商店记的包名是 $($slotUp.fileName)，不是 $innerName —— 停止提交，避免把旧包发出去。"
+$uploaded = $false
+$slotUp = $null
+foreach ($c in $cands) {
+    Write-Host "上传包体（$($c.n)）…" -ForegroundColor DarkGray
+    try {
+        Invoke-WebRequest -Method Put -Uri $c.u -Headers $upHeaders -Body $bytes -UseBasicParsing | Out-Null
+    } catch {
+        $d = Get-HttpErrorBody $_
+        if (-not $d) { $d = $_.Exception.Message }
+        Write-Host "  上传失败：$d" -ForegroundColor Yellow
+        continue
+    }
+    Write-Host "  已上传 $([math]::Round($bytes.Length / 1MB, 2)) MB" -ForegroundColor DarkGray
+
+    $afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
+    $slotUp = @($afterUp.applicationPackages)[0]
+    Write-Host "  上传后核对：$($slotUp.fileName)  version=$($slotUp.version)  fileStatus=$($slotUp.fileStatus)" -ForegroundColor DarkGray
+    if ($slotUp.fileName -eq $innerName -and (-not $verFromName -or $slotUp.version -eq $verFromName)) {
+        $uploaded = $true
+        break
+    }
+    Write-Host '    → 商店还没认到这个包，换下一个候选地址' -ForegroundColor DarkGray
 }
-if ($verFromName -and $slotUp.version -ne $verFromName) {
-    throw "上传后商店记的版本是 $($slotUp.version)，不是 $verFromName —— 停止提交，避免发出去还是旧版本。"
-}
-if ($slotUp.fileStatus -ne 'Uploaded') {
-    Write-Host "::warning::包状态是 $($slotUp.fileStatus) 而不是 Uploaded，提交可能失败"
+
+if (-not $uploaded) {
+    throw "包体传上去了但商店没认到（当前记的是 $($slotUp.fileName) / version=$($slotUp.version)）。停止提交，避免把旧包发出去。"
 }
 
 # ── 6. commit ─────────────────────────────────────────────────────────
