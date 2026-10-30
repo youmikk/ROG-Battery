@@ -217,25 +217,41 @@ $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $header
 #   · minimumDirectXVersion 写 'NotSet' 被拒：'NotSet' is not a valid 'DirectXVersion' value
 #   · 把包槽裁成只剩 fileName 被拒：Please keep all file entries for existing packages
 #     ... The following packages are missing in your update: 2000000000099886849
-#   → 克隆槽的 id / architecture / languages / minimum* 一个都不能少，只能改
-#     fileName 与 fileStatus；minimum* 与 version 沿用商店给的值，让 ingestion
-#     解析完我们上传的包体后自己回填。
+#   · 把已有槽的 fileStatus 改回 PendingUpload 也被同一句拒掉 —— 即使 id 原样带着。
+#     → 说明「已存在的包」不能被改成 PendingUpload；要换包只能按错误提示的做法：
+#       旧槽标 PendingDelete、再新增一个 PendingUpload 的新槽（不带 id/version）。
+#   · 只改 fileName（保持 Uploaded）能过，但商店不会重新解析包体，version 仍停在旧值，
+#     因为 SAS 指向的是同一个 blob，覆盖写入后 ingestion 不重新解析。
 $shapes = @(
+    @{ name = '旧槽 PendingDelete + 新槽 PendingUpload'
+       pkg  = {
+           param($base, $n, $ver)
+           $old = $base | Select-Object *
+           $old.fileStatus = 'PendingDelete'
+           $new = $base | Select-Object *
+           foreach ($f in 'id', 'version') { if ($new.PSObject.Properties[$f]) { $new.PSObject.Properties.Remove($f) } }
+           $new.fileName = $n
+           $new.fileStatus = 'PendingUpload'
+           @($old, $new)
+       } },
+    @{ name = '旧槽 PendingDelete + 新槽 PendingUpload + version'
+       pkg  = {
+           param($base, $n, $ver)
+           $old = $base | Select-Object *
+           $old.fileStatus = 'PendingDelete'
+           $new = $base | Select-Object *
+           if ($new.PSObject.Properties['id']) { $new.PSObject.Properties.Remove('id') }
+           $new.fileName = $n
+           $new.fileStatus = 'PendingUpload'
+           if ($ver) { $new.version = $ver }
+           @($old, $new)
+       } },
     @{ name = '完整槽 + fileName + PendingUpload'
        pkg  = {
            param($base, $n, $ver)
            $o = $base | Select-Object *
            $o.fileName = $n
            $o.fileStatus = 'PendingUpload'
-           $o
-       } },
-    @{ name = '完整槽 + fileName + PendingUpload + version'
-       pkg  = {
-           param($base, $n, $ver)
-           $o = $base | Select-Object *
-           $o.fileName = $n
-           $o.fileStatus = 'PendingUpload'
-           if ($ver) { $o.version = $ver }
            $o
        } },
     @{ name = '完整槽 + 仅 fileName（保持 Uploaded，兜底）'
@@ -264,9 +280,13 @@ foreach ($s in $shapes) {
         Write-Host "    发送的包对象：$(($cur.applicationPackages | ConvertTo-Json -Depth 8 -Compress))" -ForegroundColor DarkGray
         continue
     }
-    $got = @($try.applicationPackages)[0]
-    Write-Host "  [$($s.name)] -> $($got.fileName)  fileStatus=$($got.fileStatus)  version=$($got.version)" -ForegroundColor DarkGray
-    if ($got.fileName -eq $innerName) { $sub2 = $try; $acceptedShape = $s.name; break }
+    $pkgs = @($try.applicationPackages)
+    foreach ($g in $pkgs) {
+        Write-Host "  [$($s.name)] -> $($g.fileName)  fileStatus=$($g.fileStatus)  version=$($g.version)" -ForegroundColor DarkGray
+    }
+    # 有的形状会返回两条（旧槽 PendingDelete + 新槽 PendingUpload），按文件名找我们那条
+    $mine = @($pkgs | Where-Object { $_.fileName -eq $innerName })
+    if ($mine.Count -gt 0) { $sub2 = $try; $acceptedShape = $s.name; break }
     Write-Host '    → 商店没接受这个包名，换下一种形状' -ForegroundColor DarkGray
 }
 
@@ -334,7 +354,9 @@ foreach ($c in $cands) {
     Write-Host "  已上传 $([math]::Round($bytes.Length / 1MB, 2)) MB" -ForegroundColor DarkGray
 
     $afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
-    $slotUp = @($afterUp.applicationPackages)[0]
+    $pkgAfter = @($afterUp.applicationPackages)
+    $slotUp = @($pkgAfter | Where-Object { $_.fileName -eq $innerName })
+    if ($slotUp.Count -eq 0) { $slotUp = @($pkgAfter)[0] } else { $slotUp = $slotUp[0] }
     Write-Host "  上传后核对：$($slotUp.fileName)  version=$($slotUp.version)  fileStatus=$($slotUp.fileStatus)" -ForegroundColor DarkGray
     if ($slotUp.fileName -eq $innerName -and (-not $verFromName -or $slotUp.version -eq $verFromName)) {
         $uploaded = $true
