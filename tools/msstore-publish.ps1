@@ -317,6 +317,12 @@ if ($sub.fileUploadUrl) { $cands += @{ n = 'POST 的 fileUploadUrl'; u = $sub.fi
 if ($sub2.fileUploadUrl -and $sub2.fileUploadUrl -ne $sub.fileUploadUrl) {
     $cands += @{ n = 'PUT 的 fileUploadUrl'; u = $sub2.fileUploadUrl }
 }
+# 新包条目自己也带 fileUploadUrl 时，那才是给这个包用的
+$mineSlot = @(@($sub2.applicationPackages) | Where-Object { $_.fileName -eq $innerName })
+if ($mineSlot.Count -gt 0 -and $mineSlot[0].fileUploadUrl) {
+    $u3 = $mineSlot[0].fileUploadUrl
+    if (-not ($cands | Where-Object { $_.u -eq $u3 })) { $cands += @{ n = '新包条目的 fileUploadUrl'; u = $u3 } }
+}
 $extra = @()
 foreach ($c in $cands) {
     if ($c.u -match '\?') {
@@ -353,15 +359,21 @@ foreach ($c in $cands) {
     }
     Write-Host "  已上传 $([math]::Round($bytes.Length / 1MB, 2)) MB" -ForegroundColor DarkGray
 
-    $afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
-    $pkgAfter = @($afterUp.applicationPackages)
-    $slotUp = @($pkgAfter | Where-Object { $_.fileName -eq $innerName })
-    if ($slotUp.Count -eq 0) { $slotUp = @($pkgAfter)[0] } else { $slotUp = $slotUp[0] }
-    Write-Host "  上传后核对：$($slotUp.fileName)  version=$($slotUp.version)  fileStatus=$($slotUp.fileStatus)" -ForegroundColor DarkGray
-    if ($slotUp.fileName -eq $innerName -and (-not $verFromName -or $slotUp.version -eq $verFromName)) {
-        $uploaded = $true
-        break
+    # ingestion 解析包体是异步的，刚传完 fileStatus 还是 PendingUpload、version 还是空的。
+    # 给它最多 60 秒把 .msix 解出来回填 version。
+    for ($w = 1; $w -le 8; $w++) {
+        Start-Sleep -Seconds 8
+        $afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
+        $pkgAfter = @($afterUp.applicationPackages)
+        $slotUp = @($pkgAfter | Where-Object { $_.fileName -eq $innerName })
+        if ($slotUp.Count -eq 0) { $slotUp = @($pkgAfter)[0] } else { $slotUp = $slotUp[0] }
+        Write-Host "  上传后核对（$($w*8)s）：$($slotUp.fileName)  version=$($slotUp.version)  fileStatus=$($slotUp.fileStatus)" -ForegroundColor DarkGray
+        if ($slotUp.fileName -eq $innerName -and (-not $verFromName -or $slotUp.version -eq $verFromName)) {
+            $uploaded = $true
+            break
+        }
     }
+    if ($uploaded) { break }
     Write-Host '    → 商店还没认到这个包，换下一个候选地址' -ForegroundColor DarkGray
 }
 
