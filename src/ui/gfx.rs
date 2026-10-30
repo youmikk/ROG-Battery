@@ -778,6 +778,43 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// 整条折线当作**一条路径**一次描边。
+    ///
+    /// `polyline` 是逐段 `GdipDrawLine`，抗锯齿按段独立计算，接缝处的覆盖
+    /// 会被叠两次或漏一次，采样点密集时看起来像一串小珠子。曲线（几百到
+    /// 上千个点）用这个版本：光栅化一次完成，边缘连续。
+    pub fn stroke_path(&mut self, pts: &[(f32, f32)], color: u32, width: f32) {
+        if pts.len() < 2 {
+            return;
+        }
+        let y_min = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        let y_max = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+        let x_min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+        let x_max = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        if !self.visible(R::new(x_min, y_min, x_max - x_min, y_max - y_min)) {
+            return;
+        }
+        unsafe {
+            let mut path: *mut c_void = std::ptr::null_mut();
+            if GdipCreatePath(0, &mut path) != OK {
+                return;
+            }
+            for w in pts.windows(2) {
+                GdipAddPathLine(path, w[0].0, w[0].1, w[1].0, w[1].1);
+            }
+            let mut pen: *mut c_void = std::ptr::null_mut();
+            if GdipCreatePen1(color, width, 2, &mut pen) == OK {
+                // 2 = Round：拐角与两端都是圆的
+                GdipSetPenLineJoin(pen, 2);
+                GdipSetPenStartCap(pen, 2);
+                GdipSetPenEndCap(pen, 2);
+                GdipDrawPath(self.g, pen, path);
+                GdipDeletePen(pen);
+            }
+            GdipDeletePath(path);
+        }
+    }
+
     /// 多边形填充（曲线图的面积填充）。
     ///
     /// `pts` 至少 3 个点，自动闭合。`top`/`bottom` 是竖直渐变的两端颜色
@@ -1863,6 +1900,41 @@ mod tests {
         release_screen_dc(screen);
     }
 
+
+    /// 快照用的 48 小时电量历史：放电 → 充电 → 放电，含充电段以便看到绿色底带。
+    fn demo_rows() -> Vec<crate::history::HistoryRow> {
+        // 固定基准时间，快照才稳定（不随运行时刻变）。
+        let t0 = 1_761_400_000i64;
+        let mut rows: Vec<crate::history::HistoryRow> = Vec::new();
+        // 0..30h：96% → 71%，每 20 分钟一个点
+        let mut level = 96i32;
+        for i in 0..=90i64 {
+            let ts = t0 + i * 1200;
+            rows.push(crate::history::HistoryRow::new(ts, level as u8, false, 2));
+            if i % 3 == 0 && level > 71 {
+                level -= 1;
+            }
+        }
+        // 30h..33h：71% → 100%，充电，每 6 分钟一个点
+        let start = t0 + 90 * 1200;
+        for i in 0..=30i64 {
+            let ts = start + i * 360;
+            let lv = 71 + (i as i32 * 29 / 30);
+            rows.push(crate::history::HistoryRow::new(ts, lv as u8, true, 2));
+        }
+        // 33h..48h：100% → 78%，每 20 分钟一个点
+        let start2 = start + 30 * 360;
+        let mut lv2 = 100i32;
+        for i in 0..=45i64 {
+            let ts = start2 + i * 1200;
+            rows.push(crate::history::HistoryRow::new(ts, lv2 as u8, false, 2));
+            if i % 4 == 0 && lv2 > 78 {
+                lv2 -= 2;
+            }
+        }
+        rows
+    }
+
     #[test]
     fn 渲染前端ui效果图() {
         assert!(start());
@@ -1918,14 +1990,19 @@ mod tests {
             hours: 3.2,
             stale_seconds: 0,
         };
+        // 48 小时「真实感」历史：先放电 30 小时、再充 3 小时、最后放电 15 小时。
+        // 没有这段数据，快照里的图表永远是「正在读取历史样本」，看不出曲线本身长什么样。
+        let demo = demo_rows();
+        let plot = crate::chart::build(&demo, crate::chart::plot_rect());
+        let demo_len = demo.len();
         let data = crate::ui::pages::Data {
             state: Some(&state),
             ident: Some(&ident),
             link_mode: "Wireless24G",
             status: String::new(),
-            plot: None,
+            plot: Some(&plot),
             estimate: &estimate,
-            rows: 0,
+            rows: demo_len,
             cfg: &cfg,
             autostart_text: "已开机自启",
             version: crate::gui::APP_VERSION,
