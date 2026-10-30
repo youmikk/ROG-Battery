@@ -359,16 +359,19 @@ foreach ($c in $cands) {
     }
     Write-Host "  已上传 $([math]::Round($bytes.Length / 1MB, 2)) MB" -ForegroundColor DarkGray
 
-    # ingestion 解析包体是异步的，刚传完 fileStatus 还是 PendingUpload、version 还是空的。
-    # 给它最多 60 秒把 .msix 解出来回填 version。
-    for ($w = 1; $w -le 8; $w++) {
+    # ingestion 解析包体是异步的：刚传完 fileStatus 还是 PendingUpload、version 还是空的。
+    # 实测 64 秒都填不上 —— 说明真正的解析发生在 commit 之后，所以这里不把
+    # 「version 还没回填」当成失败：只要包名对得上、状态是 PendingUpload 就放行，
+    # 提交后由商店自己解析，然后我们再回读确认版本。
+    for ($w = 1; $w -le 4; $w++) {
         Start-Sleep -Seconds 8
         $afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
         $pkgAfter = @($afterUp.applicationPackages)
         $slotUp = @($pkgAfter | Where-Object { $_.fileName -eq $innerName })
         if ($slotUp.Count -eq 0) { $slotUp = @($pkgAfter)[0] } else { $slotUp = $slotUp[0] }
         Write-Host "  上传后核对（$($w*8)s）：$($slotUp.fileName)  version=$($slotUp.version)  fileStatus=$($slotUp.fileStatus)" -ForegroundColor DarkGray
-        if ($slotUp.fileName -eq $innerName -and (-not $verFromName -or $slotUp.version -eq $verFromName)) {
+        if ($slotUp.fileName -ne $innerName) { continue }
+        if (-not $verFromName -or $slotUp.version -eq $verFromName -or [string]::IsNullOrEmpty($slotUp.version)) {
             $uploaded = $true
             break
         }
@@ -392,16 +395,31 @@ if ($DryRun) {
 Write-Host '提交认证…' -ForegroundColor DarkGray
 Invoke-RestMethod -Method Post -Uri "$subsUri/$($sub.id)/commit" -Headers $headers -Body '{}' -ContentType 'application/json' | Out-Null
 
-# 提交后再核对一次，防止「跑绿了但发出去的是旧包」这种静默错误。
-try {
-    $check = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
-    $gotPkg = @($check.applicationPackages)[0]
-    Write-Host "  已提交的包：$($gotPkg.fileName)  version=$($gotPkg.version)  status=$($check.status)" -ForegroundColor DarkGray
-    if ($gotPkg.fileName -and $gotPkg.fileName -ne $pkgName) {
-        Write-Host "::warning::提交里挂的包名是 $($gotPkg.fileName)，不是 $pkgName —— 去 Partner Center 核对一下"
+# 提交后再核对：commit 会触发 ingestion 真正解析包体，这里等它把 version 回填出来，
+# 顺便防止「跑绿了但发出去的是旧包」这种静默错误。
+$finalOk = $false
+for ($w = 1; $w -le 10; $w++) {
+    Start-Sleep -Seconds 10
+    try {
+        $check = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
+    } catch {
+        continue
     }
-} catch {
-    Write-Host "  （提交后核对失败，不影响提交本身：$($_.Exception.Message)）" -ForegroundColor DarkGray
+    $pkgs = @($check.applicationPackages)
+    $minePkg = @($pkgs | Where-Object { $_.fileName -eq $innerName })
+    $gotPkg = if ($minePkg.Count -gt 0) { $minePkg[0] } else { $pkgs[0] }
+    Write-Host "  提交后核对（$($w*10)s）：$($gotPkg.fileName)  version=$($gotPkg.version)  status=$($check.status)" -ForegroundColor DarkGray
+    if ($gotPkg.fileName -eq $innerName -and $gotPkg.version -eq $verFromName) {
+        $finalOk = $true
+        break
+    }
+    if ($check.status -in @('CommitFailed', 'PreProcessingFailed', 'CertificationFailed', 'PublishFailed')) { break }
+}
+
+if ($finalOk) {
+    Write-Host "  ✔ 商店已接收 $innerName（version=$verFromName）" -ForegroundColor Green
+} else {
+    Write-Host "::error::提交后商店里记的包是 $($gotPkg.fileName) / version=$($gotPkg.version)，不是 $innerName / $verFromName —— 去 Partner Center 核对" -ForegroundColor Red
 }
 
 Write-Host ''
