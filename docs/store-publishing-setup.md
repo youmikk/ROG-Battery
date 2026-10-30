@@ -282,3 +282,30 @@ CI 里就是一步：`.github/workflows/msstore.yml` 的「上传并提交到商
 另外：商店同一时间只允许一个在途提交。上一次提交还在
 `CommitStarted`/`Certification`/`Release` 时，脚本会打 warning 并跳过（`exit 0`），
 MSIX 包照常作为 artifact 上传，等前一个走完再重跑即可。
+
+## 附三：换包的最终可用做法（2026-10-30 跑通）
+
+按 400 正文逐条试出来的结论，pplicationPackages 必须是**两条**：
+
+| 条目 | id | version | fileName | fileStatus |
+| --- | --- | --- | --- | --- |
+| 旧包 | 原样保留 | 原样保留 | 原样保留 | PendingDelete |
+| 新包 | **删掉** | 留空（提交后由 ingestion 回填） | Sonder.RBattery_X.Y.Z.0_x64.msix | PendingUpload |
+
+其他要点：
+
+1. 已存在的包槽**不能**改回 PendingUpload（会报
+   Please keep all file entries for existing packages ... missing in your update），
+   只能标 PendingDelete 再新增一条。
+2. minimumDirectXVersion / minimumSystemRam 写 NotSet 会被拒
+   （'NotSet' is not a valid 'DirectXVersion' value），正确值是 None，最好原样沿用。
+3. ileName 是上传 ZIP 里的 .msix 名；.msixupload 本身就是内含该 .msix 的 ZIP，
+   整份 PUT 到 ileUploadUrl（blob 级 SAS）即可。
+4. **ingestion 解析包体发生在 commit 之后**：上传完成后 ersion 仍是空的、
+   ileStatus 仍是 PendingUpload，这是正常的；commit 后 1～2 分钟才会回填
+   ersion 并转 Uploaded。所以脚本先按包名放行，commit 后轮询 5 分钟核对版本。
+5. 提交后状态依次是 CommitStarted → Certification → Published
+   （TargetPublishMode=Immediate 时认证通过即自动上线）。
+
+跑通记录：run 41074616586，提交 id 1152921505702278422，
+包 Sonder.RBattery_1.2.0.0_x64.msix / Version 1.2.0.0，随后进入 Certification。
