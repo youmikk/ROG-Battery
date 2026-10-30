@@ -60,23 +60,36 @@ $tok = Invoke-RestMethod -Method Post -ContentType 'application/x-www-form-urlen
     -Body $tokenBody -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
 $headers = @{ Authorization = "Bearer $($tok.access_token)" }
 
-# Invoke-RestMethod 的 ErrorDetails.Message 经常是空的，400 只打出「PUT 被拒：」后面什么都没有。
-# 这里直接从 WebException 的响应流里读正文，才能看清商店在抱怨哪个字段。
+# 400 的响应正文才是唯一能说明「哪个字段不对」的东西，但不同 PowerShell 版本取法不同：
+#   PS 7  → $_.ErrorDetails.Message（RestMethod 会填），或 HttpResponseMessage.Content
+#   PS 5.1 → WebException.Response.GetResponseStream()
+# 之前只按 5.1 的取法，在 CI 的 pwsh 7 上永远拿到 null，于是只看到「400 (Bad Request)」。
 function Get-HttpErrorBody {
     param($err)
-    try {
-        $resp = $err.Exception.Response
-        if (-not $resp) { return $null }
-        $stream = $resp.GetResponseStream()
-        if (-not $stream) { return $null }
-        $reader = New-Object System.IO.StreamReader($stream)
-        $text = $reader.ReadToEnd()
-        $reader.Close()
-        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-        return $text.Trim()
-    } catch {
-        return $null
+    if ($err.ErrorDetails -and $err.ErrorDetails.Message) {
+        $m = [string]$err.ErrorDetails.Message
+        if (-not [string]::IsNullOrWhiteSpace($m)) { return $m.Trim() }
     }
+    try {
+        $r = $err.Exception.Response
+        if ($r -and $r.Content) {
+            $t = $r.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            if (-not [string]::IsNullOrWhiteSpace($t)) { return $t.Trim() }
+        }
+    } catch { }
+    try {
+        $r2 = $err.Exception.Response
+        if ($r2) {
+            $s = $r2.GetResponseStream()
+            if ($s) {
+                $rd = New-Object System.IO.StreamReader($s)
+                $t2 = $rd.ReadToEnd()
+                $rd.Close()
+                if (-not [string]::IsNullOrWhiteSpace($t2)) { return $t2.Trim() }
+            }
+        }
+    } catch { }
+    return $null
 }
 Write-Host '  OK' -ForegroundColor DarkGray
 
@@ -202,22 +215,41 @@ $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $header
 
 # 枚举值不能乱填：minimumDirectXVersion 属于 DirectXVersion（NotSet/DirectX9/…/DirectX12），
 # minimumSystemRam 属于 MemoryRAM（NotSet/RAM_300MB/…），写 'None' 会被 400 拒。
-# 按「文档形状」从最完整到最精简依次试，取第一个商店真的接受了 fileName 的形状。
+#
+# 形状梯度：克隆来的槽是 fileStatus=Uploaded 的「已定稿」状态，只改 fileName 的话
+# commit 后商店会把槽换回旧包（这就是之前一直重发 1.1.2.0 的原因）。要让商店重新解析
+# 包体，必须把 fileStatus 置回 PendingUpload —— 但只给 fileName+fileStatus 又会被 400，
+# 说明槽对象里的 id/architecture/languages 等字段仍是必需的。所以第一条形状是
+# 「完整槽 + PendingUpload + NotSet 枚举 + version 对齐目标」，其后才是精简形状。
 $shapes = @(
+    @{ name = '完整槽 + PendingUpload + NotSet + version'
+       pkg  = {
+           param($base, $n, $ver)
+           $o = $base | Select-Object *
+           $o.fileName = $n
+           $o.fileStatus = 'PendingUpload'
+           $o.minimumDirectXVersion = 'NotSet'
+           $o.minimumSystemRam = 'NotSet'
+           if ($ver) { $o.version = $ver }
+           $o
+       } },
     @{ name = 'fileName + PendingUpload + NotSet×2'
-       pkg  = { param($n) [pscustomobject]@{ fileName = $n; fileStatus = 'PendingUpload'; minimumDirectXVersion = 'NotSet'; minimumSystemRam = 'NotSet' } } },
+       pkg  = { param($base, $n, $ver) [pscustomobject]@{ fileName = $n; fileStatus = 'PendingUpload'; minimumDirectXVersion = 'NotSet'; minimumSystemRam = 'NotSet' } } },
     @{ name = 'fileName + PendingUpload'
-       pkg  = { param($n) [pscustomobject]@{ fileName = $n; fileStatus = 'PendingUpload' } } },
+       pkg  = { param($base, $n, $ver) [pscustomobject]@{ fileName = $n; fileStatus = 'PendingUpload' } } },
     @{ name = 'fileName + NotSet×2'
-       pkg  = { param($n) [pscustomobject]@{ fileName = $n; minimumDirectXVersion = 'NotSet'; minimumSystemRam = 'NotSet' } } },
+       pkg  = { param($base, $n, $ver) [pscustomobject]@{ fileName = $n; minimumDirectXVersion = 'NotSet'; minimumSystemRam = 'NotSet' } } },
     @{ name = '仅 fileName'
-       pkg  = { param($n) [pscustomobject]@{ fileName = $n } } }
+       pkg  = { param($base, $n, $ver) [pscustomobject]@{ fileName = $n } } }
 )
 
 $sub2 = $null
 $acceptedShape = $null
 foreach ($s in $shapes) {
-    $cur.applicationPackages = @((& $s.pkg $innerName))
+    # 每次都重新 GET，保证形状是在"干净克隆"上改的
+    $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
+    $baseSlot = @($cur.applicationPackages)[0]
+    $cur.applicationPackages = @((& $s.pkg $baseSlot $innerName $verFromName))
     $body = $cur | ConvertTo-Json -Depth 32
     try {
         $try = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
@@ -225,6 +257,7 @@ foreach ($s in $shapes) {
         $detail = Get-HttpErrorBody $_
         if (-not $detail) { $detail = $_.Exception.Message }
         Write-Host "  [$($s.name)] PUT 被拒：$detail" -ForegroundColor Yellow
+        Write-Host "    发送的包对象：$(($cur.applicationPackages | ConvertTo-Json -Depth 8 -Compress))" -ForegroundColor DarkGray
         continue
     }
     $got = @($try.applicationPackages)[0]
