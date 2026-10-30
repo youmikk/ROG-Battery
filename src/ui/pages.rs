@@ -1850,10 +1850,10 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     // ---- 电量历史 ----
     c.h2(p, "电量历史", false);
     // 卡片高度按 `draw_chart` 的实际内容算：16（上边距）+ 18（标题行）+ 8 +
-    // 132（绘图区）+ 20（X 轴时间）+ 12（下边距）= 206。
+    // 146（绘图区）+ 20（X 轴时间）+ 12（下边距）= 220。
     // 原来写 `168 + 56 + 28 = 252` 是照抄原型的 SVG viewBox，
-    // 底下会空出 46px 一条白边。
-    let chart = c.card(p, 206.0);
+    // 底下会空出 46px 一条白边；132 的绘图区又太扁，曲线被压成一条带子。
+    let chart = c.card(p, 220.0);
     draw_chart(p, chart, d);
     // 卡片不会自己推进游标（它的返回值才是位置），必须手动前移 ——
     // 漏了这一步，「电源管理」的标题会画在图表卡片上面。
@@ -2007,6 +2007,22 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
             Align::Right,
         );
     }
+    // 有充电段才画图例，否则纯放电历史不需要解释那条绿带。
+    if d.plot
+        .filter(|p| p.enough())
+        .map(|p| p.points.iter().any(|pt| pt.charging))
+        .unwrap_or(false)
+    {
+        p.dot(card.x + 98.0, head_y + 9.0, 4.0, with_alpha(t.green, 0xB0));
+        p.text(
+            "充电",
+            R::new(card.x + 106.0, head_y, 34.0, 18.0),
+            font::TINY,
+            false,
+            t.text3,
+            Align::Left,
+        );
+    }
     let samples = format!("{} 个采样点", d.rows);
     p.text(
         &samples,
@@ -2019,9 +2035,12 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
 
     // 绘图区：左边留 42px 给 Y 轴标签，底部留 20px 给 X 轴时间。
     // 高度定死 132，和上面 `c.card(p, 206.0)` 的算法对应。
-    let plot = R::new(card.x + 42.0, head_y + 26.0, card.w - 42.0 - 18.0, 132.0);
+    let plot = R::new(card.x + 42.0, head_y + 26.0, card.w - 42.0 - 18.0, 146.0);
 
-    // 网格 + Y 轴刻度（92 / 88 / 84 / 80 是原型里那组，这里按实际数据取整）
+    // ── 坐标轴 ────────────────────────────────────────────────────────
+    // 刻度要「整除」：四条线等距，否则会出现 92 / 95 / 97 / 100 这种
+    // 间距不齐的刻度，一眼看着就毛糙。做法是先按数据跨度取一个整数步长，
+    // 再把上下界对齐到步长的整数倍，顶格不超过 100%。
     let (lo, hi) = match d.plot.filter(|p| p.enough()) {
         Some(pl) => {
             let mut mn = 100u8;
@@ -2030,20 +2049,62 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
                 mn = mn.min(pt.level);
                 mx = mx.max(pt.level);
             }
-            // 上下各留一点余量，否则线贴着框边
-            (mn.saturating_sub(2), (mx + 2).min(100))
+            // 上下各留 2% 余量，否则折线贴着框边
+            let (mn, mx) = (mn.saturating_sub(2) as i32, (mx as i32 + 2).min(100));
+            let step = (((mx - mn).max(1) as f32) / 4.0).ceil() as i32;
+            let step = step.max(1);
+            let mut lo = (mn / step) * step;
+            let mut hi = lo + step * 4;
+            while hi < mx {
+                lo += step;
+                hi += step;
+            }
+            if hi > 100 {
+                hi = 100;
+                lo = hi - step * 4;
+            }
+            if lo < 0 {
+                lo = 0;
+                hi = step * 4;
+            }
+            (lo, hi)
         }
         None => (0, 100),
     };
-    let span = (hi as i32 - lo as i32).max(1);
-    for i in 0..5 {
+    let span = (hi - lo).max(1) as f32;
+
+    // x / y 映射：`build` 用它自己的矩形算 x，这里按比例搬到当前 plot，
+    // 两份实现各自算时间→x 一定会漂移，所以只搬比例。
+    let area_w = (crate::chart::AREA_W as f32).max(1.0);
+    let map_x = |px: i32| -> f32 {
+        let fx = (px - crate::chart::AREA_X) as f32 / area_w;
+        plot.x + fx.clamp(0.0, 1.0) * plot.w
+    };
+    let map_y = |level: u8| -> f32 {
+        let fy = (level as i32 - lo) as f32 / span;
+        plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
+    };
+
+    // 底轴：比网格线略深一点，给图表一条"地面"
+    p.line(
+        plot.x,
+        plot.bottom(),
+        plot.right(),
+        plot.bottom(),
+        with_alpha(t.text, 0x1E),
+        1.0,
+    );
+    // 4 条水平网格 + 左侧刻度（顶格带 % 号，其余纯数字，少点视觉噪音）
+    for i in 1..=4 {
         let frac = i as f32 / 4.0;
         let gy = plot.bottom() - frac * plot.h;
-        p.hline(plot.x, plot.right(), gy, with_alpha(t.text, 0x10));
-        let level = lo as i32 + (span as f32 * frac) as i32;
+        p.hline(plot.x, plot.right(), gy, with_alpha(t.text, 0x0D));
+        let level = lo + (span * frac) as i32;
+        // 四条刻度都带 %：只给顶格加会让 92 看起来像个编号。
+        let label = format!("{level}%");
         p.text(
-            &level.to_string(),
-            R::new(card.x + 8.0, gy - 8.0, 28.0, 16.0),
+            &label,
+            R::new(card.x + 2.0, gy - 8.0, 38.0, 16.0),
             font::TINY,
             false,
             t.text3,
@@ -2075,73 +2136,174 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
             );
         }
         Some(pl) => {
-            // 点集直接取自 `chart::build`（它已经按数据时间跨度算好 x），
-            // 这里只把 i32 转成 f32 并映射到当前 plot 矩形。
-            // 不自己再算一遍时间→x：两份实现一定会漂移。
             let n = pl.points.len();
             let pts: Vec<(f32, f32)> = pl
                 .points
                 .iter()
-                .map(|pt| {
-                    // `build` 用的是它自己接收的 plot 矩形，宽度不一定和我们一样，
-                    // 所以按比例搬运而不是直接照抄坐标。
-                    let fx = if crate::chart::AREA_W > 0 {
-                        (pt.x - crate::chart::AREA_X) as f32 / crate::chart::AREA_W as f32
-                    } else {
-                        0.0
-                    };
-                    let fy = (pt.level.saturating_sub(lo)) as f32 / span as f32;
-                    (plot.x + fx.clamp(0.0, 1.0) * plot.w, plot.bottom() - fy * plot.h)
-                })
+                .map(|pt| (map_x(pt.x), map_y(pt.level)))
                 .collect();
 
-            // 面积：折线点 + 右下角 + 左下角
-            if pts.len() >= 2 {
-                let mut area: Vec<(f32, f32)> = Vec::with_capacity(pts.len() + 2);
-                area.push((plot.x, plot.bottom()));
-                area.extend(pts.iter().copied());
-                area.push((plot.right(), plot.bottom()));
-                p.fill_polygon(&area, with_alpha(t.accent, 0x3D), with_alpha(t.accent, 0x05));
-            }
-            p.polyline(&pts, t.accent, 2.0);
-
-            // 数据点：普通点是「卡片色填充 + 强调色描边」，最新点额外一圈淡光
-            for (i, (x, y)) in pts.iter().enumerate() {
-                if i + 1 == n {
-                    p.dot(*x, *y, 9.0, with_alpha(t.accent, 0x2E));
-                    p.dot(*x, *y, 4.6, t.accent);
-                } else {
-                    p.dot(*x, *y, 3.4, t.card);
-                    p.dot_ring(*x, *y, 3.4, t.accent, 2.0);
+            // 充电时段：整列淡绿底带。比在折线上换颜色更直观 ——
+            // 一眼就能看出"这段在充、那段在放"。
+            for w in pl.points.windows(2) {
+                if w[0].charging && w[1].charging {
+                    let x0 = map_x(w[0].x);
+                    let x1 = map_x(w[1].x);
+                    if x1 - x0 > 0.5 {
+                        p.rect(
+                            R::new(x0, plot.y, x1 - x0, plot.h),
+                            with_alpha(t.green, 0x12),
+                        );
+                    }
                 }
             }
 
-            // X 轴：首尾时间。
-            //
-            // `format_unix_local` 返回 `MM-DD HH:MM`（11 个字符，12px 约 74px 宽），
-            // 给 60px 会被省略成「10-21 1…」。给 84px 且不加右对齐留白才放得下。
-            let first = crate::settings::format_unix_local(pl.first_ts).unwrap_or_default();
-            let last = crate::settings::format_unix_local(pl.last_ts).unwrap_or_default();
+            // 电量是 1% 量化的，原始折线是一格一格的锯齿。先做一次窗口 5 的
+            // 移动平均把台阶磨圆（末点保持原值，免得和右下角那个标记对不上），
+            // 再用 Catmull-Rom 插值：y 用样条、x 保持线性 —— 采样点疏密不均时
+            // 对 x 也插值会让曲线打结甚至回折。
+            let soft = soften(&pts, 5);
+            let curve = smooth_curve(&soft, 10);
+
+            // 面积：曲线 + 首尾各拉到底边。起点用曲线自己的 x，不要用 plot.x ——
+            // 第一个采样点可能晚于窗口起点（休眠、刚装完），从 plot.x 硬拉
+            // 会多出一块三角形空填充，看着像画错了。
+            if curve.len() >= 2 {
+                let x0 = curve.first().map(|p| p.0).unwrap_or(plot.x);
+                let x1 = curve.last().map(|p| p.0).unwrap_or(plot.right());
+                let mut area: Vec<(f32, f32)> = Vec::with_capacity(curve.len() + 2);
+                area.push((x0, plot.bottom()));
+                area.extend(curve.iter().copied());
+                area.push((x1, plot.bottom()));
+                p.fill_polygon(&area, with_alpha(t.accent, 0x4A), with_alpha(t.accent, 0x00));
+            }
+            // 整条曲线一次描边。逐段 `polyline` 在接缝处会叠出「串珠」感。
+            p.stroke_path(&curve, t.accent, 2.0);
+
+            // 数据点：点多了就只标最新那个，否则满屏小圈
+            if n <= 14 {
+                for (i, (x, y)) in pts.iter().enumerate() {
+                    if i + 1 == n {
+                        continue;
+                    }
+                    p.dot(*x, *y, 3.0, t.card);
+                    p.dot_ring(*x, *y, 3.0, with_alpha(t.accent, 0xD8), 1.8);
+                }
+            }
+            if let Some((x, y)) = pts.last() {
+                // 末点常正好落在绘图区右边界上，圆环会被裁掉一半 → 往里收 5px
+                let mx = x.clamp(plot.x + 5.0, plot.right() - 5.0);
+                p.dot(mx, *y, 9.0, with_alpha(t.accent, 0x28));
+                p.dot(mx, *y, 5.0, t.card);
+                p.dot_ring(mx, *y, 4.6, t.accent, 2.6);
+            }
+
+            // X 轴：起点 / 中点 / 终点三个时间，比只有首尾更容易定位。
+            // 每处配一条极淡的竖线，把时间刻度和曲线对上。
             let ty = plot.bottom() + 6.0;
-            p.text(
-                &first,
-                R::new(plot.x, ty, 84.0, 14.0),
-                font::TINY,
-                false,
-                t.text3,
-                Align::Left,
-            );
-            p.text(
-                &last,
-                R::new(plot.right() - 84.0, ty, 84.0, 14.0),
-                font::TINY,
-                false,
-                t.text3,
-                Align::Right,
-            );
+            for gx in [plot.x, plot.cx(), plot.right() - 0.5] {
+                p.line(gx, plot.y, gx, plot.bottom(), with_alpha(t.text, 0x08), 1.0);
+            }
+            let fmt = crate::settings::format_unix_local;
+            if let Some(first) = fmt(pl.first_ts) {
+                p.text(
+                    &first,
+                    R::new(plot.x, ty, 84.0, 14.0),
+                    font::TINY,
+                    false,
+                    t.text3,
+                    Align::Left,
+                );
+            }
+            if let Some(last) = fmt(pl.last_ts) {
+                p.text(
+                    &last,
+                    R::new(plot.right() - 84.0, ty, 84.0, 14.0),
+                    font::TINY,
+                    false,
+                    t.text3,
+                    Align::Right,
+                );
+            }
+            if pl.last_ts > pl.first_ts + 600 {
+                if let Some(mid) = fmt((pl.first_ts + pl.last_ts) / 2) {
+                    p.text(
+                        &mid,
+                        R::new(plot.cx() - 42.0, ty, 84.0, 14.0),
+                        font::TINY,
+                        false,
+                        with_alpha(t.text3, 0xB0),
+                        Align::Center,
+                    );
+                }
+            }
         }
     }
 }
+
+/// 窗口移动平均：把 1% 量化的台阶磨成缓坡。
+///
+/// 首尾各留一半窗口不参与（用 saturating 边界），并且强制保留末点原值 ——
+/// 末点要跟「最新值」那个圆点标记重合，被平均掉就错位了。
+fn soften(pts: &[(f32, f32)], win: usize) -> Vec<(f32, f32)> {
+    if win < 3 || pts.len() < win {
+        return pts.to_vec();
+    }
+    let h = win / 2;
+    let n = pts.len();
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let lo = i.saturating_sub(h);
+        let hi = (i + h).min(n - 1);
+        let mut sum = 0.0f32;
+        let mut cnt = 0.0f32;
+        for j in lo..=hi {
+            sum += pts[j].1;
+            cnt += 1.0;
+        }
+        out.push((pts[i].0, sum / cnt));
+    }
+    out[n - 1] = pts[n - 1];
+    out
+}
+
+/// Catmull-Rom 平滑：只对 y 插值，x 线性。
+///
+/// 采样点按时间递增，x 间隔可能很不均匀（比如休眠期间两小时才一个点）。
+/// 如果对 x 也做样条，曲线会在密集处打结、在稀疏处回折，所以 x 一律线性，
+/// y 用样条并把结果夹在数据自身的极值内，避免过冲跑出绘图区。
+fn smooth_curve(pts: &[(f32, f32)], seg: usize) -> Vec<(f32, f32)> {
+    if pts.len() < 3 || seg < 2 {
+        return pts.to_vec();
+    }
+    let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
+    for (_, y) in pts {
+        min_y = min_y.min(*y);
+        max_y = max_y.max(*y);
+    }
+    let n = pts.len();
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(n * seg + 1);
+    for i in 0..n - 1 {
+        let p0 = pts[i.saturating_sub(1)];
+        let p1 = pts[i];
+        let p2 = pts[i + 1];
+        let p3 = pts[(i + 2).min(n - 1)];
+        for s in 0..seg {
+            let t = s as f32 / seg as f32;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let y = 0.5
+                * (2.0 * p1.1
+                    + (p2.1 - p0.1) * t
+                    + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
+                    + (3.0 * p1.1 - p0.1 - 3.0 * p2.1 + p3.1) * t3);
+            out.push((p1.0 + (p2.0 - p1.0) * t, y.clamp(min_y, max_y)));
+        }
+    }
+    out.push(*pts.last().unwrap());
+    out
+}
+
 
 // ───────────────────────── 性能页 ─────────────────────────
 
