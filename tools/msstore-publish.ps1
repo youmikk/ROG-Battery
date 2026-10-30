@@ -213,34 +213,38 @@ Write-Host "  目标包：$innerName  version=$verFromName（上传档案：$pkg
 
 $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
 
-# 枚举值不能乱填：minimumDirectXVersion 属于 DirectXVersion（NotSet/DirectX9/…/DirectX12），
-# minimumSystemRam 属于 MemoryRAM（NotSet/RAM_300MB/…），写 'None' 会被 400 拒。
-#
-# 形状梯度：克隆来的槽是 fileStatus=Uploaded 的「已定稿」状态，只改 fileName 的话
-# commit 后商店会把槽换回旧包（这就是之前一直重发 1.1.2.0 的原因）。要让商店重新解析
-# 包体，必须把 fileStatus 置回 PendingUpload —— 但只给 fileName+fileStatus 又会被 400，
-# 说明槽对象里的 id/architecture/languages 等字段仍是必需的。所以第一条形状是
-# 「完整槽 + PendingUpload + NotSet 枚举 + version 对齐目标」，其后才是精简形状。
+# 形状梯度（2026-10-30 用 400 正文逐条验证）：
+#   · minimumDirectXVersion 写 'NotSet' 被拒：'NotSet' is not a valid 'DirectXVersion' value
+#   · 把包槽裁成只剩 fileName 被拒：Please keep all file entries for existing packages
+#     ... The following packages are missing in your update: 2000000000099886849
+#   → 克隆槽的 id / architecture / languages / minimum* 一个都不能少，只能改
+#     fileName 与 fileStatus；minimum* 与 version 沿用商店给的值，让 ingestion
+#     解析完我们上传的包体后自己回填。
 $shapes = @(
-    @{ name = '完整槽 + PendingUpload + NotSet + version'
+    @{ name = '完整槽 + fileName + PendingUpload'
        pkg  = {
            param($base, $n, $ver)
            $o = $base | Select-Object *
            $o.fileName = $n
            $o.fileStatus = 'PendingUpload'
-           $o.minimumDirectXVersion = 'NotSet'
-           $o.minimumSystemRam = 'NotSet'
+           $o
+       } },
+    @{ name = '完整槽 + fileName + PendingUpload + version'
+       pkg  = {
+           param($base, $n, $ver)
+           $o = $base | Select-Object *
+           $o.fileName = $n
+           $o.fileStatus = 'PendingUpload'
            if ($ver) { $o.version = $ver }
            $o
        } },
-    @{ name = 'fileName + PendingUpload + NotSet×2'
-       pkg  = { param($base, $n, $ver) [pscustomobject]@{ fileName = $n; fileStatus = 'PendingUpload'; minimumDirectXVersion = 'NotSet'; minimumSystemRam = 'NotSet' } } },
-    @{ name = 'fileName + PendingUpload'
-       pkg  = { param($base, $n, $ver) [pscustomobject]@{ fileName = $n; fileStatus = 'PendingUpload' } } },
-    @{ name = 'fileName + NotSet×2'
-       pkg  = { param($base, $n, $ver) [pscustomobject]@{ fileName = $n; minimumDirectXVersion = 'NotSet'; minimumSystemRam = 'NotSet' } } },
-    @{ name = '仅 fileName'
-       pkg  = { param($base, $n, $ver) [pscustomobject]@{ fileName = $n } } }
+    @{ name = '完整槽 + 仅 fileName（保持 Uploaded，兜底）'
+       pkg  = {
+           param($base, $n, $ver)
+           $o = $base | Select-Object *
+           $o.fileName = $n
+           $o
+       } }
 )
 
 $sub2 = $null
