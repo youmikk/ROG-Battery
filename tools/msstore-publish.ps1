@@ -397,8 +397,10 @@ Invoke-RestMethod -Method Post -Uri "$subsUri/$($sub.id)/commit" -Headers $heade
 
 # 提交后再核对：commit 会触发 ingestion 真正解析包体，这里等它把 version 回填出来，
 # 顺便防止「跑绿了但发出去的是旧包」这种静默错误。
+# 实测回填要 100 秒以上（2026-10-30 那次 100 秒还没好、事后查已是 1.2.0.0），
+# 所以给足 5 分钟。
 $finalOk = $false
-for ($w = 1; $w -le 10; $w++) {
+for ($w = 1; $w -le 30; $w++) {
     Start-Sleep -Seconds 10
     try {
         $check = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
