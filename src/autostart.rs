@@ -252,32 +252,7 @@ const RUN_VALUE_NAME: &str = "RogMouseCtl";
 /// 而且编译期不会报错。
 pub const RUN_ARG: &str = "--autostart";
 
-#[link(name = "advapi32")]
-extern "system" {
-    fn RegOpenKeyExW(key: usize, sub: *const u16, opts: u32, sam: u32, out: *mut usize) -> i32;
-    fn RegCreateKeyExW(
-        key: usize,
-        sub: *const u16,
-        reserved: u32,
-        class: *const u16,
-        opts: u32,
-        sam: u32,
-        sec: *mut c_void,
-        out: *mut usize,
-        disposition: *mut u32,
-    ) -> i32;
-    fn RegSetValueExW(key: usize, name: *const u16, reserved: u32, ty: u32, data: *const u8, len: u32) -> i32;
-    fn RegQueryValueExW(
-        key: usize,
-        name: *const u16,
-        reserved: *mut u32,
-        ty: *mut u32,
-        data: *mut u8,
-        len: *mut u32,
-    ) -> i32;
-    fn RegDeleteValueW(key: usize, name: *const u16) -> i32;
-    fn RegCloseKey(key: usize) -> i32;
-}
+use crate::win32::{RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
 
 /// 当前 exe 的完整路径，包上引号。路径含空格时**必须**加引号，否则系统按空格
 /// 切分参数会把 `C:\Program Files\...` 切成两段。

@@ -877,9 +877,60 @@ pub fn attach_console() -> bool {
     }
 }
 
+// 注册表读写（`advapi32`）。
+//
+// 原来 `autostart.rs` 与 `ui/theme.rs` 各声明了一份 —— 同一批 Win32 函数
+// 写两遍，参数名/类型一漂就是 UB（`extern` 声明不做类型检查，只信你写的）。
+// 现在只有这里一份，两边 `use crate::win32::{...}`。
+// （`extern` 块不接收文档注释，写了会报 `unused doc comment`。）
+#[link(name = "advapi32")]
+extern "system" {
+    pub fn RegOpenKeyExW(key: usize, sub: *const u16, opts: u32, sam: u32, out: *mut usize) -> i32;
+    pub fn RegCreateKeyExW(
+        key: usize,
+        sub: *const u16,
+        reserved: u32,
+        class: *const u16,
+        opts: u32,
+        sam: u32,
+        sec: *mut c_void,
+        out: *mut usize,
+        disposition: *mut u32,
+    ) -> i32;
+    pub fn RegSetValueExW(
+        key: usize,
+        name: *const u16,
+        reserved: u32,
+        ty: u32,
+        data: *const u8,
+        len: u32,
+    ) -> i32;
+    pub fn RegQueryValueExW(
+        key: usize,
+        name: *const u16,
+        reserved: *mut u32,
+        ty: *mut u32,
+        data: *mut u8,
+        len: *mut u32,
+    ) -> i32;
+    pub fn RegDeleteValueW(key: usize, name: *const u16) -> i32;
+    pub fn RegCloseKey(key: usize) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reg_open_of_missing_subkey_reports_failure() {
+        // 打开一个不存在子键必须返回非 0（ERROR_FILE_NOT_FOUND），
+        // 顺手验证宽字符串 + `HKCU` 常量这一串调用是通的。
+        let sub: Vec<u16> = "Software\\RogMouseCtlNoSuchKey\u{0}".encode_utf16().collect();
+        let mut h: usize = 0;
+        let rc = unsafe { RegOpenKeyExW(0xFFFF_FFFF_8000_0001, sub.as_ptr(), 0, 0x0001, &mut h) };
+        assert_ne!(rc, 0, "不存在的子键不该返回 0");
+        assert_eq!(h, 0, "失败时不该写出句柄");
+    }
 
     #[test]
     fn hid_api_load_is_cached_not_reloaded() {

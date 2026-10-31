@@ -207,19 +207,7 @@ pub fn normalize_pref(s: &str) -> &'static str {
 ///
 /// 值为 1 → 浅色。读不到默认深色（Windows 默认是深色任务栏/深色应用）。
 pub fn system_is_light() -> bool {
-    #[link(name = "advapi32")]
-    extern "system" {
-        fn RegOpenKeyExW(key: usize, sub: *const u16, opts: u32, sam: u32, out: *mut usize) -> i32;
-        fn RegQueryValueExW(
-            key: usize,
-            name: *const u16,
-            reserved: *mut u32,
-            ty: *mut u32,
-            data: *mut u8,
-            len: *mut u32,
-        ) -> i32;
-        fn RegCloseKey(key: usize) -> i32;
-    }
+    use crate::win32::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW};
     const HKCU: usize = 0xFFFF_FFFF_8000_0001;
     const KEY_QUERY_VALUE: u32 = 0x0001;
 
