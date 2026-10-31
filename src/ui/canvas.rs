@@ -877,7 +877,9 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
             if let Some(c) = ctx_of(hwnd) {
                 let had = {
                     let mut ui = c.ui.borrow_mut();
-                    let had = ui.pointer.down || ui.pressed_slide.is_some();
+                    // 只有「按下状态还在」才算真的丢了拖拽；WM_LBUTTONUP 已经
+            // 把 pointer.down 置 false 后再释放捕获，这里就不该再清一次。
+            let had = ui.pointer.down;
                     ui.cancel_press();
                     had
                 };
@@ -1063,7 +1065,11 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
 
         WM_LBUTTONUP => {
             if let Some(c) = ctx_of(hwnd) {
-                ReleaseCapture();
+                // **不要**在这里 ReleaseCapture：它会同步派发 WM_CAPTURECHANGED，
+                // 而那个分支会 cancel_press() 把 `pressed` 清掉，紧接着的
+                // on_release 就什么都命中不到 —— 点击全部失效（悬停/按下有动效，
+                // 但页面不切换、下拉不弹、输入框不进焦点、开关不响应）。
+                // 正确的顺序：先算出 pushed，再释放捕获。
                 let x = lo_word(lp) as f32 / c.scale;
                 let y = hi_word(lp) as f32 / c.scale;
                 let mut pushed: Option<Act> = None;
@@ -1092,6 +1098,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 } else if let Some(a) = pushed {
                     c.acts.borrow_mut().push(a);
                 }
+                ReleaseCapture();
                 (c.damage)();
             }
             0

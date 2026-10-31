@@ -1198,4 +1198,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn release_fires_even_after_pointer_down_cleared() {
+        // 回归：WM_LBUTTONUP 会先把 pointer.down 置 false 再调 on_release。
+        // 如果 on_release 依赖 pointer.down（或被 cancel_press 提前清掉 pressed），
+        // 点击就会全部失效：悬停有动效、页面不切换、下拉不弹、输入框不进焦点。
+        let mut u = Ui::default();
+        u.begin_frame();
+        u.chrome_hot(R::new(10.0, 100.0, 38.0, 36.0), Act::Nav(Page::Battery));
+        u.pointer.x = 20.0;
+        u.pointer.y = 110.0;
+        u.pointer.down = true;
+        u.on_press(20.0, 110.0, 0.0);
+        u.pointer.down = false;
+        assert_eq!(u.on_release(20.0, 110.0, 0.0), Some(Act::Nav(Page::Battery)));
+    }
+
 }
