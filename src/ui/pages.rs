@@ -67,6 +67,8 @@ pub struct Data<'a> {
     pub cfg: &'a crate::settings::Settings,
     /// 开机自启的当前状态文字。
     pub autostart_text: &'a str,
+    /// 开机自启是否打开（开关状态，不能靠文案反推）。
+    pub autostart_on: bool,
     /// 版本号（侧栏底部）。
     pub version: &'a str,
     /// 帧耗时（侧栏底部「19 帧 · 588 ms」）。
@@ -2596,8 +2598,10 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     {
         let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
         let ctl = row_label(p, area, "开机自动启动", Some(d.autostart_text), 40.0);
-        // 真实状态从 `autostart` 模块来，这里只显示；点击发 Toggle
-        let on = d.autostart_text.contains("已启用");
+        // 真实状态从 `autostart` 模块来，这里只显示；点击发 Toggle。
+        // 开关的布尔量也直接用状态机的值：以前是 `autostart_text.contains("已启用")`，
+        // 文案一改开关就跟着错（而它俩本来没有关系）。
+        let on = d.autostart_on;
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, on, true);
         ui.hot(sw, Act::Toggle(Pref::AutoStart));
@@ -3007,6 +3011,7 @@ mod tests {
             rows: 0,
             cfg: &cfg,
             autostart_text: "",
+        autostart_on: false,
             version: "test",
             frames: 0,
             elapsed_ms: 0,
@@ -3066,6 +3071,7 @@ mod tests {
             rows: 0,
             cfg: &cfg,
             autostart_text: "",
+        autostart_on: false,
             version: "test",
             frames: 0,
             elapsed_ms: 0,

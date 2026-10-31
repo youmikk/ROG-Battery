@@ -321,6 +321,13 @@ impl Shared {
         )
     }
 
+    /// 开机自启当前是否打开。开关状态必须来自状态机，不能靠 `autostart_text()`
+    /// 里的「已开启」四个字去反推 —— 文案一改（比如加个「已开启（由策略）」）
+    /// 开关就跟着错，而这两件事本来没有关系。
+    fn autostart_on(&self) -> bool {
+        self.autostart.0.is_enabled()
+    }
+
     /// 底部浮层要常驻显示的**异常**文字。
     ///
     /// 只有「真的出错」和「正在写设备」才返回非空：
@@ -1140,11 +1147,7 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
             ));
         }
         Pref::AutoStart => {
-            let on = matches!(
-                lock_shared(env.shared).autostart.0,
-                crate::autostart::AutoStartState::Enabled
-                    | crate::autostart::AutoStartState::EnabledByPolicy
-            );
+            let on = lock_shared(env.shared).autostart_on();
             if !env.submit(Cmd::AutoStart(!on)) {
                 env.say("✘ 后台正在执行别的操作，这次开机自启没有提交");
             }
@@ -2196,6 +2199,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 estimate,
                 cfg,
                 autostart_text,
+                autostart_on,
                 frames,
                 elapsed,
                 rows_n,
@@ -2210,6 +2214,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     s.estimate.clone(),
                     s.cfg.clone(),
                     s.autostart_text(),
+                    s.autostart_on(),
                     s.frames,
                     s.elapsed_ms,
                     s.rows.len(),
@@ -2229,6 +2234,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 rows: rows_n,
                 cfg: &cfg,
                 autostart_text: &autostart_text,
+                autostart_on,
                 version: APP_VERSION,
                 frames,
                 elapsed_ms: elapsed,
