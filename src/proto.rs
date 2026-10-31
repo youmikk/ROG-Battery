@@ -58,12 +58,25 @@ pub const BUTTON_NAME: [&str; BUTTON_SLOTS] = [
 
 // ==================== 编解码 ====================
 
-/// DPI 编码：`enc = (dpi - 50) / 50`。步进 50，写非整数倍会被截断。
+/// DPI 编码：`enc = (dpi - 50) / 50`（非整数倍按截断处理），并夹到合法区间。
+///
+/// 必须夹取。原实现 `dpi < 50 → 0`（解码回来 50 DPI，低于设备下限 100）、
+/// `dpi = 50000 → 999`（远超 `DPI_ENC_MAX`）：这两个值写进鼠标后设备行为
+/// 未定义，而界面上完全看不出发生过什么。`ops` 层已经做过范围校验，这里是
+/// 最后一道防线，防止将来新调用方直接调进来。
 pub fn encode_dpi(dpi: i32) -> i32 {
-    if dpi < DPI_STEP {
-        return 0;
-    }
-    (dpi - DPI_STEP) / DPI_STEP
+    encode_dpi_checked(dpi).0
+}
+
+/// 同 [`encode_dpi`]，另外告诉你「输入被夹取过没有」。
+///
+/// 返回 `(编码值, 是否被改过)`。调用方可以据此提示用户「你输入的值会被设备
+/// 改成 X」，而不是默默写一个不一样的数。
+pub fn encode_dpi_checked(dpi: i32) -> (i32, bool) {
+    // 截断语义保持不变（`ops` 的「步进提醒」就是按截断算的），只补夹取。
+    let raw = (dpi - DPI_STEP) / DPI_STEP;
+    let enc = raw.clamp(DPI_ENC_MIN, DPI_ENC_MAX);
+    (enc, enc != raw)
 }
 
 /// DPI 解码：`dpi = enc * 50 + 50`
@@ -934,5 +947,25 @@ mod tests {
         assert_eq!(button_src(BUTTON_SLOTS - 1), Some(BUTTON_SRC[BUTTON_SLOTS - 1]));
         assert_eq!(button_src(BUTTON_SLOTS), None);
         assert_eq!(button_src(999), None);
+    }
+
+    #[test]
+    fn encode_dpi_clamps_without_changing_truncation() {
+        // 正常值：截断语义不变（437 -> enc 7 -> 400），且不算被改过
+        assert_eq!(encode_dpi(800), 15);
+        assert_eq!(decode_dpi(encode_dpi(437)), 400);
+        assert_eq!(encode_dpi_checked(800), (15, false));
+
+        // 低于下限：不能落成 0（解码 50，低于设备下限），夹到 DPI_ENC_MIN
+        let (low, changed) = encode_dpi_checked(10);
+        assert_eq!(low, DPI_ENC_MIN);
+        assert!(changed);
+        assert_eq!(decode_dpi(low), 100);
+
+        // 高于上限：夹到 DPI_ENC_MAX（解码 42000）
+        let (high, changed) = encode_dpi_checked(50_000);
+        assert_eq!(high, DPI_ENC_MAX);
+        assert!(changed);
+        assert_eq!(decode_dpi(high), 42_000);
     }
 }
