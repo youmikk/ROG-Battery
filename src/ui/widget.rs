@@ -190,6 +190,19 @@ impl Slide {
     }
 }
 
+/// 两个悬停目标「是不是同一个东西」。
+///
+/// `Act::SetSlide` / `Act::SetCustomHue` 里带着 f32 分量（滑块比例、色相角度），
+/// 它们随鼠标位置连续变化。直接用 `PartialEq` 比较，鼠标在滑块上移动一个像素
+/// 就认为「悬停变了」→ 整页重绘；而这种变化对高亮毫无意义。
+fn hover_same(a: Option<Act>, b: Option<Act>) -> bool {
+    match (a, b) {
+        (Some(Act::SetSlide(x, _)), Some(Act::SetSlide(y, _))) => x == y,
+        (Some(Act::SetCustomHue(x, _)), Some(Act::SetCustomHue(y, _))) => x == y,
+        (x, y) => x == y,
+    }
+}
+
 /// 本地偏好（不写设备，写 `settings.ini`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pref {
@@ -805,7 +818,7 @@ impl Ui {
         let scroll = self.scroll_y(self.page);
         let want = self.hit(self.pointer.x, self.pointer.y, scroll);
         // §下拉弹层开着时，命中优先级变了：鼠标在弹层里应该高亮弹层项
-        if want != self.hover {
+        if !hover_same(want, self.hover) {
             self.hover = want;
             true
         } else {
@@ -899,6 +912,24 @@ mod tests {
 
     fn ui() -> Ui {
         Ui::default()
+    }
+
+    #[test]
+    fn hover_ignores_slider_fraction() {
+        // 滑块比例随鼠标位置连续变化，不能算「悬停变了」——否则每移动一像素重绘整页
+        let a = Some(Act::SetSlide(Slide::LightBright, 0.31));
+        let b = Some(Act::SetSlide(Slide::LightBright, 0.32));
+        assert!(hover_same(a, b), "同一条滑块、比例不同应视为同一个悬停目标");
+        // 换一条滑块就算变了
+        assert!(!hover_same(a, Some(Act::SetSlide(Slide::Tune, 0.31))));
+        // 色环同理
+        assert!(hover_same(
+            Some(Act::SetCustomHue(Drop::Palette(0), 12.0)),
+            Some(Act::SetCustomHue(Drop::Palette(0), 13.5)),
+        ));
+        // 普通动作照旧严格比较
+        assert!(hover_same(Some(Act::None), Some(Act::None)));
+        assert!(!hover_same(None, Some(Act::None)));
     }
 
     #[test]
