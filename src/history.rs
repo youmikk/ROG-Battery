@@ -283,15 +283,20 @@ pub fn parse_rows(text: &str) -> Vec<HistoryRow> {
         if s.is_empty() {
             continue;
         }
-        let f: Vec<&str> = s.split('\t').collect();
-        if f.len() < 4 {
+        // 直接按迭代器取前 4 个字段，不 collect —— 原来每行都分配一个
+        // `Vec<&str>`，2000 行就是 2000 次堆分配，而这条路径每个刷新周期都跑。
+        // 多出来的字段照旧忽略（原实现只检查「至少 4 段」）。
+        let mut it = s.split('\t');
+        let (Some(f0), Some(f1), Some(f2), Some(f3)) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
             continue;
-        }
+        };
         let (Ok(ts), Ok(level), Ok(chg), Ok(mode)) = (
-            f[0].parse::<i64>(),
-            f[1].parse::<i32>(),
-            f[2].parse::<i32>(),
-            f[3].parse::<i32>(),
+            f0.parse::<i64>(),
+            f1.parse::<i32>(),
+            f2.parse::<i32>(),
+            f3.parse::<i32>(),
         ) else {
             continue;
         };
@@ -1475,5 +1480,16 @@ mod tests {
         let p = phase_start(&rows, false);
         assert_eq!(p, 2, "断档之前的两条应当被截掉");
         assert_eq!(rows[p..].len(), 1);
+    }
+
+    #[test]
+    fn parse_rows_tolerates_extra_fields_and_skips_short_lines() {
+        // 第 2 行只有 3 段（丢弃）、第 3 行有 6 段（照收）、第 4 行只有 2 段（丢弃）
+        let text = "1800000000\t80\t1\t2\n1800000060\t79\t1\n1800000120\t78\t0\t2\t备注\t多出来的字段\n1800000180\t77\n";
+        let rows = parse_rows(text);
+        assert_eq!(rows.len(), 2, "少字段的行丢弃，多字段的行照收");
+        assert_eq!(rows[0].ts, 1_800_000_000);
+        assert_eq!(rows[1].ts, 1_800_000_120);
+        assert_eq!(rows[1].level, 78);
     }
 }
