@@ -1,67 +1,43 @@
-//! 电量历史曲线的**数据层**：把 `history.tsv` 的行映射成像素点。
+//! 电量历史曲线的**数据层**：把 `history.tsv` 的行映射成横向坐标。
 //!
-//! 绘制不在这里 —— 界面已经全部改成 GDI+ 自绘（`src/ui/pages.rs` 的
-//! `draw_chart`），本模块只负责「行数据 → 坐标」这一件纯计算的事。
+//! 绘制在 `src/ui/pages.rs` 的 `draw_chart` 里。本模块只负责一件纯计算的事：
+//! 「行数据 → 采样点」，不碰 Win32、不碰文件，所以能在单测里喂任意数据点，
+//! 不用去污染用户真实的 `history.tsv`。
 //!
-//! 早先这里还有一套 GDI 渲染（`paint` / `fill` / `draw_text` + 一堆
-//! `COLORREF` 常量和 `DT_*` 位），是 nwg `Tab` 子类化时代的产物。
-//! 自绘界面接管后它们一行都没人调了，2026-10-22 直接删掉 ——
-//! 用 `#[allow(dead_code)]` 压住只会让下一个读代码的人以为它还有用。
+//! # 为什么这里只管 X
 //!
-//! 「行数据 → 像素坐标」全部收在 [`build`] 里，是**纯函数**（不碰 Win32、不碰文件），
-//! 所以能在单测里喂任意数据点，不用去污染用户真实的 `history.tsv`。
+//! 纵向映射归页面：界面按**数据自己的极值**自适应 Y 轴（手上只有 82~89% 时
+//! 要把这段铺满整个绘图区，否则曲线贴成一条直线），而这个窗口只能由绘制方
+//! 决定 —— 它还画刻度线、充电底带、面积渐变，必须和曲线用同一套算术。
+//!
+//! 早先这里也存过 `Pt.y`（按 0~100% 固定映射到 `AREA_H`），但自绘界面接管后
+//! `pages.rs` 一律用 `pt.level` 现算，`Pt.y` 一次都没被读过 —— 两套纵向算术
+//! 并存的结果是改一个忘一个。2026-11-01 直接删掉，只留 X。
+//!
+//! 早先这里还有一套 GDI 渲染（`paint` / `fill` / `draw_text` + 一堆 `COLORREF`
+//! 常量和 `DT_*` 位），是 nwg `Tab` 子类化时代的产物，2026-10-22 已删。
 
 use crate::history::HistoryRow;
-use crate::win32::Rect;
 
 // ==================== 版面 ====================
 
-/// 绘图区在电量页客户坐标里的位置与大小。
+/// X 轴的坐标系基准：`build` 把时间线性映射到 `AREA_X .. AREA_X + AREA_W`。
 ///
-/// 注意：自绘界面里页面按**逻辑像素**排版，这套常量现在只作为
-/// `build` 的坐标系基准（`pages.rs` 把 `pt.x` 从 `AREA_X..AREA_X+AREA_W`
-/// 线性搬到卡片里的实际宽度）。数值本身没有物理意义了。
+/// 自绘界面按**逻辑像素**排版，这两个数没有物理意义，只作为比例基准 ——
+/// `pages.rs` 用 `(pt.x - AREA_X) / AREA_W` 把点搬进卡片的实际宽度。
 pub const AREA_X: i32 = 24;
-pub const AREA_Y: i32 = 186;
 pub const AREA_W: i32 = 660;
-pub const AREA_H: i32 = 200;
 
-/// 左侧留给 Y 轴刻度、底部留给 X 轴时间、顶部留给说明行。
-const PAD_LEFT: i32 = 40;
-const PAD_RIGHT: i32 = 12;
-const PAD_TOP: i32 = 22;
-const PAD_BOTTOM: i32 = 22;
+// ==================== 行数据 → 采样点 ====================
 
-/// 折线真正落笔的矩形（不含刻度和文字）。
-pub fn plot_rect() -> Rect {
-    Rect::new(
-        AREA_X + PAD_LEFT,
-        AREA_Y + PAD_TOP,
-        AREA_X + AREA_W - PAD_RIGHT,
-        AREA_Y + AREA_H - PAD_BOTTOM,
-    )
-}
-
-/// 电量 → 纵坐标。100% 落在 `rc.top`，0% 落在 `rc.bottom - 1`。
-///
-/// 单独抽成函数是为了让**刻度线和数据点用同一套算术** ——
-/// 各写一遍的话，25% 的刻度线永远和数据里 level=25 的点差一个像素。
-pub fn level_to_y(rc: Rect, level: u8) -> i32 {
-    let h = rc.height().max(1);
-    let clamped = level.min(100) as i32;
-    rc.bottom - 1 - (clamped * (h - 1) + 50) / 100
-}
-
-// ==================== 行数据 → 像素坐标 ====================
-
-/// 一个采样点落到屏幕上的位置。
+/// 一个采样点。纵向位置由绘制方按自己的 Y 轴窗口算。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pt {
+    /// 已映射好的横向像素坐标（`AREA_X .. AREA_X + AREA_W`）。
     pub x: i32,
-    pub y: i32,
-    /// 原始电量，画点时不直接用（`y` 已经算好了），诊断和单测要看它。
+    /// 原始电量，绘制方据此算 Y。
     pub level: u8,
-    /// 这个采样点当时是否在充电 —— 用于给折线段换颜色。
+    /// 这个采样点当时是否在充电 —— 用于给折线段换颜色、画充电底带。
     pub charging: bool,
 }
 
@@ -80,7 +56,7 @@ impl Plot {
     }
 }
 
-/// 把历史行映射成像素点。
+/// 把历史行映射成采样点。
 ///
 /// X 轴范围取**数据自己的时间跨度**，不是写死 48 小时：历史文件保留 48 小时，
 /// 但手上只有 8.75 小时数据时，按 48 小时铺满会让 7 个点全挤在左边五分之一里，
@@ -88,7 +64,7 @@ impl Plot {
 ///
 /// `first_ts` / `last_ts` 用 `min` / `max` 而不是首尾元素：`read_rows()` 虽然会排序，
 /// 但这个函数不该依赖调用方的排序 —— 用极值后即使输入乱序，X 也不会反向。
-pub fn build(rows: &[HistoryRow], plot: Rect) -> Plot {
+pub fn build(rows: &[HistoryRow]) -> Plot {
     if rows.is_empty() {
         return Plot::default();
     }
@@ -99,14 +75,12 @@ pub fn build(rows: &[HistoryRow], plot: Rect) -> Plot {
     // 结果是所有点落在同一条竖线上（诚实反映「数据只覆盖一瞬」）。
     let span = (last_ts - first_ts).max(1);
 
-    let w = plot.width().max(1);
     let mut points = Vec::with_capacity(rows.len());
     for r in rows {
         let fx = (r.ts - first_ts) as f64 / span as f64;
-        let x = plot.left + (fx * (w - 1) as f64).round() as i32;
+        let x = AREA_X + (fx * (AREA_W - 1) as f64).round() as i32;
         points.push(Pt {
             x,
-            y: level_to_y(plot, r.level),
             level: r.level,
             charging: r.charging,
         });
@@ -156,119 +130,73 @@ mod tests {
 
     #[test]
     fn empty_and_single_are_not_enough() {
-        let prc = plot_rect();
-        assert!(!build(&[], prc).enough());
-        assert!(!build(&real_rows()[..1], prc).enough());
+        assert!(!build(&[]).enough());
+        assert!(!build(&real_rows()[..1]).enough());
         // 1 个点也能算出坐标（不能 panic），但不够画折线
-        let one = build(&real_rows()[..1], prc);
+        let one = build(&real_rows()[..1]);
         assert_eq!(one.points.len(), 1);
-        assert_eq!(one.points[0].x, prc.left);
+        assert_eq!(one.points[0].x, AREA_X);
     }
 
-    /// 真实数据必须画成「左上 → 右下」的缓降折线，7 个点，X 单调递增。
+    /// 真实数据：7 个点、X 严格递增、首尾贴满整个横向区间。
     /// 这条测试就是「别把 X 轴映射写错」的钉子：写错时点会挤成一堆或变成平线。
     #[test]
-    fn real_seven_points_form_a_falling_curve() {
-        let prc = plot_rect();
-        let plot = build(&real_rows(), prc);
+    fn real_seven_points_span_the_whole_band() {
+        let plot = build(&real_rows());
         assert!(plot.enough());
         assert_eq!(plot.points.len(), 7);
 
-        // 起点贴左边界，终点贴右边界（右边界是 `right - 1`，因为闭区间像素）
-        assert_eq!(plot.points[0].x, prc.left);
-        assert_eq!(plot.points[6].x, prc.right - 1);
+        assert_eq!(plot.points[0].x, AREA_X);
+        assert_eq!(plot.points[6].x, AREA_X + AREA_W - 1);
 
-        // X 单调递增（时间往前走）
         for w in plot.points.windows(2) {
-            assert!(w[1].x > w[0].x, "X 必须严格递增：{:?}", w);
+            assert!(w[1].x > w[0].x, "X 必须严格递增：{w:?}");
         }
 
-        // 电量 89% → 82%，屏幕上是往下走（y 变大）
+        // 电平原样带过去，绘制方靠它算 Y
         assert_eq!(plot.points[0].level, 89);
         assert_eq!(plot.points[6].level, 82);
-        assert!(
-            plot.points[6].y > plot.points[0].y,
-            "电量下降对应 y 增大：{} → {}",
-            plot.points[0].y,
-            plot.points[6].y
-        );
-
-        // 不能画成平线：y 的极差至少要有几个像素（7 个点跨 7 个百分点）
-        let ys: Vec<i32> = plot.points.iter().map(|p| p.y).collect();
-        let span = ys.iter().max().unwrap() - ys.iter().min().unwrap();
-        assert!(span >= 5, "曲线太扁（y 极差 {span}px），像是 X/Y 映射写错了");
     }
 
-    /// 所有点必须落在绘图矩形内，越界就是裁剪或被别的控件挡住。
+    /// 所有点必须落在横向区间内，越界就是被裁剪或被别的控件挡住。
     #[test]
-    fn all_points_stay_inside_plot_rect() {
-        let prc = plot_rect();
+    fn all_points_stay_inside_the_band() {
         let mut rows = real_rows();
-        // 再塞几个极端值：0% 与 100%
         rows.push(HistoryRow::new(1792601000, 0, true, 2));
         rows.push(HistoryRow::new(1792602000, 100, false, 2));
-        let plot = build(&rows, prc);
+        let plot = build(&rows);
         for p in &plot.points {
             assert!(
-                p.x >= prc.left && p.x < prc.right,
+                p.x >= AREA_X && p.x < AREA_X + AREA_W,
                 "x={} 越界 [{}, {})",
                 p.x,
-                prc.left,
-                prc.right
+                AREA_X,
+                AREA_X + AREA_W
             );
-            assert!(
-                p.y >= prc.top && p.y <= prc.bottom - 1,
-                "y={} 越界 [{}, {}]",
-                p.y,
-                prc.top,
-                prc.bottom - 1
-            );
-        }
-    }
-
-    /// 0% / 100% 必须正好落在绘图区的下/上边界，25% 等刻度线与数据点共用同一套算术。
-    #[test]
-    fn level_maps_to_axis_edges() {
-        let prc = plot_rect();
-        assert_eq!(level_to_y(prc, 100), prc.top);
-        assert_eq!(level_to_y(prc, 0), prc.bottom - 1);
-        // 越界的电量被钳住而不是画到框外
-        assert_eq!(level_to_y(prc, 200), prc.top);
-        // 单调：电量越高，y 越小
-        let mut prev = i32::MAX;
-        for lv in [0u8, 25, 50, 75, 100] {
-            let y = level_to_y(prc, lv);
-            assert!(y < prev, "level {lv} 的 y 没有随电量升高而减小");
-            prev = y;
         }
     }
 
     /// 所有点在同一秒时跨度为 0，不能除零 panic。
     #[test]
     fn identical_timestamps_do_not_panic() {
-        let prc = plot_rect();
         let rows: Vec<HistoryRow> = (0..4)
             .map(|i| HistoryRow::new(1_700_000_000, 50 + i, false, 2))
             .collect();
-        let plot = build(&rows, prc);
+        let plot = build(&rows);
         assert_eq!(plot.points.len(), 4);
-        assert!(plot.points.iter().all(|p| p.x == prc.left));
+        assert!(plot.points.iter().all(|p| p.x == AREA_X));
     }
 
     /// 输入乱序也能画：X 轴范围用 min/max，不用首尾元素。
     #[test]
     fn unsorted_input_keeps_x_monotonic_by_timestamp() {
-        let prc = plot_rect();
         let mut rows = real_rows();
         rows.reverse();
-        let plot = build(&rows, prc);
-        let mut by_ts: Vec<(i64, i32)> = Vec::new();
-        for (r, p) in rows.iter().zip(plot.points.iter()) {
-            by_ts.push((r.ts, p.x));
-        }
+        let plot = build(&rows);
+        let mut by_ts: Vec<(i64, i32)> = rows.iter().zip(plot.points.iter()).map(|(r, p)| (r.ts, p.x)).collect();
         by_ts.sort_by_key(|(ts, _)| *ts);
         for w in by_ts.windows(2) {
-            assert!(w[1].1 >= w[0].1, "时间越大 X 不能更小：{:?}", w);
+            assert!(w[1].1 >= w[0].1, "时间越大 X 不能更小：{w:?}");
         }
     }
 
@@ -277,7 +205,7 @@ mod tests {
     /// 点数要对、起止时间要来自极值而不是首尾元素。
     #[test]
     fn span_comes_from_extremes_not_endpoints() {
-        let plot = build(&real_rows(), plot_rect());
+        let plot = build(&real_rows());
         assert_eq!(plot.points.len(), 7);
         assert_eq!(plot.first_ts, 1792568899);
         assert_eq!(plot.last_ts, 1792600403);
@@ -286,7 +214,7 @@ mod tests {
         // 否则 X 轴会反向（曲线左右翻转）。
         let mut rows = real_rows();
         rows.reverse();
-        let rev = build(&rows, plot_rect());
+        let rev = build(&rows);
         assert_eq!(rev.first_ts, plot.first_ts);
         assert_eq!(rev.last_ts, plot.last_ts);
     }

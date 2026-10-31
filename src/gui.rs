@@ -2404,7 +2404,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         let sender_c = sender;
         std::thread::spawn(move || loop {
             let rows = crate::history::read_rows();
-            let plot = crate::chart::build(&rows, crate::chart::plot_rect());
+            let plot = crate::chart::build(&rows);
             {
                 let mut s = lock_shared(&shared_c);
                 s.rows = rows;

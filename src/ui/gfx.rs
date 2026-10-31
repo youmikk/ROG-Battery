@@ -2143,7 +2143,7 @@ mod tests {
         // 48 小时「真实感」历史：先放电 30 小时、再充 3 小时、最后放电 15 小时。
         // 没有这段数据，快照里的图表永远是「正在读取历史样本」，看不出曲线本身长什么样。
         let demo = demo_rows();
-        let plot = crate::chart::build(&demo, crate::chart::plot_rect());
+        let plot = crate::chart::build(&demo);
         let demo_len = demo.len();
         let data = crate::ui::pages::Data {
             state: Some(&state),
