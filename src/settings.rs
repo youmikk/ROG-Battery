@@ -25,8 +25,6 @@ pub struct Settings {
     pub refresh_interval_sec: u64,
     /// 是否启用托盘图标。
     pub tray_enabled: bool,
-    /// 点关闭按钮时最小化到托盘（true）还是直接退出（false）。
-    pub close_to_tray: bool,
     /// 窗口关闭时的行为："ask"（每次询问）、"minimize"（最小化到托盘）、"quit"（直接退出）。
     pub close_mode: String,
     /// 界面配色：`"light"` 或 `"dark"`。
@@ -47,7 +45,6 @@ impl Default for Settings {
             // 撞上超时（一次 MISS 要等满 1200ms），所以默认 60 秒。
             refresh_interval_sec: 60,
             tray_enabled: true,
-            close_to_tray: true,
             close_mode: "ask".to_string(),
             theme: "system".to_string(),
         }
@@ -57,6 +54,10 @@ impl Default for Settings {
 impl Settings {
     fn parse(text: &str) -> Settings {
         let mut s = Settings::default();
+        // 旧版本同时写 close_to_tray 和 close_mode，两者表达同一件事。
+        // 现在只认 close_mode；close_to_tray 仅在文件里没出现 close_mode 时兜底换算。
+        let mut legacy_close: Option<bool> = None;
+        let mut saw_close_mode = false;
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -85,14 +86,14 @@ impl Settings {
                 }
                 "close_to_tray" => {
                     if let Some(b) = parse_bool(v) {
-                        s.close_to_tray = b;
+                        legacy_close = Some(b);
                     }
                 }
                 "close_mode" => {
                     let want = v.trim().to_ascii_lowercase();
                     if want == "ask" || want == "minimize" || want == "quit" {
-                        s.close_to_tray = want == "minimize";
                         s.close_mode = want;
+                        saw_close_mode = true;
                     }
                 }
                 "theme" => {
@@ -104,6 +105,11 @@ impl Settings {
                     }
                 }
                 _ => {} // 未知键忽略，向后兼容（旧文件只有 cache_ttl_sec 一行也能读）
+            }
+        }
+        if !saw_close_mode {
+            if let Some(b) = legacy_close {
+                s.close_mode = if b { "minimize" } else { "quit" }.to_string();
             }
         }
         s
@@ -124,9 +130,6 @@ impl Settings {
         s.push_str(&format!("refresh_interval_sec={}\n\n", self.refresh_interval_sec));
         s.push_str("# 是否启用托盘图标（true/false）。\n");
         s.push_str(&format!("tray_enabled={}\n\n", self.tray_enabled));
-        s.push_str("# 点窗口关闭按钮时：true=最小化到托盘，false=直接退出。\n");
-        s.push_str("# 只在 tray_enabled=true 时才有意义。\n");
-        s.push_str(&format!("close_to_tray={}\n\n", self.close_to_tray));
         s.push_str("# 关闭窗口动作：ask=每次询问，minimize=最小化到系统托盘，quit=直接退出。\n");
         s.push_str(&format!("close_mode={}\n\n", self.close_mode));
         s.push_str("# 界面配色：system（默认，跟随系统深浅色）/ light（浅色）/ dark（深色）。\n");
@@ -253,7 +256,19 @@ mod tests {
         // 缺失的键用默认值
         assert_eq!(s.refresh_interval_sec, 60);
         assert!(s.tray_enabled);
-        assert!(s.close_to_tray);
+        assert_eq!(s.close_mode, "ask");
+    }
+
+    #[test]
+    fn legacy_close_to_tray_maps_to_close_mode() {
+        // 旧文件里的 close_to_tray 必须还能换算成 close_mode
+        assert_eq!(Settings::parse("close_to_tray=true").close_mode, "minimize");
+        assert_eq!(Settings::parse("close_to_tray=false").close_mode, "quit");
+        // 两者同时出现时以 close_mode 为准（它更具体，能表达 ask）
+        assert_eq!(
+            Settings::parse("close_to_tray=true\nclose_mode=ask").close_mode,
+            "ask"
+        );
     }
 
     #[test]
@@ -302,7 +317,6 @@ mod tests {
             cache_ttl_sec: 45,
             refresh_interval_sec: 20,
             tray_enabled: false,
-            close_to_tray: false,
             close_mode: "quit".to_string(),
             theme: "dark".to_string(),
         };
@@ -310,7 +324,6 @@ mod tests {
         assert_eq!(back.cache_ttl_sec, 45);
         assert_eq!(back.refresh_interval_sec, 20);
         assert!(!back.tray_enabled);
-        assert!(!back.close_to_tray);
         assert_eq!(back.close_mode, "quit");
         assert_eq!(back.theme, "dark", "配色没有往返成功");
     }

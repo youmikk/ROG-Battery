@@ -194,7 +194,6 @@ impl Slide {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pref {
     TrayEnabled,
-    CloseToTray,
     AutoStart,
     /// 电量页：充满效果开关（这个**是**写设备的）。
     FullEffect,

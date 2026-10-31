@@ -602,10 +602,7 @@ fn handle_act(a: Act, env: &UiEnv) {
                 } else {
                     "quit"
                 };
-                env.set_cfg(|c| {
-                    c.close_mode = mode.to_string();
-                    c.close_to_tray = mode == "minimize";
-                });
+                env.set_cfg(|c| c.close_mode = mode.to_string());
             }
 
             if choice == crate::ui::widget::CloseChoice::Minimize {
@@ -623,11 +620,7 @@ fn handle_act(a: Act, env: &UiEnv) {
                 2 => "quit",
                 _ => "ask",
             };
-            let is_min = mode == "minimize";
-            env.set_cfg(|c| {
-                c.close_mode = mode.to_string();
-                c.close_to_tray = is_min;
-            });
+            env.set_cfg(|c| c.close_mode = mode.to_string());
         }
 
         Act::ToggleRail => {
@@ -976,11 +969,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
                 2 => "quit",
                 _ => "ask",
             };
-            let is_min = mode == "minimize";
-            env.set_cfg(|c| {
-                c.close_mode = mode.to_string();
-                c.close_to_tray = is_min;
-            });
+            env.set_cfg(|c| c.close_mode = mode.to_string());
         }
     }
 }
@@ -1219,22 +1208,6 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
             env.say(format!(
                 "✔ 托盘图标已{}",
                 if on { "开启" } else { "关闭" }
-            ));
-        }
-        Pref::CloseToTray => {
-            // 防御：界面上托盘关掉时这个开关已经点不动了，但设置可能是
-            // 手改 ini 或旧版本留下的（`tray_enabled=false` + `close_to_tray=true`）。
-            // 那种组合下开这个开关等于「关窗口就消失，又没有托盘图标」——
-            // 用户只能去任务管理器杀进程。宁可直接拒绝。
-            if !env.cfg().tray_enabled {
-                env.say("✘ 托盘图标没开，「最小化到托盘」不会生效");
-                return;
-            }
-            let on = !env.cfg().close_to_tray;
-            env.set_cfg(|c| c.close_to_tray = on);
-            env.say(format!(
-                "✔ 关闭窗口时{}",
-                if on { "最小化到托盘" } else { "直接退出" }
             ));
         }
         Pref::AutoStart => {
