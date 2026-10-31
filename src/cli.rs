@@ -299,6 +299,14 @@ pub fn cmd_backup(ctx: &mut Ctx, dev: &mut HidDevice, path: &str) -> Result<(), 
 ///
 /// `log` 收的是**已格式化好的一行**（不带换行），调用方决定打到终端还是
 /// 塞进界面的结果框。
+/// 还原 DPI 档位时，是否需要为了补齐颜色去读一次设备状态。
+///
+/// 只有「这一档要写、但备份里没记颜色」才需要；这种情况整份还原最多发生
+/// 一次读取（见 `apply_backup` 里的 `base`）。
+fn needs_color_base(b: &backup::Backup) -> bool {
+    (0..DPI_STAGES).any(|i| b.dpi_enc[i].is_some() && b.dpi_rgb[i].is_none())
+}
+
 pub fn apply_backup(
     dev: &mut HidDevice,
     rid: u8,
@@ -326,6 +334,16 @@ pub fn apply_backup(
     //    **缺失的键不该被当成零值写进设备**。现在缺失就沿用设备当前值。
     // ② `dpiN_enc` 完全没有范围校验，写 `dpi1_enc=999` 会变成 50000 DPI
     //    （`decode_dpi(999) = 999*50+50`）。现在超范围直接拒绝整份还原。
+    // 缺 `dpiN_rgb` 时要沿用设备当前颜色。**整份还原最多只读一次设备**：
+    // 原来每个缺失的档位都 `reader.read(...)` 一遍（17 帧 ≈ 860ms，休眠时 4.8s），
+    // 四个档位都不带颜色就是四次。基准状态在循环前取一次，后面复用。
+    let base = if needs_color_base(b) {
+        let mut reader = ops::DirectReader;
+        Some(reader.read(dev, rid, true).map_err(|e| e.message)?)
+    } else {
+        None
+    };
+
     for i in 0..DPI_STAGES {
         let Some(enc) = b.dpi_enc[i] else { continue };
         if !(proto::DPI_ENC_MIN..=proto::DPI_ENC_MAX).contains(&enc) {
@@ -339,14 +357,15 @@ pub fn apply_backup(
                 proto::decode_dpi(proto::DPI_ENC_MAX)
             ));
         }
-        // 缺 `dpiN_rgb` 时沿用设备当前颜色，绝不兜底成黑色
+        // 缺 `dpiN_rgb` 时沿用设备当前颜色，绝不兜底成黑色。
+        // `base` 必然是 `Some`（上面的 `any` 条件与这里的分支一一对应），
+        // 万一不成立也必须报错而不是写黑色。
         let rgb = match b.dpi_rgb[i] {
             Some(c) => c,
-            None => {
-                let mut reader = ops::DirectReader;
-                let cur = reader.read(dev, rid, true).map_err(|e| e.message)?;
-                cur.rgb[i]
-            }
+            None => match base.as_ref() {
+                Some(st) => st.rgb[i],
+                None => return Err(format!("DPI 档 {} 缺少颜色基准状态", i + 1)),
+            },
         };
         if proto::write_dpi(dev, rid, i, proto::decode_dpi(enc), rgb).is_none() {
             return Err(format!("写 DPI 档 {} 无应答", i + 1));
@@ -973,5 +992,26 @@ mod tests {
         let msg = partial_hint("写能量块无应答".into(), 5);
         assert!(msg.contains("写能量块无应答"));
         assert!(msg.contains("已成功写入 5 项"), "实际：{msg}");
+    }
+
+    #[test]
+    fn needs_color_base_only_when_color_missing() {
+        use crate::backup::Backup;
+
+        // 全都带颜色：不需要读设备
+        let mut b = Backup::default();
+        for i in 0..crate::proto::DPI_STAGES {
+            b.dpi_enc[i] = Some(15);
+            b.dpi_rgb[i] = Some([1, 2, 3]);
+        }
+        assert!(!needs_color_base(&b));
+
+        // 有一档要写但没颜色：需要读一次
+        b.dpi_rgb[2] = None;
+        assert!(needs_color_base(&b));
+
+        // 没颜色的那档本来就不写（enc 是 None）：仍然不需要读
+        b.dpi_enc[2] = None;
+        assert!(!needs_color_base(&b));
     }
 }
