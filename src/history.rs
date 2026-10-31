@@ -40,6 +40,18 @@ pub const MUTEX_NAME: &str = "Local\\RogBatteryHistory";
 /// 等锁上限。拿不到就放弃本次写入，不阻塞调用方。
 pub const MUTEX_TIMEOUT_MS: u32 = 3000;
 
+/// 单行历史记录的最大字节数（`ts\tlevel\tcharging\tmode`，留足余量）。
+///
+/// 只用来估算「文件体积是否接近行数上限」，不需要精确。
+const LINE_MAX_BYTES: usize = 24;
+/// 每写这么多条就做一次整份裁剪。
+///
+/// 48 小时窗口按行时间判断，必须全量；但写采样只需要最后一行。折中是攒够一批
+/// 再读全量，把「每条一次全量读」降成「每 40 条一次」。
+const PRUNE_EVERY_WRITES: u32 = 40;
+/// 距上次裁剪又写了几条。
+static WRITES_SINCE_PRUNE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// 外推上限（小时）。
 ///
 /// 原来取 100 小时，本意是不让界面出现「还能用 137 小时」这种没人信的数字。
@@ -442,8 +454,14 @@ pub fn record_sample_at(
         crate::paths::ensure_dir(dir)?;
     }
 
-    let rows = read_rows();
-    if !should_record(&rows, level, charging, now_sec) {
+    // 只读最后一条：去重只看「上一条」，为了它整份读盘 + 解析 + 排序是每 60 秒一次的
+    // 固定浪费（2000 行 ≈ 2000 次 split + collect + O(n log n) 排序）。
+    let last = read_last_row();
+    let tail: &[HistoryRow] = match last.as_ref() {
+        Some(r) => std::slice::from_ref(r),
+        None => &[],
+    };
+    if !should_record(tail, level, charging, now_sec) {
         return Ok(false);
     }
 
@@ -453,18 +471,79 @@ pub fn record_sample_at(
 
     // 先追加再裁剪：万一裁剪失败，至少样本已经落盘了。
     //
-    // ⚠️ 裁剪必须拿**含刚追加那条**的列表去算。以前这里传的是 `&rows`（追加前的
+    // 裁剪要拿**含刚追加那条**的列表去算。以前这里传的是 `&rows`（追加前的
     // 快照），于是每次 rewrite 都会把刚写进去的那条覆盖掉；如果 `rows` 已经全部
     // 超出 48 小时窗口，裁剪结果就是空表 —— 文件被改写成 0 字节，样本永远攒不起来，
-    // 界面上就永远显示「样本不足」。
-    let outcome = prune_after_append(&rows, new_row, now_sec);
-    if outcome.rewrite {
-        write_all(&path, &outcome.rows)?;
+    // 界面上就永远显示「样本不足」。现在直接读追加后的文件，天然包含新样本。
+    if prune_due(&path) {
+        let all = read_rows();
+        let outcome = prune_rows(&all, now_sec);
+        if outcome.rewrite {
+            write_all(&path, &outcome.rows)?;
+        }
     }
     Ok(true)
 }
 
+/// 只读文件末尾，取最后一条样本。
+///
+/// 写采样时唯一需要的历史信息就是「上一条是什么」，为此把整份文件读盘 + 解析 +
+/// 排序（2000 行）是纯浪费。这里从文件尾往前找最后一行，最多回退 8KB。
+fn read_last_row() -> Option<HistoryRow> {
+    read_last_row_at(&history_path())
+}
+
+fn read_last_row_at(path: &std::path::Path) -> Option<HistoryRow> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    let mut back = 256u64;
+    loop {
+        let start = len.saturating_sub(back);
+        f.seek(SeekFrom::Start(start)).ok()?;
+        let mut buf = Vec::with_capacity((len - start) as usize);
+        f.read_to_end(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        // 末尾若没有换行，说明是刚写完的残行，丢掉它再取上一行
+        let mut lines: Vec<&str> = text.split('\n').filter(|l| !l.trim().is_empty()).collect();
+        if !text.ends_with('\n') {
+            lines.pop();
+        }
+        if let Some(line) = lines.last() {
+            let mut rows = parse_rows(line);
+            if let Some(r) = rows.pop() {
+                return Some(r);
+            }
+        }
+        if start == 0 || back >= 8192 {
+            return None;
+        }
+        back *= 2;
+    }
+}
+
+/// 是否该做一次整份裁剪。
+///
+/// 裁剪需要全量行（48 小时窗口按行判断），而写采样只用到「最后一行」。
+/// 每写一条就读整份文件是纯浪费，所以按文件体积 + 写入计数节流：
+/// 体积接近行数上限，或累计写了 `PRUNE_EVERY_WRITES` 条，才真正读全量。
+fn prune_due(path: &std::path::Path) -> bool {
+    let writes = WRITES_SINCE_PRUNE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let too_big = std::fs::metadata(path)
+        .map(|m| m.len() as usize >= HIST_MAX_LINES * LINE_MAX_BYTES)
+        .unwrap_or(false);
+    if too_big || writes >= PRUNE_EVERY_WRITES {
+        WRITES_SINCE_PRUNE.store(0, std::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
 /// 追加一条之后的裁剪：把新样本并进列表再算，避免「刚写的被裁剪覆盖掉」。
+#[allow(dead_code)]
 fn prune_after_append(rows: &[HistoryRow], new_row: HistoryRow, now_sec: i64) -> PruneOutcome {
     let mut all = Vec::with_capacity(rows.len() + 1);
     all.extend_from_slice(rows);
@@ -1094,6 +1173,42 @@ mod tests {
         let out = prune_rows(&rows, T0 + 600);
         assert!(!out.rewrite, "没什么可删的时候不应该重写文件");
         assert_eq!(out.rows.len(), 10);
+    }
+
+    #[test]
+    fn read_last_row_reads_tail_without_full_parse() {
+        // 写采样只读最后一行：给一个 500 行的文件，结果必须等于最后一行。
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-last-row.tsv");
+        let mut text = String::new();
+        for i in 0..500 {
+            text.push_str(&format!("{}\t{}\t0\t2\n", T0 - (500 - i) * 60, 80));
+        }
+        text.push_str(&format!("{}\t{}\t1\t2\n", T0, 97));
+        std::fs::write(&path, text).expect("写测试文件");
+
+        let last = read_last_row_at(&path).expect("应读到最后一行");
+        assert_eq!(last.ts, T0);
+        assert_eq!(last.level, 97);
+        assert!(last.charging, "充电标志也要读出来");
+
+        // 末尾是不完整的残行时，退回上一条完整行
+        std::fs::write(&path, format!("{}\t90\t0\t2\n1234", T0)).expect("写残行");
+        let last = read_last_row_at(&path).expect("残行应被跳过");
+        assert_eq!(last.ts, T0);
+        assert_eq!(last.level, 90);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_last_row_handles_missing_file() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("does-not-exist-last-row.tsv");
+        let _ = std::fs::remove_file(&path);
+        assert!(read_last_row_at(&path).is_none());
     }
 
     #[test]
