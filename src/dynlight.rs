@@ -116,7 +116,7 @@ fn probe() -> Option<LampInfo> {
     let api = crate::win32::HidApi::load().ok()?;
     let ifaces = crate::hid::enumerate(&api).ok()?;
     let iface = ifaces.iter().find(|i| i.usage_page == USAGE_PAGE_LAMPARRAY)?;
-    let (lamp_count, kind) = read_attributes(&iface.path)?;
+    let (lamp_count, kind) = read_attributes(&api, &iface.path)?;
     if lamp_count == 0 {
         return None;
     }
@@ -171,26 +171,8 @@ pub fn open_settings() -> Result<(), String> {
 // ───────────────────────── 底层：HidD_GetFeature ─────────────────────────
 
 // `hid.dll` 在本机这套工具链里**没有** `libhid.a`（`win32.rs` 顶部注释也写了这点），
-// 所以不能用 `#[link(name = "hid")]`，只能 `LoadLibraryW` + `GetProcAddress` 动态取。
-type FnHidDGetFeature = unsafe extern "system" fn(
-    hid_device_object: crate::win32::Handle,
-    report_buffer: *mut u8,
-    report_buffer_length: u32,
-) -> i32;
-
-fn hid_get_feature() -> Option<FnHidDGetFeature> {
-    let module = unsafe { crate::win32::LoadLibraryW(crate::win32::to_wide("hid.dll").as_ptr()) };
-    if module.is_null() || module as isize == -1 {
-        return None;
-    }
-    let sym = b"HidD_GetFeature\0";
-    let ptr = unsafe { crate::win32::GetProcAddress(module, sym.as_ptr()) };
-    if ptr.is_null() {
-        return None;
-    }
-    Some(unsafe { core::mem::transmute::<*mut core::ffi::c_void, FnHidDGetFeature>(ptr) })
-}
-
+// 加载与 `GetProcAddress` 统一由 `win32::HidApi` 负责 —— 这里不再自建一套
+// `LoadLibraryW`（原来每调一次就多一次引用计数，且从不释放）。
 /// 读 LampArray 属性报表，返回 `(LampCount, LampArrayKind)`。
 ///
 /// 报表布局（按实测字节 + HID LampArray 1.0 规范）：
@@ -204,8 +186,7 @@ fn hid_get_feature() -> Option<FnHidDGetFeature> {
 /// byte 15..17 LampArrayKind        u16 LE
 /// byte 17..21 MinUpdateInterval    u32 LE（微秒）
 /// ```
-fn read_attributes(path: &str) -> Option<(u16, u16)> {
-    let get_feature = hid_get_feature()?;
+fn read_attributes(api: &crate::win32::HidApi, path: &str) -> Option<(u16, u16)> {
     let wide = crate::win32::to_wide(path);
     let h = unsafe {
         crate::win32::CreateFileW(
@@ -225,7 +206,7 @@ fn read_attributes(path: &str) -> Option<(u16, u16)> {
     // 51 字节的 feature report，取 64 兜底。
     let mut buf = [0u8; 64];
     buf[0] = REPORT_ATTRIBUTES;
-    let ok = unsafe { get_feature(h, buf.as_mut_ptr(), buf.len() as u32) };
+    let ok = unsafe { (api.get_feature)(h, buf.as_mut_ptr(), buf.len() as u32) };
     unsafe { crate::win32::CloseHandle(h) };
     if ok == 0 {
         return None;

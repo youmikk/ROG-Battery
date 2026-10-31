@@ -720,8 +720,16 @@ pub type FnHidDFreePreparsedData = unsafe extern "system" fn(*mut c_void) -> u8;
 pub type FnHidPGetCaps = unsafe extern "system" fn(*mut c_void, *mut HidpCaps) -> i32;
 pub type FnHidDGetProductString = unsafe extern "system" fn(Handle, *mut u16, u32) -> u8;
 pub type FnHidDGetSerialNumberString = unsafe extern "system" fn(Handle, *mut u16, u32) -> u8;
+pub type FnHidDGetFeature = unsafe extern "system" fn(Handle, *mut u8, u32) -> u8;
 
-/// hid.dll 的函数表。进程内只加载一次。
+/// hid.dll 的函数表。进程内只加载一次（见 [`HidApi::load`]）。
+///
+/// `Copy` 是故意的：表里全是函数指针与模块句柄，复制一份是零成本的，
+/// 这样调用方拿到的是「缓存表的副本」而不是引用，签名不用改。
+///
+/// 模块句柄**故意不释放**：多个 `HidDevice` 可能还持有这里的函数指针，
+/// `FreeLibrary` 会在退出路径上踩空；进程结束时由系统回收即可。
+#[derive(Clone, Copy)]
 pub struct HidApi {
     _module: Handle,
     pub get_hid_guid: FnHidDGetHidGuid,
@@ -731,10 +739,30 @@ pub struct HidApi {
     pub get_caps: FnHidPGetCaps,
     pub get_product_string: FnHidDGetProductString,
     pub get_serial_number_string: FnHidDGetSerialNumberString,
+    pub get_feature: FnHidDGetFeature,
 }
 
+// 表里只有模块句柄与函数指针，跨线程共享是安全的（hid.dll 的导出函数无状态）。
+unsafe impl Send for HidApi {}
+unsafe impl Sync for HidApi {}
+
+/// 进程级缓存。用 `Mutex<Option<_>>` 而不是 `OnceLock<Result<_>>`：
+/// 加载失败（比如 hid.dll 被临时挡住）不能变成永久失败，要允许下次重试。
+static HID_API: std::sync::Mutex<Option<HidApi>> = std::sync::Mutex::new(None);
+
 impl HidApi {
+    /// 取 hid.dll 函数表。首次调用加载并缓存，之后只复制一份。
     pub fn load() -> Result<HidApi, String> {
+        let mut g = HID_API.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(api) = *g {
+            return Ok(api);
+        }
+        let api = unsafe { Self::load_uncached() }?; // 失败故意不写缓存
+        *g = Some(api);
+        Ok(api)
+    }
+
+    unsafe fn load_uncached() -> Result<HidApi, String> {
         unsafe {
             let name = to_wide("hid.dll");
             let module = LoadLibraryW(name.as_ptr());
@@ -768,6 +796,7 @@ impl HidApi {
                     "HidD_GetSerialNumberString",
                     FnHidDGetSerialNumberString
                 ),
+                get_feature: take!("HidD_GetFeature", FnHidDGetFeature),
             })
         }
     }
@@ -851,6 +880,16 @@ pub fn attach_console() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hid_api_load_is_cached_not_reloaded() {
+        // 两次 load 必须拿到同一张表（函数指针地址相同）。若哪天有人把缓存去掉，
+        // 这条会挂 —— 那意味着每次调用都重新 LoadLibraryW 一遍。
+        let a = HidApi::load().expect("hid.dll 应能加载");
+        let b = HidApi::load().expect("第二次也应成功");
+        assert_eq!(a.get_feature as usize, b.get_feature as usize);
+        assert_eq!(a.get_attributes as usize, b.get_attributes as usize);
+    }
 
     #[test]
     fn taskbar_created_message_id_is_stable() {
