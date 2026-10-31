@@ -842,7 +842,7 @@ fn apply_theme_pref(env: &UiEnv, pref: &str) {
 /// `idx` 在预设模式下是颜色下标，在色环模式下是打包的 24-bit RGB ——
 /// `palette_color` 两种都认。
 fn pick_palette(env: &UiEnv, slot: u8, idx: usize) {
-    let Some(rgb) = pages::palette_color(idx) else {
+    let Some(rgb) = crate::ui::palette::palette_color(idx) else {
         return;
     };
     if slot == crate::ui::widget::LIGHT_COLOR_SLOT {
@@ -915,7 +915,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
         return;
     }
 
-    let Some(code) = pages::option_value(d, idx) else {
+    let Some(code) = crate::ui::dropdown::option_value(d, idx) else {
         return;
     };
 

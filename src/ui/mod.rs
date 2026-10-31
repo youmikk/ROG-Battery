@@ -27,6 +27,8 @@
 //! 这样「点了哪一行」这种判断不用起窗口就能验证。
 
 pub mod canvas;
+pub mod dropdown;
+pub mod palette;
 pub mod frame;
 pub mod gfx;
 pub mod layout;

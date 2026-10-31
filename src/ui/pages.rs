@@ -27,6 +27,13 @@
 use crate::ui::gfx::{with_alpha, Align, Painter, R};
 use crate::ui::layout::{self, font, Breakpoint, Frame};
 use crate::ui::theme::Theme;
+use crate::ui::dropdown::{
+    drop_current, drop_selected, options,
+};
+use crate::ui::palette::{
+    hsv_to_rgb, pack_custom_rgb, palette_colors, palette_index, rgb_to_hsv, PAL_CELL,
+    PAL_COLS, PAL_GAP,
+};
 use crate::ui::widget::{
     Act, Drop, Edit, Icon, Page, Pref, Slide, Ui,
 };
@@ -384,112 +391,12 @@ fn badge(p: &mut Painter, r: R, label: &str, fg: u32, bg: u32) {
 
 // ───────────────────────── 色盘 ─────────────────────────
 
-/// 色盘格子边长与间距（逻辑像素）。
-const PAL_CELL: f32 = 30.0;
-const PAL_GAP: f32 = 6.0;
-/// 一行几个色块。
-///
-/// **必须是 12**：色相每 30 度一格正好 12 格，一行才是一个完整的色相环。
-/// 一开始写的 8，结果 12 个饱和色排在 8 列里要折行 —— 第二行前 4 格是
-/// 饱和色、后 4 格已经是淡色，界面上看是两种色系糊在一起（真机截图确认）。
-const PAL_COLS: usize = 12;
 
-/// HSV → RGB。`h` 是 0–360 度，`s`/`v` 是 0–1。
-///
-/// 自己算而不是查表：色盘要的是「色相均分」这个性质，写成 12 个角度的循环
-/// 比手抄 24 个十六进制更不容易抄错，也顺手给出两档明度。
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
-    let c = v * s;
-    let hp = (h / 60.0).clamp(0.0, 6.0);
-    let x = c * (1.0 - ((hp % 2.0) - 1.0).abs());
-    let (r1, g1, b1) = match hp as i32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = v - c;
-    let f = |u: f32| ((u + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    [f(r1), f(g1), f(b1)]
-}
 
-/// 色盘的候选颜色（36 个，12 列 × 3 行）。
-///
-/// 组成：12 个色相 × 2 档明度（饱和 + 淡色）+ 12 级灰阶。
-///
-/// 为什么不是「二十四色手抄表」：色相均分是这里唯一要的性质，手抄一边
-/// 多写一个少写一个都不报错，只会让某个色相在盘上占两格 —— 看不见的错。
-///
-/// 灰阶放最后一行：灯光常设成白色/关闭，给一整行 0–255 的灰比在彩色里
-/// 找白色直观。**12 级灰而不是 8 级**：这样三行都正好填满 12 列，
-/// 最后一行右边不会空出 4 格（真机截图里那 4 个空位看着像画漏了）。
-pub fn palette_colors() -> Vec<[u8; 3]> {
-    let mut out = Vec::with_capacity(PAL_COLS * 3);
-    // 前 12：色相每 30 度一格，饱和
-    for i in 0..PAL_COLS {
-        out.push(hsv_to_rgb(i as f32 * 30.0, 1.0, 1.0));
-    }
-    // 中 12：同一组色相的淡色
-    for i in 0..PAL_COLS {
-        out.push(hsv_to_rgb(i as f32 * 30.0, 0.45, 1.0));
-    }
-    // 后 12：灰阶（含纯黑与纯白）
-    for i in 0..PAL_COLS {
-        let v = i as f32 / (PAL_COLS - 1) as f32;
-        let g = (v * 255.0).round() as u8;
-        out.push([g, g, g]);
-    }
-    out
-}
 
-/// 某个颜色在色盘里的下标。找不到返 `None`（用户从十六进制框输入了盘上没有的颜色）。
-pub fn palette_index(rgb: [u8; 3]) -> Option<usize> {
-    palette_colors().iter().position(|c| *c == rgb)
-}
 
-/// 色盘第 `idx` 个颜色。越界返 `None`。
-///
-/// 支持 0..36 预设下标，以及 >= 0x0100_0000 的 24-bit 自定义 RGB 编码。
-pub fn palette_color(idx: usize) -> Option<[u8; 3]> {
-    if idx >= 0x0100_0000 {
-        let r = ((idx >> 16) & 0xFF) as u8;
-        let g = ((idx >> 8) & 0xFF) as u8;
-        let b = (idx & 0xFF) as u8;
-        Some([r, g, b])
-    } else {
-        palette_colors().get(idx).copied()
-    }
-}
 
-/// 把自定义 RGB 颜色打包进 `usize`（保留高字节标志位）。
-pub fn pack_custom_rgb(rgb: [u8; 3]) -> usize {
-    0x0100_0000 | ((rgb[0] as usize) << 16) | ((rgb[1] as usize) << 8) | (rgb[2] as usize)
-}
 
-/// RGB 转 HSV（H: 0..360, S: 0..1, V: 0..1）。
-pub fn rgb_to_hsv(rgb: [u8; 3]) -> (f32, f32, f32) {
-    let r = rgb[0] as f32 / 255.0;
-    let g = rgb[1] as f32 / 255.0;
-    let b = rgb[2] as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let delta = max - min;
-    let v = max;
-    let s = if max > 1e-5 { delta / max } else { 0.0 };
-    let h = if delta < 1e-5 {
-        0.0
-    } else if (max - r).abs() < 1e-5 {
-        60.0 * (((g - b) / delta) % 6.0)
-    } else if (max - g).abs() < 1e-5 {
-        60.0 * (((b - r) / delta) + 2.0)
-    } else {
-        60.0 * (((r - g) / delta) + 4.0)
-    };
-    let h = if h < 0.0 { h + 360.0 } else { h };
-    (h, s, v)
-}
 
 /// 色盘弹层的逻辑尺寸（含内边距）。
 fn palette_size(tab: u8) -> (f32, f32) {
@@ -1205,186 +1112,6 @@ fn draw_toast(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
 }
 
 // ───────────────────────── 下拉弹层 ─────────────────────────
-
-/// 某个下拉框的候选项（文字, 值）。
-fn options(drop: Drop, d: &Data) -> Vec<(String, usize)> {
-    // 候选文字目前不依赖 `d`，保留参数是为了将来加「当前值」标记时不用改所有调用点。
-    let _ = d;
-    raw_options(drop)
-}
-
-/// 下拉框第 `idx` 项对应的**语义值**。
-///
-/// 语义值不等于下标：灯光模式的表是 `[0, 1, 2, 4, 6, 0xF0]`（第 3 项的值是 4），
-/// 刷新间隔的表是 `[15, 30, 60, 120, 300]` 秒。谁要按下标去推语义值，
-/// 就一定会在「灯光选第 3 项」或「刷新间隔选第 4 项」上错位。
-///
-/// 越界返 `None`。
-pub fn option_value(drop: Drop, idx: usize) -> Option<usize> {
-    raw_options(drop).get(idx).map(|(_, v)| *v)
-}
-
-/// 候选项本身。
-///
-/// 抽成独立函数是因为 [`option_value`] 也要用同一张表 —— 表一旦分成两份，
-/// 改了一处忘了另一处，界面显示的和实际写进设备的值就会错位。
-fn raw_options(drop: Drop) -> Vec<(String, usize)> {
-    // 每个分支写全 `Vec<(String, usize)>`：不加这个标注，
-    // arms 各自是不同的 iterator 类型，`collect()` 推不出目标类型。
-    let items: Vec<(String, usize)> = match drop {
-        Drop::Sleep => (0u8..=4)
-            .map(|c| (crate::proto::sleep_mode_name(c), c as usize))
-            .chain(std::iter::once((
-                crate::proto::sleep_mode_name(0xFF),
-                0xFFusize,
-            )))
-            .collect(),
-        // 用 `u16` 不是 `u8`：1000 > 255，写 `u8` 编译期就报 literal out of range。
-        // 这里的值只是显示用的 Hz 数，和 `poll_code`（0..3）是两回事。
-        Drop::Poll => [125u16, 250, 500, 1000]
-            .iter()
-            .enumerate()
-            .map(|(i, hz)| (format!("{hz} Hz"), i))
-            .collect(),
-        // value 必须是**协议里的 1 基档位**，不是 0 基下标。
-        //
-        // 原来写的是 `(0..4).map(|i| (..., i))`，于是：
-        //   点「档位 1」→ 传 stage=0 → `set_stage` 报「档位必须是 1-4」
-        //   点「档位 2」→ 传 stage=1 → 设备真的切到 **档位 1**
-        //   点「档位 3」→ 传 stage=2 → 设备真的切到 **档位 2**
-        //   点「档位 4」→ 传 stage=3 → 设备真的切到 **档位 3**
-        // 用户原话「切换 dpi 没有反应，写的是切换了实际没有切换档位」——
-        // 真机点「档位 3」时设备正好当前是 2，切到 2 等于没变，
-        // 界面高亮也跟着留在 2，看起来完全没反应。
-        Drop::Stage => (0..4)
-            .map(|i| (format!("档位 {}", i + 1), i + 1))
-            .collect(),
-        Drop::Debounce => (0u8..=7)
-            .map(|c| (crate::proto::debounce_name(c), c as usize))
-            .collect(),
-        Drop::Lod => (0u8..=1)
-            .map(|c| (crate::proto::lod_name(c), c as usize))
-            .collect(),
-        // **只列设备认的模式**：Rainbow(3) 与 Comet(5) 写进去会被静默回落到
-        // ColorCycle，1.1.0 的 CLI 干脆不提供这两个值。列出来只会让用户以为能选。
-        Drop::LightMode => [0x00u8, 0x01, 0x02, 0x04, 0x06, 0xF0]
-            .iter()
-            .map(|&c| (crate::proto::light_mode_name(c), c as usize))
-            .collect(),
-        Drop::Refresh => [15u64, 30, 60, 120, 300]
-            .iter()
-            .map(|s| (format!("{s} 秒"), *s as usize))
-            .collect(),
-        Drop::CacheTtl => [0u64, 15, 30, 60, 300]
-            .iter()
-            .map(|s| {
-                if *s == 0 {
-                    ("每次都重读".to_string(), 0)
-                } else {
-                    (format!("{s} 秒"), *s as usize)
-                }
-            })
-            .collect(),
-        // value 是**目标码本身**（如 `0x01F0`），不是下标 —— 这样
-        // [`option_value`] 的返回值可以直接写进设备，中间不用再查一次表。
-        // 8 个槽位共用同一张候选表，让 `Drop` 保持无参数
-        // （`ButtonTarget(slot)` 只区分槽位）。
-        Drop::ButtonTarget(_) => BUTTON_TARGETS
-            .iter()
-            .map(|&c| (button_target_name(c), c as usize))
-            .collect(),
-        // 色盘不是文字列表，`draw_palette` 走单独一支。这里给空表而不是
-        // `palette_colors()`：万一有人误走文字下拉，空表会显示成「没有选项」
-        // （一眼看出走错了），而颜色列表会被画成 32 行没法读的文字。
-        Drop::Palette(_) => Vec::new(),
-        Drop::CloseMode => vec![
-            ("每次询问".to_string(), 0),
-            ("最小化到系统托盘".to_string(), 1),
-            ("直接退出程序".to_string(), 2),
-        ],
-    };
-    items
-}
-
-/// 某个下拉框当前该显示什么文字。
-fn drop_current(drop: Drop, d: &Data) -> String {
-    let st = d.state;
-    match drop {
-        Drop::Sleep => st
-            .map(|s| crate::proto::sleep_mode_name(s.sleep_mode))
-            .unwrap_or_else(|| "—".to_string()),
-        Drop::Poll => st
-            .map(|s| crate::proto::poll_name(s.poll_code))
-            .unwrap_or_else(|| "—".to_string()),
-        Drop::Stage => st
-            .map(|s| format!("档位 {}", s.active_stage.max(1)))
-            .unwrap_or_else(|| "—".to_string()),
-        Drop::Debounce => st
-            .map(|s| crate::proto::debounce_name(s.debounce_code))
-            .unwrap_or_else(|| "—".to_string()),
-        Drop::Lod => st
-            .map(|s| crate::proto::lod_name(s.lod))
-            .unwrap_or_else(|| "—".to_string()),
-        Drop::LightMode => st
-            .map(|s| crate::proto::light_mode_name(s.light_mode))
-            .unwrap_or_else(|| "—".to_string()),
-        Drop::Refresh => format!("{} 秒", d.cfg.refresh_interval_sec),
-        Drop::CacheTtl => {
-            if d.cfg.cache_ttl_sec == 0 {
-                "每次都重读".to_string()
-            } else {
-                format!("{} 秒", d.cfg.cache_ttl_sec)
-            }
-        }
-        Drop::ButtonTarget(slot) => d
-            .state
-            .map(|s| button_target_name(s.buttons[(slot as usize) & 7]))
-            .unwrap_or_else(|| "—".to_string()),
-        // 色盘自己不显示文字（色块本身就是显示）。走到这里是走错分支了，
-        // 给「—」而不是编一个色号。
-        Drop::Palette(_) => "—".to_string(),
-        Drop::CloseMode => match d.cfg.close_mode.as_str() {
-            "minimize" => "最小化到系统托盘".to_string(),
-            "quit" => "直接退出程序".to_string(),
-            _ => "每次询问".to_string(),
-        },
-    }
-}
-
-/// 当前选中的下标。
-///
-/// 一律「拿语义值反查下标」，不按下标正查 —— 后者要求「表格顺序恰好等于设备
-/// 编码顺序」，而灯光模式的表是 `[0, 1, 2, 4, 6, 0xF0]`（中间缺 3 和 5），
-/// 一旦按下标正查，选 Rainbow 会显示成 React。
-fn drop_selected(drop: Drop, d: &Data) -> usize {
-    let opts = options(drop, d);
-    let st = d.state;
-    let cur: usize = match drop {
-        Drop::Sleep => st.map(|s| s.sleep_mode as usize).unwrap_or(0),
-        Drop::Poll => st.map(|s| s.poll_code as usize).unwrap_or(0),
-        // `active_stage` 是 1 基的（0 表示设备没报），候选值也是 1..=4
-        Drop::Stage => st.map(|s| s.active_stage.max(1) as usize).unwrap_or(1),
-        Drop::Debounce => st.map(|s| s.debounce_code as usize).unwrap_or(0),
-        Drop::Lod => st.map(|s| s.lod as usize).unwrap_or(0),
-        Drop::LightMode => st.map(|s| s.light_mode as usize).unwrap_or(0),
-        Drop::Refresh => d.cfg.refresh_interval_sec as usize,
-        Drop::CacheTtl => d.cfg.cache_ttl_sec as usize,
-        Drop::ButtonTarget(slot) => st
-            .map(|s| s.buttons[(slot as usize) & 7] as usize)
-            .unwrap_or(0),
-        Drop::Palette(_) => 0,
-        Drop::CloseMode => match d.cfg.close_mode.as_str() {
-            "minimize" => 1,
-            "quit" => 2,
-            _ => 0,
-        },
-    };
-    opts.iter()
-        .position(|(_, v)| *v == cur)
-        // 反查不到就落到第一项。宁可让用户重选，也不伪造一个「看起来对」的名字 ——
-        // 比如备份里还原进来一个未知按键码，显示成「左键点击」就是骗人。
-        .unwrap_or(0)
-}
 
 /// 画下拉框本体，并登记「打开弹层」。点击区域是整个矩形。
 ///
@@ -2760,35 +2487,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
 
 // ───────────────────────── 按键页 ─────────────────────────
 
-/// 按键目标码 → 显示名。
-///
-/// `proto::BUTTON_SRC` 只有 8 个**源**键的码，没有目标码表（`cli.rs` 里也没有），
-/// 所以这张表在这里定义。值来自抓包确认的目标码；不认识的码原样显示成十六进制，
-/// 不猜 —— 猜错会让用户把键绑到别处去。
-fn button_target_name(code: u16) -> String {
-    match code {
-        0x0000 => "无功能".to_string(),
-        0x01F0 => "左键点击".to_string(),
-        0x01F1 => "右键点击".to_string(),
-        0x01F2 => "中键点击".to_string(),
-        0x01E4 => "浏览器后退".to_string(),
-        0x01E5 => "浏览器前进".to_string(),
-        0x01E6 => "切换 DPI 档位".to_string(),
-        0x01E8 => "滚轮上滚".to_string(),
-        0x01E9 => "滚轮下滚".to_string(),
-        other => format!("0x{other:04X}"),
-    }
-}
 
-/// 按键页下拉框的候选目标码。
-///
-/// **只列抓包确认过的码**，外加 `0x0000`（无功能）。`button_target_name` 对未知码
-/// 会原样显示成十六进制 —— 从备份还原进来的未知码因此仍能正确显示，
-/// 但它不在候选表里，下拉打开时选不中任何一项（`unwrap_or(0)` 落到「无功能」）。
-/// 这是有意的：宁可显示成「无功能」让用户重选，也不要伪造一个名字。
-const BUTTON_TARGETS: [u16; 9] = [
-    0x0000, 0x01F0, 0x01F1, 0x01F2, 0x01E4, 0x01E5, 0x01E6, 0x01E8, 0x01E9,
-];
 
 fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
