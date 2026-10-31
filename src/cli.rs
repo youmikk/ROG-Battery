@@ -775,21 +775,14 @@ pub fn cmd_save(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
     proto::print_state(&st);
 
     let rid = ctx.rid();
-    let r = match proto::commit(dev, rid) {
-        Some(m) => {
-            if is_nak(&m) {
-                Err("commit 被设备 NAK".to_string())
-            } else {
-                // 回全零是正常的（不是 NAK）
-                println!(
-                    "\n已提交（0x50 0x03）。回帧 {} 字节，全零属正常。",
-                    m.len()
-                );
-                println!("VERIFY       commit=OK");
-                Ok(())
-            }
+    // 归类规则只有一份：无应答 → Asleep、NAK → Rejected、回全零 → Ok。
+    let r = match ops::commit_or_fail(dev, rid) {
+        Ok(()) => {
+            println!("\n已提交（0x50 0x03）。回全零属正常。");
+            println!("VERIFY       commit=OK");
+            Ok(())
         }
-        None => Err("commit 无应答（鼠标休眠中？）".to_string()),
+        Err(e) => Err(e.to_string()),
     };
     ctx.invalidate();
     r
