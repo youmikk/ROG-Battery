@@ -119,6 +119,10 @@ const SWP_FRAMECHANGED: u32 = 0x0020;
 
 // ============ 静态链接的 FFI（系统组件，所有目标系统都有）============
 //
+// `SetWindowPos` 不在这里重复声明：`ui/canvas.rs` 已有唯一一份（那边是
+// 全工程管窗口的地方），同一个函数写两遍只会在某天悄悄改成不同签名。
+use crate::ui::canvas::SetWindowPos;
+//
 // user32 / gdi32 在所有受支持的系统上都存在，导入库也在 rustlib 的
 // self-contained 目录里，所以这三个可以静态链接，不必动态解析。
 #[link(name = "user32")]
@@ -126,16 +130,6 @@ extern "system" {
     /// Vista+。DPI 感知降级链的最后一环。
     fn SetProcessDPIAware() -> i32;
 
-    /// 只用来「踢」一下窗口让 DWM 重画非客户区，见 `refresh_titlebar`。
-    fn SetWindowPos(
-        hwnd: Handle,
-        insert_after: Handle,
-        x: i32,
-        y: i32,
-        cx: i32,
-        cy: i32,
-        flags: u32,
-    ) -> i32;
 }
 
 #[link(name = "gdi32")]

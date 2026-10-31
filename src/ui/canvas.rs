@@ -171,7 +171,7 @@ extern "system" {
 extern "system" {
     fn GetClientRect(hwnd: Handle, out: *mut Rect) -> i32;
     fn GetParent(hwnd: Handle) -> Handle;
-    fn SetWindowPos(
+    pub fn SetWindowPos(
         hwnd: Handle,
         insert_after: Handle,
         x: i32,
