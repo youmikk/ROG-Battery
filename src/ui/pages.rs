@@ -1640,12 +1640,15 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
 
     // ---- 电源管理 ----
     c.h2(p, "电源管理", false);
-    let rows: [(&str, Option<&str>, f32); 3] = [
-        ("自动休眠", Some("鼠标静止多久后进入休眠以省电"), 150.0),
-        ("低电量阈值", Some("低于该电量时鼠标上的指示灯会闪"), 150.0),
-        ("充满效果", Some("充满电时播放一次灯效"), 60.0),
+    // 只管「标题 · 说明」，控件宽度由各行自己按控件类型定（下拉 150、
+    // 输入框+按钮、开关 40）。曾经这里多一个宽度字段，三处调用全都无视它、
+    // 直接写字面量，于是那个字段从没被读过，第三行的 60 还和实际用的 40 对不上。
+    let rows: [(&str, Option<&str>); 3] = [
+        ("自动休眠", Some("鼠标静止多久后进入休眠以省电")),
+        ("低电量阈值", Some("低于该电量时鼠标上的指示灯会闪")),
+        ("充满效果", Some("充满电时播放一次灯效")),
     ];
-    let total_h: f32 = rows.iter().map(|(_, _, _)| layout::ROW_H).sum();
+    let total_h: f32 = rows.iter().map(|_| layout::ROW_H).sum();
     let card = c.card(p, total_h);
     let mut ry = card.y;
     let mut i = 0;
