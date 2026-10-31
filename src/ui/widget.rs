@@ -1,4 +1,4 @@
-//! 控件模型：命中区域、交互状态、动作。
+﻿//! 控件模型：命中区域、交互状态、动作。
 //!
 //! # 为什么用「即时模式」而不是控件树
 //!
@@ -1168,6 +1168,34 @@ mod tests {
         u.hot(R::new(0.0, 0.0, 1200.0, 800.0), Act::None);
         u.chrome_hot(R::new(10.0, 100.0, 38.0, 36.0), Act::Nav(Page::Battery));
         assert_eq!(u.hit(20.0, 110.0, 0.0), Some(Act::Nav(Page::Battery)));
+    }
+
+    #[test]
+    fn every_nav_item_survives_a_full_page_hot_zone() {
+        // 回归：五个导航项逐个验证，避免只测中第一个就以为全好了。
+        let pages = [
+            Page::Battery,
+            Page::Perf,
+            Page::Light,
+            Page::Keys,
+            Page::Settings,
+        ];
+        let item_h = crate::ui::layout::NAV_ITEM_H;
+        let mut u = Ui::default();
+        u.begin_frame();
+        u.hot(R::new(0.0, 0.0, 1200.0, 800.0), Act::None);
+        for (i, page) in pages.iter().enumerate() {
+            let y = 40.0 + i as f32 * (item_h + 1.0);
+            u.chrome_hot(R::new(8.0, y, 40.0, item_h), Act::Nav(*page));
+        }
+        for (i, page) in pages.iter().enumerate() {
+            let y = 40.0 + i as f32 * (item_h + 1.0) + item_h / 2.0;
+            assert_eq!(
+                u.hit(20.0, y, 0.0),
+                Some(Act::Nav(*page)),
+                "第 {i} 个导航项被内容区盖住了"
+            );
+        }
     }
 
 }
