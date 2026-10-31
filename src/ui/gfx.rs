@@ -64,8 +64,6 @@
 //! 6. 所有 GDI+ 函数都返回 `Status`（0 = Ok）。**不看返回值就会得到
 //!    一张纯底色的图，且没有任何提示**。
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -123,31 +121,6 @@ struct GdiplusStartupInput {
     suppress_external_codecs: i32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct BitmapInfoHeader {
-    size: u32,
-    width: i32,
-    height: i32,
-    planes: u16,
-    bit_count: u16,
-    compression: u32,
-    size_image: u32,
-    x_pels: i32,
-    y_pels: i32,
-    clr_used: u32,
-    clr_important: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct BitmapInfo {
-    header: BitmapInfoHeader,
-    /// 坑 3：这个数组必须存在。`CreateDIBSection` 会按「头 + 调色板」
-    /// 算结构总大小，没有它就会读到结构外面的栈上垃圾。
-    colors: [u32; 3],
-}
-
 // ==================== FFI ====================
 
 #[link(name = "gdiplus")]
@@ -157,7 +130,6 @@ extern "system" {
         input: *const GdiplusStartupInput,
         out: *mut c_void,
     ) -> i32;
-    fn GdiplusShutdown(token: usize);
 
     fn GdipCreateFromHDC(hdc: Gdi, g: *mut *mut c_void) -> i32;
     pub fn GdipDeleteGraphics(g: *mut c_void) -> i32;
@@ -426,15 +398,6 @@ pub fn start() -> bool {
     true
 }
 
-/// 关闭 GDI+。只在程序退出时调一次。
-pub fn stop() {
-    use std::sync::atomic::Ordering;
-    let token = TOKEN.swap(0, Ordering::Relaxed);
-    if token != 0 {
-        unsafe { GdiplusShutdown(token) };
-    }
-}
-
 // ==================== 字体 ====================
 
 /// 一个字体缓存表。
@@ -567,28 +530,27 @@ impl R {
     }
 
     /// 扣掉左边一段。
+    #[cfg(test)]
     pub fn skip_x(&self, dx: f32) -> R {
         R::new(self.x + dx, self.y, (self.w - dx).max(0.0), self.h)
     }
 
     /// 扣掉右边一段。
+    #[cfg(test)]
     pub fn trim_x(&self, dx: f32) -> R {
         R::new(self.x, self.y, (self.w - dx).max(0.0), self.h)
     }
 
     /// 在矩形内右侧取一段。
+    #[cfg(test)]
     pub fn tail(&self, w: f32) -> R {
         R::new(self.right() - w, self.y, w, self.h)
     }
 
     /// 在矩形内左侧取一段。
+    #[cfg(test)]
     pub fn head(&self, w: f32) -> R {
         R::new(self.x, self.y, w, self.h)
-    }
-
-    /// 竖直方向上重新定位、改高度。
-    pub fn at_y(&self, y: f32, h: f32) -> R {
-        R::new(self.x, y, self.w, h)
     }
 
     pub fn contains(&self, px: f32, py: f32) -> bool {
@@ -596,6 +558,7 @@ impl R {
     }
 
     /// 两个矩形是否相交（裁剪用）。
+    #[cfg(test)]
     pub fn intersects(&self, o: &R) -> bool {
         self.x < o.right() && self.right() > o.x && self.y < o.bottom() && self.bottom() > o.y
     }
@@ -838,6 +801,7 @@ impl<'a> Painter<'a> {
     }
 
     /// 竖直渐变填充的圆角矩形（卡片顶部高光、选中行）。
+    #[cfg(test)]
     pub fn round_gradient(&mut self, r: R, radius: f32, top: u32, bottom: u32) {
         if !self.visible(r) {
             return;
@@ -1342,14 +1306,6 @@ impl<'a> Painter<'a> {
         knob_x
     }
 
-    /// 下拉箭头（▾），画在矩形中心。
-    pub fn chevron(&mut self, r: R, color: u32) {
-        let cx = r.cx();
-        let cy = r.cy();
-        self.line(cx - 4.0, cy - 2.0, cx, cy + 2.0, color, 1.4);
-        self.line(cx, cy + 2.0, cx + 4.0, cy - 2.0, color, 1.4);
-    }
-
     /// 圆形小圆点（状态点、数据点）。
     pub fn dot(&mut self, cx: f32, cy: f32, radius: f32, color: u32) {
         let r = R::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
@@ -1512,6 +1468,7 @@ impl Canvas {
     }
 
     /// 当前位图尺寸。
+    #[cfg(test)]
     pub fn size(&self) -> (i32, i32) {
         (self.w, self.h)
     }
