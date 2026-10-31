@@ -46,6 +46,7 @@ pub const ICON_SIZE: i32 = 32;
 /// 查 `SM_CXSMICON`（=49）。查询失败或返回离谱值时回落到 [`ICON_SIZE`]。
 ///
 /// 夹在 16..=32：小于 16 画不下两位数字，大于 32 没意义（托盘不显示那么大）。
+#[cfg(test)]
 pub fn icon_size() -> i32 {
     let n = unsafe { win32::GetSystemMetrics(49) };
     if n < 16 {
@@ -57,10 +58,13 @@ pub fn icon_size() -> i32 {
 
 /// 背景色 —— 深色圆角块，白字。和曲线不同，托盘图标必须**不透明**
 /// 才能在浅色/深色任务栏上都看得清（透明图标配白字在浅色栏上会消失）。
+#[cfg(test)]
 const BG: [u8; 3] = [0x20, 0x24, 0x2B];
+#[cfg(test)]
 const FG: [u8; 3] = [0xFF, 0xFF, 0xFF];
 
 /// 电量对应的图标底色。三档，够用户一眼分辨「还早 / 该充了 / 快没电」。
+#[cfg(test)]
 fn level_color(level: u8) -> [u8; 3] {
     match level {
         0..=20 => [0xD1, 0x3A, 0x2E],   // 红：快没电
@@ -105,11 +109,14 @@ pub fn scaled_font_height(level: u8, size: i32) -> i32 {
 /// 把 `[r, g, b]` 转 `COLORREF`（`0x00BBGGRR`）。
 ///
 /// 顺序写反是最常见的 GDI 错误：红色 `(255,0,0)` 写成 `0x0000FF` 会变蓝。
+#[cfg(test)]
 fn colorref(c: [u8; 3]) -> u32 {
     (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16)
 }
 
 /// 一次绘制产生的所有对象。`Drop` 负责回收，**不依赖调用方记得**。
+// 纯 RAII 守卫：只为保证句柄 Drop 时被回收，构造点已随旧渲染器删除。
+#[allow(dead_code)]
 struct Gdi {
     objects: Vec<Handle>,
     dc: Handle,

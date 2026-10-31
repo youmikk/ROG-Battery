@@ -287,61 +287,6 @@ impl Default for PaintStruct {
 
 // ============ 托盘图标自绘用到的结构 ============
 
-/// `ICONINFO`。`CreateIconIndirect` 要它。
-///
-/// **必须五个字段**，一个都不能少：
-/// ```c
-/// typedef struct { BOOL fIcon; DWORD xHotspot; DWORD yHotspot;
-///                  HBITMAP hbmMask; HBITMAP hbmColor; } ICONINFO;
-/// ```
-/// 少了 `xHotspot`/`yHotspot` 两个字段会怎样？`CreateIconIndirect`
-/// 直接把 `hbmColor` 那 8 字节读成热点坐标，于是把 `hbmMask` 当成
-/// `hbmColor`、把 `hbmColor` 当成越界垃圾 —— **返回 NULL，`GetLastError` = 203
-/// （`ERROR_ENVVAR_NOT_FOUND`，完全是误导性的错误码）**。
-/// 实测：3 字段版恒失败，补上两个 DWORD 立刻成功。
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct IconInfo {
-    /// 1 = 图标，0 = 光标。托盘要图标，固定填 1。
-    pub is_icon: i32,
-    /// 光标热点。图标用不到，填 0。
-    pub x_hotspot: i32,
-    pub y_hotspot: i32,
-    pub mask: Handle,
-    pub color: Handle,
-}
-
-/// `BITMAPINFOHEADER`（`BITMAPINFO` 的头部，后面紧跟调色板）。
-///
-/// 32bpp 的 DIB 不需要调色板，所以只申请 header 就够
-/// —— 但 `biSizeImage` 必须给对，否则某些驱动会拒绝。
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct BitmapInfoHeader {
-    pub size: u32,
-    pub width: i32,
-    pub height: i32,
-    /// 必须是 1。
-    pub planes: u16,
-    /// 32 = BGRA，每像素自带 alpha。
-    pub bit_count: u16,
-    /// 0 = 不压缩。
-    pub compression: u32,
-    pub size_image: u32,
-    pub x_pels_per_meter: i32,
-    pub y_pels_per_meter: i32,
-    pub clr_used: u32,
-    pub clr_important: u32,
-}
-
-/// `BITMAPINFO` = header + 1 个调色板项（32bpp 时不用，但要留出空间）。
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct BitmapInfo {
-    pub header: BitmapInfoHeader,
-    pub colors: [u32; 3],
-}
-
 /// `MONITORINFO`。`GetMonitorInfoW` 用它返回显示器的工作区（去掉任务栏那块）。
 ///
 /// 无边框窗口最大化时必须自己算工作区：`WS_THICKFRAME` 让系统以为有 8px 边框，
@@ -591,13 +536,6 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     /// （`CreateCompatibleDC` 要一个参考 DC，否则内存位图的色彩格式可能和屏幕不一致）。
     pub fn GetDC(hwnd: Handle) -> Handle;
     pub fn ReleaseDC(hwnd: Handle, hdc: Handle) -> i32;
-    /// 取系统度量。托盘自绘只用一个值：`SM_CXSMICON`（49）——
-    /// 系统在通知区里**实际**用的小图标边长。
-    ///
-    /// 不查这个值、硬画 32x32 也能work，但系统会把 32 缩到 16，
-    /// 双线性缩放会把笔画糊掉（实测「82」边缘发虚）。
-    /// 按原生尺寸画就完全避开缩放。
-    pub fn GetSystemMetrics(index: i32) -> i32;
     /// 取当前进程的**伪句柄**（不需要 CloseHandle）。
     /// 配合 `GetGuiResources` 读自己的 GDI/USER 对象数，用来测泄漏。
     ///
@@ -610,19 +548,12 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     /// 这个数字就会单调上涨。
     #[cfg(test)]
     pub fn GetGuiResources(process: Handle, flag: u32) -> u32;
-    /// `CreateIconIndirect` 在 **user32**（不是 gdi32）。
-    /// 用它把内存位图 + 掩码合成 HICON。
-    pub fn CreateIconIndirect(info: *const IconInfo) -> Handle;
     /// 自建的 HICON **必须** `DestroyIcon`：图标句柄属于 User 对象，
     /// 不回收会一直涨（每刷新一次多一个，几十次就能看出来）。
     pub fn DestroyIcon(icon: Handle) -> i32;
-    pub fn DrawTextW(
-        hdc: Handle,
-        text: *const u16,
-        len: i32,
-        rect: *mut Rect,
-        format: u32,
-    ) -> i32;
+    /// 取系统度量（`SM_CXSMICON = 49`）。托盘的泄漏回归测试拿它算图标边长。
+    #[cfg(test)]
+    pub fn GetSystemMetrics(index: i32) -> i32;
 }
 
 // ============ gdi32 ============
@@ -641,24 +572,6 @@ extern "system" {
     pub fn CreateSolidBrush(color: u32) -> Handle;
     pub fn DeleteObject(obj: Handle) -> i32;
     pub fn SelectObject(hdc: Handle, obj: Handle) -> Handle;
-    pub fn SetBkMode(hdc: Handle, mode: i32) -> i32;
-    pub fn SetTextColor(hdc: Handle, color: u32) -> u32;
-    pub fn CreateFontW(
-        height: i32,
-        width: i32,
-        escapement: i32,
-        orientation: i32,
-        weight: i32,
-        italic: u32,
-        underline: u32,
-        strike_out: u32,
-        char_set: u32,
-        out_precision: u32,
-        clip_precision: u32,
-        quality: u32,
-        pitch_and_family: u32,
-        face: *const u16,
-    ) -> Handle;
 
     // ---- 托盘图标自绘 ----
     //
@@ -667,17 +580,7 @@ extern "system" {
     //
     // 注意 `CreateDIBSection` 在 **gdi32**，但 `CreateIconIndirect` 在 **user32**。
     pub fn CreateCompatibleDC(hdc: Handle) -> Handle;
-    pub fn CreateDIBSection(
-        hdc: Handle,
-        bmi: *const BitmapInfo,
-        usage: u32,
-        bits: *mut *mut c_void,
-        section: Handle,
-        offset: u32,
-    ) -> Handle;
     pub fn DeleteDC(hdc: Handle) -> i32;
-    pub fn CreateBitmap(w: i32, h: i32, planes: u32, bits_per_pixel: u32, bits: *const c_void)
-        -> Handle;
 }
 
 // ============ setupapi ============
