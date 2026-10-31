@@ -789,6 +789,18 @@ impl Ui {
         }
     }
 
+    /// 放弃当前按下的手势（鼠标捕获被系统收回时调用）。
+    ///
+    /// 不清的话：按住滑块拖到窗口外、按 Alt+Tab 切走、或者弹出别的窗口把捕获
+    /// 抢走，`pressed`/`pressed_slide` 会一直留着 —— 之后不按键移动鼠标，
+    /// 滑块仍然跟着跑，看起来像「鼠标粘住了」。
+    pub fn cancel_press(&mut self) {
+        self.pressed = None;
+        self.pressed_slide = None;
+        self.pointer.down = false;
+        self.pointer.dragging = None;
+    }
+
     /// 鼠标移动后刷新悬停态。返回是否变了（变了才要重画）。
     pub fn refresh_hover(&mut self) -> bool {
         let scroll = self.scroll_y(self.page);
@@ -888,6 +900,29 @@ mod tests {
 
     fn ui() -> Ui {
         Ui::default()
+    }
+
+    #[test]
+    fn 捕获丢失后不再残留拖拽态() {
+        // 按住滑块拖到窗口外松手、或切窗口被系统收回捕获：pressed_slide 必须清掉，
+        // 否则之后不按键移动鼠标，滑块还会跟着跑。
+        let mut u = ui();
+        u.begin_frame();
+        u.hot(R::new(10.0, 10.0, 100.0, 20.0), Act::SetSlide(Slide::LightBright, 0.5));
+        // 复刻 canvas 的顺序：先记指针按下，再交给 on_press 判定命中
+        u.pointer.x = 60.0;
+        u.pointer.y = 20.0;
+        u.pointer.down = true;
+        u.on_press(60.0, 20.0, 0.0);
+        u.pointer.dragging = u.pressed_slide;
+        assert!(u.pressed_slide.is_some(), "按下后应进入拖拽态");
+        assert!(u.pointer.down);
+
+        u.cancel_press();
+        assert!(u.pressed.is_none());
+        assert!(u.pressed_slide.is_none());
+        assert!(!u.pointer.down);
+        assert!(u.pointer.dragging.is_none());
     }
 
     #[test]

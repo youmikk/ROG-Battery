@@ -64,6 +64,10 @@ const WM_CHAR: u32 = 0x0102;
 /// 编译只报 `warning: unused variable`，运行起来整个窗口过程全走那一支。
 /// 我这次真踩了：加完 `WM_TIMER` 分支就收到这两条警告。
 const WM_TIMER: u32 = 0x0113;
+/// 捕获被系统收回（切窗口、弹窗抢焦点等）。
+const WM_CAPTURECHANGED: u32 = 0x0215;
+/// 系统要求放弃当前模态状态（拖拽中按 Esc、菜单弹出等）。
+const WM_CANCELMODE: u32 = 0x001F;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
@@ -849,6 +853,23 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 // SAFETY: 传空矩形 = 整个客户区。
                 InvalidateRect(hwnd, std::ptr::null(), 0);
                 (c.damage)();
+            }
+            0
+        }
+
+        // 捕获被系统收回（切窗口 / 弹窗抢焦点 / 拖到窗口外松手）时，
+        // 必须把「按下」状态一起清掉，否则滑块会一直跟着鼠标跑。
+        WM_CAPTURECHANGED | WM_CANCELMODE => {
+            if let Some(c) = ctx_of(hwnd) {
+                let had = {
+                    let mut ui = c.ui.borrow_mut();
+                    let had = ui.pointer.down || ui.pressed_slide.is_some();
+                    ui.cancel_press();
+                    had
+                };
+                if had {
+                    (c.damage)();
+                }
             }
             0
         }
