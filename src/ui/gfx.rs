@@ -1191,9 +1191,18 @@ impl<'a> Painter<'a> {
     ///
     /// 世界变换在生效，`GdipMeasureString` 返回的是设备单位，
     /// 所以这里除以 `scale` 换算回去 —— 页面代码不用知道 DPI。
+    ///
+    /// **必须用和 `text()` 同一个格式**（`fmt_oneline`：不折行、尾部省略）。
+    /// 以前这里传的是 `null`，GDI+ 按默认格式排版 —— 允许折行，于是同样一段
+    /// 长文字量出来是多行高度、宽度被 4096 的版面宽截住，而 `text()` 实际画的是
+    /// 一行带省略号。调用方拿这个数去判断「放不放得下」，结论自然是错的。
     pub fn measure(&mut self, s: &str, size: f32, bold: bool) -> (f32, f32) {
         let font = self.fonts.get(size, bold);
         if font.is_null() || s.is_empty() {
+            return (0.0, 0.0);
+        }
+        let fmt = self.obj.fmt_oneline(0);
+        if fmt.is_null() {
             return (0.0, 0.0);
         }
         let u: Vec<u16> = s.encode_utf16().collect();
@@ -1208,7 +1217,7 @@ impl<'a> Painter<'a> {
                 u.len() as i32,
                 font,
                 &layout,
-                std::ptr::null_mut(),
+                fmt,
                 &mut bounds,
                 &mut fitted,
                 &mut lines,
@@ -2479,4 +2488,24 @@ mod tests {
         canvas.release();
         release_screen_dc(screen);
     }
+    #[test]
+    fn measure_uses_the_same_single_line_format_as_text() {
+        assert!(start());
+        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
+        let mut canvas = Canvas::new();
+        let dc = gdi_create_compatible_dc(0);
+        assert_ne!(dc, 0);
+        let _mem = canvas.ensure(dc, 400, 300);
+        let t = &super::super::theme::LIGHT;
+        let long = "很长的一行文字".repeat(40);
+        let mut got = (0.0f32, 0.0f32);
+        canvas.paint(&mut fonts, t, 1.0, 0.0, 400.0, 300.0, |p| {
+            got = p.measure(&long, 13.0, false);
+        });
+        assert!(got.0 > 0.0, "宽度应为正: {:?}", got);
+        // 单行度量：高度必须是「一行」的量级。旧实现传 null 格式，GDI+ 允许
+        // 折行，600 个字会返回几十行的高度。
+        assert!(got.1 < 40.0, "measure 返回了多行高度: {:?}", got);
+    }
+
 }
