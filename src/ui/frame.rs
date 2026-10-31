@@ -117,6 +117,16 @@ pub fn is_maximized(hwnd: Handle) -> bool {
     crate::ui::canvas::get_window_long(hwnd, GWL_STYLE) & WS_MAXIMIZE != 0
 }
 
+/// 命中测试该看的是**顶层窗口**的最大化状态。
+///
+/// canvas 是 `WS_CHILD` 子窗口，它永远没有 `WS_MAXIMIZE` 位 —— 拿它去问恒为
+/// false，于是最大化状态下四边照样报 `HTLEFT`/`HTTOP`，用户在屏幕边缘按住就
+/// 触发「还原 + 拖动」。这里统一向上找父窗口。
+pub fn owner_is_maximized(hwnd: Handle) -> bool {
+    let parent = crate::ui::canvas::get_parent(hwnd);
+    is_maximized(if parent.is_null() { hwnd } else { parent })
+}
+
 /// 去掉标题栏之后把**客户区**校正回指定逻辑尺寸。
 ///
 /// 为什么需要这一步：`WM_NCCALCSIZE` 让客户区 = 整个窗口矩形之后，
@@ -416,5 +426,36 @@ mod tests {
             (style & !WS_CAPTION & !WS_SYSMENU) | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
         assert_eq!(new_style & WS_THICKFRAME, WS_THICKFRAME);
         assert_eq!(new_style & WS_CAPTION, 0);
+    }
+
+    /// 最大化时四边都不能报缩放热区 —— 否则在屏幕边缘按住会「还原 + 拖动」。
+    /// 这条锁住 [`owner_is_maximized`] 存在的原因：以前传的是 canvas 自己的
+    /// 句柄，恒为 false，最大化窗口照样能拖边。
+    #[test]
+    fn maximized_window_has_no_resize_border() {
+        let edges = [
+            (1.0, 1.0),
+            (TW - 1.0, 1.0),
+            (1.0, TH - 1.0),
+            (TW - 1.0, TH - 1.0),
+            (1.0, 300.0),
+            (TW - 1.0, 300.0),
+            (500.0, 1.0),
+            (500.0, TH - 1.0),
+        ];
+        for (x, y) in edges {
+            let hit = logical_hit(x, y, TW, TH, TITLE, true);
+            let resize = [
+                HTLEFT,
+                HTRIGHT,
+                HTTOP,
+                HTBOTTOM,
+                HTTOPLEFT,
+                HTTOPRIGHT,
+                HTBOTTOMLEFT,
+                HTBOTTOMRIGHT,
+            ];
+            assert!(!resize.contains(&hit), "({x},{y}) 最大化窗口报了缩放热区 {hit}");
+        }
     }
 }

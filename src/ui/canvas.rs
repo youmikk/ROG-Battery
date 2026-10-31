@@ -209,6 +209,10 @@ pub fn get_window_long(hwnd: Handle, index: i32) -> isize {
 }
 
 /// 改窗口样式。`frame::go_frameless` 用它去掉 `WS_CAPTION`。
+pub fn get_parent(hwnd: Handle) -> Handle {
+    unsafe { GetParent(hwnd) }
+}
+
 pub fn set_window_long(hwnd: Handle, index: i32, value: isize) {
     unsafe { SetWindowLongPtrW(hwnd, index, value) };
 }
@@ -355,8 +359,7 @@ pub fn draw_frame(
 
     // 最大化状态要问**父窗口**：canvas 是 `WS_CHILD`，它自己没有
     // `WS_MAXIMIZE` 位，查它恒为 false，标题栏上的按钮图标就永远画成「最大化」。
-    let parent = unsafe { GetParent(a.hwnd) };
-    let is_max = !parent.is_null() && crate::ui::frame::is_maximized(parent);
+    let is_max = crate::ui::frame::owner_is_maximized(a.hwnd);
     let hover_btn = ui.hover_btn;
 
     // 整帧只开一个 Graphics：5 层复用同一套渲染状态（省 4 次建上下文 + 16 次属性设置）。
@@ -1138,7 +1141,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 cw,
                 ch,
                 crate::ui::titlebar::TITLE_H,
-                crate::ui::frame::is_maximized(hwnd),
+                crate::ui::frame::owner_is_maximized(hwnd),
             );
             // 悬停高亮：命中变化时重画一帧
             let want_btn = crate::ui::titlebar::hit(x, y, cw);
@@ -1200,7 +1203,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                     client_pixel_size(hwnd).0 as f32 / c.scale,
                     client_pixel_size(hwnd).1 as f32 / c.scale,
                     crate::ui::titlebar::TITLE_H,
-                    crate::ui::frame::is_maximized(target),
+                    crate::ui::frame::owner_is_maximized(hwnd),
                 );
                 if hit == crate::ui::frame::HTCAPTION {
                     crate::ui::frame::toggle_maximize(target);
