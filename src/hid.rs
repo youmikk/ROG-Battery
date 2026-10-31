@@ -40,7 +40,6 @@ pub struct HidInterface {
     pub output_len: u16,
     pub product: String,
     pub serial: String,
-    pub index: usize,
 }
 
 impl HidInterface {
@@ -123,11 +122,10 @@ pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
                 continue;
             };
             match probe_interface(hid, &path) {
-                Ok(mut iface) => {
+                Ok(iface) => {
                     if iface.vendor_id != VID_ASUS {
                         continue;
                     }
-                    iface.index = list.len();
                     list.push(iface);
                 }
                 // 单个接口打不开（权限 / 被占用）不算致命，但要留下原因，
@@ -270,7 +268,6 @@ fn probe_interface(hid: &HidApi, path: &str) -> Result<HidInterface, String> {
             output_len: caps.output_report_byte_length,
             product: read_hid_string(hid, h, 0),
             serial: read_hid_string(hid, h, 1),
-            index: 0,
         })
     })();
 
