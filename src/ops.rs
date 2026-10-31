@@ -287,25 +287,43 @@ impl CycleSpec {
 /// 5. 再读回并断言 `restored`
 /// 6. 只有 `save` 才真正落 flash —— 默认跑完设备状态与跑之前一模一样
 ///
-/// `expect` 和 `build` 都拿着**同一次**读到的原值 [`State`]：
-/// `expect` 算出期望的读回字符串，`build` 造出「写新值」和「写回原值」两个动作。
+/// `mutate` 和 `build` 都拿着**同一次**读到的原值 [`State`]：
+/// `mutate` 在克隆上应用目标改动，`build` 造出「写新值」和「写回原值」两个动作。
+///
+/// 期望值不用调用方再手写一份格式：`cycle` 把克隆交给 `mutate`，再拿**同一个**
+/// `probe` 格式化出来。两侧共用一个格式化器，改格式不会悄悄让判据失效。
 ///
 /// 返回 `Ok(report)` 表示流程走完了，**`applied` / `restored` 要看字段**：
 /// 读了但不一致不是致命错误，是个结果。只有无应答、NAK、读失败才返回 `Err`。
+/// 期望值：把目标改动应用到原值克隆上，再用**同一个** `probe` 格式化。
+///
+/// 抽成函数是为了给「两侧共用一个格式化器」这条不变量留可测的接缝 ——
+/// 判据不再依赖调用方手写的第二份格式，改格式不会悄悄让断言失效。
+fn expected_text<S, M, P>(probe: &P, before: &S, mutate: M) -> String
+where
+    S: Clone,
+    M: FnOnce(&mut S),
+    P: Fn(&S) -> String,
+{
+    let mut want = before.clone();
+    mutate(&mut want);
+    probe(&want)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cycle<P, E, B>(
     dev: &mut HidDevice,
     rid: u8,
     spec: &CycleSpec,
     probe: P,
-    expect: E,
+    mutate: E,
     build: B,
     reader: &mut dyn StateReader,
     log: Logger,
 ) -> Result<ApplyReport, OpsError>
 where
     P: Fn(&State) -> String,
-    E: FnOnce(&State) -> String,
+    E: FnOnce(&mut State),
     B: FnOnce(&State) -> (WriteFn, WriteFn),
 {
     log(&format!("== {} ==", spec.title));
@@ -315,7 +333,7 @@ where
     let old_value = probe(&before);
     log(&format!("BEFORE       {old_value}"));
 
-    let expected = expect(&before);
+    let expected = expected_text(&probe, &before, mutate);
     let (apply, revert) = build(&before);
 
     if expected == old_value {
@@ -439,7 +457,7 @@ pub fn set_poll(
                 st.poll_code
             )
         },
-        |_| format!("{} (code {code})", proto::poll_name(code)),
+        |st: &mut State| st.poll_code = code,
         move |before: &State| {
             let orig = before.poll_code;
             (
@@ -511,10 +529,10 @@ pub fn set_dpi(
                 st.rgb[idx][2]
             )
         },
-        move |before: &State| {
+        move |st: &mut State| {
             // 没指定颜色就沿用当前该档的颜色（同一帧里 DPI 和颜色一起写）
-            let c = rgb.unwrap_or(before.rgb[idx]);
-            format!("{applied_dpi} #{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+            st.enc[idx] = proto::encode_dpi(applied_dpi);
+            st.rgb[idx] = rgb.unwrap_or(st.rgb[idx]);
         },
         move |before: &State| {
             let color = rgb.unwrap_or(before.rgb[idx]);
@@ -557,7 +575,7 @@ pub fn set_stage(
         rid,
         &spec,
         |st: &State| st.active_stage.to_string(),
-        |_| stage.to_string(),
+        |st: &mut State| st.active_stage = stage,
         move |before: &State| {
             let orig = before.active_stage;
             (
@@ -598,7 +616,7 @@ pub fn set_debounce(
         rid,
         &spec,
         |st: &State| st.debounce_code.to_string(),
-        |_| code.to_string(),
+        |st: &mut State| st.debounce_code = code,
         move |before: &State| {
             let orig = before.debounce_code;
             (
@@ -638,7 +656,7 @@ pub fn set_snap(
         rid,
         &spec,
         |st: &State| st.angle_snap.to_string(),
-        |_| snap.to_string(),
+        |st: &mut State| st.angle_snap = snap,
         move |before: &State| {
             let orig = before.angle_snap;
             (
@@ -683,7 +701,7 @@ pub fn set_tuning(
         rid,
         &spec,
         |st: &State| st.angle_tuning.to_string(),
-        |_| value.to_string(),
+        |st: &mut State| st.angle_tuning = value,
         move |before: &State| {
             let orig = before.angle_tuning;
             (
@@ -745,7 +763,7 @@ pub fn set_lod(
         rid,
         &spec,
         |st: &State| st.lod.to_string(),
-        |_| code.to_string(),
+        |st: &mut State| st.lod = code,
         move |before: &State| {
             let orig = before.lod;
             (
@@ -855,16 +873,15 @@ pub fn set_light(
                 st.light_speed
             )
         },
-        // 期望值必须用和 `probe` **完全相同**的格式，并且把"没传就沿用原值"
-        // 那三个字段按原值填进去。早先这里写死 `0 0 0`，设备上只要有非 0
-        // 值，写成功了也会被判成 applied=NO。
-        move |before: &State| {
-            let b = bright.unwrap_or(before.light_bright);
-            let c = rgb.unwrap_or(before.light_rgb);
-            let d = dir.unwrap_or(before.light_dir);
-            let r = random.unwrap_or(before.light_random);
-            let s = speed.unwrap_or(before.light_speed);
-            format!("{mode} #{:02x}{:02x}{:02x} {b} {d} {r} {s}", c[0], c[1], c[2])
+        // 「没传就沿用原值」的字段留在克隆上不动 —— 这里只把真要写下去的
+        // 那几个字段改成目标值，期望值就来自和设备那一帧完全相同的状态。
+        move |st: &mut State| {
+            st.light_mode = mode;
+            st.light_bright = bright.unwrap_or(st.light_bright);
+            st.light_rgb = rgb.unwrap_or(st.light_rgb);
+            st.light_dir = dir.unwrap_or(st.light_dir);
+            st.light_random = random.unwrap_or(st.light_random);
+            st.light_speed = speed.unwrap_or(st.light_speed);
         },
         move |before: &State| {
             let b = bright.unwrap_or(before.light_bright);
@@ -956,8 +973,7 @@ pub fn set_sleep(
                 st.sleep_mode
             )
         },
-        // 期望值必须和 probe 用**完全相同**的格式，否则断言永远不相等
-        |_| format!("{} (code {code})", proto::sleep_mode_name(code)),
+        |st: &mut State| st.sleep_mode = code,
         move |before: &State| {
             // 能量块是一整帧写的：只改休眠档，其余两个字段必须用原值补上，
             // 否则会被这一帧覆盖成 0（正是文档第 5 节事故的成因）。
@@ -1009,8 +1025,7 @@ pub fn set_low_batt(
         rid,
         &spec,
         |st: &State| format!("{}%", st.low_warn),
-        // 期望值和 probe 格式必须一致
-        |_| format!("{percent}%"),
+        |st: &mut State| st.low_warn = percent,
         move |before: &State| {
             let orig = (before.sleep_mode, before.low_warn, before.full_effect);
             (
@@ -1060,7 +1075,7 @@ pub fn set_full_effect(
         rid,
         &spec,
         |st: &State| format!("{}", st.full_effect),
-        |_| format!("{on}"),
+        |st: &mut State| st.full_effect = on,
         move |before: &State| {
             let orig = (before.sleep_mode, before.low_warn, before.full_effect);
             (
@@ -1129,7 +1144,7 @@ pub fn set_button(
         rid,
         &spec,
         move |st: &State| format!("{:04X}", st.buttons[slot]),
-        move |_| format!("{dst:04X}"),
+        move |st: &mut State| st.buttons[slot] = dst,
         move |before: &State| {
             let orig = before.buttons[slot];
             (
@@ -1149,6 +1164,29 @@ pub fn set_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_text_uses_the_same_formatter_as_probe() {
+        let before = State {
+            low_warn: 20,
+            ..State::default()
+        };
+        let probe = |st: &State| format!("{}%", st.low_warn);
+        assert_eq!(
+            expected_text(&probe, &before, |st: &mut State| st.low_warn = 55),
+            "55%"
+        );
+
+        // 探针换一种格式，期望值跟着换 —— 结构上不可能再跑偏
+        let probe2 = |st: &State| format!("{} ％", st.low_warn);
+        assert_eq!(
+            expected_text(&probe2, &before, |st: &mut State| st.low_warn = 55),
+            "55 ％"
+        );
+
+        // 判据取的是克隆，原值不被改动
+        assert_eq!(before.low_warn, 20);
+    }
 
     #[test]
     fn error_kinds_are_distinguishable() {
