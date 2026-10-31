@@ -583,6 +583,16 @@ pub fn cmd_restore(ctx: &mut Ctx, dev: &mut HidDevice, path: &str, save: bool) -
 // 每个 setter 只做三件事：解析参数 → 调 ops::* → 打报告。
 // 六步循环、错误分类、读回断言全部在 ops 里，这里不许重复实现。
 
+/// setter 的统一收尾：打报告，再把「读回不一致」升级成非零退出码。
+///
+/// GUI 直接看 [`ApplyReport`] 的字段；CLI 没有报告面板，只能靠退出码，
+/// 所以这条差异只在 CLI 这一侧落地一次。
+fn finish(r: Result<ApplyReport, OpsError>) -> Result<ApplyReport, OpsError> {
+    let r = r?;
+    print_report(&r);
+    r.into_result()
+}
+
 /// `setdpi <1-4> <dpi> [RRGGBB]`
 pub fn cmd_setdpi(
     ctx: &mut Ctx,
@@ -595,10 +605,7 @@ pub fn cmd_setdpi(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_dpi(dev, rid, stage, dpi, rgb, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_dpi(dev, rid, stage, dpi, rgb, keep, save, ctx, &mut log))
 }
 
 /// `setpoll <125|250|500|1000>`
@@ -611,10 +618,7 @@ pub fn cmd_setpoll(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_poll(dev, rid, hz, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_poll(dev, rid, hz, keep, save, ctx, &mut log))
 }
 
 /// `setstage <1-4>` —— 当前 DPI 档位（寄存器 0x09，1-based）
@@ -627,10 +631,7 @@ pub fn cmd_setstage(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_stage(dev, rid, stage, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_stage(dev, rid, stage, keep, save, ctx, &mut log))
 }
 
 /// `setdebounce <0-7>`
@@ -643,10 +644,7 @@ pub fn cmd_setdebounce(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_debounce(dev, rid, code, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_debounce(dev, rid, code, keep, save, ctx, &mut log))
 }
 
 /// `setsnap <0|1>`
@@ -659,10 +657,7 @@ pub fn cmd_setsnap(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_snap(dev, rid, snap, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_snap(dev, rid, snap, keep, save, ctx, &mut log))
 }
 
 /// `settuning <-20..20>` —— 角度微调，signed int16 LE，步进 5
@@ -675,10 +670,7 @@ pub fn cmd_settuning(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_tuning(dev, rid, value, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_tuning(dev, rid, value, keep, save, ctx, &mut log))
 }
 
 /// `setlod <low|high>` —— ⚠️ 会重置表面标定（厂商确认无恢复命令）
@@ -691,10 +683,7 @@ pub fn cmd_setlod(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_lod(dev, rid, code, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_lod(dev, rid, code, keep, save, ctx, &mut log))
 }
 
 /// `setlight <mode> [brightness] [RRGGBB]`
@@ -714,12 +703,9 @@ pub fn cmd_setlight(
     let rid = ctx.rid();
     // CLI 不暴露方向/随机/速度：本型号只有 Rainbow(3)/Comet(5) 用得上这三个字段，
     // 而这两个模式写进去会被设备静默回落到 ColorCycle。传 `None` = 沿用设备当前值。
-    let r = ops::set_light(
+    finish(ops::set_light(
         dev, rid, mode, bright, rgb, None, None, None, keep, save, ctx, &mut log,
-    )?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    ))
 }
 
 /// `setbutton <slot 0-7> <dstHex>`
@@ -736,10 +722,7 @@ pub fn cmd_setbutton(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_button(dev, rid, slot, dst, keep, save, confirmed, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_button(dev, rid, slot, dst, keep, save, confirmed, ctx, &mut log))
 }
 
 /// `setsleep <code>` —— 休眠（自动关机）时间。
@@ -755,10 +738,7 @@ pub fn cmd_setsleep(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_sleep(dev, rid, code, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_sleep(dev, rid, code, keep, save, ctx, &mut log))
 }
 
 /// `setlowbatt <percent>` —— 低电量告警阈值。
@@ -771,10 +751,7 @@ pub fn cmd_setlowbatt(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_low_batt(dev, rid, percent, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_low_batt(dev, rid, percent, keep, save, ctx, &mut log))
 }
 
 /// `setfulleffect <0|1>` —— 充满电时的灯效开关。
@@ -787,10 +764,7 @@ pub fn cmd_setfulleffect(
 ) -> Result<ApplyReport, OpsError> {
     let mut log = |line: &str| println!("{line}");
     let rid = ctx.rid();
-    let r = ops::set_full_effect(dev, rid, on, keep, save, ctx, &mut log)?;
-    print_report(&r);
-    // CLI 要非零退出码：读回不一致在这里升级成错误（GUI 则直接看报告字段）
-    r.into_result()
+    finish(ops::set_full_effect(dev, rid, on, keep, save, ctx, &mut log))
 }
 
 /// `save` —— 单独提交当前 RAM 里的设置进 flash。
@@ -968,6 +942,28 @@ pub fn open_dongle(all: &[HidInterface]) -> Result<HidDevice, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn finish_upgrades_readback_mismatch_to_error() {
+        // 读回一致：原样返回报告
+        let ok = ApplyReport {
+            applied: true,
+            ..ApplyReport::default()
+        };
+        assert!(finish(Ok(ok)).is_ok());
+
+        // 读回不一致：CLI 靠退出码，必须升级成错误
+        let bad = ApplyReport {
+            applied: false,
+            new_value: "800 DPI".to_string(),
+            readback_value: "400 DPI".to_string(),
+            ..ApplyReport::default()
+        };
+        let err = finish(Ok(bad)).expect_err("读回不一致必须变成错误");
+        assert!(err.to_string().contains("写入未生效"), "{err}");
+
+        // ops 层的错误原样透出（不能在这里被吞掉）
+        assert!(finish(Err(OpsError::asleep("写入无应答"))).is_err());
+    }
 
     #[test]
     fn error_hints_cover_all_kinds() {
