@@ -120,7 +120,13 @@ fn main() -> ExitCode {
         unsafe {
             win32::FreeConsole();
         }
-        return run_gui(wants_autostart);
+        // 开机自启只在托盘里待着，不要弹主窗口。
+        //
+        // 绿色版的自启一定带 `--autostart`；MSIX 版做不到 —— `desktop:StartupTask`
+        // 是系统激活，命令行里没有参数，所以那里只能靠父进程判断（见
+        // `autostart::launched_at_logon`）。
+        let start_hidden = wants_autostart || autostart::launched_at_logon();
+        return run_gui(start_hidden);
     }
     let _ = wants_help; // 参数非空时由下面的 CLI 分支统一处理
 
@@ -210,7 +216,7 @@ impl Drop for MutexGuard {
 
 /// GUI 入口。控制台已经在上面的 [`main`] 里脱离干净，这里**不能**再 `println!`
 /// —— 没有地方会接住它。需要日志就写 [`paths::cache_dir`] 下的文件。
-fn run_gui(wants_autostart: bool) -> ExitCode {
+fn run_gui(start_hidden: bool) -> ExitCode {
     // 单实例互斥锁：防止多开造成 HID 设备冲突与多托盘图标堆叠
     let mutex = match check_single_instance() {
         Some(h) => h,
@@ -229,7 +235,7 @@ fn run_gui(wants_autostart: bool) -> ExitCode {
     // 降级链，全失败也只是退回模糊状态，不该因此拒绝启动。
     let _ = dwm::enable_dpi_awareness();
 
-    match gui::run(wants_autostart) {
+    match gui::run(start_hidden) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // GUI 起不来时控制台已经没了，唯一的告知途径是消息框 + 日志文件。

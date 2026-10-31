@@ -206,6 +206,28 @@ pub fn detect_path() -> AutoStartPath {
     }
 }
 
+/// 这次启动是不是「开机自启」拉起来的。
+///
+/// 绿色版不需要猜：Run 键和 Startup 里的 VBS 都显式带 [`RUN_ARG`]。
+/// MSIX 版做不到 —— `desktop:StartupTask` 是**系统激活**，命令行里没有参数，
+/// 双击图标和开机启动的 argv 完全一样。所以这里看父进程：
+///
+/// - 用户手动启动（开始菜单 / 桌面快捷方式 / 任务栏）→ 父进程是 `explorer.exe`
+/// - 登录时由 StartupTask 拉起 → 父进程是系统激活宿主（`svchost.exe` /
+///   `RuntimeBroker.exe` 之类）
+///
+/// 判不出来（快照失败）时返回 `false`：宁可多弹一次窗口，也不要让用户
+/// 点了图标以为没反应。
+pub fn launched_at_logon() -> bool {
+    if package_identity() != Some(true) {
+        return false;
+    }
+    match crate::win32::parent_exe_name(std::process::id()) {
+        Some(name) => !name.eq_ignore_ascii_case("explorer.exe"),
+        None => false,
+    }
+}
+
 // ============================================================
 // 绿色版：注册表
 // ============================================================

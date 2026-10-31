@@ -43,7 +43,7 @@
 //! - `nwg::full_bind_event_handler` 收的是 **`Fn`**，不是 `FnMut`。所以要改的状态
 //!   必须放进 `Cell` / `RefCell` / `Mutex`。
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -66,6 +66,11 @@ use crate::win32;
 ///
 /// 三个理由：绿色版是单文件发布（旁边不会有 `assets\`）、MSIX 里 exe 所在的
 /// install 目录只读、`Icon::from_file` 在 strict=false 时读不到会 panic。
+///
+/// 注意：托盘图标现在由 `TrayCtl` 自己画（要固定 GUID），不再走这个字节流。
+/// 留着它是为了**编译期校验** `assets/tray.ico` 一定存在且被打进 exe ——
+/// `assets/app.rc` 靠它生成 exe 的图标资源，删了会让构建悄悄少一份资源。
+#[allow(dead_code)]
 static TRAY_ICON: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/tray.ico"));
 
 /// 窗口标题。用产品名，不写具体型号 —— 这是个通用 ROG 鼠标工具。
@@ -398,6 +403,78 @@ fn lock_shared(s: &Arc<Mutex<Shared>>) -> std::sync::MutexGuard<'_, Shared> {
 
 // ==================== 界面动作的执行 ====================
 
+/// 托盘图标回调消息号。`WM_APP + 100`，避开 nwg 自己用的那些。
+const TRAY_CALLBACK_MSG: u32 = 0x8000 + 100;
+
+/// 自己管的托盘图标。
+///
+/// 为什么不用 nwg 的 `TrayNotification`：它不暴露 `guidItem`，而托盘图标的
+/// 显示/折叠状态 Windows 是按 **exe 路径** 记的 —— MSIX 每次更新换目录，
+/// 系统就当成新程序，又折叠回溢出区（用户报的「更新之后托盘又被折叠」）。
+/// 注册固定 GUID 后系统按 GUID 记，跨版本保持用户的选择。
+struct TrayCtl {
+    /// 回调消息的接收窗口（`msg_window`，托盘必须挂在 MessageWindow 上）。
+    hwnd: win32::Handle,
+    visible: std::cell::Cell<bool>,
+    /// 当前显示的图标句柄。**必须一直有效** —— `Shell_NotifyIconW` 不拷贝图标，
+    /// 句柄销毁了任务栏上就是一片空白。
+    cur: std::cell::Cell<win32::Handle>,
+}
+
+impl TrayCtl {
+    fn new(hwnd: win32::Handle) -> Self {
+        Self {
+            hwnd,
+            visible: std::cell::Cell::new(false),
+            cur: std::cell::Cell::new(std::ptr::null_mut()),
+        }
+    }
+
+    /// 添加/移除托盘图标。退出时必须调，否则任务栏上留一个点不动的幽灵图标。
+    fn set_visibility(&self, on: bool) {
+        if on == self.visible.get() {
+            return;
+        }
+        if on {
+            // 先用占位图标加进去；真实电量图标由通知循环在下一拍换上。
+            let Some(h) = crate::tray_icon::render_unknown() else {
+                return;
+            };
+            if win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", win32::TRAY_GUID) {
+                self.cur.set(h);
+                self.visible.set(true);
+            } else {
+                unsafe { win32::DestroyIcon(h) };
+            }
+        } else {
+            win32::tray_remove(self.hwnd, win32::TRAY_GUID);
+            let old = self.cur.replace(std::ptr::null_mut());
+            if !old.is_null() {
+                unsafe { win32::DestroyIcon(old) };
+            }
+            self.visible.set(false);
+        }
+    }
+
+    fn set_icon(&self, hicon: win32::Handle) {
+        if !self.visible.get() {
+            unsafe { win32::DestroyIcon(hicon) };
+            return;
+        }
+        win32::tray_update(self.hwnd, Some(hicon), None, win32::TRAY_GUID);
+        let old = self.cur.replace(hicon);
+        if !old.is_null() && old != hicon {
+            unsafe { win32::DestroyIcon(old) };
+        }
+    }
+
+    fn set_tip(&self, tip: &str) {
+        if self.visible.get() {
+            win32::tray_update(self.hwnd, None, Some(tip), win32::TRAY_GUID);
+        }
+    }
+}
+
 /// 处理一个 `Act` 时要用到的一堆句柄。
 ///
 /// 打成一个结构而不是给 `handle_act` 传七个参数：这条链上每加一个能力
@@ -407,7 +484,7 @@ struct UiEnv<'a> {
     shared: &'a Arc<Mutex<Shared>>,
     signal: &'a Signal,
     window: &'a nwg::Window,
-    tray: &'a nwg::TrayNotification,
+    tray: &'a TrayCtl,
 }
 
 impl<'a> UiEnv<'a> {
@@ -1918,7 +1995,12 @@ fn tray_tip_full(s: &Shared) -> String {
     format!("{name}\n{conn}\n{battery}\n{dpi}")
 }
 
-/// 托盘悬停提示。**必须是 `&str`**（`set_tip` 不收 `Option`）。
+/// 早期的单行悬停提示（只有电量）。
+///
+/// 现在托盘用的是 [`tray_tip_full`]（名称/链路/电量/DPI 四行）。这个只剩单测
+/// 在用 —— 留着是因为它锁定了「休眠时说休眠中、出错时说读取出错」这套措辞，
+/// 免得将来改文案时把边界情况弄丢。
+#[cfg(test)]
 fn tray_tip(q: Option<Quick>, status: &Status) -> String {
     match (q, status) {
         (Some(q), _) => format!(
@@ -2000,7 +2082,7 @@ fn ask_confirm(title: &str, text: &str) -> bool {
 // ==================== 入口 ====================
 
 /// 启动 GUI。返回时进程就要退出了。
-pub fn run(wants_autostart: bool) -> Result<(), String> {
+pub fn run(start_hidden: bool) -> Result<(), String> {
     nwg::init().map_err(|e| format!("nwg 初始化失败：{e}"))?;
 
     let cfg = settings::load();
@@ -2121,14 +2203,6 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
         .build(&mut msg_window)
         .map_err(|e| format!("建消息窗口失败：{e}"))?;
 
-    let mut icon = nwg::Icon::default();
-    nwg::Icon::builder()
-        .source_bin(Some(TRAY_ICON))
-        // 千万不要加 .size()：那条路走 WIC，ico 里的 PNG 条目 WIC 不认，
-        // 实测报 Err(ResourceCreationError("Failed to create a image factory"))
-        .build(&mut icon)
-        .map_err(|e| format!("从内嵌字节建图标失败：{e}"))?;
-
     let mut menu = nwg::Menu::default();
     nwg::Menu::builder()
         .popup(true)
@@ -2147,15 +2221,12 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
         .build(&mut mi_quit)
         .map_err(|e| format!("菜单项：{e}"))?;
 
-    let mut tray = nwg::TrayNotification::default();
-    nwg::TrayNotification::builder()
-        .parent(&msg_window)
-        // icon 必须给，None 会 panic
-        .icon(Some(&icon))
-        .tip(Some(&tray_tip(None, &Status::Idle)))
-        .visible(cfg.tray_enabled)
-        .build(&mut tray)
-        .map_err(|e| format!("建托盘图标失败：{e}"))?;
+    // 托盘图标自己管（见 `TrayCtl` 注释：nwg 不暴露 guidItem，做不到跨版本固定）。
+    // 图标在消息循环起来之后再添加 —— 那时 `msg_window` 才能收回调消息。
+    let tray = TrayCtl::new(msg_window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as win32::Handle);
+    if cfg.tray_enabled {
+        tray.set_visibility(true);
+    }
 
     let mut notice = nwg::Notice::default();
     nwg::Notice::builder()
@@ -2412,10 +2483,7 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
     //
     // 闭包是 `Fn`，所以所有可变状态都要放进 `Cell` / `RefCell`。
     let tray_level: Cell<Option<u8>> = Cell::new(None);
-    let static_icon_handle = icon.handle;
-    let icon_cell: RefCell<nwg::Icon> = RefCell::new(icon);
 
-    let h_tray = tray.handle.clone();
     let h_mi_quit = mi_quit.handle.clone();
 
     let shared_e = Arc::clone(&shared);
@@ -2530,17 +2598,8 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
                         None => crate::tray_icon::render_unknown(),
                     };
                     if let Some(hicon) = hicon {
-                        let mut ic = icon_cell.borrow_mut();
-                        let old = ic.handle;
-                        ic.handle = hicon as usize as *mut _;
-                        tray.set_icon(&ic);
-                        // 旧的自绘图标必须手工 DestroyIcon —— `Icon.owned`
-                        // 是 `pub(crate)`，外部改不了，nwg 的 Drop 不管这个
-                        // 句柄。静态图标那份归 nwg 自己（owned=true），
-                        // 不能碰，否则 double free。
-                        if !old.is_null() && old != static_icon_handle {
-                            unsafe { win32::DestroyIcon(old as win32::Handle) };
-                        }
+                        // `TrayCtl::set_icon` 负责换图并销毁旧句柄。
+                        tray.set_icon(hicon);
                         tray_level.set(want);
                     }
                 }
@@ -2552,34 +2611,42 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
         }
     });
 
-    // ── 托盘 / 菜单事件处理器 ────────────────────────────────
+    // ── 托盘图标回调 ────────────────────────────────────────
     //
-    // 关键：`TrayNotification` 与 `Menu` 的 parent 都是 `msg_window`（见上，
-    // nwg 要求托盘必须挂在 MessageWindow 上）。Windows 把 `NWG_TRAY` 回调消息
-    // 和菜单的 `WM_COMMAND` 都投递给 **msg_window**，而不是主窗口 `window`。
-    // 之前只在 `window` 上绑了事件处理器，于是托盘点击/菜单选择全部进入黑洞
-    // —— 这就是「点托盘没反应」的根因。这里单独给 `msg_window` 绑一个处理器。
-    let h_tray_m = h_tray;
+    // 图标是我们自己用 `Shell_NotifyIconW` 加的（见 `TrayCtl`），鼠标事件会
+    // 发到 `TRAY_CALLBACK_MSG`，由 `msg_window` 接收。nwg 那条「托盘事件」
+    // 通道已经不参与，所以这里用裸处理器。
+    let tray_handler = unsafe {
+        nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |_h, msg, _wp, lp| {
+            if msg != TRAY_CALLBACK_MSG {
+                return None;
+            }
+            // 回调的 lParam 低字是鼠标消息
+            match (lp as u32) & 0xFFFF {
+                // WM_RBUTTONUP：弹菜单（现在只剩「退出」）。
+                0x0205 => {
+                    let (x, y) = nwg::GlobalCursor::position();
+                    menu.popup(x, y);
+                }
+                // WM_LBUTTONUP：直接回主窗口。
+                // SW_RESTORE = 9：既显示窗口、又取消最小化。
+                // 用裸句柄，不用 `window`（它已被主处理器 move 走）。
+                0x0202 => {
+                    let _ = crate::win32::ShowWindow(hwnd, 9);
+                    let _ = crate::win32::SetForegroundWindow(hwnd);
+                }
+                _ => {}
+            }
+            Some(0)
+        })
+    }
+    .map_err(|e| format!("绑托盘回调失败：{e}"))?;
+
+    // ── 菜单事件处理器 ──────────────────────────────────────
     let signal_m = Arc::clone(&signal);
     let msg_handler = nwg::full_bind_event_handler(&msg_window.handle, move |evt, _evt_data, handle| {
         use nwg::Event as E;
         match evt {
-            // 右键：弹菜单（现在只剩「退出」）。
-            E::OnContextMenu if handle == h_tray_m => {
-                let (x, y) = nwg::GlobalCursor::position();
-                menu.popup(x, y);
-            }
-            // 左键单击：直接打开主窗口（用户要求：单击托盘图标就回主页面，
-            // 不要再弹「显示主窗口 / 立即刷新」那套菜单）。
-            //
-            // 用裸句柄恢复，不用 `window`（它已被主处理器 move 走）。
-            // SW_RESTORE = 9：既显示窗口、又取消最小化。
-            E::OnMousePress(nwg::MousePressEvent::MousePressLeftUp) if handle == h_tray_m => {
-                unsafe {
-                    let _ = crate::win32::ShowWindow(hwnd, 9);
-                    let _ = crate::win32::SetForegroundWindow(hwnd);
-                }
-            }
             E::OnMenuItemSelected if handle == h_mi_quit => {
                 signal_m.shutdown.store(true, Ordering::Relaxed);
                 signal_m.cv.notify_all();
@@ -2597,9 +2664,9 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
     signal.request_refresh();
 
     // 初始化全部就绪、消息循环马上开始 —— 这一刻才把窗口显示出来。
-    // 若是由开机自启动拉起且托盘已开启，则保持在托盘后台运行，不弹窗打扰用户。
+    // 若是开机自启拉起（且托盘已开启），就留在托盘后台，不弹窗打扰用户。
     // SW_SHOWNORMAL = 1。
-    if !(wants_autostart && cfg.tray_enabled) {
+    if !(start_hidden && cfg.tray_enabled) {
         unsafe {
             let _ = crate::win32::ShowWindow(hwnd, 1);
         }
@@ -2624,6 +2691,12 @@ pub fn run(wants_autostart: bool) -> Result<(), String> {
 
     nwg::unbind_event_handler(&handler);
     nwg::unbind_event_handler(&msg_handler);
+    let _ = nwg::unbind_raw_event_handler(&tray_handler);
+    // 托盘图标必须显式移除，否则任务栏上留一个点不动的幽灵图标。
+    // `tray` 已被主处理器闭包 move 走，这里直接按 GUID 移除。
+    if let Some(h) = msg_window.handle.hwnd() {
+        crate::win32::tray_remove(h as crate::win32::Handle, crate::win32::TRAY_GUID);
+    }
     Ok(())
 }
 

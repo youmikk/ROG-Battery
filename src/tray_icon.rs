@@ -79,7 +79,9 @@ pub fn label(level: u8) -> String {
 
 /// 按位数选字号（**相对 [`ICON_SIZE`] 的 32px 图标**）。
 ///
-/// 一位数（`7`）用 28px，两位数（`82`）用 27px（双位分栏紧凑绘制，高度占满），三位数（`100`）用 14px。
+/// 一位数（`7`）用 28px，两位数（`82`）用 27px，三位数（`100`）用 20px。
+/// 三位数每格只有 10px 宽，20px 是「占满宽度又不互相压线」的上限 ——
+/// 原来给 14px，满电时数字小得像注脚，用户专门提过。
 /// 这是纯函数，测试直接断言数字，不需要真的画。
 ///
 /// 实际绘制时按 `icon_size()` 等比缩放 —— 见 [`scaled_font_height`]。
@@ -87,7 +89,7 @@ pub fn font_height(level: u8) -> i32 {
     match label(level).len() {
         1 => 28,
         2 => 27,
-        _ => 14,
+        _ => 20,
     }
 }
 
@@ -300,7 +302,6 @@ fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) ->
         }
 
         let text: Vec<u16> = text.encode_utf16().collect();
-        let len = text.len() as i32;
 
         if !font.is_null() {
             // 描边/光晕（8 方向偏 1px）：浅色任务栏柔和浅光晕，深色任务栏柔和深暗影
@@ -328,66 +329,41 @@ fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) ->
                 (1.0, 1.0),
             ];
 
-            if text.len() == 2 {
-                // 两位数：将两个数字分左右栏绘制，消除单串过长被 GDI+ 折行/裁切的问题，字号拉大至 27px 占满高度
-                let half = size as f32 / 2.0;
-                let d1 = [text[0]];
-                let d2 = [text[1]];
-                let rc1 = RectF {
-                    x: -1.2,
+            // 按字符分栏绘制：每个字符一个等宽槽，槽左右各外扩 1.2px 让字形
+            // 紧凑相接。整串一次绘制在三位数（`100`）时会因为总宽超出图标被
+            // GDI+ 折行/裁切，分栏把这个坑绕开了，也顺便让一位/两位/三位走
+            // 同一条代码路径。
+            let n = text.len().max(1);
+            let slot_w = size as f32 / n as f32;
+            let mut chars: Vec<[u16; 1]> = Vec::with_capacity(n);
+            for ch in text.iter() {
+                chars.push([*ch]);
+            }
+            let rects: Vec<RectF> = (0..n)
+                .map(|i| RectF {
+                    x: i as f32 * slot_w - 1.2,
                     y: -0.5,
-                    w: half + 2.4,
+                    w: slot_w + 2.4,
                     h: size as f32,
-                };
-                let rc2 = RectF {
-                    x: half - 1.2,
-                    y: -0.5,
-                    w: half + 2.4,
-                    h: size as f32,
-                };
+                })
+                .collect();
 
-                if !shadow.is_null() {
-                    for (dx, dy) in offs {
-                        let r1 = RectF {
-                            x: rc1.x + dx,
-                            y: rc1.y + dy,
-                            w: rc1.w,
-                            h: rc1.h,
-                        };
-                        let r2 = RectF {
-                            x: rc2.x + dx,
-                            y: rc2.y + dy,
-                            w: rc2.w,
-                            h: rc2.h,
-                        };
-                        GdipDrawString(g, d1.as_ptr(), 1, font, &r1, fmt, shadow);
-                        GdipDrawString(g, d2.as_ptr(), 1, font, &r2, fmt, shadow);
-                    }
-                }
-                if !fg.is_null() {
-                    GdipDrawString(g, d1.as_ptr(), 1, font, &rc1, fmt, fg);
-                    GdipDrawString(g, d2.as_ptr(), 1, font, &rc2, fmt, fg);
-                }
-            } else {
-                let rc = RectF {
-                    x: 0.0,
-                    y: -0.5,
-                    w: size as f32,
-                    h: size as f32,
-                };
-                if !shadow.is_null() {
-                    for (dx, dy) in offs {
+            if !shadow.is_null() {
+                for (dx, dy) in offs {
+                    for (ch, rc) in chars.iter().zip(rects.iter()) {
                         let r = RectF {
                             x: rc.x + dx,
                             y: rc.y + dy,
                             w: rc.w,
                             h: rc.h,
                         };
-                        GdipDrawString(g, text.as_ptr(), len, font, &r, fmt, shadow);
+                        GdipDrawString(g, ch.as_ptr(), 1, font, &r, fmt, shadow);
                     }
                 }
-                if !fg.is_null() {
-                    GdipDrawString(g, text.as_ptr(), len, font, &rc, fmt, fg);
+            }
+            if !fg.is_null() {
+                for (ch, rc) in chars.iter().zip(rects.iter()) {
+                    GdipDrawString(g, ch.as_ptr(), 1, font, rc, fmt, fg);
                 }
             }
 
@@ -788,7 +764,7 @@ mod tests {
         // 16px 上两位数必须是可读的，且不能顶出边界。
         assert_eq!(scaled_font_height(82, 16), 13); // 27 * 16 / 32 = 13
         assert_eq!(scaled_font_height(7, 16), 14); // 28 * 16 / 32 = 14
-        assert_eq!(scaled_font_height(100, 16), 7); // 14 * 16 / 32 = 7
+        assert_eq!(scaled_font_height(100, 16), 10); // 20 * 16 / 32 = 10
         for lv in [0u8, 7, 42, 82, 99, 100] {
             for size in [16, 20, 24, 32] {
                 let h = scaled_font_height(lv, size);

@@ -359,6 +359,190 @@ pub struct MonitorInfo {
     pub flags: u32,
 }
 
+// ============ Toolhelp（父进程探测）============
+//
+// 用途只有一个：判断「这次是不是开机自启拉起来的」。MSIX 的 `desktop:StartupTask`
+// 是系统激活，命令行里拿不到 `--autostart`，只能看父进程是不是 explorer.exe。
+
+/// `TH32CS_SNAPPROCESS`
+pub const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+
+/// `PROCESSENTRY32W`。字段顺序/宽度严格按 `tlhelp32.h`，`dw_size` 必须先填。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessEntry32W {
+    pub dw_size: u32,
+    pub cnt_usage: u32,
+    pub th32_process_id: u32,
+    /// `ULONG_PTR`：x64 上是 8 字节，写 `u32` 会让后面所有字段错位。
+    pub th32_default_heap_id: usize,
+    pub th32_module_id: u32,
+    pub cnt_threads: u32,
+    pub th32_parent_process_id: u32,
+    pub pc_pri_class_base: i32,
+    pub dw_flags: u32,
+    pub sz_exe_file: [u16; 260],
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
+    pub fn Process32FirstW(snap: Handle, entry: *mut ProcessEntry32W) -> i32;
+    pub fn Process32NextW(snap: Handle, entry: *mut ProcessEntry32W) -> i32;
+}
+
+/// 取某个进程的父进程可执行文件名（如 `explorer.exe`，小写）。
+///
+/// 一次快照把「pid → (父 pid, 名字)」全读出来再走链，比
+/// `NtQueryInformationProcess` 稳 —— 后者结构体布局随系统版本变。
+pub fn parent_exe_name(pid: u32) -> Option<String> {
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap.is_null() || snap == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut rows: Vec<(u32, u32, String)> = Vec::new();
+        let mut e: ProcessEntry32W = std::mem::zeroed();
+        e.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok {
+            let end = e.sz_exe_file.iter().position(|c| *c == 0).unwrap_or(0);
+            let name = String::from_utf16_lossy(&e.sz_exe_file[..end]).to_lowercase();
+            rows.push((e.th32_process_id, e.th32_parent_process_id, name));
+            e.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+
+        let ppid = rows.iter().find(|(p, _, _)| *p == pid)?.1;
+        rows.iter()
+            .find(|(p, _, _)| *p == ppid)
+            .map(|(_, _, n)| n.clone())
+    }
+}
+
+// ============ 托盘图标（shell32）============
+//
+// 为什么要自己调 `Shell_NotifyIconW`，而不是用 nwg 的 `TrayNotification`：
+//
+// 托盘图标的「显示/折叠」状态，Windows 是按 **exe 路径** 记的。MSIX 每次更新
+// 都把程序装进带版本号的新目录（`...\Sonder.RBattery_1.2.1.0_x64__<hash>\`），
+// 于是新路径在系统眼里是个全新程序 → 又落回溢出区，用户看到的就是
+// 「更新之后托盘又被折叠掉」。
+//
+// 给图标注册一个**固定 GUID**（`NIF_GUID`）就能让系统按 GUID 记状态，
+// 跨版本保持用户的固定/折叠选择。而 nwg 不暴露 `guidItem` 字段，所以这里
+// 自己发通知消息。
+
+pub const NIM_ADD: u32 = 0x0000_0000;
+pub const NIM_MODIFY: u32 = 0x0000_0001;
+pub const NIM_DELETE: u32 = 0x0000_0002;
+
+pub const NIF_MESSAGE: u32 = 0x0000_0001;
+pub const NIF_ICON: u32 = 0x0000_0002;
+pub const NIF_TIP: u32 = 0x0000_0004;
+pub const NIF_GUID: u32 = 0x0000_0020;
+
+/// `GUID`。`#[repr(C)]` 布局与 `guiddef.h` 一致。
+///
+/// 类型本身定义在文件上方（`SpDeviceInterfaceData` 那一段要用），这里只补一条
+/// 说明：托盘图标的 `guidItem` 字段就是它。
+
+/// 本程序的托盘图标 GUID —— **一旦发布就不能改**，改了等于换了个新图标。
+pub const TRAY_GUID: Guid = Guid {
+    data1: 0x9A7C_3E10,
+    data2: 0x4B21,
+    data3: 0x4E9C,
+    data4: [0x9B, 0x2A, 0x11, 0x7D, 0xC4, 0x35, 0x8F, 0x60],
+};
+
+/// `NOTIFYICONDATAW`（x64 上 976 字节）。
+///
+/// `timeout_or_version` 对应 C 里的匿名 union（`uTimeout` / `uVersion`）。
+/// 字段顺序必须与 `shellapi.h` 完全一致，`cb_size` 交给
+/// [`notify_icon_data`] 填，别手写。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NotifyIconDataW {
+    pub cb_size: u32,
+    pub hwnd: Handle,
+    pub uid: u32,
+    pub flags: u32,
+    pub callback_message: u32,
+    pub hicon: Handle,
+    pub sz_tip: [u16; 128],
+    pub state: u32,
+    pub state_mask: u32,
+    pub sz_info: [u16; 256],
+    pub timeout_or_version: u32,
+    pub sz_info_title: [u16; 64],
+    pub info_flags: u32,
+    pub guid_item: Guid,
+    pub balloon_icon: Handle,
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    pub fn Shell_NotifyIconW(message: u32, data: *const NotifyIconDataW) -> i32;
+}
+
+/// 造一份填好 `cb_size`/`hwnd`/`guid` 的通知结构。其余字段由调用方按需填。
+fn notify_icon_data(hwnd: Handle, callback_message: u32, guid: Guid) -> NotifyIconDataW {
+    // SAFETY: 全零是 `NOTIFYICONDATAW` 的合法初值（所有字段都是 POD）。
+    let mut n: NotifyIconDataW = unsafe { std::mem::zeroed() };
+    n.cb_size = std::mem::size_of::<NotifyIconDataW>() as u32;
+    n.hwnd = hwnd;
+    n.callback_message = callback_message;
+    n.guid_item = guid;
+    n
+}
+
+fn copy_tip(dst: &mut [u16; 128], tip: &str) {
+    let mut i = 0;
+    for c in tip.encode_utf16() {
+        if i + 1 >= dst.len() {
+            break; // 留一个位置给结尾的 NUL
+        }
+        dst[i] = c;
+        i += 1;
+    }
+    dst[i] = 0;
+}
+
+/// 添加托盘图标（带固定 GUID）。
+pub fn tray_add(hwnd: Handle, callback_message: u32, hicon: Handle, tip: &str, guid: Guid) -> bool {
+    let mut n = notify_icon_data(hwnd, callback_message, guid);
+    n.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_GUID;
+    n.hicon = hicon;
+    copy_tip(&mut n.sz_tip, tip);
+    // SAFETY: `n` 已按 `shellapi.h` 布局初始化，指针只在调用期间有效。
+    unsafe { Shell_NotifyIconW(NIM_ADD, &n) != 0 }
+}
+
+/// 改图标和/或提示文字（都传 `None` 等于只刷新一次，不改内容）。
+pub fn tray_update(hwnd: Handle, hicon: Option<Handle>, tip: Option<&str>, guid: Guid) -> bool {
+    let mut n = notify_icon_data(hwnd, 0, guid);
+    n.flags = NIF_GUID;
+    if let Some(h) = hicon {
+        n.flags |= NIF_ICON;
+        n.hicon = h;
+    }
+    if let Some(t) = tip {
+        n.flags |= NIF_TIP;
+        copy_tip(&mut n.sz_tip, t);
+    }
+    // SAFETY: 同上。
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &n) != 0 }
+}
+
+/// 移除托盘图标。退出时调用，否则图标会变成「幽灵」留在任务栏上。
+pub fn tray_remove(hwnd: Handle, guid: Guid) -> bool {
+    let mut n = notify_icon_data(hwnd, 0, guid);
+    n.flags = NIF_GUID;
+    // SAFETY: 同上。
+    unsafe { Shell_NotifyIconW(NIM_DELETE, &n) != 0 }
+}
+
 // ============ user32 ============
 #[link(name = "user32")]
 extern "system" {    /// 查找顶层窗口（单实例检测用）。

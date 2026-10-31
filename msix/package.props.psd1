@@ -1,4 +1,4 @@
-# MSIX 打包用的可变参数。build-msix.ps1 读这个文件填 AppxManifest.xml.template。
+﻿# MSIX 打包用的可变参数。build-msix.ps1 读这个文件填 AppxManifest.xml.template。
 #
 # 为什么单独一个 psd1 而不是塞进脚本：这些值每次发布/每次换身份都要动，
 # 而脚本逻辑不该跟着动。改这里不会有改坏逻辑的风险。
@@ -45,7 +45,7 @@
     #
     # 2026-10-29：商店侧已经提交过 1.1.9.0（CI 测试跑上去的），所以这里必须
     # 大于它，顺手对齐成 1.2.0.0 —— 与 Cargo.toml / tag 的主次号一致。
-    Version      = '1.2.1.0'
+    Version        = '1.2.2.0'
 
     # ---------- 可执行文件 ----------
     # 相对包根的路径。.exe 由 build-msix.ps1 从 ..\target\release\ 拷进 stage 根目录，
