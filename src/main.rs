@@ -166,7 +166,7 @@ fn main() -> ExitCode {
         };
     }
 
-    match run(cmd, &pos, keep, save, yes, fresh, use_dongle, light) {
+    match parse_cmd(cmd, &pos).and_then(|a| run(a, keep, save, yes, fresh, use_dongle, light)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("错误：{e}");
@@ -280,8 +280,7 @@ fn run_gui(start_hidden: bool) -> ExitCode {
 
 
 fn run(
-    cmd: &str,
-    pos: &[&str],
+    a: Cmd,
     keep: bool,
     save: bool,
     yes: bool,
@@ -289,49 +288,45 @@ fn run(
     use_dongle: bool,
     light: bool,
 ) -> Result<(), String> {
-    // 参数校验先做，避免为了一个拼错的字去动设备
-    validate(cmd, pos)?;
-
-    // `version` 只打印版本号，不碰设备 —— CI 用它断言「二进制自报的版本 == tag」。
-    if cmd == "version" {
-        println!("{}", crate::gui::APP_VERSION);
-        return Ok(());
-    }
-
-    let api = win32::HidApi::load()?;
-
-    // `dump` 只列接口，不打开链路 —— 有线/无线模式下暴露的 usage page 完全不同，
-    // 链路开不起来时靠它定位。
-    if cmd == "dump" {
-        // 用详细版：打不开的接口也要列出来，否则「设备插着却用不了」查不出原因。
-        let report = hid::enumerate_report(&api)?;
-        let all = &report.interfaces;
-        println!("共 {} 个可用的 ASUS HID 接口", all.len());
-        for i in all {
-            println!(
-                "  PID 0x{:04X}  usage_page 0x{:04X}  usage 0x{:04X}  命令通道={}  {}",
-                i.product_id,
-                i.usage_page,
-                i.usage,
-                if i.is_command_channel() { "是" } else { "否" },
-                i.product
-            );
-            println!("      {}", i.path);
+    // 只打印、不碰设备的两个命令先走
+    match a {
+        Cmd::Version => {
+            println!("{}", crate::gui::APP_VERSION);
+            return Ok(());
         }
-        if !report.skipped.is_empty() {
-            println!("打不开的接口 {} 个：", report.skipped.len());
-            for s in &report.skipped {
-                println!("  {}\n      原因：{}", s.path, s.reason);
+        Cmd::Dump => {
+            let api = win32::HidApi::load()?;
+            // 用详细版：打不开的接口也要列出来，否则「设备插着却用不了」查不出原因。
+            let report = hid::enumerate_report(&api)?;
+            println!("共 {} 个可用的 ASUS HID 接口", report.interfaces.len());
+            for i in &report.interfaces {
+                println!(
+                    "  PID 0x{:04X}  usage_page 0x{:04X}  usage 0x{:04X}  命令通道={}  {}",
+                    i.product_id,
+                    i.usage_page,
+                    i.usage,
+                    if i.is_command_channel() { "是" } else { "否" },
+                    i.product
+                );
+                println!("      {}", i.path);
             }
+            if !report.skipped.is_empty() {
+                println!("打不开的接口 {} 个：", report.skipped.len());
+                for s in &report.skipped {
+                    println!("  {}\n      原因：{}", s.path, s.reason);
+                }
+            }
+            return Ok(());
         }
-        return Ok(());
+        _ => {}
     }
 
+    // `raw` 也要写 feature report 才能发命令，所以它同样需要写句柄。
+    let needs_write = !matches!(a, Cmd::Info | Cmd::Backup { .. } | Cmd::Quick | Cmd::Estimate);
+    let api = win32::HidApi::load()?;
     let link = hid::open_link(&api)?;
     let mut dev = hid::HidDevice::open(&link.iface)?;
-
-    // `raw` 也要写 feature report 才能发命令，所以同样需要写句柄
-    if !dev.writable && !matches!(cmd, "info" | "backup" | "quick" | "estimate") {
+    if !dev.writable && needs_write {
         return Err("设备以只读方式打开（写句柄不可用），无法执行写命令。\
              可能被 Armoury Crate / GearLink 独占，先关掉它们。"
             .into());
@@ -340,183 +335,73 @@ fn run(
     let ttl = settings::load().cache_ttl_sec;
     let mut ctx = cli::Ctx::new(&link, ttl);
 
-    match cmd {
-        "info" => {
+    match a {
+        Cmd::Info => {
             if light {
                 cli::cmd_quick(&mut ctx, &mut dev)
             } else {
                 cli::cmd_info(&mut ctx, &mut dev, fresh)
             }
         }
-
-        "quick" => cli::cmd_quick(&mut ctx, &mut dev),
-
-        "backup" => {
-            let name = format!("stock-{}.txt", settings::timestamp_for_filename());
-            let path = paths::resolve_backup_path(pos.get(1).copied(), &name);
-            let p = path.display().to_string();
-            cli::cmd_backup(&mut ctx, &mut dev, &p)
-        }
-
-        "restore" => {
-            let path = paths::resolve_backup_path(Some(pos[1]), "");
-            cli::cmd_restore(&mut ctx, &mut dev, &path.display().to_string(), save)
-        }
-
-        "save" => cli::cmd_save(&mut ctx, &mut dev),
-
-        "estimate" => cli::cmd_estimate(&mut ctx, &mut dev),
-
-        "setdpi" => {
-            let stage: usize = pos[1]
-                .parse()
-                .map_err(|_| format!("档位必须是 1-4，收到 {:?}", pos[1]))?;
-            let dpi: i32 = pos[2]
-                .parse()
-                .map_err(|_| format!("DPI 必须是整数，收到 {:?}", pos[2]))?;
-            let rgb = match pos.get(3) {
-                Some(s) => Some(backup::parse_rgb(s)?),
-                None => None,
-            };
-            cli::cmd_setdpi(&mut ctx, &mut dev, stage, dpi, rgb, keep, save).map(|_| ()).map_err(fail)
-        }
-
-        "setpoll" => {
-            let hz: i32 = pos[1]
-                .parse()
-                .map_err(|_| format!("回报率必须是整数，收到 {:?}", pos[1]))?;
-            cli::cmd_setpoll(&mut ctx, &mut dev, hz, keep, save).map(|_| ()).map_err(fail)
-        }
-
-        "setstage" => {
-            let stage: u8 = pos[1]
-                .parse()
-                .map_err(|_| format!("档位必须是 1-4，收到 {:?}", pos[1]))?;
-            cli::cmd_setstage(&mut ctx, &mut dev, stage, keep, save).map(|_| ()).map_err(fail)
-        }
-
-        "setdebounce" => {
-            let code: u8 = pos[1]
-                .parse()
-                .map_err(|_| format!("去抖代码必须是 0-7，收到 {:?}", pos[1]))?;
-            cli::cmd_setdebounce(&mut ctx, &mut dev, code, keep, save).map(|_| ()).map_err(fail)
-        }
-
-        "setsnap" => {
-            let snap: u8 = pos[1]
-                .parse()
-                .map_err(|_| format!("角度吸附必须是 0 或 1，收到 {:?}", pos[1]))?;
-            cli::cmd_setsnap(&mut ctx, &mut dev, snap, keep, save).map(|_| ()).map_err(fail)
-        }
-
-        "settuning" => {
-            let v: i16 = pos[1]
-                .parse()
-                .map_err(|_| format!("角度微调必须是整数，收到 {:?}", pos[1]))?;
-            cli::cmd_settuning(&mut ctx, &mut dev, v, keep, save).map(|_| ()).map_err(fail)
-        }
-
-        "setlod" => {
-            let code = match pos[1].to_ascii_lowercase().as_str() {
-                "low" => 0u8,
-                "high" => 1u8,
-                other => return Err(format!("只接受 low / high，收到 {other:?}")),
-            };
-            cli::cmd_setlod(&mut ctx, &mut dev, code, keep, save).map(|_| ()).map_err(fail)
-        }
-
-        "setlight" => {
-            let mode_s = pos[1];
-            let mode = if let Some(hex) = mode_s
-                .strip_prefix("0x")
-                .or_else(|| mode_s.strip_prefix("0X"))
-            {
-                u8::from_str_radix(hex, 16)
-                    .map_err(|_| format!("灯光模式 {mode_s:?} 不是合法十六进制"))?
-            } else {
-                mode_s
-                    .parse::<u8>()
-                    .map_err(|_| format!("灯光模式 {mode_s:?} 不是合法数字"))?
-            };
-            let bright = match pos.get(2) {
-                Some(s) => Some(
-                    s.parse::<u8>()
-                        .map_err(|_| format!("亮度必须是 0-100，收到 {s:?}"))?,
-                ),
-                None => None,
-            };
-            let rgb = match pos.get(3) {
-                Some(s) => Some(backup::parse_rgb(s)?),
-                None => None,
-            };
-            cli::cmd_setlight(&mut ctx, &mut dev, mode, bright, rgb, keep, save).map(|_| ()).map_err(fail)
-        }
-
-        "setsleep" => {
-            let code = parse_u8_arg(pos[1], "休眠档位")?;
-            cli::cmd_setsleep(&mut ctx, &mut dev, code, keep, save)
+        Cmd::Quick => cli::cmd_quick(&mut ctx, &mut dev),
+        Cmd::Backup { path } => cli::cmd_backup(&mut ctx, &mut dev, &path),
+        Cmd::Restore { path } => cli::cmd_restore(&mut ctx, &mut dev, &path, save),
+        Cmd::Save => cli::cmd_save(&mut ctx, &mut dev),
+        Cmd::Estimate => cli::cmd_estimate(&mut ctx, &mut dev),
+        Cmd::SetDpi { stage, dpi, rgb } => cli::cmd_setdpi(&mut ctx, &mut dev, stage, dpi, rgb, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetPoll { hz } => cli::cmd_setpoll(&mut ctx, &mut dev, hz, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetStage { stage } => cli::cmd_setstage(&mut ctx, &mut dev, stage, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetDebounce { code } => cli::cmd_setdebounce(&mut ctx, &mut dev, code, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetSnap { on } => cli::cmd_setsnap(&mut ctx, &mut dev, on, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetTuning { v } => cli::cmd_settuning(&mut ctx, &mut dev, v, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetLod { code } => cli::cmd_setlod(&mut ctx, &mut dev, code, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetLight { mode, bright, rgb } => {
+            cli::cmd_setlight(&mut ctx, &mut dev, mode, bright, rgb, keep, save)
                 .map(|_| ())
                 .map_err(fail)
         }
-
-        "setlowbatt" => {
-            let pct = parse_u8_arg(pos[1], "低电量阈值")?;
-            cli::cmd_setlowbatt(&mut ctx, &mut dev, pct, keep, save)
+        Cmd::SetSleep { code } => cli::cmd_setsleep(&mut ctx, &mut dev, code, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetLowBatt { pct } => cli::cmd_setlowbatt(&mut ctx, &mut dev, pct, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetFullEffect { on } => cli::cmd_setfulleffect(&mut ctx, &mut dev, on, keep, save)
+            .map(|_| ())
+            .map_err(fail),
+        Cmd::SetButton { slot, code } => {
+            cli::cmd_setbutton(&mut ctx, &mut dev, slot, code, keep, save, yes)
                 .map(|_| ())
                 .map_err(fail)
         }
-
-        "setfulleffect" => {
-            let on = parse_u8_arg(pos[1], "充满效果开关")?;
-            cli::cmd_setfulleffect(&mut ctx, &mut dev, on, keep, save)
-                .map(|_| ())
-                .map_err(fail)
-        }
-
-        "setbutton" => {
-            let slot: usize = pos[1]
-                .parse()
-                .map_err(|_| format!("槽位必须是 0-7，收到 {:?}", pos[1]))?;
-            let dst = pos[2];
-            let dst = if let Some(hex) = dst.strip_prefix("0x").or_else(|| dst.strip_prefix("0X")) {
-                u16::from_str_radix(hex, 16)
-            } else {
-                u16::from_str_radix(dst, 16)
-            }
-            .map_err(|_| format!("动作码 {dst:?} 不是合法十六进制"))?;
-            cli::cmd_setbutton(&mut ctx, &mut dev, slot, dst, keep, save, yes).map(|_| ()).map_err(fail)
-        }
-
-        "raw" => {
-            let cmd = parse_hex_u8(pos[1], "cmd")?;
-            let sub = parse_hex_u8(pos[2], "sub")?;
-            // 尾部字节：`raw 12 04 00` 里 pos[3..] 都是 tail
-            let mut tail: Vec<u8> = Vec::new();
-            for s in &pos[3..] {
-                tail.push(parse_hex_u8(s, "tail")?);
-            }
-            // `--dongle` 走接收器通道（0xFF02，report id 0x01）
-            //
-            // 超时 900ms，比 DEFAULT_TIMEOUT_MS(1200) 短。**这不是「raw 想快」，
-            // 而是两条路径对 MISS 的解释不同**：
-            //
-            //   raw  —— 人手敲的调试口，会故意发不存在的 cmd 去试探协议边界
-            //           （`raw 12 FF`）。MISS 是**预期结果**，早点告诉人比多等好。
-            //   light/ops —— 高频自动路径，MISS **本身就是要判定的信号**（休眠 /
-            //           链路断）。必须诚实等满一整个超时，不能因为设备刚好慢一点
-            //           就提前判成「无应答」。
-            //
-            // 所以两个值保留差异是对的。改这里之前先想清楚是哪一类用法。
+        Cmd::Raw { cmd_byte, sub_byte, tail } => {
+            // 超时 900ms，比 DEFAULT_TIMEOUT_MS(1200) 短：raw 是人手敲的调试口，
+            // 会故意发不存在的 cmd 试探协议边界，MISS 是**预期结果**，早报早好；
+            // 而 light/ops 是高频自动路径，MISS 本身就是判据（休眠 / 链路断），
+            // 必须诚实等满整个超时。两个值有差异是对的。
             const RAW_TIMEOUT_MS: u32 = 900;
             if use_dongle {
                 let mut d = cli::open_dongle(&link.all_interfaces)?;
-                cli::cmd_raw_on(&mut d, 1, cmd, sub, &tail, RAW_TIMEOUT_MS)
+                cli::cmd_raw_on(&mut d, 1, cmd_byte, sub_byte, &tail, RAW_TIMEOUT_MS)
             } else {
-                cli::cmd_raw(&mut ctx, &mut dev, cmd, sub, &tail, RAW_TIMEOUT_MS)
+                cli::cmd_raw(&mut ctx, &mut dev, cmd_byte, sub_byte, &tail, RAW_TIMEOUT_MS)
             }
         }
-
-        other => Err(format!("未知子命令 {other:?}\n\n{USAGE}")),
+        Cmd::Version | Cmd::Dump => Ok(()),
     }
 }
 
@@ -607,7 +492,36 @@ fn cmd_cache(pos: &[&str]) -> Result<(), String> {
 }
 
 /// 参数校验。放在打开设备之前，拼错的命令不会碰到硬件。
-fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
+/// 命令行参数解析一次完成，返回强类型 [`Cmd`]。
+///
+/// 以前是「`validate()` 校验一遍 + `run()` 里 `pos[1].parse()` 再解析一遍」：
+/// 范围规则写两份，漂了就是「校验说行、执行报错」；而且 `run()` 的裸索引在
+/// 参数缺失时是 panic 而不是提示。现在只在这里解析，`run()` 只消费结果。
+enum Cmd {
+    Version,
+    Info,
+    Quick,
+    Save,
+    Estimate,
+    Dump,
+    Backup { path: String },
+    Restore { path: String },
+    Raw { cmd_byte: u8, sub_byte: u8, tail: Vec<u8> },
+    SetDpi { stage: usize, dpi: i32, rgb: Option<[u8; 3]> },
+    SetPoll { hz: i32 },
+    SetStage { stage: u8 },
+    SetDebounce { code: u8 },
+    SetSnap { on: u8 },
+    SetTuning { v: i16 },
+    SetLod { code: u8 },
+    SetLight { mode: u8, bright: Option<u8>, rgb: Option<[u8; 3]> },
+    SetButton { slot: usize, code: u16 },
+    SetSleep { code: u8 },
+    SetLowBatt { pct: u8 },
+    SetFullEffect { on: u8 },
+}
+
+fn parse_cmd(cmd: &str, pos: &[&str]) -> Result<Cmd, String> {
     let need = |n: usize| -> Result<(), String> {
         if pos.len() < n {
             return Err(format!(
@@ -619,18 +533,33 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
     };
 
     match cmd {
-        "info" | "save" | "estimate" | "quick" | "dump" | "version" => Ok(()),
-        "backup" => Ok(()),                    // 文件可选，默认落到备份目录
-        "restore" => need(2),
+        "version" => Ok(Cmd::Version),
+        "info" => Ok(Cmd::Info),
+        "quick" => Ok(Cmd::Quick),
+        "save" => Ok(Cmd::Save),
+        "estimate" => Ok(Cmd::Estimate),
+        "dump" => Ok(Cmd::Dump),
+        "backup" => {
+            // 文件名可选，缺省落到备份目录，名字带时间戳
+            let name = format!("stock-{}.txt", settings::timestamp_for_filename());
+            let path = paths::resolve_backup_path(pos.get(1).copied(), &name);
+            Ok(Cmd::Backup { path: path.display().to_string() })
+        }
+        "restore" => {
+            need(2)?;
+            let path = paths::resolve_backup_path(Some(pos[1]), "");
+            Ok(Cmd::Restore { path: path.display().to_string() })
+        }
         "raw" => {
             need(3)?;
-            parse_hex_u8(pos[1], "cmd")?;
-            parse_hex_u8(pos[2], "sub")?;
-            // 第 3 个字节可以没有（很多命令 tail 为空）
+            let cmd_byte = parse_hex_u8(pos[1], "cmd")?;
+            let sub_byte = parse_hex_u8(pos[2], "sub")?;
+            // 第 3 个字节之后都可以是 tail（很多命令 tail 为空）
+            let mut tail = Vec::new();
             for s in &pos[3..] {
-                parse_hex_u8(s, "tail")?;
+                tail.push(parse_hex_u8(s, "tail")?);
             }
-            Ok(())
+            Ok(Cmd::Raw { cmd_byte, sub_byte, tail })
         }
         "setdpi" => {
             need(3)?;
@@ -643,11 +572,18 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
             let dpi: i32 = pos[2]
                 .parse()
                 .map_err(|_| format!("DPI 必须是整数，收到 {:?}", pos[2]))?;
-            // 型号规格：100..42000，步进 50
-            if !(100..=42000).contains(&dpi) {
-                return Err(format!("DPI 范围 100-42000，收到 {dpi}"));
+            if !(proto::DPI_MIN..=proto::DPI_MAX).contains(&dpi) {
+                return Err(format!(
+                    "DPI 范围 {}-{}，收到 {dpi}",
+                    proto::DPI_MIN,
+                    proto::DPI_MAX
+                ));
             }
-            Ok(())
+            let rgb = match pos.get(3) {
+                Some(s) => Some(backup::parse_rgb(s)?),
+                None => None,
+            };
+            Ok(Cmd::SetDpi { stage, dpi, rgb })
         }
         "setpoll" => {
             need(2)?;
@@ -657,7 +593,7 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
             if proto::poll_code_of(hz).is_none() {
                 return Err(format!("回报率只支持 125/250/500/1000，收到 {hz}"));
             }
-            Ok(())
+            Ok(Cmd::SetPoll { hz })
         }
         "setstage" => {
             need(2)?;
@@ -667,7 +603,7 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
             if !(1..=4).contains(&stage) {
                 return Err(format!("档位必须是 1-4，收到 {stage}"));
             }
-            Ok(())
+            Ok(Cmd::SetStage { stage })
         }
         "setdebounce" => {
             need(2)?;
@@ -677,17 +613,17 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
             if proto::debounce_ms(code).is_none() {
                 return Err(format!("去抖代码必须是 0-7，收到 {code}"));
             }
-            Ok(())
+            Ok(Cmd::SetDebounce { code })
         }
         "setsnap" => {
             need(2)?;
-            let v: u8 = pos[1]
+            let on: u8 = pos[1]
                 .parse()
                 .map_err(|_| format!("角度吸附必须是 0 或 1，收到 {:?}", pos[1]))?;
-            if v > 1 {
-                return Err(format!("角度吸附必须是 0 或 1，收到 {v}"));
+            if on > 1 {
+                return Err(format!("角度吸附必须是 0 或 1，收到 {on}"));
             }
-            Ok(())
+            Ok(Cmd::SetSnap { on })
         }
         "settuning" => {
             need(2)?;
@@ -700,18 +636,43 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
             if v % 5 != 0 {
                 return Err(format!("角度微调步进为 5，{v} 不是 5 的整数倍"));
             }
-            Ok(())
+            Ok(Cmd::SetTuning { v })
         }
         "setlod" => {
             need(2)?;
-            match pos[1].to_ascii_lowercase().as_str() {
-                "low" | "high" => Ok(()),
-                other => Err(format!("只接受 low / high，收到 {other:?}")),
-            }
+            let code = match pos[1].to_ascii_lowercase().as_str() {
+                "low" => 0u8,
+                "high" => 1u8,
+                other => return Err(format!("只接受 low / high，收到 {other:?}")),
+            };
+            Ok(Cmd::SetLod { code })
         }
         "setlight" => {
             need(2)?;
-            Ok(())
+            let mode_s = pos[1];
+            let mode = if let Some(hex) = mode_s
+                .strip_prefix("0x")
+                .or_else(|| mode_s.strip_prefix("0X"))
+            {
+                u8::from_str_radix(hex, 16)
+                    .map_err(|_| format!("灯光模式 {mode_s:?} 不是合法十六进制"))?
+            } else {
+                mode_s
+                    .parse::<u8>()
+                    .map_err(|_| format!("灯光模式 {mode_s:?} 不是合法数字"))?
+            };
+            let bright = match pos.get(2) {
+                Some(s) => Some(
+                    s.parse::<u8>()
+                        .map_err(|_| format!("亮度必须是 0-100，收到 {s:?}"))?,
+                ),
+                None => None,
+            };
+            let rgb = match pos.get(3) {
+                Some(s) => Some(backup::parse_rgb(s)?),
+                None => None,
+            };
+            Ok(Cmd::SetLight { mode, bright, rgb })
         }
         "setbutton" => {
             need(3)?;
@@ -724,7 +685,14 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
                     proto::BUTTON_SLOTS - 1
                 ));
             }
-            Ok(())
+            let dst = pos[2];
+            let code = if let Some(hex) = dst.strip_prefix("0x").or_else(|| dst.strip_prefix("0X")) {
+                u16::from_str_radix(hex, 16)
+            } else {
+                u16::from_str_radix(dst, 16)
+            }
+            .map_err(|_| format!("动作码 {dst:?} 不是合法十六进制"))?;
+            Ok(Cmd::SetButton { slot, code })
         }
         "setsleep" => {
             need(2)?;
@@ -735,7 +703,7 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
                      注意这是枚举值不是分钟数：设备对 5..254 不做校验会原样存下，但没有定义。"
                 ));
             }
-            Ok(())
+            Ok(Cmd::SetSleep { code })
         }
         "setlowbatt" => {
             need(2)?;
@@ -743,7 +711,7 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
             if pct > 100 {
                 return Err(format!("低电量阈值范围 0-100（百分比），收到 {pct}"));
             }
-            Ok(())
+            Ok(Cmd::SetLowBatt { pct })
         }
         "setfulleffect" => {
             need(2)?;
@@ -754,7 +722,7 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
                      设备会把任何 ≥2 的值归一成 1，所以这里直接拒绝。"
                 ));
             }
-            Ok(())
+            Ok(Cmd::SetFullEffect { on })
         }
         other => Err(format!("未知子命令 {other:?}\n\n{USAGE}")),
     }
