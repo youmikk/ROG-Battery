@@ -142,14 +142,19 @@ mod gdiplus {
     // PixelFormat32bppARGB = 10 | (32<<8) | Alpha(0x40000) | GDI(0x20000) | Canonical(0x200000)
     pub const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
 
-    #[repr(C)]
-    pub struct RectF {
-        pub x: f32,
-        pub y: f32,
-        pub w: f32,
-        pub h: f32,
-    }
+    // 这 15 个 GDI+ 入口 `ui/gfx.rs` 里已有声明，这里不再抄一份 —— 抄两份时
+    // `GdipDrawString` 的 7 个参数最容易漏，漏了编译不报错、运行时静默错位。
+    // `RectF` 也用 gfx 那份：结构虽然相同，但不同的类型会让 `GdipDrawString`
+    // 的 `*const RectF` 实参直接类型不匹配。
+    pub(crate) use crate::ui::gfx::{
+        GdipCreateFont, GdipCreateFontFamilyFromName, GdipCreateSolidFill,
+        GdipCreateStringFormat, GdipDeleteBrush, GdipDeleteFont, GdipDeleteFontFamily,
+        GdipDeleteGraphics, GdipDeleteStringFormat, GdipDrawString, GdipSetSmoothingMode,
+        GdipSetStringFormatAlign, GdipSetStringFormatFlags, GdipSetStringFormatLineAlign,
+        GdipSetTextRenderingHint, RectF,
+    };
 
+    // 只有托盘图标自己用到的 5 个（gfx 只画界面、不画位图图标），保留在这里。
     #[link(name = "gdiplus")]
     extern "system" {
         pub fn GdipCreateBitmapFromScan0(
@@ -162,40 +167,7 @@ mod gdiplus {
         ) -> i32;
         pub fn GdipDisposeImage(image: *mut c_void) -> i32;
         pub fn GdipGetImageGraphicsContext(image: *mut c_void, g: *mut *mut c_void) -> i32;
-        pub fn GdipDeleteGraphics(g: *mut c_void) -> i32;
         pub fn GdipGraphicsClear(g: *mut c_void, color: u32) -> i32;
-        pub fn GdipSetSmoothingMode(g: *mut c_void, mode: i32) -> i32;
-        pub fn GdipSetTextRenderingHint(g: *mut c_void, hint: i32) -> i32;
-        pub fn GdipCreateFontFamilyFromName(
-            name: *const u16,
-            collection: *mut c_void,
-            family: *mut *mut c_void,
-        ) -> i32;
-        pub fn GdipDeleteFontFamily(family: *mut c_void) -> i32;
-        pub fn GdipCreateFont(
-            family: *mut c_void,
-            size: f32,
-            style: i32,
-            unit: i32,
-            font: *mut *mut c_void,
-        ) -> i32;
-        pub fn GdipDeleteFont(font: *mut c_void) -> i32;
-        pub fn GdipCreateStringFormat(attrs: i32, lang: u16, fmt: *mut *mut c_void) -> i32;
-        pub fn GdipSetStringFormatFlags(fmt: *mut c_void, flags: i32) -> i32;
-        pub fn GdipSetStringFormatAlign(fmt: *mut c_void, align: i32) -> i32;
-        pub fn GdipSetStringFormatLineAlign(fmt: *mut c_void, align: i32) -> i32;
-        pub fn GdipDeleteStringFormat(fmt: *mut c_void) -> i32;
-        pub fn GdipCreateSolidFill(argb: u32, brush: *mut *mut c_void) -> i32;
-        pub fn GdipDeleteBrush(brush: *mut c_void) -> i32;
-        pub fn GdipDrawString(
-            g: *mut c_void,
-            s: *const u16,
-            len: i32,
-            font: *mut c_void,
-            layout: *const RectF,
-            fmt: *mut c_void,
-            brush: *mut c_void,
-        ) -> i32;
         pub fn GdipCreateHICONFromBitmap(bitmap: *mut c_void, hicon: *mut *mut c_void) -> i32;
     }
 }

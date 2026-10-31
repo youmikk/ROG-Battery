@@ -173,7 +173,7 @@ extern "system" {
     fn GetParent(hwnd: Handle) -> Handle;
     fn SetWindowPos(
         hwnd: Handle,
-        after: Handle,
+        insert_after: Handle,
         x: i32,
         y: i32,
         cx: i32,

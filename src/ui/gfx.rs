@@ -160,9 +160,9 @@ extern "system" {
     fn GdiplusShutdown(token: usize);
 
     fn GdipCreateFromHDC(hdc: Gdi, g: *mut *mut c_void) -> i32;
-    fn GdipDeleteGraphics(g: *mut c_void) -> i32;
-    fn GdipSetSmoothingMode(g: *mut c_void, mode: i32) -> i32;
-    fn GdipSetTextRenderingHint(g: *mut c_void, hint: i32) -> i32;
+    pub fn GdipDeleteGraphics(g: *mut c_void) -> i32;
+    pub fn GdipSetSmoothingMode(g: *mut c_void, mode: i32) -> i32;
+    pub fn GdipSetTextRenderingHint(g: *mut c_void, hint: i32) -> i32;
     fn GdipSetPixelOffsetMode(g: *mut c_void, mode: i32) -> i32;
 
     fn GdipCreateMatrix2(
@@ -178,8 +178,8 @@ extern "system" {
     fn GdipSetWorldTransform(g: *mut c_void, matrix: *mut c_void) -> i32;
     fn GdipResetWorldTransform(g: *mut c_void) -> i32;
 
-    fn GdipCreateSolidFill(argb: u32, brush: *mut *mut c_void) -> i32;
-    fn GdipDeleteBrush(brush: *mut c_void) -> i32;
+    pub fn GdipCreateSolidFill(argb: u32, brush: *mut *mut c_void) -> i32;
+    pub fn GdipDeleteBrush(brush: *mut c_void) -> i32;
     fn GdipCreateLineBrush(
         p1: *const PointF,
         p2: *const PointF,
@@ -222,29 +222,29 @@ extern "system" {
     fn GdipDrawLine(g: *mut c_void, pen: *mut c_void, x1: f32, y1: f32, x2: f32, y2: f32) -> i32;
     fn GdipDrawEllipse(g: *mut c_void, pen: *mut c_void, x: f32, y: f32, w: f32, h: f32) -> i32;
 
-    fn GdipCreateFontFamilyFromName(
+    pub fn GdipCreateFontFamilyFromName(
         name: *const u16,
         collection: *mut c_void,
         family: *mut *mut c_void,
     ) -> i32;
-    fn GdipDeleteFontFamily(family: *mut c_void) -> i32;
-    fn GdipCreateFont(
+    pub fn GdipDeleteFontFamily(family: *mut c_void) -> i32;
+    pub fn GdipCreateFont(
         family: *mut c_void,
         size: f32,
         style: i32,
         unit: i32,
         font: *mut *mut c_void,
     ) -> i32;
-    fn GdipDeleteFont(font: *mut c_void) -> i32;
+    pub fn GdipDeleteFont(font: *mut c_void) -> i32;
 
-    fn GdipCreateStringFormat(attrs: i32, lang: u16, fmt: *mut *mut c_void) -> i32;
-    fn GdipSetStringFormatAlign(fmt: *mut c_void, align: i32) -> i32;
-    fn GdipSetStringFormatLineAlign(fmt: *mut c_void, align: i32) -> i32;
+    pub fn GdipCreateStringFormat(attrs: i32, lang: u16, fmt: *mut *mut c_void) -> i32;
+    pub fn GdipSetStringFormatAlign(fmt: *mut c_void, align: i32) -> i32;
+    pub fn GdipSetStringFormatLineAlign(fmt: *mut c_void, align: i32) -> i32;
     fn GdipSetStringFormatTrimming(fmt: *mut c_void, trimming: i32) -> i32;
-    fn GdipSetStringFormatFlags(fmt: *mut c_void, flags: i32) -> i32;
-    fn GdipDeleteStringFormat(fmt: *mut c_void) -> i32;
+    pub fn GdipSetStringFormatFlags(fmt: *mut c_void, flags: i32) -> i32;
+    pub fn GdipDeleteStringFormat(fmt: *mut c_void) -> i32;
 
-    fn GdipDrawString(
+    pub fn GdipDrawString(
         g: *mut c_void,
         s: *const u16,
         len: i32,
