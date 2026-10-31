@@ -406,6 +406,21 @@ fn lock_shared(s: &Arc<Mutex<Shared>>) -> std::sync::MutexGuard<'_, Shared> {
 
 // ==================== 界面动作的执行 ====================
 
+/// 等一个后台线程收尾，最多 `budget`。
+///
+/// 不用裸 `join()`：刷新线程可能正卡在 `record_sample` 的跨进程锁上
+/// （超时 3 秒），裸 join 会让「点退出」变成最长 3 秒毫无反应；也不能只
+/// `sleep(50ms)` 就走 —— 那会把最后一次采样丢在半路。
+fn join_bounded(h: std::thread::JoinHandle<()>, budget: Duration) {
+    let start = std::time::Instant::now();
+    while !h.is_finished() && start.elapsed() < budget {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if h.is_finished() {
+        let _ = h.join();
+    }
+}
+
 /// 托盘图标回调消息号。`WM_APP + 100`，避开 nwg 自己用的那些。
 const TRAY_CALLBACK_MSG: u32 = 0x8000 + 100;
 
@@ -2384,7 +2399,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     //
     // 每 30 秒重读一次：`history.tsv` 也可能是别的实例在追加；对一条看 8 小时
     // 趋势的曲线，30 秒滞后无所谓。分段睡 1 秒是为了 shutdown 时能立刻退出。
-    {
+    let history_thread = {
         let shared_c = Arc::clone(&shared);
         let signal_c = Arc::clone(&signal);
         let sender_c = sender;
@@ -2404,11 +2419,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 }
                 std::thread::sleep(Duration::from_millis(1000));
             }
-        });
-    }
+        })
+    };
 
     // ── 主刷新线程 ──────────────────────────────────────────
-    {
+    let refresh_thread = {
         let shared_t = Arc::clone(&shared);
         let signal_t = Arc::clone(&signal);
         let sender_t = sender;
@@ -2522,8 +2537,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
                 sender_t.notice();
             }
-        });
-    }
+        })
+    };
 
     // ── 事件处理 ────────────────────────────────────────────
     //
@@ -2740,10 +2755,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     nwg::dispatch_thread_events();
 
-    // 退出：通知两条后台线程，给它们一点时间收尾（`record_sample` 可能在写盘）。
+    // 退出：通知两条后台线程，并等它们真的收尾（`record_sample` 可能在写盘）。
     signal.shutdown.store(true, Ordering::Relaxed);
     signal.cv.notify_all();
-    std::thread::sleep(Duration::from_millis(50));
+    join_bounded(history_thread, Duration::from_millis(4000));
+    join_bounded(refresh_thread, Duration::from_millis(4000));
 
     nwg::unbind_event_handler(&handler);
     nwg::unbind_event_handler(&msg_handler);
@@ -2919,5 +2935,29 @@ mod tests {
         let _ = apply_outcome(&out, &mut s);
         assert_eq!(s.link_mode, "Wireless24G");
         assert_eq!(conn_text(&s), "2.4G 无线");
+    }
+
+    #[test]
+    fn join_bounded_waits_for_finishing_thread() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d = std::sync::Arc::clone(&done);
+        let h = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            d.store(true, Ordering::Relaxed);
+        });
+        join_bounded(h, Duration::from_millis(2000));
+        assert!(done.load(Ordering::Relaxed), "预算内应当等到线程结束");
+    }
+
+    #[test]
+    fn join_bounded_gives_up_after_budget() {
+        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(600)));
+        let t0 = std::time::Instant::now();
+        join_bounded(h, Duration::from_millis(100));
+        let el = t0.elapsed();
+        assert!(
+            el >= Duration::from_millis(80) && el < Duration::from_millis(450),
+            "超预算就该放弃，不该干等：{el:?}"
+        );
     }
 }
