@@ -457,13 +457,16 @@ impl HidDevice {
     }
 
     /// 把输入缓冲里的陈旧推送帧抽干（`0xFF01` 会主动推送电量帧）。
-    /// 最多 8 轮、每轮 15ms；正常情况下第一轮就抽空。
+    ///
+    /// 每轮用 0ms 等待：队列里真有积压时数据已经就绪，`WaitForSingleObject` 立刻返回；
+    /// 队列空则立刻超时退出。原来每轮固定等 15ms，`read_state` 的 8 帧光抽干就白花
+    /// 120ms。迟到的推送帧仍会被 `align_reply` 按 cmd/sub 过滤掉，不影响正确性。
     fn drain(&mut self) {
         for _ in 0..8 {
             if !self.start_read(4096) {
                 break;
             }
-            if self.finish_read(15).is_none() {
+            if self.finish_read(0).is_none() {
                 break;
             }
         }
