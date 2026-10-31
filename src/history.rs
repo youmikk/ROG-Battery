@@ -117,18 +117,21 @@ pub fn primary_history_path() -> PathBuf {
 /// 只有前一个**真的写不进去**才往后掉，正常机器上永远是第一个。
 pub fn history_path() -> PathBuf {
     if let Ok(guard) = resolved_cell().lock() {
-        if let Some(p) = guard.as_ref() {
-            return p.clone();
+        if let Some(r) = guard.as_ref() {
+            return r.path.clone();
         }
     }
-    let p = match read_custom_history_path() {
-        Some(custom) => custom,
-        None => resolve_history_path_default(),
+    let (path, custom) = match read_custom_history_path() {
+        Some(custom) => (custom, true),
+        None => (resolve_history_path_default(), false),
     };
     if let Ok(mut guard) = resolved_cell().lock() {
-        *guard = Some(p.clone());
+        *guard = Some(Resolved {
+            path: path.clone(),
+            custom,
+        });
     }
-    p
+    path
 }
 
 fn custom_history_pointer() -> PathBuf {
@@ -138,30 +141,41 @@ fn custom_history_pointer() -> PathBuf {
 /// 用户在设置里点「更改」时随时改历史文件路径（进程内立即生效）。
 pub fn set_custom_history_path(new_path: Option<PathBuf>) -> Result<(), String> {
     let pointer = custom_history_pointer();
-    let resolved = match new_path {
+    let (resolved, custom) = match new_path {
         Some(p) => {
             let _ = crate::paths::ensure_dir(&crate::paths::config_dir());
             std::fs::write(&pointer, p.to_string_lossy().as_bytes())
                 .map_err(|e| format!("写入历史文件重定向记录失败：{e}"))?;
-            p
+            (p, true)
         }
         None => {
             let _ = std::fs::remove_file(&pointer);
-            resolve_history_path_default()
+            (resolve_history_path_default(), false)
         }
     };
-    set_resolved_history_path(resolved)
+    set_resolved_history_path(resolved, custom)
+}
+
+/// 当前实际生效的历史文件路径 + 它是不是用户自定义的。
+///
+/// 两件事一起缓存：`history_path_is_custom` 会被设置页每帧调用一次，
+/// 单独去读指针文件就是每帧一次磁盘 IO（而且在 UI 线程上）。
+#[derive(Clone)]
+struct Resolved {
+    path: PathBuf,
+    custom: bool,
 }
 
 /// 用全局静态变量保存当前实际路径，支持运行时热更新。
-fn resolved_cell() -> &'static std::sync::Mutex<Option<PathBuf>> {
-    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> = std::sync::OnceLock::new();
+fn resolved_cell() -> &'static std::sync::Mutex<Option<Resolved>> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<Resolved>>> =
+        std::sync::OnceLock::new();
     CELL.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-fn set_resolved_history_path(p: PathBuf) -> Result<(), String> {
+fn set_resolved_history_path(p: PathBuf, custom: bool) -> Result<(), String> {
     let mut guard = resolved_cell().lock().map_err(|_| "历史路径锁中毒".to_string())?;
-    *guard = Some(p);
+    *guard = Some(Resolved { path: p, custom });
     Ok(())
 }
 
@@ -182,7 +196,12 @@ pub fn history_path_is_fallback() -> bool {
 
 /// 用户是否手动指定了历史文件路径。
 pub fn history_path_is_custom() -> bool {
-    read_custom_history_path().is_some()
+    // 先确保缓存已填好（`history_path` 会顺手记下 custom 标志）
+    let _ = history_path();
+    match resolved_cell().lock() {
+        Ok(guard) => guard.as_ref().map(|r| r.custom).unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 fn probe_writable(p: &std::path::Path) -> bool {

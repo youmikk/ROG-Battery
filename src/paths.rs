@@ -59,7 +59,29 @@ fn custom_settings_pointer() -> PathBuf {
 }
 
 /// 读取用户自定义的配置文件路径（若已配置且非空）。
+///
+/// 结果缓存：设置页每帧都会问一次「是不是自定义」，不缓存就是每帧一次磁盘读，
+/// 而且读在 UI 线程上。`set_custom_settings_file` 负责失效。
 pub fn custom_settings_file() -> Option<PathBuf> {
+    if let Ok(guard) = custom_settings_cell().lock() {
+        if let Some(cached) = guard.as_ref() {
+            return cached.clone();
+        }
+    }
+    let read = read_custom_settings_pointer();
+    if let Ok(mut guard) = custom_settings_cell().lock() {
+        *guard = Some(read.clone());
+    }
+    read
+}
+
+fn custom_settings_cell() -> &'static std::sync::Mutex<Option<Option<PathBuf>>> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<Option<PathBuf>>>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn read_custom_settings_pointer() -> Option<PathBuf> {
     if let Ok(text) = std::fs::read_to_string(custom_settings_pointer()) {
         let t = text.trim();
         if !t.is_empty() {
@@ -76,10 +98,17 @@ pub fn set_custom_settings_file(new_path: Option<PathBuf>) -> Result<(), String>
         Some(p) => {
             let _ = ensure_dir(&config_dir());
             std::fs::write(&pointer, p.to_string_lossy().as_bytes())
-                .map_err(|e| format!("写入配置文件重定向记录失败：{e}"))
+                .map_err(|e| format!("写入配置文件重定向记录失败：{e}"))?;
+            if let Ok(mut guard) = custom_settings_cell().lock() {
+                *guard = Some(Some(p));
+            }
+            Ok(())
         }
         None => {
             let _ = std::fs::remove_file(&pointer);
+            if let Ok(mut guard) = custom_settings_cell().lock() {
+                *guard = Some(None);
+            }
             Ok(())
         }
     }
