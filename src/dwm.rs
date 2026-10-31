@@ -31,9 +31,6 @@
 // 声明的都是 Win32 导出的原名（`SetWindowPos` 之类），改成 snake_case 就没法
 // 和 MSDN 对照了。
 #![allow(non_snake_case)]
-// 本模块的 `pub` 函数要等 `main.rs` 里加上 `mod dwm;` 和调用点之后才有人用。
-// 在那之前 `dead_code` 会对每个函数报一遍。调用点全部接好之后可以删掉这一行。
-#![allow(dead_code)]
 
 use core::ffi::c_void;
 use core::mem::size_of;

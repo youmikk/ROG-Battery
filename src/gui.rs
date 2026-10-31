@@ -804,7 +804,10 @@ fn apply_theme_pref(env: &UiEnv, pref: &str) {
     });
     env.set_cfg(|c| c.theme = pref.to_string());
     if let Some(h) = env.window.handle.hwnd() {
-        crate::dwm::set_dark_titlebar(h as crate::win32::Handle, m == crate::ui::theme::Mode::Dark);
+        // 必须走 `refresh_titlebar`：DWM 只在非客户区重算时才重新合成标题栏，
+        // 光调 `DwmSetWindowAttribute` 在 Win11 上要等用户拖窗口颜色才出现
+        // （用户看到的正是「点了开关没反应，于是再点第二次」）。
+        crate::dwm::refresh_titlebar(h as crate::win32::Handle, m == crate::ui::theme::Mode::Dark);
     }
     env.canvas.repaint_now();
 }
