@@ -179,12 +179,43 @@ const ERROR_ALREADY_EXISTS: u32 = 183;
 const SW_RESTORE: i32 = 9;
 const SW_SHOW: i32 = 5;
 
-/// 单实例互斥检查。如果已有实例运行，激活前台窗口并返回 None。
-fn check_single_instance() -> Option<win32::Handle> {
-    let name = win32::to_wide(SINGLE_INSTANCE_MUTEX);
+struct MutexGuard(win32::Handle);
+
+impl Drop for MutexGuard {
+    fn drop(&mut self) {
+        unsafe {
+            win32::ReleaseMutex(self.0);
+            win32::CloseHandle(self.0);
+        }
+    }
+}
+
+/// 单实例检查的三种结果。
+///
+/// 原来把「创建互斥体失败」和「已有实例在跑」压成同一个 `None`：前者会让程序
+/// 一声不响地 `ExitCode::SUCCESS` 退出，用户看到的就是「双击没反应」。这两种
+/// 情况必须分开 —— 抢不到锁是正常多开，建不出锁是环境异常，后者应该照常启动。
+enum Instance {
+    /// 抢到了锁。值要在进程存活期间一直持有，否则锁会被系统回收。
+    Owner(MutexGuard),
+    /// 已有实例在跑，已经把它的窗口激活到前台。
+    AlreadyRunning,
+    /// 创建互斥体失败（权限/句柄耗尽等）。当首次启动继续跑。
+    Unavailable,
+}
+
+/// 单实例互斥检查。已有实例时激活它的窗口并返回 [`Instance::AlreadyRunning`]。
+fn check_single_instance() -> Instance {
+    check_instance_named(SINGLE_INSTANCE_MUTEX)
+}
+
+/// 按名字做单实例检查。拆出来只为了让测试用一个独立的名字，不与真机上的
+/// 运行实例互相干扰。
+fn check_instance_named(mutex_name: &str) -> Instance {
+    let name = win32::to_wide(mutex_name);
     let handle = unsafe { win32::CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
     if handle.is_null() {
-        return None;
+        return Instance::Unavailable;
     }
     let err = unsafe { win32::GetLastError() };
     if err == ERROR_ALREADY_EXISTS {
@@ -198,31 +229,20 @@ fn check_single_instance() -> Option<win32::Handle> {
             }
         }
         unsafe { win32::CloseHandle(handle) };
-        return None;
+        return Instance::AlreadyRunning;
     }
-    Some(handle)
-}
-
-struct MutexGuard(win32::Handle);
-
-impl Drop for MutexGuard {
-    fn drop(&mut self) {
-        unsafe {
-            win32::ReleaseMutex(self.0);
-            win32::CloseHandle(self.0);
-        }
-    }
+    Instance::Owner(MutexGuard(handle))
 }
 
 /// GUI 入口。控制台已经在上面的 [`main`] 里脱离干净，这里**不能**再 `println!`
 /// —— 没有地方会接住它。需要日志就写 [`paths::cache_dir`] 下的文件。
 fn run_gui(start_hidden: bool) -> ExitCode {
     // 单实例互斥锁：防止多开造成 HID 设备冲突与多托盘图标堆叠
-    let mutex = match check_single_instance() {
-        Some(h) => h,
-        None => return ExitCode::SUCCESS,
+    let _guard = match check_single_instance() {
+        Instance::Owner(g) => Some(g),
+        Instance::AlreadyRunning => return ExitCode::SUCCESS,
+        Instance::Unavailable => None,
     };
-    let _guard = MutexGuard(mutex);
 
     // DPI 感知必须在**任何窗口创建之前**声明，否则 Windows 会先按 96 DPI 建窗口，
     // 再把整窗当位图拉伸到实际缩放比 —— 那就是「字体发虚」的根因（GDI+ 画出来的
@@ -728,5 +748,29 @@ fn validate(cmd: &str, pos: &[&str]) -> Result<(), String> {
             Ok(())
         }
         other => Err(format!("未知子命令 {other:?}\n\n{USAGE}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 同一个名字建两次互斥体：第一次拿到锁，第二次必须报告「已有实例」，
+    /// 而不是被当成「创建失败」。
+    #[test]
+    fn second_instance_is_detected_as_already_running() {
+        let name = format!("Local\\RogMouseCtl_Test_{}", std::process::id());
+        let first = check_instance_named(&name);
+        assert!(
+            matches!(first, Instance::Owner(_)),
+            "首次应抢到锁，实际是创建失败或已有实例"
+        );
+        let second = check_instance_named(&name);
+        assert!(
+            matches!(second, Instance::AlreadyRunning),
+            "第二次应报告已有实例"
+        );
+        drop(second);
+        drop(first);
     }
 }
