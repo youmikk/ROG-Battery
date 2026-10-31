@@ -230,6 +230,14 @@ fn row_label(p: &mut Painter, area: R, title: &str, desc: Option<&str>, ctl_w: f
     R::new(area.right() - ctl_w, area.y, ctl_w, area.h)
 }
 
+/// 卡片内一行设置项的绘制区：左右各留 18px，高度固定为一行。
+///
+/// 这个式子在本文件里手写过 20 多次，抽样一改就得挨个改；漏一处就是那行
+/// 比其他行宽 4px，肉眼几乎看不出来，但会顶到卡片边。
+fn row_area(card: R, y: f32) -> R {
+    R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H)
+}
+
 /// 分段控件（`.seg`）。返回是否命中，命中时给出第几段。
 ///
 /// 原型：外层 `padding:2px`、`gap:2px`、圆角 4；内层按钮高 26、padding 0 12、圆角 3。
@@ -1657,7 +1665,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
 
     // 自动休眠
     {
-        let area = R::new(card.x + 18.0, ry, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, ry);
         let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
         drop_button(p, ui, R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0), Drop::Sleep, d);
         if i + 1 < rows.len() {
@@ -1669,7 +1677,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
 
     // 低电量阈值：输入框 + % + 应用
     {
-        let area = R::new(card.x + 18.0, ry, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, ry);
         let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
         let edit = Edit::LowWarn;
         let cur = st.map(|s| s.low_warn).unwrap_or(20);
@@ -1697,7 +1705,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
 
     // 充满效果
     {
-        let area = R::new(card.x + 18.0, ry, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, ry);
         let ctl = row_label(p, area, rows[i].0, rows[i].1, 40.0);
         let on = st.map(|s| s.full_effect != 0).unwrap_or(true);
         let sw = R::new(ctl.right() - 40.0, ctl.cy() - 10.0, 40.0, 20.0);
@@ -2192,7 +2200,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.h2(p, "回报率", false);
     let card = c.card(p, layout::ROW_H * 2.0);
     {
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y);
         let ctl = row_label(
             p,
             area,
@@ -2226,7 +2234,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         p.hline(card.x, card.right(), area.bottom(), t.border);
     }
     {
-        let area = R::new(card.x + 18.0, card.y + layout::ROW_H, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y + layout::ROW_H);
         let ctl = row_label(p, area, "当前档位", Some("同时决定鼠标的 DPI 和档位指示灯"), 220.0);
         segmented(
             p,
@@ -2243,7 +2251,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.h2(p, "去抖", false);
     let card = c.card(p, layout::ROW_H);
     {
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y);
         let ctl = row_label(
             p,
             area,
@@ -2267,7 +2275,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let base_h = layout::ROW_H + if adv_open { 46.0 + 46.0 + 46.0 } else { 46.0 };
     let card = c.card(p, base_h);
     {
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y);
         let ctl = row_label(
             p,
             area,
@@ -2360,7 +2368,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.h2(p, "抬起距离", false);
     let card = c.card(p, layout::ROW_H);
     {
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y);
         let ctl = row_label(p, area, "抬起距离（LOD）", Some("低省电，高更容易追踪"), 160.0);
         let sel = st.map(|s| s.lod as usize).unwrap_or(0).min(1);
         segmented(
@@ -2402,7 +2410,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     c.h2(p, "控制方式", true);
     let card = c.card(p, layout::ROW_H + 8.0);
     {
-        let area = R::new(card.x + 18.0, card.y + 4.0, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y + 4.0);
         p.circle(area.x + 5.0, area.cy(), 4.5, t.green);
         p.text(
             "由 Windows 动态光效控制",
@@ -2430,7 +2438,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     let extra = if lamp.is_some() { layout::ROW_H } else { 0.0 };
     let card = c.card(p, layout::ROW_H + extra);
     {
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y);
         let found = lamp.is_some();
         p.circle(
             area.x + 5.0,
@@ -2508,7 +2516,7 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let card = c.card(p, rows as f32 * layout::ROW_H);
     for slot in 0..rows {
         let y = card.y + slot as f32 * layout::ROW_H;
-        let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, y);
         let src = crate::proto::BUTTON_SRC[slot];
         let name = crate::proto::BUTTON_NAME[slot];
 
@@ -2566,7 +2574,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
 
     // 托盘
     {
-        let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, y);
         let ctl = row_label(p, area, "显示托盘图标", Some("关闭后只能用窗口操作"), 40.0);
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, d.cfg.tray_enabled, true);
@@ -2576,7 +2584,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     // 关闭窗口动作
     {
-        let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, y);
         let ctl = row_label(
             p,
             area,
@@ -2596,7 +2604,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     // 开机自启
     {
-        let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, y);
         let ctl = row_label(p, area, "开机自动启动", Some(d.autostart_text), 40.0);
         // 真实状态从 `autostart` 模块来，这里只显示；点击发 Toggle。
         // 开关的布尔量也直接用状态机的值：以前是 `autostart_text.contains("已启用")`，
@@ -2610,7 +2618,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     // 刷新间隔
     {
-        let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, y);
         let ctl = row_label(p, area, "后台刷新间隔", Some("读取鼠标状态的频率"), 150.0);
         drop_button(
             p,
@@ -2628,7 +2636,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     let mut y = card.y;
     // 缓存有效期
     {
-        let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, y);
         let ctl = row_label(p, area, "快照缓存有效期", Some("设为「每次都重读」会明显更慢"), 150.0);
         drop_button(
             p,
@@ -2642,7 +2650,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     // 备份与还原
     {
-        let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, y);
         let ctl = row_label(p, area, "备份与还原", Some("把全部 31 项参数存成一个文本文件"), 230.0);
         let b1 = R::new(ctl.x, ctl.cy() - 15.0, 110.0, 30.0);
         button(p, ui, b1, "备份到文件", false, Act::Backup);
@@ -2653,7 +2661,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     // 历史记录
     {
-        let area = R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, y);
         let ctl = row_label(p, area, "历史记录", Some("电量采样点，最多保留 48 小时"), 230.0);
         let b1 = R::new(ctl.x, ctl.cy() - 15.0, 130.0, 30.0);
         button(p, ui, b1, "打开所在文件夹", false, Act::OpenHistoryFolder);
@@ -2667,7 +2675,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     let card = c.card(p, layout::ROW_H * 2.0);
     {
         // 历史文件
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y);
         let hp = crate::history::history_path().display().to_string();
         let status = if crate::history::history_path_is_custom() { "已自定义" } else { "默认" };
         let title = format!("历史文件保存位置（{status}）");
@@ -2680,7 +2688,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     {
         // 设置文件
-        let area = R::new(card.x + 18.0, card.y + layout::ROW_H, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y + layout::ROW_H);
         let sp = crate::paths::settings_file().display().to_string();
         let status = if crate::paths::custom_settings_file().is_some() { "已自定义" } else { "默认" };
         let title = format!("设置文件保存位置（{status}）");
@@ -2696,7 +2704,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     c.h2(p, "外观", false);
     let card = c.card(p, layout::ROW_H);
     {
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y);
         let ctl = row_label(p, area, "配色", Some("跟随系统或手动选择"), 210.0);
         let sel = ui.theme_pref.min(2) as usize;
         segmented(
@@ -2715,7 +2723,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     let card = c.card(p, layout::ROW_H * 3.0);
     {
         // 版本：值右对齐，版本号来自 Cargo.toml（不再手写常量）
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
+        let area = row_area(card, card.y);
         row_label(
             p,
             area,
