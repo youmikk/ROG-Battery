@@ -53,9 +53,33 @@ impl HidInterface {
 }
 
 // ---------------- 枚举 ----------------
-/// 枚举本机所有 ASUS HID 接口。
+
+/// 枚举时被跳过的接口：路径 + 打不开的原因（权限 / 被占用 / 取不到路径）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Skipped {
+    pub path: String,
+    pub reason: String,
+}
+
+/// 枚举结果：拿到的接口，以及**打不开的那些**及其原因。
+///
+/// 两者必须分开：「一个接口都没打开」和「根本没有 ASUS 设备」是两件事 ——
+/// 前者通常是 Armoury Crate 占着设备或权限不足，后者才是真的没插。
+/// 原来 `Err(_) => continue` 把两者糊成同一个「找不到设备」，用户完全没法排查。
+pub struct EnumerateReport {
+    pub interfaces: Vec<HidInterface>,
+    pub skipped: Vec<Skipped>,
+}
+
+/// 枚举本机所有 ASUS HID 接口（只关心拿到的那些）。
 pub fn enumerate(hid: &HidApi) -> Result<Vec<HidInterface>, String> {
+    Ok(enumerate_report(hid)?.interfaces)
+}
+
+/// 枚举本机所有 ASUS HID 接口，同时带回打不开的接口清单。
+pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
     let mut list = Vec::new();
+    let mut skipped: Vec<Skipped> = Vec::new();
 
     let mut guid = Guid::default();
     unsafe { (hid.get_hid_guid)(&mut guid) };
@@ -106,8 +130,9 @@ pub fn enumerate(hid: &HidApi) -> Result<Vec<HidInterface>, String> {
                     iface.index = list.len();
                     list.push(iface);
                 }
-                // 单个接口打不开（权限 / 被占用）不算致命，跳过
-                Err(_) => continue,
+                // 单个接口打不开（权限 / 被占用）不算致命，但要留下原因，
+                // 否则「设备插着却报找不到」没法解释。
+                Err(reason) => skipped.push(Skipped { path, reason }),
             }
         }
         Ok(())
@@ -115,7 +140,25 @@ pub fn enumerate(hid: &HidApi) -> Result<Vec<HidInterface>, String> {
 
     unsafe { SetupDiDestroyDeviceInfoList(dev_info) };
     result?;
-    Ok(list)
+    Ok(EnumerateReport {
+        interfaces: list,
+        skipped,
+    })
+}
+
+/// 一个可用接口都没有时该报什么。
+///
+/// 有跳过记录说明设备在、但打开失败（Armoury Crate 抢占 / 权限），这时
+/// 报「没有找到设备」会把人带偏，必须把第一条原因原样带出来。
+fn empty_reason(skipped: &[Skipped]) -> String {
+    match skipped.first() {
+        None => "没有找到任何 ASUS HID 接口（VID 0x0B05）".to_string(),
+        Some(first) => format!(
+            "找到 {} 个 HID 接口但一个都打不开（最常见是 Armoury Crate 占着设备，其次是权限）：{}",
+            skipped.len(),
+            first.reason
+        ),
+    }
 }
 
 /// `SetupDiGetDeviceInterfaceDetailW` 需要两次调用：先问长度，再取内容。
@@ -687,9 +730,10 @@ pub struct Link {
 /// 优先有线（PID != 接收器 && usage page == 0xFF01），
 /// 否则走接收器：用 `A0 00` 读配对表，从里面找出鼠标的 report id。
 pub fn open_link(hid: &HidApi) -> Result<Link, String> {
-    let all = enumerate(hid)?;
+    let report = enumerate_report(hid)?;
+    let all = report.interfaces;
     if all.is_empty() {
-        return Err("没有找到任何 ASUS HID 接口（VID 0x0B05）".to_string());
+        return Err(empty_reason(&report.skipped));
     }
 
     // 1) 有线模式：直接是 0xFF01 且能回答电量帧。
@@ -821,5 +865,28 @@ mod tests {
         // 主动推送的电量帧（cmd 0x12 之外）不应被当成应答
         assert_eq!(align_reply(0x03, 0x12, 0x07, &[0x03, 0x99, 0x99, 0x00]), None);
         assert_eq!(align_reply(0x03, 0x12, 0x07, &[]), None);
+    }
+
+    #[test]
+    fn empty_reason_prefers_the_open_failure() {
+        // 什么接口都没枚举到 → 真·没插设备
+        let none: Vec<Skipped> = Vec::new();
+        assert!(empty_reason(&none).contains("没有找到任何 ASUS HID 接口"));
+
+        // 枚举到了但打不开 → 必须把原因带出来，不能报「找不到设备」
+        let skipped = vec![
+            Skipped {
+                path: "hid#vid_0b05#pid_1b63#1".into(),
+                reason: "CreateFileW 失败（GetLastError=5 拒绝访问）".into(),
+            },
+            Skipped {
+                path: "hid#vid_0b05#pid_1ace#2".into(),
+                reason: "CreateFileW 失败（GetLastError=32 另一个程序正在使用）".into(),
+            },
+        ];
+        let msg = empty_reason(&skipped);
+        assert!(msg.contains("2 个 HID 接口"), "{msg}");
+        assert!(msg.contains("Armoury Crate"), "{msg}");
+        assert!(msg.contains("拒绝访问"), "第一条原因要原样带出来：{msg}");
     }
 }

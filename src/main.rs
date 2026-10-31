@@ -302,9 +302,11 @@ fn run(
     // `dump` 只列接口，不打开链路 —— 有线/无线模式下暴露的 usage page 完全不同，
     // 链路开不起来时靠它定位。
     if cmd == "dump" {
-        let all = hid::enumerate(&api)?;
-        println!("共 {} 个 ASUS HID 接口", all.len());
-        for i in &all {
+        // 用详细版：打不开的接口也要列出来，否则「设备插着却用不了」查不出原因。
+        let report = hid::enumerate_report(&api)?;
+        let all = &report.interfaces;
+        println!("共 {} 个可用的 ASUS HID 接口", all.len());
+        for i in all {
             println!(
                 "  PID 0x{:04X}  usage_page 0x{:04X}  usage 0x{:04X}  命令通道={}  {}",
                 i.product_id,
@@ -314,6 +316,12 @@ fn run(
                 i.product
             );
             println!("      {}", i.path);
+        }
+        if !report.skipped.is_empty() {
+            println!("打不开的接口 {} 个：", report.skipped.len());
+            for s in &report.skipped {
+                println!("  {}\n      原因：{}", s.path, s.reason);
+            }
         }
         return Ok(());
     }
