@@ -885,11 +885,7 @@ impl<'a> Painter<'a> {
         if pts.len() < 2 {
             return;
         }
-        let y_min = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-        let y_max = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-        let x_min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-        let x_max = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-        if !self.visible(R::new(x_min, y_min, x_max - x_min, y_max - y_min)) {
+        if !self.visible(Painter::bbox(pts)) {
             return;
         }
         let pen = self.obj.pen_round(color, width);
@@ -903,6 +899,19 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// 一串点的包围盒。四遍 `map().fold()` 遍历同一串点纯属浪费。
+    fn bbox(pts: &[(f32, f32)]) -> R {
+        let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
+        let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for p in pts {
+            x0 = x0.min(p.0);
+            y0 = y0.min(p.1);
+            x1 = x1.max(p.0);
+            y1 = y1.max(p.1);
+        }
+        R::new(x0, y0, x1 - x0, y1 - y0)
+    }
+
     /// 整条折线当作**一条路径**一次描边。
     ///
     /// `polyline` 是逐段 `GdipDrawLine`，抗锯齿按段独立计算，接缝处的覆盖
@@ -912,11 +921,7 @@ impl<'a> Painter<'a> {
         if pts.len() < 2 {
             return;
         }
-        let y_min = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-        let y_max = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-        let x_min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-        let x_max = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-        if !self.visible(R::new(x_min, y_min, x_max - x_min, y_max - y_min)) {
+        if !self.visible(Painter::bbox(pts)) {
             return;
         }
         unsafe {
@@ -924,6 +929,8 @@ impl<'a> Painter<'a> {
             if GdipCreatePath(0, &mut path) != OK {
                 return;
             }
+            // `GdipAddPathLines` 不在 vendor/mingw-import-libs 的导入表里
+            // （链接期 undefined reference），只能逐段加。
             for w in pts.windows(2) {
                 GdipAddPathLine(path, w[0].0, w[0].1, w[1].0, w[1].1);
             }
@@ -943,11 +950,8 @@ impl<'a> Painter<'a> {
         if pts.len() < 3 {
             return;
         }
-        let y_min = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-        let y_max = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-        let x_min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-        let x_max = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-        if !self.visible(R::new(x_min, y_min, x_max - x_min, y_max - y_min)) {
+        let bb = Painter::bbox(pts);
+        if !self.visible(bb) {
             return;
         }
         unsafe {
@@ -955,10 +959,7 @@ impl<'a> Painter<'a> {
             if GdipCreatePath(0, &mut path) != OK {
                 return;
             }
-            // 每条边都显式从上一个点连到当前点。
-            // 不要图省事只传 `(p, p)` 让库自己接 —— `GdipAddPathLine`
-            // 在路径已有当前点时会不会自动连一段，是文档没写清的行为，
-            // 而错的表现是「面积图少画几条边」，看图未必看得出。
+            // 每条边显式从上一个点连到当前点；不要只传 (p, p) 指望库自动接。
             for w in pts.windows(2) {
                 GdipAddPathLine(path, w[0].0, w[0].1, w[1].0, w[1].1);
             }
@@ -968,8 +969,8 @@ impl<'a> Painter<'a> {
             // wrap 用 0 不用 4：线性渐变画刷不支持 Clamp，传 4 返 InvalidParameter
             // 会让整块面积填充静默消失。详见 `WRAP_TILE`。
             let rc = GdipCreateLineBrush(
-                &PointF { x: 0.0, y: y_min },
-                &PointF { x: 0.0, y: y_max },
+                &PointF { x: 0.0, y: bb.y },
+                &PointF { x: 0.0, y: bb.bottom() },
                 top,
                 bottom,
                 WRAP_TILE,
