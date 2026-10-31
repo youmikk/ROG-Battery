@@ -1,4 +1,4 @@
-//! 界面配色令牌。
+﻿//! 界面配色令牌。
 //!
 //! # 为什么颜色要集中在这里
 //!
@@ -180,7 +180,7 @@ impl Mode {
     /// 查询，属于运行期行为。用 [`resolve`] 得到实际配色。
     ///
     /// 现在运行期走 [`resolve`]，这个只剩单测在用，留着当解析规则的说明书。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn parse(s: &str) -> Mode {
         match s.trim().to_ascii_lowercase().as_str() {
             "dark" => Mode::Dark,

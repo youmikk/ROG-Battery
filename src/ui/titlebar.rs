@@ -27,9 +27,6 @@
 use crate::ui::gfx::{Painter, R};
 use crate::ui::theme::Theme;
 
-/// 窗口标题（任务栏与系统元数据用）。
-#[allow(dead_code)]
-pub const APP_TITLE: &str = "R Battery";
 
 /// 标题栏逻辑高度（96 DPI 下的像素）。
 ///
@@ -84,12 +81,12 @@ pub fn hit(x: f32, y: f32, win_w: f32) -> Option<Btn> {
     })
 }
 
+#[cfg(test)]
 /// `(x, y)` 是不是落在标题栏那一条里（含按钮）。
 ///
 /// 生产代码不用它 —— `frame::logical_hit` 里的 `title_h` 是参数（要按缩放
 /// 传值），不能用这个常量。留着是给测试当判据：`命中测试按按钮边界` 用它
 /// 确认「不是按钮但仍属于标题栏」这一档，正是拖动区。
-#[allow(dead_code)]
 pub fn in_bar(y: f32) -> bool {
     (0.0..=TITLE_H).contains(&y)
 }
@@ -114,30 +111,6 @@ pub fn draw(p: &mut Painter, win_w: f32, nav_w: f32, theme: &Theme) {
     p.rect(R::new(nw, 0.0, win_w - nw, TITLE_H), t.bg);
 }
 
-/// 画 exe 的图标（电池形状，和托盘图标同一套笔画）。
-///
-/// 不复用 `LoadIconW` 再 `DrawIconEx` 这条路：那是 GDI 的 16×16 位图，
-/// 在 125%/150% 缩放屏上会被位图拉伸得发虚 —— 正是用户抱怨的「图标分辨率低」。
-/// 用矢量笔画重新画一遍，任何缩放下都是清的。
-#[allow(dead_code)]
-fn draw_app_icon(p: &mut Painter, r: R, t: &Theme) {
-    // 深色圆角底 + 白色电池，和 `assets/tray.ico` 的 256px 版一致
-    p.round(r, 3.0, t.accent);
-    let body = R::new(r.x + 2.5, r.cy() - 3.5, r.w - 6.0, 7.0);
-    p.round_stroke(body, 1.5, t.accent_fg, 1.4);
-    // 正极触点
-    p.round(
-        R::new(body.right() + 0.5, r.cy() - 1.5, 1.6, 3.0),
-        0.6,
-        t.accent_fg,
-    );
-    // 电量条（实心，表示「有电」）
-    p.round(
-        R::new(body.x + 1.8, body.y + 1.8, body.w * 0.55, body.h - 3.6),
-        0.6,
-        t.accent_fg,
-    );
-}
 
 /// Win11 关闭按钮的 hover 底色。
 ///

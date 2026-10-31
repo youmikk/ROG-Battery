@@ -164,8 +164,6 @@ extern "system" {
     /// 为什么不用 `Instant::now()`：动效只需要「每帧不重样」，用单调时钟更省事，
     /// 但 `std::time::Instant` 在某些老平台上走的是不保证单调的路径。这里只取模
     /// 算相位，回绕一次会让彗尾跳一下，无感。
-    #[allow(dead_code)]
-    pub fn GetTickCount() -> u32;
 
     /// 本地时间。备份文件名用它，避免出现 UTC `14:26` 与本地 `22:26` 不一致的困惑。
     pub fn GetLocalTime(out: *mut SystemTime);

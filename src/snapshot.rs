@@ -603,11 +603,6 @@ impl SnapshotCache {
         let _ = std::fs::remove_file(p);
     }
 
-    /// 只失效内存、保留磁盘 —— 给「刚写完但还没读回」的中间态用。
-    #[allow(dead_code)]
-    pub fn invalidate_memory_only(&mut self) {
-        self.snapshot = None;
-    }
 }
 
 fn load_disk_cache() -> Option<Snapshot> {

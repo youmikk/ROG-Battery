@@ -30,7 +30,7 @@
 use core::ffi::c_void;
 use core::ptr;
 
-use crate::win32::{self, Handle};
+use crate::win32::Handle;
 
 /// 图标边长。
 ///
@@ -48,7 +48,7 @@ pub const ICON_SIZE: i32 = 32;
 /// 夹在 16..=32：小于 16 画不下两位数字，大于 32 没意义（托盘不显示那么大）。
 #[cfg(test)]
 pub fn icon_size() -> i32 {
-    let n = unsafe { win32::GetSystemMetrics(49) };
+    let n = unsafe { crate::win32::GetSystemMetrics(49) };
     if n < 16 {
         ICON_SIZE
     } else {
@@ -114,28 +114,7 @@ fn colorref(c: [u8; 3]) -> u32 {
     (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16)
 }
 
-/// 一次绘制产生的所有对象。`Drop` 负责回收，**不依赖调用方记得**。
-// 纯 RAII 守卫：只为保证句柄 Drop 时被回收，构造点已随旧渲染器删除。
-#[allow(dead_code)]
-struct Gdi {
-    objects: Vec<Handle>,
-    dc: Handle,
-}
 
-impl Drop for Gdi {
-    fn drop(&mut self) {
-        unsafe {
-            for h in self.objects.drain(..) {
-                if !h.is_null() {
-                    win32::DeleteObject(h);
-                }
-            }
-            if !self.dc.is_null() {
-                win32::DeleteDC(self.dc);
-            }
-        }
-    }
-}
 
 // ==================== GDI+ 透明图标 ====================
 //
@@ -436,7 +415,7 @@ mod tests {
         assert!(!h.is_null());
         // 位图属性：宽高必须是我们画的那块
         unsafe {
-            assert_ne!(win32::DestroyIcon(h), 0, "DestroyIcon 应当成功");
+            assert_ne!(crate::win32::DestroyIcon(h), 0, "DestroyIcon 应当成功");
         }
     }
 
@@ -445,7 +424,7 @@ mod tests {
         for lv in [0u8, 1, 20, 21, 50, 51, 99, 100, 200] {
             let h = render(lv);
             assert!(h.is_some(), "level={lv} 应该能画出来");
-            unsafe { win32::DestroyIcon(h.unwrap()) };
+            unsafe { crate::win32::DestroyIcon(h.unwrap()) };
         }
     }
 
@@ -486,13 +465,13 @@ mod tests {
 
         unsafe fn gdi_count() -> i32 {
             // GR_GDIOBJECTS = 0
-            win32::GetGuiResources(GetCurrentProcess(), 0) as i32
+            crate::win32::GetGuiResources(GetCurrentProcess(), 0) as i32
         }
 
         // 预热
         for _ in 0..20 {
             if let Some(h) = render(82) {
-                unsafe { win32::DestroyIcon(h) };
+                unsafe { crate::win32::DestroyIcon(h) };
             }
         }
         let before = unsafe { gdi_count() };
@@ -500,7 +479,7 @@ mod tests {
         for i in 0..200 {
             let lv = (i % 101) as u8;
             match render(lv) {
-                Some(h) => unsafe { win32::DestroyIcon(h) },
+                Some(h) => unsafe { crate::win32::DestroyIcon(h) },
                 None => panic!("level={lv} 画不出来"),
             };
         }

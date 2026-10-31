@@ -334,10 +334,6 @@ fn startup_dir() -> Option<PathBuf> {
         .map(|base| base.join(r"Microsoft\Windows\Start Menu\Programs\Startup"))
 }
 
-#[allow(dead_code)]
-fn startup_script_path() -> Option<PathBuf> {
-    startup_dir().map(|d| d.join("RogMouseCtl.vbs"))
-}
 
 /// 启动文件夹里的启动脚本内容。用 VBS 的 `ws.Run ..., 0, False`
 /// 隐藏窗口静默拉起，避免开机时闪一下黑框。

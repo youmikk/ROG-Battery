@@ -120,6 +120,7 @@ impl Settings {
 
     /// 只取结果、丢弃告警。仅供单测使用（生产一律走 [`load`]）。
     #[cfg(test)]
+    #[cfg(test)]
     fn parse(text: &str) -> Settings {
         Self::parse_collect(text).0
     }
@@ -153,7 +154,6 @@ impl Settings {
     }
 
     /// 写出默认配置文件。GUI 首次启动 / `cache` 子命令会用到。
-    #[allow(dead_code)]
     pub fn write_default_if_missing() {
         if paths::settings_file().exists() {
             return;
@@ -208,7 +208,6 @@ pub fn load() -> Settings {
 /// 写设置。失败时返回错误（调用方决定是警告还是致命）。
 ///
 /// 走原子写：中途崩溃留下半份 settings.ini，下次启动会把整份配置读成默认值。
-#[allow(dead_code)]
 pub fn save(s: &Settings) -> Result<(), String> {
     let p = paths::settings_file();
     paths::write_atomic(&p, s.to_text().as_bytes())

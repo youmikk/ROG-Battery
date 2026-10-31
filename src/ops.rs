@@ -147,7 +147,6 @@ pub trait StateReader {
 ///
 /// CLI 用 `Ctx`（它实现了 [`StateReader`] 并带缓存），所以这个类型在
 /// 纯 CLI 构建里只出现在测试中 —— GUI 接进来后就是主路径。
-#[allow(dead_code)]
 pub struct DirectReader;
 
 impl StateReader for DirectReader {
