@@ -623,7 +623,8 @@ impl Canvas {
 
     /// 告诉 canvas「当前页要不要一直重画」。
     ///
-    /// 充电动效是唯一的使用者：它靠 `GetTickCount` 算相位，必须有人不停
+    /// 充电动效是唯一的使用者：它按「进程启动到现在的毫秒数」算相位（见
+    /// `gfx::Painter::arc_comet` 里的 `OnceLock<Instant>`），必须有人不停
     /// 触发重画才会动。调用点在 gui.rs 每帧画完后根据「当前页 + 充电状态」
     /// 算一次 —— 重复传同一个值没有额外代价（内部先比一下再决定动不动系统）。
     pub fn set_animating(&self, on: bool) {
