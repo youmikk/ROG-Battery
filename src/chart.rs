@@ -41,10 +41,25 @@ pub struct Pt {
     pub charging: bool,
 }
 
+/// 曲线上的一个点：横向是 0..=1 的比例，纵向是**平滑后**的电量。
+///
+/// 平滑（移动平均 + Catmull-Rom）本来在绘制方每帧现算，充电时 60fps 下
+/// 每秒要算 120 次、每次 2 万个点。数据 30 秒才更新一次，所以挪到这里
+/// 由 `build` 算一遍，绘制方只做像素映射。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurvePt {
+    /// 横向比例（0 = 区间左端，1 = 右端），按 `AREA_X / AREA_W` 归一。
+    pub fx: f32,
+    /// 平滑后的电量（可能是小数，纵向映射仍由绘制方按自己的 Y 窗口算）。
+    pub level: f32,
+}
+
 /// 一次完整的折线数据。
 #[derive(Clone, Debug, Default)]
 pub struct Plot {
     pub points: Vec<Pt>,
+    /// 已平滑、待映射的曲线点。`points.len() < 3` 时就是原始点的拷贝。
+    pub curve: Vec<CurvePt>,
     pub first_ts: i64,
     pub last_ts: i64,
 }
@@ -86,11 +101,103 @@ pub fn build(rows: &[HistoryRow]) -> Plot {
         });
     }
 
+    let curve = build_curve(&points);
+
     Plot {
         points,
+        curve,
         first_ts,
         last_ts,
     }
+}
+
+// ==================== 平滑 ====================
+
+/// 曲线上限：`AREA_W` 是 660 逻辑像素，两点/像素已经远超肉眼能分辨的密度。
+/// 2000 个采样 × 10 段插值 = 2 万点，是一条 660px 宽的线负担 30 倍冗余。
+const MAX_CURVE_PTS: usize = (AREA_W as usize) * 2;
+
+/// 尾部移动平均 + Catmull-Rom 插值，产出归一化曲线。
+fn build_curve(points: &[Pt]) -> Vec<CurvePt> {
+    let area_w = AREA_W as f32;
+    let raw: Vec<(f32, f32)> = points
+        .iter()
+        .map(|p| {
+            (
+                (p.x - AREA_X) as f32 / area_w,
+                p.level as f32,
+            )
+        })
+        .collect();
+    let soft = soften(&raw, 5);
+    // 段数自适应：点多时降到 1，避免总点数随采样数线性膨胀。
+    let seg = (MAX_CURVE_PTS / raw.len().max(1)).clamp(1, 10);
+    smooth_curve(&soft, seg)
+        .into_iter()
+        .map(|(fx, level)| CurvePt { fx, level })
+        .collect()
+}
+
+/// 窗口移动平均：把 1% 量化的台阶磨成缓坡。
+///
+/// 首尾各留一半窗口不参与（saturating 边界），末点强制保留原值 ——
+/// 它要跟「最新值」那个圆点标记重合，被平均掉就错位了。
+fn soften(pts: &[(f32, f32)], win: usize) -> Vec<(f32, f32)> {
+    if win < 3 || pts.len() < win {
+        return pts.to_vec();
+    }
+    let h = win / 2;
+    let n = pts.len();
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let lo = i.saturating_sub(h);
+        let hi = (i + h).min(n - 1);
+        let mut sum = 0.0f32;
+        let mut cnt = 0.0f32;
+        for j in lo..=hi {
+            sum += pts[j].1;
+            cnt += 1.0;
+        }
+        out.push((pts[i].0, sum / cnt));
+    }
+    out[n - 1] = pts[n - 1];
+    out
+}
+
+/// Catmull-Rom：只对 y 插值，x 线性。
+///
+/// 采样间隔可能极不均匀（休眠两小时才一个点）。x 也插值会让曲线在密集处打结、
+/// 稀疏处回折，所以 x 一律线性；y 用样条并夹在数据自身极值内，避免过冲出界。
+fn smooth_curve(pts: &[(f32, f32)], seg: usize) -> Vec<(f32, f32)> {
+    if pts.len() < 3 || seg < 2 {
+        return pts.to_vec();
+    }
+    let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
+    for (_, y) in pts {
+        min_y = min_y.min(*y);
+        max_y = max_y.max(*y);
+    }
+    let n = pts.len();
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(n * seg + 1);
+    for i in 0..n - 1 {
+        let p0 = pts[i.saturating_sub(1)];
+        let p1 = pts[i];
+        let p2 = pts[i + 1];
+        let p3 = pts[(i + 2).min(n - 1)];
+        for s in 0..seg {
+            let t = s as f32 / seg as f32;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let y = 0.5
+                * (2.0 * p1.1
+                    + (p2.1 - p0.1) * t
+                    + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
+                    + (3.0 * p1.1 - p0.1 - 3.0 * p2.1 + p3.1) * t3);
+            out.push((p1.0 + (p2.0 - p1.0) * t, y.clamp(min_y, max_y)));
+        }
+    }
+    out.push(*pts.last().unwrap());
+    out
 }
 
 /// 数据不够时显示的文字。抽出来是为了让单测钉住这句文案 ——
@@ -217,6 +324,36 @@ mod tests {
         let rev = build(&rows);
         assert_eq!(rev.first_ts, plot.first_ts);
         assert_eq!(rev.last_ts, plot.last_ts);
+    }
+
+    /// 曲线在 `build` 期就平滑好：末点必须落在原始末点上（否则会跟最新值圆点错位），
+    /// 首点贴左边，且总点数被 `MAX_CURVE_PTS` 相关上限压住，不随采样数膨胀。
+    #[test]
+    fn curve_is_prebuilt_and_hits_both_ends() {
+        let rows: Vec<HistoryRow> = (0..200).map(|i| HistoryRow::new(1_800_000_000 + i * 60, (60 + i % 40) as u8, false, 2)).collect();
+        let plot = build(&rows);
+        assert_eq!(plot.points.len(), 200);
+        assert!(plot.curve.len() >= 2);
+        // 自适应段数：200 点 -> seg = 1320/200 = 6 -> 200*6 附近，远小于 200*10
+        assert!(plot.curve.len() <= MAX_CURVE_PTS + 11, "{} 点", plot.curve.len());
+        assert!(plot.curve[0].fx.abs() < 1e-3);
+        let last = *plot.curve.last().unwrap();
+        assert!((last.level - 99.0).abs() < 0.01, "末点电量被平滑掉了: {}", last.level);
+        assert!((last.fx - 1.0).abs() < 2e-3, "末点 fx={}", last.fx);
+    }
+
+    /// 曲线点数必须是采样点数的整数倍插值，且全部落在 0..=1 之间。
+    /// 少于 3 个采样时不做插值，曲线就是原始点的拷贝。
+    #[test]
+    fn curve_stays_normalized_and_degrades_to_raw() {
+        let plot = build(&real_rows());
+        assert_eq!(plot.curve.len(), (plot.points.len() - 1) * 10 + 1);
+        for c in &plot.curve {
+            assert!((0.0..=1.0).contains(&c.fx), "fx={}", c.fx);
+        }
+
+        let two = build(&real_rows()[..2]);
+        assert_eq!(two.curve.len(), 2, "少于 3 点不该插值");
     }
 
     #[test]

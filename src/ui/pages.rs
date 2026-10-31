@@ -2079,6 +2079,12 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
         let fy = (level as i32 - lo) as f32 / span;
         plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
     };
+    // 平滑后的曲线点按比例搬过来：`chart::build` 已经算好，这里只做映射。
+    let map_fx = |fx: f32| -> f32 { plot.x + fx.clamp(0.0, 1.0) * plot.w };
+    let map_yf = |level: f32| -> f32 {
+        let fy = (level - lo as f32) / span;
+        plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
+    };
 
     // 底轴：比网格线略深一点，给图表一条"地面"
     p.line(
@@ -2153,12 +2159,13 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
                 }
             }
 
-            // 电量是 1% 量化的，原始折线是一格一格的锯齿。先做一次窗口 5 的
-            // 移动平均把台阶磨圆（末点保持原值，免得和右下角那个标记对不上），
-            // 再用 Catmull-Rom 插值：y 用样条、x 保持线性 —— 采样点疏密不均时
-            // 对 x 也插值会让曲线打结甚至回折。
-            let soft = soften(&pts, 5);
-            let curve = smooth_curve(&soft, 10);
+            // 平滑与插值已在 `chart::build` 做完（数据 30 秒才变一次，
+            // 没必要充电时每秒重算 60 遍），这里只把归一化坐标映射成像素。
+            let curve: Vec<(f32, f32)> = pl
+                .curve
+                .iter()
+                .map(|c| (map_fx(c.fx), map_yf(c.level)))
+                .collect();
 
             // 面积：曲线 + 首尾各拉到底边。起点用曲线自己的 x，不要用 plot.x ——
             // 第一个采样点可能晚于窗口起点（休眠、刚装完），从 plot.x 硬拉
@@ -2235,70 +2242,6 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
         }
     }
 }
-
-/// 窗口移动平均：把 1% 量化的台阶磨成缓坡。
-///
-/// 首尾各留一半窗口不参与（用 saturating 边界），并且强制保留末点原值 ——
-/// 末点要跟「最新值」那个圆点标记重合，被平均掉就错位了。
-fn soften(pts: &[(f32, f32)], win: usize) -> Vec<(f32, f32)> {
-    if win < 3 || pts.len() < win {
-        return pts.to_vec();
-    }
-    let h = win / 2;
-    let n = pts.len();
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let lo = i.saturating_sub(h);
-        let hi = (i + h).min(n - 1);
-        let mut sum = 0.0f32;
-        let mut cnt = 0.0f32;
-        for j in lo..=hi {
-            sum += pts[j].1;
-            cnt += 1.0;
-        }
-        out.push((pts[i].0, sum / cnt));
-    }
-    out[n - 1] = pts[n - 1];
-    out
-}
-
-/// Catmull-Rom 平滑：只对 y 插值，x 线性。
-///
-/// 采样点按时间递增，x 间隔可能很不均匀（比如休眠期间两小时才一个点）。
-/// 如果对 x 也做样条，曲线会在密集处打结、在稀疏处回折，所以 x 一律线性，
-/// y 用样条并把结果夹在数据自身的极值内，避免过冲跑出绘图区。
-fn smooth_curve(pts: &[(f32, f32)], seg: usize) -> Vec<(f32, f32)> {
-    if pts.len() < 3 || seg < 2 {
-        return pts.to_vec();
-    }
-    let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
-    for (_, y) in pts {
-        min_y = min_y.min(*y);
-        max_y = max_y.max(*y);
-    }
-    let n = pts.len();
-    let mut out: Vec<(f32, f32)> = Vec::with_capacity(n * seg + 1);
-    for i in 0..n - 1 {
-        let p0 = pts[i.saturating_sub(1)];
-        let p1 = pts[i];
-        let p2 = pts[i + 1];
-        let p3 = pts[(i + 2).min(n - 1)];
-        for s in 0..seg {
-            let t = s as f32 / seg as f32;
-            let t2 = t * t;
-            let t3 = t2 * t;
-            let y = 0.5
-                * (2.0 * p1.1
-                    + (p2.1 - p0.1) * t
-                    + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
-                    + (3.0 * p1.1 - p0.1 - 3.0 * p2.1 + p3.1) * t3);
-            out.push((p1.0 + (p2.0 - p1.0) * t, y.clamp(min_y, max_y)));
-        }
-    }
-    out.push(*pts.last().unwrap());
-    out
-}
-
 
 // ───────────────────────── 性能页 ─────────────────────────
 
