@@ -2163,7 +2163,8 @@ mod tests {
         let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch");
         std::fs::create_dir_all(&out_dir).ok();
 
-        let render_full_view = |canvas: &mut Canvas, fonts: &mut Fonts, ui: &mut super::super::widget::Ui, data_ref: &super::super::pages::Data, theme: &super::super::theme::Theme, out_name: &str, draw_extra: Option<&dyn Fn(&mut Painter, &super::super::layout::Frame)>, scroll: f32| {
+        let render_full_view = |canvas: &mut Canvas, fonts: &mut Fonts, ui: &mut super::super::widget::Ui, data_ref: &super::super::pages::Data, theme: &super::super::theme::Theme, out_name: &str, draw_extra: Option<&dyn Fn(&mut Painter, &super::super::layout::Frame)>, scroll: f32, dim: (f32, f32)| {
+            let (w, h) = (dim.0 as i32, dim.1 as i32);
             let oy = super::super::titlebar::TITLE_H;
             let nav_w = ui.nav_width();
             let mut frame = super::super::layout::Frame::new(w as f32, h as f32, nav_w);
@@ -2207,7 +2208,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-light.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-light.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 2. 电量页 深色模式
@@ -2215,7 +2216,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-battery-dark.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-battery-dark.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 3. 性能页 + 预设色盘
@@ -2234,7 +2235,7 @@ mod tests {
                     f,
                 );
             };
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-palette-preset.bmp", Some(&extra), 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-palette-preset.bmp", Some(&extra), 0.0, (1100.0, 740.0));
         }
 
         // 4. 性能页 + 高级自定义色环
@@ -2257,7 +2258,7 @@ mod tests {
                     f,
                 );
             };
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-palette-ring.bmp", Some(&extra), 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-palette-ring.bmp", Some(&extra), 0.0, (1100.0, 740.0));
         }
 
         // 5. 电量页 正在充电状态（动效光晕与徽标）
@@ -2285,7 +2286,7 @@ mod tests {
                 estimate: &estimate_charging,
                 ..data.clone()
             };
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data_charging, &super::super::theme::DARK, "ui-battery-charging.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data_charging, &super::super::theme::DARK, "ui-battery-charging.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 6. 关闭确认模态对话框
@@ -2296,7 +2297,7 @@ mod tests {
             ui.show_close_dialog = true;
             ui.close_choice = super::super::widget::CloseChoice::Minimize;
             ui.close_remember = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-close-dialog.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-close-dialog.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 7. 电量页 展开导航（rail=false，验证设备卡不再被标题栏裁切，#1）
@@ -2304,7 +2305,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
             ui.rail = false;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-expanded.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-expanded.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 8. 性能页 高级折叠收起（排查折叠区色差）
@@ -2313,7 +2314,7 @@ mod tests {
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
             ui.adv = [false, false];
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-closed.bmp", None, 560.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-closed.bmp", None, 560.0, (1100.0, 740.0));
         }
 
         // 9. 性能页 高级折叠展开（排查展开后色差）
@@ -2322,7 +2323,7 @@ mod tests {
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
             ui.adv = [true, false];
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-open.bmp", None, 560.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-open.bmp", None, 560.0, (1100.0, 740.0));
         }
 
         // 10. 按键页（警告条置顶 + 现代行样式）
@@ -2330,7 +2331,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Keys;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-keys.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-keys.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 11. 按键页 深色
@@ -2338,7 +2339,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Keys;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-keys-dark.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-keys-dark.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 12. 成功提示 toast
@@ -2347,7 +2348,7 @@ mod tests {
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
             ui.set_status("✔ 回报率已生效");
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-ok.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-ok.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 13. 错误提示 toast
@@ -2356,7 +2357,7 @@ mod tests {
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
             ui.set_status("✘ 开机自启失败：权限不足 (错误 5)");
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-err.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-err.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 14. 深色 toast
@@ -2365,7 +2366,7 @@ mod tests {
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
             ui.set_status("✔ 灯光颜色已生效");
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-toast-dark.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-toast-dark.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 15. 性能页 LOD 卡片（警告条在卡片外）
@@ -2373,7 +2374,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-lod.bmp", None, 620.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-lod.bmp", None, 620.0, (1100.0, 740.0));
         }
 
         // 16. 去抖下拉框：靠近视口底部时必须向上翻开（否则整块弹层落到窗外）
@@ -2382,7 +2383,7 @@ mod tests {
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
             ui.set_open_drop(Some(super::super::widget::Drop::Debounce));
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-drop-up.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-drop-up.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 17. DPI 数值框正在编辑：草稿顶到上限（5 位）也不能溢出框外
@@ -2391,7 +2392,7 @@ mod tests {
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
             ui.begin_edit(super::super::widget::Edit::Dpi(0), "42000".into());
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-dpi-edit.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-dpi-edit.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 18. 灯光页：交给 Windows 动态光效（方案 A）
@@ -2399,7 +2400,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Light;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-light-dyn.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-light-dyn.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 19. 设置页：存储路径卡 + 外观「跟随系统/浅色/深色」三段
@@ -2407,7 +2408,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Settings;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings.bmp", None, 620.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings.bmp", None, 620.0, (1100.0, 740.0));
         }
 
         // 20. 性能页顶部：DPI 档位每行带「切换」+「应用」
@@ -2415,7 +2416,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-top.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-top.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 21. 设置页顶部（通用设置：开机自启等）
@@ -2423,7 +2424,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Settings;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-top.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-top.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 21b. 设置页底部「关于」卡：版本号 / 开源仓库 / 商店页
@@ -2431,7 +2432,7 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Settings;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-about.bmp", None, 700.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-about.bmp", None, 700.0, (1100.0, 740.0));
         }
 
         // 22. 标题栏关闭按钮悬停：红底 + 白叉（必须都可见，不能是透明 alpha）
@@ -2440,7 +2441,7 @@ mod tests {
             ui.page = super::super::widget::Page::Battery;
             ui.rail = true;
             ui.hover_btn = Some(super::super::titlebar::Btn::Close);
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-titlebar-hover.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-titlebar-hover.bmp", None, 0.0, (1100.0, 740.0));
         }
 
         // 23. 性能页深色：上架图里的深色主题示例（四档彩色指示灯 + 药丸分段控件）
@@ -2448,7 +2449,16 @@ mod tests {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
             ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-perf-dark.bmp", None, 0.0);
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-perf-dark.bmp", None, 0.0, (1100.0, 740.0));
+        }
+
+        // 23. 窄屏：hero 是「环在上、KPI 单列 4 行」，卡片必须长到装得下
+        //     （早先写死高度，第 3、4 行画到卡外、压住「电量历史」标题）
+        {
+            let mut ui = super::super::widget::Ui::default();
+            ui.page = super::super::widget::Page::Battery;
+            ui.rail = true;
+            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-narrow.bmp", None, 0.0, (700.0, 1040.0));
         }
 
         canvas.release();

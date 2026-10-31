@@ -1502,6 +1502,84 @@ fn draw_drop(p: &mut Painter, ui: &mut Ui, d: &Data, drop: Drop, view_h: f32) {
 
 // ───────────────────────── 电量页 ─────────────────────────
 
+/// hero 卡（电量环 + KPI）的内部几何。
+///
+/// 高度必须由 KPI **实际行数**推导：窄屏（Narrow/Tiny）KPI 是单列 4 行，
+/// 早先写死 `ring_d + 156`，而 4 行要 `62 + 4*52`，卡片装不下，
+/// 第 3、4 行直接画到卡片外面，压住下面的「电量历史」标题。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HeroGeom {
+    /// 卡片高度。
+    hero_h: f32,
+    /// 设备信息卡宽度。
+    info_w: f32,
+    /// 主卡与信息卡之间的间距。
+    gap: f32,
+    /// 主卡宽度。
+    main_w: f32,
+    /// KPI 列起点，相对主卡左边。
+    kpi_x: f32,
+    /// KPI 单列可用宽度。
+    right_w: f32,
+    /// KPI 是否摆成两列。
+    two_cols: bool,
+    /// KPI 行数。
+    kv_rows: f32,
+    /// KPI 首行顶部，相对主卡上边。
+    kv_y: f32,
+}
+
+/// KPI 每行的纵向步进：label 14 + 值 26 + 行距 12 = 52。
+const KV_ROW_H: f32 = 52.0;
+/// 卡片底部留白。
+const HERO_PAD_B: f32 = 16.0;
+
+fn hero_geometry(bp: crate::ui::layout::Breakpoint, content_w: f32, ring_d: f32) -> HeroGeom {
+    let side_by_side = bp.hero_side_by_side();
+    let show_info = side_by_side && content_w > 760.0;
+    let info_w = 268.0;
+    let gap = 16.0;
+    let main_w = if show_info {
+        content_w - info_w - gap
+    } else {
+        content_w
+    };
+
+    // KPI 的横向布局只依赖内容宽度（不依赖卡片高度），先定列数，
+    // 再由行数反推卡片高度 —— 一处算一遍，不让两处各算一份。
+    let kpi_x = if side_by_side {
+        24.0 + ring_d + 26.0
+    } else {
+        24.0
+    };
+    let right_w = (main_w - 24.0 - kpi_x).max(80.0);
+    let two_cols = bp.kv_two_cols() && right_w > 180.0;
+    let kv_rows = if two_cols { 2.0 } else { 4.0 };
+    // 末行不需要下面那一档行距。
+    let kv_h = kv_rows * KV_ROW_H - 12.0;
+
+    let (hero_h, kv_y) = if side_by_side {
+        // 环在左、KPI 在右：环高 + 上下边距，但要保证不比 KPI 需要的矮。
+        ((ring_d + 68.0).max(38.0 + kv_h + HERO_PAD_B), 38.0)
+    } else {
+        // 环在上、KPI 在下：环(22 + ring_d) + 结论行 + KPI 整块 + 底边距。
+        let y = ring_d + 62.0;
+        (y + kv_h + HERO_PAD_B, y)
+    };
+
+    HeroGeom {
+        hero_h,
+        info_w,
+        gap,
+        main_w,
+        kpi_x,
+        right_w,
+        two_cols,
+        kv_rows,
+        kv_y,
+    }
+}
+
 fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     let t = p.t;
     let model = d
@@ -1522,35 +1600,14 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     let side_by_side = f.bp.hero_side_by_side();
     let show_info = side_by_side && c.w > 760.0;
     let ring_d = f.bp.ring_diameter();
-    // 环下面要放一行「预计可用 / 预计充满」的结论，所以比原来多留 26px。
-    let hero_h = if side_by_side {
-        ring_d + 68.0
-    } else {
-        ring_d + 156.0
-    };
-    let info_w = 268.0;
-    let gap = 16.0;
-    let main_w = if show_info {
-        c.w - info_w - gap
-    } else {
-        c.w
-    };
+    let g = hero_geometry(f.bp, c.w, ring_d);
+    let (hero_h, info_w, gap, main_w) = (g.hero_h, g.info_w, g.gap, g.main_w);
     let hero = c.card_w(p, main_w, hero_h);
 
     // 左卡片里环之后剩下的宽度
-    let kpi_x = if side_by_side {
-        hero.x + 24.0 + ring_d + 26.0
-    } else {
-        hero.x + 24.0
-    };
-    let right_w = (hero.right() - 24.0 - kpi_x).max(80.0);
-    let kv_y = if side_by_side {
-        // KPI 只有两行（≈104px），hero 变高后靠上排会显得下面空一截，居中更像样。
-        hero.y + 38.0
-    } else {
-        hero.y + ring_d + 62.0
-    };
-    let _ = kv_y;
+    let kpi_x = hero.x + g.kpi_x;
+    let right_w = g.right_w;
+    let kv_y = hero.y + g.kv_y;
 
     // 电量环。
     //
@@ -1682,7 +1739,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
 
     // KPI：电压 / 回报率 / 当前档位 / 变化速率
     {
-        let two_cols = f.bp.kv_two_cols() && right_w > 180.0;
+        let two_cols = g.two_cols;
         let items: [(&str, String); 4] = if let Some(s) = st {
             [
                 ("电压", format!("{} mV", s.voltage_mv)),
@@ -1720,7 +1777,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
                 (0, i)
             };
             let x = kpi_x + col as f32 * (col_w + 26.0);
-            let y = kv_y + row as f32 * 52.0;
+            let y = kv_y + row as f32 * KV_ROW_H;
             p.text(
                 k,
                 R::new(x, y, col_w, 14.0),
@@ -3066,6 +3123,47 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    /// hero 卡必须装得下它自己画的 KPI：`kv_y + 行数*行距 - 行距 + 底边距`
+    /// 不能超过 `hero_h`。窄屏（单列 4 行）是曾经画到卡外、压住下一个标题的那档。
+    #[test]
+    fn hero_card_always_fits_its_kpi_rows() {
+        use crate::ui::layout::Breakpoint;
+        for bp in [
+            Breakpoint::Wide,
+            Breakpoint::Mid,
+            Breakpoint::Narrow,
+            Breakpoint::Tiny,
+        ] {
+            for w in [520.0f32, 560.0, 700.0, 760.0, 900.0, 1100.0, 1440.0] {
+                let ring_d = bp.ring_diameter();
+                let g = hero_geometry(bp, w, ring_d);
+                let kpi_bottom = g.kv_y + (g.kv_rows - 1.0) * KV_ROW_H + 14.0 + 26.0;
+                assert!(
+                    kpi_bottom + HERO_PAD_B <= g.hero_h + 0.01,
+                    "{bp:?} w={w}: KPI 底 {kpi_bottom} + 底边距 超出卡高 {}",
+                    g.hero_h
+                );
+                assert!(g.kv_rows == 2.0 || g.kv_rows == 4.0);
+                assert!(g.right_w >= 80.0);
+            }
+        }
+    }
+
+    /// 两列时必须真的两行，单列时必须四行 —— 行数错了卡片高度就跟着错。
+    #[test]
+    fn hero_kpi_row_count_matches_columns() {
+        use crate::ui::layout::Breakpoint;
+        for bp in [
+            Breakpoint::Wide,
+            Breakpoint::Mid,
+            Breakpoint::Narrow,
+            Breakpoint::Tiny,
+        ] {
+            let g = hero_geometry(bp, 1100.0, bp.ring_diameter());
+            assert_eq!(g.kv_rows, if g.two_cols { 2.0 } else { 4.0 });
+        }
+    }
     use super::*;
 
     #[test]
