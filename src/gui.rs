@@ -361,6 +361,13 @@ impl Signal {
         }
     }
 
+    /// 「请求退出」的唯一出口：置标志 + 唤醒后台线程。
+    /// 结束消息循环（`nwg::stop_thread_dispatch()`）留给调用点 —— 那是 UI 线程的事。
+    fn request_quit(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.cv.notify_all();
+    }
+
     fn request_refresh(&self) {
         let mut n = lock_poke(&self.poke);
         *n += 1;
@@ -646,8 +653,7 @@ fn handle_act(a: Act, env: &UiEnv) {
             if choice == crate::ui::widget::CloseChoice::Minimize {
                 env.window.set_visible(false);
             } else {
-                env.signal.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
-                env.signal.cv.notify_all();
+                env.signal.request_quit();
                 nwg::stop_thread_dispatch();
             }
         }
@@ -2426,8 +2432,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     }
                     window.set_visible(false);
                 } else {
-                    signal_e.shutdown.store(true, Ordering::Relaxed);
-                    signal_e.cv.notify_all();
+                    signal_e.request_quit();
                     nwg::stop_thread_dispatch();
                 }
             }
@@ -2558,8 +2563,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         use nwg::Event as E;
         match evt {
             E::OnMenuItemSelected if handle == h_mi_quit => {
-                signal_m.shutdown.store(true, Ordering::Relaxed);
-                signal_m.cv.notify_all();
+                signal_m.request_quit();
                 nwg::stop_thread_dispatch();
             }
             _ => {}
@@ -2595,8 +2599,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     nwg::dispatch_thread_events();
 
     // 退出：通知两条后台线程，并等它们真的收尾（`record_sample` 可能在写盘）。
-    signal.shutdown.store(true, Ordering::Relaxed);
-    signal.cv.notify_all();
+    signal.request_quit();
     join_bounded(history_thread, Duration::from_millis(4000));
     join_bounded(refresh_thread, Duration::from_millis(4000));
 
@@ -2794,4 +2797,15 @@ mod tests {
             "超预算就该放弃，不该干等：{el:?}"
         );
     }
+    #[test]
+    fn request_quit_sets_flag_and_wakes_workers() {
+        let s = Signal::new(60);
+        assert!(!s.shutdown.load(Ordering::Relaxed));
+        s.request_quit();
+        assert!(s.shutdown.load(Ordering::Relaxed));
+        // 托盘菜单和关闭对话框可能先后触发，必须幂等
+        s.request_quit();
+        assert!(s.shutdown.load(Ordering::Relaxed));
+    }
+
 }
