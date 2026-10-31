@@ -518,6 +518,14 @@ pub fn cmd_restore(ctx: &mut Ctx, dev: &mut HidDevice, path: &str, save: bool) -
 
     println!("== 还原 {path} ==");
     println!("识别到 {} / {} 个键", b.keys_found, backup::BACKUP_KEYS.len());
+    if !b.rejected.is_empty() {
+        // 以前这些值会被静默截断（256 变 0）或整条丢掉（负角度），
+        // 「还原成功」其实是谎话。现在明确列出来，让用户知道哪几项没还原。
+        eprintln!("警告：有 {} 项的值无法使用，将被跳过：", b.rejected.len());
+        for r in &b.rejected {
+            eprintln!("      {r}");
+        }
+    }
     if backup::energy_missing(&b) {
         eprintln!("警告：这份备份缺少能量块（poweroff_code / low_warn / full_effect）。");
         eprintln!("      文档第 5 节的事故正是因此而起——commit 后休眠时间会被写坏。");

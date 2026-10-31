@@ -141,30 +141,108 @@ pub struct Backup {
     pub full_effect: Option<u8>,
     /// 文件里实际出现的已知键数量（用于校验「31 个键」）
     pub keys_found: usize,
+    /// 值存在但解析失败/超范围的键。调用方应把它们提示给用户 ——
+    /// 静默丢弃会让「还原成功」变成谎话。
+    pub rejected: Vec<String>,
 }
 
-fn get_u32(map: &[(String, String)], key: &str) -> Option<u32> {
-    map.iter()
-        .find(|(k, _)| k == key)
-        .and_then(|(_, v)| v.trim().parse::<u32>().ok())
+/// 备份字段的类型化读取。
+///
+/// 原来的 `get_u8`/`get_u16` 是 `get_u32(...) as u8` —— 静默截断：文件里
+/// `poll_code=256` 会变成 0，`angle_tuning=-90` 因为 `parse::<u32>` 失败直接
+/// 变成 `None`，**负角度整个丢失**（而设备确实会写出负值）。这里改成范围
+/// 检查：超范围或解析失败都记进 `rejected`，由调用方决定怎么提示，不再悄悄
+/// 改写数值。
+struct Reader<'a> {
+    map: &'a [(String, String)],
+    rejected: Vec<String>,
 }
 
-fn get_u8(map: &[(String, String)], key: &str) -> Option<u8> {
-    get_u32(map, key).map(|v| v as u8)
-}
+impl<'a> Reader<'a> {
+    fn new(map: &'a [(String, String)]) -> Self {
+        Self {
+            map,
+            rejected: Vec::new(),
+        }
+    }
 
-fn get_u16(map: &[(String, String)], key: &str) -> Option<u16> {
-    get_u32(map, key).map(|v| v as u16)
-}
+    fn raw(&self, key: &str) -> Option<&'a str> {
+        self.map
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
 
-fn get_u32_required(map: &[(String, String)], key: &str) -> Option<u32> {
-    get_u32(map, key)
-}
+    fn reject(&mut self, key: &str, why: String) {
+        self.rejected.push(format!("{key}：{why}"));
+    }
 
-fn get_rgb(map: &[(String, String)], key: &str) -> Option<[u8; 3]> {
-    map.iter()
-        .find(|(k, _)| k == key)
-        .and_then(|(_, v)| parse_rgb(v).ok())
+    fn i32(&mut self, key: &str) -> Option<i32> {
+        let raw = self.raw(key)?;
+        match raw.trim().parse::<i32>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                self.reject(key, format!("{raw:?} 不是整数"));
+                None
+            }
+        }
+    }
+
+    fn u32(&mut self, key: &str) -> Option<u32> {
+        let raw = self.raw(key)?;
+        match raw.trim().parse::<u32>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                self.reject(key, format!("{raw:?} 不是非负整数"));
+                None
+            }
+        }
+    }
+
+    fn u8(&mut self, key: &str) -> Option<u8> {
+        let v = self.u32(key)?;
+        match u8::try_from(v) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                self.reject(key, format!("{v} 超出 0..=255"));
+                None
+            }
+        }
+    }
+
+    fn u16(&mut self, key: &str) -> Option<u16> {
+        let v = self.u32(key)?;
+        match u16::try_from(v) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                self.reject(key, format!("{v} 超出 0..=65535"));
+                None
+            }
+        }
+    }
+
+    /// 角度微调是**有符号**的：设备会返回 -90..90。
+    fn i16(&mut self, key: &str) -> Option<i16> {
+        let v = self.i32(key)?;
+        match i16::try_from(v) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                self.reject(key, format!("{v} 超出 -32768..=32767"));
+                None
+            }
+        }
+    }
+
+    fn rgb(&mut self, key: &str) -> Option<[u8; 3]> {
+        let raw = self.raw(key)?;
+        match parse_rgb(raw) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                self.reject(key, e);
+                None
+            }
+        }
+    }
 }
 
 /// 解析备份文本。
@@ -192,31 +270,33 @@ pub fn parse(text: &str) -> Result<Backup, String> {
         .filter(|k| map.iter().any(|(kk, _)| kk == **k))
         .count();
 
-    b.poll_code = get_u8(&map, "poll_code");
+    let mut r = Reader::new(&map);
+    b.poll_code = r.u8("poll_code");
     for i in 0..DPI_STAGES {
         let ek = format!("dpi{}_enc", i + 1);
         let ck = format!("dpi{}_rgb", i + 1);
-        b.dpi_enc[i] = get_u32_required(&map, &ek).map(|v| v as i32);
-        b.dpi_rgb[i] = get_rgb(&map, &ck);
+        b.dpi_enc[i] = r.i32(&ek);
+        b.dpi_rgb[i] = r.rgb(&ck);
     }
-    b.active_stage = get_u8(&map, "active_stage");
-    b.debounce_code = get_u8(&map, "debounce_code");
-    b.angle_snap = get_u8(&map, "angle_snap");
-    b.angle_tuning = get_u32(&map, "angle_tuning").map(|v| v as i16);
-    b.lod = get_u8(&map, "lod");
-    b.light_mode = get_u8(&map, "light_mode");
-    b.light_bright = get_u8(&map, "light_bright");
-    b.light_rgb = get_rgb(&map, "light_rgb");
-    b.light_dir = get_u8(&map, "light_dir");
-    b.light_random = get_u8(&map, "light_random");
-    b.light_speed = get_u8(&map, "light_speed");
+    b.active_stage = r.u8("active_stage");
+    b.debounce_code = r.u8("debounce_code");
+    b.angle_snap = r.u8("angle_snap");
+    b.angle_tuning = r.i16("angle_tuning");
+    b.lod = r.u8("lod");
+    b.light_mode = r.u8("light_mode");
+    b.light_bright = r.u8("light_bright");
+    b.light_rgb = r.rgb("light_rgb");
+    b.light_dir = r.u8("light_dir");
+    b.light_random = r.u8("light_random");
+    b.light_speed = r.u8("light_speed");
     for i in 0..BUTTON_SLOTS {
         let key = format!("button{i}");
-        b.buttons[i] = get_u16(&map, &key);
+        b.buttons[i] = r.u16(&key);
     }
-    b.poweroff_code = get_u8(&map, "poweroff_code");
-    b.low_warn = get_u8(&map, "low_warn");
-    b.full_effect = get_u8(&map, "full_effect");
+    b.poweroff_code = r.u8("poweroff_code");
+    b.low_warn = r.u8("low_warn");
+    b.full_effect = r.u8("full_effect");
+    b.rejected = r.rejected;
 
     if b.keys_found == 0 {
         return Err("备份文件里没有任何已知的键，可能不是本程序生成的文件".into());
@@ -227,4 +307,54 @@ pub fn parse(text: &str) -> Result<Backup, String> {
 /// 备份缺少能量块时给出明确警告 —— 这正是文档第 5 节事故的根因。
 pub fn energy_missing(b: &Backup) -> bool {
     b.poweroff_code.is_none() && b.low_warn.is_none() && b.full_effect.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 负角度是合法值（设备会返回 -90..90）。原来用 `parse::<u32>` 直接失败，
+    /// 角度微调被静默丢弃。
+    #[test]
+    fn negative_angle_tuning_survives_parse() {
+        let b = parse("angle_tuning=-90\npoll_code=1\n").expect("应能解析");
+        assert_eq!(b.angle_tuning, Some(-90));
+        assert!(b.rejected.is_empty(), "负角度不该被记为拒绝：{:?}", b.rejected);
+    }
+
+    /// 超范围的值不能被截断成合法值，而要整条拒绝并记录。
+    #[test]
+    fn out_of_range_values_are_rejected_not_truncated() {
+        let b = parse("poll_code=256\nangle_snap=300\nlod=2\n").expect("应能解析");
+        assert_eq!(b.poll_code, None, "256 不能变成 0");
+        assert_eq!(b.angle_snap, None, "300 不能变成 44");
+        assert_eq!(b.lod, Some(2), "合法值照常读");
+        assert_eq!(b.rejected.len(), 2, "两条都要被记录：{:?}", b.rejected);
+    }
+
+    /// 非数字与坏颜色也要进 rejected，而不是静默当成缺失。
+    #[test]
+    fn unparsable_values_are_reported() {
+        let b = parse("debounce_code=abc\ndpi1_rgb=zzzzzz\nbutton0=70000\n").expect("应能解析");
+        assert_eq!(b.debounce_code, None);
+        assert_eq!(b.dpi_rgb[0], None);
+        assert_eq!(b.buttons[0], None, "70000 超出 u16");
+        assert_eq!(b.rejected.len(), 3, "{:?}", b.rejected);
+    }
+
+    /// 正常的备份文件不该产生任何拒绝记录。
+    #[test]
+    fn clean_backup_has_no_rejections() {
+        let text = "poll_code=2\ndpi1_enc=10400\ndpi1_rgb=ff1929\nactive_stage=1\n\
+                    debounce_code=4\nangle_snap=0\nangle_tuning=0\nlod=0\n\
+                    light_mode=1\nlight_bright=3\nlight_rgb=ffffff\nlight_dir=0\n\
+                    light_random=0\nlight_speed=2\nbutton0=1\npoweroff_code=2\n\
+                    low_warn=20\nfull_effect=0\n";
+        let b = parse(text).expect("应能解析");
+        assert!(b.rejected.is_empty(), "{:?}", b.rejected);
+        assert_eq!(b.poll_code, Some(2));
+        assert_eq!(b.dpi_enc[0], Some(10400));
+        assert_eq!(b.dpi_rgb[0], Some([0xff, 0x19, 0x29]));
+        assert_eq!(b.angle_tuning, Some(0));
+    }
 }
