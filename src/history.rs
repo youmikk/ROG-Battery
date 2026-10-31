@@ -17,6 +17,11 @@ use crate::win32;
 
 /// 保留最近 48 小时（覆盖两晚）。
 pub const HIST_KEEP_HOURS: i64 = 48;
+/// 时间戳的合理下界（2020-01-01Z）。历史文件是纯文本、可被任何工具改，
+/// 越界的行在下游减法里会溢出，读入时就该扔掉。
+pub const TS_MIN_PLAUSIBLE: i64 = 1_577_836_800;
+/// 时间戳的合理上界（2100-01-01Z）。
+pub const TS_MAX_PLAUSIBLE: i64 = 4_102_444_800;
 /// 文件行数上限，防止无限增长。
 pub const HIST_MAX_LINES: usize = 2000;
 /// 电量变化时，两条采样至少隔 60 秒。
@@ -291,6 +296,12 @@ pub fn parse_rows(text: &str) -> Vec<HistoryRow> {
             continue;
         };
         if !(0..=100).contains(&level) {
+            continue;
+        }
+        // 时间戳也要挑：文件是可被外部编辑的纯文本，一行 `i64::MAX` 就能让
+        // 下游的 `prev_t - r.ts` / `ts - first_ts` 溢出（debug 直接 panic，
+        // release 绕回负数，估算和曲线全变垃圾）。
+        if !(TS_MIN_PLAUSIBLE..=TS_MAX_PLAUSIBLE).contains(&ts) {
             continue;
         }
         out.push(HistoryRow::new(ts, level as u8, chg != 0, mode));
@@ -1065,8 +1076,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_crlf_file() {
-        // 真机上这个文件是 C# 版 `File.WriteAllLines` 写的，行尾是 CRLF。
+    fn parse_rows_drops_implausible_timestamps() {
+        // 一行 i64::MAX、一行 1970 年，都不该进入样本集
+        let text = "9223372036854775807\t50\t0\t2\n\
+                    0\t50\t0\t2\n\
+                    1800000000\t50\t0\t2\n";
+        let rows = parse_rows(text);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ts, 1_800_000_000);
+    }
+
+    #[test]
+    fn parse_crlf_file() {        // 真机上这个文件是 C# 版 `File.WriteAllLines` 写的，行尾是 CRLF。
         // 我们追加时写 LF（和 C# 的 `AppendAllText` 一致），于是文件里混着两种行尾。
         // 解析必须都吃得下 —— 靠的是先 `trim()` 再去 split('\t')，
         // 否则最后那个字段会变成 "2\r"、parse::<i32> 失败、整行被当成坏行丢掉。
@@ -1092,25 +1113,25 @@ mod tests {
         let path = dir.join(format!("hist-{}.tsv", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        append_line(&path, "100\t50\t0\t2").expect("追加");
+        append_line(&path, "1800000000\t50\t0\t2").expect("追加");
         let bytes = std::fs::read(&path).expect("读回");
-        assert_eq!(bytes, b"100\t50\t0\t2\n", "应当是 LF 结尾且没有多余字节");
+        assert_eq!(bytes, b"1800000000\t50\t0\t2\n", "应当是 LF 结尾且没有多余字节");
 
         // 再读回来必须得到一条合法记录
         let text = String::from_utf8(bytes).expect("应当是 ASCII");
         let rows = parse_rows(&text);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], HistoryRow::new(100, 50, false, 2));
+        assert_eq!(rows[0], HistoryRow::new(1_800_000_000, 50, false, 2));
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn parse_skips_bad_lines() {
-        let text = "100\t50\t0\t2\n\n乱码\t1\t0\t2\n200\t101\t0\t2\n300\t40\t0\n";
+        let text = "1800000000\t50\t0\t2\n\n乱码\t1\t0\t2\n1800000060\t101\t0\t2\n1800000120\t40\t0\n";
         let rows = parse_rows(text);
         assert_eq!(rows.len(), 1, "只应留下第一条合法行");
-        assert_eq!(rows[0].ts, 100);
+        assert_eq!(rows[0].ts, 1_800_000_000);
     }
 
     #[test]
