@@ -314,7 +314,7 @@ pub fn parse_rows(text: &str) -> Vec<HistoryRow> {
 /// **读完会按时间戳稳定排序**。文件是多个进程共写的：`record_sample_at` 有
 /// `Local\RogBatteryHistory` 互斥体保护，但任何外部工具、脚本、手工编辑都能
 /// 把顺序弄乱。下游的 [`predict_from_rows`] 有一堆「从最新往回取」的假设
-/// （`prev_t - r.ts > HIST_GAP_BREAK_SEC` 断档检测、`filter_direction` 逐条回看），
+/// （`prev_t - r.ts > HIST_GAP_BREAK_SEC` 断档检测、`direction_start` 逐条回看），
 /// 一旦输入乱序，断档检测会因为差值是负数而永不触发，`span_minutes` 也会算小，
 /// 估算偏乐观。排序成本 2000 行的 O(n log n)，可以忽略。
 ///
@@ -720,8 +720,11 @@ pub fn predict_from_rows(
         };
     }
 
-    // 第一步：取出「连续同相位」的一段（先不管方向）
-    let phase = filter_phase(rows, now_charging);
+    // 第一步：取出「连续同相位」的一段（先不管方向）。
+    // 只算起始下标、不复制 —— 这条路径每个刷新周期都会跑，2000 行拷两份
+    // 纯属垃圾（而且它俩都是「从最新往回扫到第一个不满足就停」的连续尾段，
+    // 天然就是一个切片）。
+    let phase = &rows[phase_start(rows, now_charging)..];
 
     // 同相位样本太少 → 说明刚切换过充电/放电，历史还没攒够。
     // 这时不要说「样本不足」糊弄过去，要告诉用户真实原因。
@@ -754,7 +757,7 @@ pub fn predict_from_rows(
 
     // 第三步：方向过滤。放电段里出现回升（或充电段里出现回落）说明中途插过线
     // 或传感器抖动，只保留最近这段干净的。
-    let sel = filter_direction(&phase, now_charging);
+    let sel = &phase[direction_start(phase, now_charging)..];
     if sel.len() < 3 {
         return Estimate {
             samples: sel.len(),
@@ -765,7 +768,10 @@ pub fn predict_from_rows(
 
     // 第四步：把当前读数并进序列末尾。历史最后一条可能是十几分钟前的，
     // 不并进去等于拿旧数据预测现在。
-    let mut full = sel;
+    // 只有这里必须复制一次：要往末尾追加当前读数，不能借用历史行切片。
+    // 容量一次给够，避免 push 触发扩容。
+    let mut full: Vec<HistoryRow> = Vec::with_capacity(sel.len() + 1);
+    full.extend_from_slice(sel);
     if let Some(last) = full.last() {
         if last.ts < now_sec {
             full.push(HistoryRow::new(now_sec, now_level, now_charging, now_mode));
@@ -909,9 +915,12 @@ fn predict_from_series(
     }
 }
 
-/// 从最新往回取「连续同一相位」的样本（不做方向判断）。
-fn filter_phase(rows: &[HistoryRow], charging: bool) -> Vec<HistoryRow> {
-    let mut sel: Vec<HistoryRow> = Vec::new();
+/// 「连续同一相位」那一段在 `rows` 里的起始下标（终点恒为 `rows.len()`）。
+///
+/// 从最新往回扫，扫到相位不同或断档就停 —— 结果必然是一个连续尾段，
+/// 所以只返回下标，让调用方用切片，不用复制一份数据。
+fn phase_start(rows: &[HistoryRow], charging: bool) -> usize {
+    let mut start = rows.len();
     let mut prev_t: Option<i64> = None;
     for r in rows.iter().rev() {
         if r.charging != charging {
@@ -926,17 +935,18 @@ fn filter_phase(rows: &[HistoryRow], charging: bool) -> Vec<HistoryRow> {
                 break;
             }
         }
-        sel.push(*r);
+        start -= 1;
         prev_t = Some(r.ts);
     }
-    sel.reverse();
-    sel
+    start
 }
 
-/// 从最新往回取「方向也一致」的一段：放电样本往回看应单调不降，充电样本相反。
-/// 碰到第一次反向就截断。
-fn filter_direction(rows: &[HistoryRow], charging: bool) -> Vec<HistoryRow> {
-    let mut sel: Vec<HistoryRow> = Vec::new();
+/// 「方向也一致」那一段在 `rows` 里的起始下标（终点恒为 `rows.len()`）。
+///
+/// 放电样本往回看应单调不降，充电样本相反；碰到第一次反向就截断。
+/// 同样是连续尾段，返回下标即可。
+fn direction_start(rows: &[HistoryRow], charging: bool) -> usize {
+    let mut start = rows.len();
     let mut prev: Option<u8> = None;
     for r in rows.iter().rev() {
         if let Some(p) = prev {
@@ -945,11 +955,10 @@ fn filter_direction(rows: &[HistoryRow], charging: bool) -> Vec<HistoryRow> {
                 break;
             }
         }
-        sel.push(*r);
+        start -= 1;
         prev = Some(r.level);
     }
-    sel.reverse();
-    sel
+    start
 }
 
 fn dur_text(hours: f64) -> String {
@@ -1425,5 +1434,46 @@ mod tests {
         let p = primary_history_path().display().to_string();
         assert!(p.contains("rog-battery"), "{}", p);
         assert!(p.ends_with("history.tsv"), "{}", p);
+    }
+
+    #[test]
+    fn phase_and_direction_pick_contiguous_tail() {
+        // 相位不同就截断：只有最后两条是连续放电
+        let rows = vec![
+            row(1_800_000_000, 90, false),
+            row(1_800_000_060, 89, false),
+            row(1_800_000_120, 88, false),
+            row(1_800_000_180, 87, true), // 相位变了
+            row(1_800_000_240, 86, false),
+            row(1_800_000_300, 85, false),
+        ];
+        let p = phase_start(&rows, false);
+        assert_eq!(p, 4);
+        assert_eq!(rows[p..].len(), 2);
+        assert_eq!(direction_start(&rows[p..], false), 0);
+
+        // 中途回升：方向过滤只保留回升之后那段
+        let rows2 = vec![
+            row(1_800_000_000, 70, false),
+            row(1_800_000_060, 72, false), // 回升
+            row(1_800_000_120, 71, false),
+            row(1_800_000_180, 70, false),
+        ];
+        let p2 = phase_start(&rows2, false);
+        assert_eq!(p2, 0);
+        assert_eq!(direction_start(&rows2[p2..], false), 1);
+    }
+
+    #[test]
+    fn phase_start_breaks_on_long_gap() {
+        // 间隔超过 HIST_GAP_BREAK_SEC 就不算连续观测
+        let rows = vec![
+            row(1_800_000_000, 90, false),
+            row(1_800_000_060, 89, false),
+            row(1_800_000_060 + HIST_GAP_BREAK_SEC + 60, 60, false),
+        ];
+        let p = phase_start(&rows, false);
+        assert_eq!(p, 2, "断档之前的两条应当被截掉");
+        assert_eq!(rows[p..].len(), 1);
     }
 }
