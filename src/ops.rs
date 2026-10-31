@@ -397,7 +397,7 @@ where
 /// commit，并把「无应答」归类成 `Asleep`、NAK 归类成 `Rejected`。
 ///
 /// 提交命令回**全零是正常的**（不是 NAK），不要误判。
-fn commit_or_fail(dev: &mut HidDevice, rid: u8) -> Result<(), OpsError> {
+pub(crate) fn commit_or_fail(dev: &mut HidDevice, rid: u8) -> Result<(), OpsError> {
     match proto::commit(dev, rid) {
         Some(m) if is_nak(&m) => Err(OpsError::rejected("commit 被设备 NAK")),
         Some(_) => Ok(()),

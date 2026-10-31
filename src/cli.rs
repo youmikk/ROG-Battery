@@ -307,8 +307,16 @@ pub fn apply_backup(
     rid: u8,
     b: &backup::Backup,
     save: bool,
-    log: &mut dyn FnMut(&str),
+    log_raw: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
+    // 逐项写回，任何一步失败都只返回一句字符串 —— 用户不知道前面改了哪些。
+    // 这里包一层：数一下已写项数，失败时把「已写 N 项」附在错误后面。
+    let mut count = 0usize;
+    let mut log = |line: &str| {
+        count += 1;
+        log_raw(line);
+    };
+    let outcome: Result<(), String> = (|| -> Result<(), String> {
     // ---- 4 档 DPI + 颜色 ----
     //
     // 这里刻意**不走 `ops::set_dpi`**：restore 是「按备份原样铺回去」，
@@ -473,7 +481,9 @@ pub fn apply_backup(
     // ---- 能量块：最后单独重写，并读回确认 ----
     let (Some(sleep), Some(low), Some(full)) = (b.poweroff_code, b.low_warn, b.full_effect) else {
         if save {
-            proto::commit(dev, rid);
+            // commit 的返回值必须看：None = 设备没应答，这时打「设置已进 flash」
+            // 就是谎报，用户拔线后会发现什么都没保存。
+            ops::commit_or_fail(dev, rid).map_err(|e| e.message)?;
             log("已 commit（能量块被跳过，见上面的警告）。");
         }
         return Ok(());
@@ -488,7 +498,7 @@ pub fn apply_backup(
     ));
 
     if save {
-        proto::commit(dev, rid);
+        ops::commit_or_fail(dev, rid).map_err(|e| e.message)?;
         log("已 commit（0x50 0x03），设置已进 flash。");
     } else {
         log("未 commit（默认不写 flash）。确认无误后可再加 --save。");
@@ -508,7 +518,18 @@ pub fn apply_backup(
     if !ok {
         return Err("能量块读回与备份不一致".into());
     }
-    Ok(())
+        Ok(())
+    })();
+    outcome.map_err(|e| partial_hint(e, count))
+}
+
+/// 还原中途失败时，把「已经写进去几项」补进错误信息。
+fn partial_hint(err: String, count: usize) -> String {
+    if count > 0 {
+        format!("{err}（此前已成功写入 {count} 项，见上方逐项输出）")
+    } else {
+        err
+    }
 }
 
 /// `restore <file>` —— 按备份逐项写回，**能量块最后单独重写并断言**。
@@ -945,5 +966,15 @@ mod tests {
         ] {
             assert!(!error_hint(k).is_empty(), "{k:?} 没有提示文案");
         }
+    }
+
+    #[test]
+    fn partial_restore_reports_how_many_steps_landed() {
+        // 一项都没写成：错误原文，不加多余尾巴
+        assert_eq!(partial_hint("写去抖无应答".into(), 0), "写去抖无应答");
+        // 已经写了几项：必须说清楚「设备已经被改过一部分」
+        let msg = partial_hint("写能量块无应答".into(), 5);
+        assert!(msg.contains("写能量块无应答"));
+        assert!(msg.contains("已成功写入 5 项"), "实际：{msg}");
     }
 }
