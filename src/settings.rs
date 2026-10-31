@@ -52,8 +52,11 @@ impl Default for Settings {
 }
 
 impl Settings {
-    fn parse(text: &str) -> Settings {
+    fn parse_collect(text: &str) -> (Settings, Vec<String>) {
         let mut s = Settings::default();
+        // 手改文件打错值不该让程序起不来，但也不能一声不响地当没看见：
+        // 逐条记下来，由 load() 打到 stderr。
+        let mut warnings: Vec<String> = Vec::new();
         // 旧版本同时写 close_to_tray 和 close_mode，两者表达同一件事。
         // 现在只认 close_mode；close_to_tray 仅在文件里没出现 close_mode 时兜底换算。
         let mut legacy_close: Option<bool> = None;
@@ -68,40 +71,40 @@ impl Settings {
             };
             let v = v.trim();
             match k.trim() {
-                "cache_ttl_sec" => {
-                    if let Ok(n) = v.parse::<u64>() {
-                        s.cache_ttl_sec = n;
-                    }
-                }
-                "refresh_interval_sec" => {
-                    if let Ok(n) = v.parse::<u64>() {
-                        // 0 会让后台线程空转，钳一个下限出来
-                        s.refresh_interval_sec = n.max(5);
-                    }
-                }
-                "tray_enabled" => {
-                    if let Some(b) = parse_bool(v) {
-                        s.tray_enabled = b;
-                    }
-                }
-                "close_to_tray" => {
-                    if let Some(b) = parse_bool(v) {
-                        legacy_close = Some(b);
-                    }
-                }
+                "cache_ttl_sec" => match v.parse::<u64>() {
+                    Ok(n) => s.cache_ttl_sec = n,
+                    Err(_) => warnings.push(format!("cache_ttl_sec={v} 不是非负整数，已忽略")),
+                },
+                "refresh_interval_sec" => match v.parse::<u64>() {
+                    // 0 会让后台线程空转，钳一个下限出来
+                    Ok(n) => s.refresh_interval_sec = n.max(5),
+                    Err(_) => warnings.push(format!("refresh_interval_sec={v} 不是非负整数，已忽略")),
+                },
+                "tray_enabled" => match parse_bool(v) {
+                    Some(b) => s.tray_enabled = b,
+                    None => warnings.push(format!("tray_enabled={v} 不是布尔值（true/false），已忽略")),
+                },
+                "close_to_tray" => match parse_bool(v) {
+                    Some(b) => legacy_close = Some(b),
+                    None => warnings.push(format!("close_to_tray={v} 不是布尔值，已忽略")),
+                },
                 "close_mode" => {
                     let want = v.trim().to_ascii_lowercase();
                     if want == "ask" || want == "minimize" || want == "quit" {
                         s.close_mode = want;
                         saw_close_mode = true;
+                    } else {
+                        warnings.push(format!("close_mode={v} 只认 ask/minimize/quit，已忽略"));
                     }
                 }
                 "theme" => {
-                    // 认 system/light/dark，其它一律当默认（不报错 —— 手改文件打错字
-                    // 不该让程序起不来）。写成 Light/Dark/System 也认，省得用户猜大小写。
+                    // 认 system/light/dark；写成 Light/Dark/System 也认，省得用户猜大小写。
+                    // 打错的值不致命，但要留痕，否则「我明明设了深色」查不出原因。
                     let want = v.trim().to_ascii_lowercase();
                     if want == "light" || want == "dark" || want == "system" {
                         s.theme = want;
+                    } else {
+                        warnings.push(format!("theme={v} 只认 system/light/dark，已忽略"));
                     }
                 }
                 _ => {} // 未知键忽略，向后兼容（旧文件只有 cache_ttl_sec 一行也能读）
@@ -112,7 +115,13 @@ impl Settings {
                 s.close_mode = if b { "minimize" } else { "quit" }.to_string();
             }
         }
-        s
+        (s, warnings)
+    }
+
+    /// 只取结果、丢弃告警。仅供单测使用（生产一律走 [`load`]）。
+    #[cfg(test)]
+    fn parse(text: &str) -> Settings {
+        Self::parse_collect(text).0
     }
 
     pub fn to_text(&self) -> String {
@@ -163,12 +172,36 @@ fn parse_bool(v: &str) -> Option<bool> {
     }
 }
 
-/// 读设置。文件不存在或读不动都用默认值，**不报错**。
-pub fn load() -> Settings {
+/// 读设置：文件不存在算正常（返回默认值）；读不动则**返回错误**，不再假装成功。
+///
+/// 以前是 `Err(_) => Settings::default()`，于是「权限被拒 / 文件被独占 /
+/// 路径指向一个目录」全部变成「一切正常，用默认值」——用户改的设置凭空消失，
+/// 界面上还看不出任何异常。现在把原因带出来。
+pub fn try_load() -> Result<(Settings, Vec<String>), String> {
     let p = paths::settings_file();
     match std::fs::read_to_string(&p) {
-        Ok(t) => Settings::parse(&t),
-        Err(_) => Settings::default(),
+        Ok(t) => Ok(Settings::parse_collect(&t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Settings::default(), Vec::new())),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    }
+}
+
+/// 读设置，读不到就告警 + 用默认值（GUI / CLI 的通用入口）。
+///
+/// 告警走 stderr：GUI 下用户看不到，但日志与命令行调用能看到；
+/// 静默失败比打一行日志危险得多。
+pub fn load() -> Settings {
+    match try_load() {
+        Ok((s, warnings)) => {
+            for w in warnings {
+                eprintln!("⚠ 设置文件：{w}");
+            }
+            s
+        }
+        Err(e) => {
+            eprintln!("⚠ 读取设置失败（{e}），本次用默认值。检查文件是否存在/可读。");
+            Settings::default()
+        }
     }
 }
 
@@ -248,6 +281,20 @@ pub fn format_unix_local(unix: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_collect_reports_bad_values() {
+        // 手改文件打错值：不致命，但要留痕，否则「我明明设了」查不出原因。
+        let (s, w) = Settings::parse_collect(
+            "tray_enabled=maybe\ntheme=blue\ncache_ttl_sec=x\nclose_mode=hide\nunknown_key=1\n",
+        );
+        assert!(s.tray_enabled, "坏值不该改掉默认的 true");
+        assert_eq!(s.theme, "system");
+        assert_eq!(s.cache_ttl_sec, crate::snapshot::DEFAULT_TTL_SEC);
+        assert_eq!(s.close_mode, "ask");
+        assert_eq!(w.len(), 4, "四个坏值各留一条痕，未知键保持沉默：{w:?}");
+    }
+
 
     #[test]
     fn parse_settings() {
