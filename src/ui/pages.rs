@@ -1583,6 +1583,9 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         let ring_color = ring_color(t, st.is_some(), charging, level);
 
         if charging && st.is_some() {
+            // 这一帧真的画了动效 —— 让 canvas 的定时器据此决定要不要继续跑。
+            // 定时器自己不知道「还需不需要重绘」，只能靠每帧画出来的事实。
+            ui.anim_hint = true;
             // 充电动效：一段固定长度的亮色弧沿整圈匀速跑动。
             //
             // 为什么不用「整圈呼吸」：呼吸动画在不满一圈的进度弧上会让人分不清

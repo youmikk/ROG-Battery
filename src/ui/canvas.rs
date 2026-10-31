@@ -861,7 +861,24 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
         // 定时器回调只负责「标脏」，真正的绘制仍是 WM_PAINT 那次。
         WM_TIMER => {
             if wp == ANIM_TIMER_ID {
-                InvalidateRect(hwnd, std::ptr::null(), 0);
+                // 上一帧画完才知道「还需不需要继续动」：充电结束、toast 淡出
+                // 完成之后没人会再来关这个定时器（`want_anim` 只在收到 Notice
+                // 时重算），所以这里按上一帧的事实自我了断。
+                let keep = ctx_of(hwnd).map(|c| {
+                    let ui = c.ui.borrow();
+                    ui.anim_hint || !ui.status.is_empty()
+                });
+                match keep {
+                    Some(false) => {
+                        if let Some(c) = ctx_of(hwnd) {
+                            c.anim_wanted.set(false);
+                        }
+                        set_timer(hwnd, false);
+                    }
+                    _ => {
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                }
             }
             0
         }

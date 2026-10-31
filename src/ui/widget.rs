@@ -397,6 +397,12 @@ pub struct Ui {
     pub status: String,
     /// 状态栏提示的触发时间（用于自动在 ~2s 后消失）。
     pub status_time: Option<std::time::Instant>,
+    /// 本帧绘制时是否真的画了需要连续重绘的动效。
+    ///
+    /// 由页面在绘制过程中置位（例如充电彗尾），[`Ui::begin_frame`] 清零。
+    /// canvas 的 16ms 定时器据此判断「还要不要继续跑」：光靠「用户想要动效」
+    /// 这个标志会漏掉「动效已经结束」，结果定时器一路空转到下一次刷新。
+    pub anim_hint: bool,
     /// 色盘模式：0 = 常用预设，1 = 自定义色环。
     pub palette_tab: u8,
     /// 自定义色环当前选中的色相（0.0 .. 360.0）。
@@ -449,6 +455,7 @@ impl Default for Ui {
             live: [None; 3],
             status: String::new(),
             status_time: None,
+            anim_hint: false,
             palette_tab: 0,
             custom_hue: 0.0,
             hover_btn: None,
@@ -504,13 +511,14 @@ impl Ui {
         self.content_h[Self::page_index(p)]
     }
 
-    /// 开始新一帧：清空登记的命中区。
+    /// 开始新一帧：清空登记的命中区与动效标记。
     pub fn begin_frame(&mut self) {
         self.hots.clear();
         self.chrome.clear();
         self.dialog_hots.clear();
         self.drop_rect = None;
         self.drop_btn = None;
+        self.anim_hint = false;
     }
 
     /// 登记一个内容区可交互区域（**内容坐标**，随滚动移动）。
