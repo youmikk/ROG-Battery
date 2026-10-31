@@ -722,6 +722,34 @@ pub struct Link {
     pub all_interfaces: Vec<HidInterface>,
 }
 
+/// 解析接收器配对表（`A0 00` 的应答），找出 `wanted` 里第一个命中的 PID 的 report id。
+///
+/// 布局：`01 A0 00 <count LE16>` 之后紧跟 `count` 项、每项 4 字节
+/// `{PID LE16, report_id, notify_id}`。表被截断（count 说的是 5 项却只回了 2 项）
+/// 或没有匹配项都返回 `None` —— 调用方保留默认 report id 3，不要猜。
+///
+/// 单独抽出来是因为这段解析原先内联在 `open_link` 里，是全文件唯一没有单测的
+/// 协议解析：`count` 是设备给的，越界读不 panic 但会读到垃圾 PID，把 report id
+/// 定成 0 之后所有指令都会静默超时。
+fn parse_pairing_table(scan: &[u8], wanted: &[u16]) -> Option<u8> {
+if scan.len() < 6 {
+    return None;
+}
+let count = scan[4] as usize | ((scan[5] as usize) << 8);
+let mut at = 6;
+for _ in 0..count {
+    if at + 4 > scan.len() {
+        return None;
+    }
+    let pid = scan[at] as u16 | ((scan[at + 1] as u16) << 8);
+    if wanted.contains(&pid) {
+        return Some(scan[at + 2]);
+    }
+    at += 4;
+}
+None
+}
+
 /// 找命令通道并确定 report id。
 ///
 /// 优先有线（PID != 接收器 && usage page == 0xFF01），
@@ -786,20 +814,10 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
         if let Ok(mut dev) = HidDevice::open(ctrl) {
             // A0 00 -> 01 A0 00 count(2) 之后每项 4 字节 {PID(LE16), report_id, notify_id}
             if let Some(scan) = dev.xfer(1, 0xA0, 0x00, &[], 2500) {
-                if scan.len() > 5 {
-                    let count = scan[4] as usize | ((scan[5] as usize) << 8);
-                    let mut at = 6;
-                    for _ in 0..count {
-                        if at + 4 > scan.len() {
-                            break;
-                        }
-                        let pid = scan[at] as u16 | ((scan[at + 1] as u16) << 8);
-                        if pid == PID_MOUSE_WIRELESS || pid == PID_MOUSE_WIRED {
-                            report_id = scan[at + 2];
-                            break;
-                        }
-                        at += 4;
-                    }
+                if let Some(rid) =
+                    parse_pairing_table(&scan, &[PID_MOUSE_WIRELESS, PID_MOUSE_WIRED])
+                {
+                    report_id = rid;
                 }
             }
         }
@@ -818,6 +836,49 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// 配对表：命中项返回它的 report id，前面的非鼠标项要跳过。
+    #[test]
+    fn pairing_table_finds_mouse_report_id() {
+        // count = 2：第一项是键盘（不匹配），第二项是鼠标
+        let scan = [
+            0x01, 0xA0, 0x00, 0x00, 0x02, 0x00,
+            0x34, 0x12, 0x07, 0x00, // PID 0x1234 report 7
+            0x65, 0x1B, 0x03, 0x01, // PID 0x1B65（无线鼠标）report 3
+        ];
+        assert_eq!(
+            parse_pairing_table(&scan, &[super::PID_MOUSE_WIRELESS, super::PID_MOUSE_WIRED]),
+            Some(3)
+        );
+    }
+
+    /// 表里没有我们要的 PID 时不能瞎认一个。
+    #[test]
+    fn pairing_table_without_match_returns_none() {
+        let scan = [0x01, 0xA0, 0x00, 0x00, 0x01, 0x00, 0x34, 0x12, 0x07, 0x00];
+        assert_eq!(parse_pairing_table(&scan, &[0x1B65, 0x1B63]), None);
+    }
+
+    /// count 说 5 项、实际只回了 1 项：必须停下返回 None，不能读到缓冲区外面。
+    #[test]
+    fn pairing_table_truncated_returns_none() {
+        let scan = [0x01, 0xA0, 0x00, 0x00, 0x05, 0x00, 0x34, 0x12, 0x07, 0x00];
+        assert_eq!(parse_pairing_table(&scan, &[0x1B65]), None);
+    }
+
+    /// 连 count 字段都没回全。
+    #[test]
+    fn pairing_table_too_short_returns_none() {
+        assert_eq!(parse_pairing_table(&[0x01, 0xA0, 0x00, 0x00, 0x00], &[0x1B65]), None);
+        assert_eq!(parse_pairing_table(&[], &[0x1B65]), None);
+    }
+
+    /// 有线 PID 也要能命中（同型号有线/无线各一个 PID）。
+    #[test]
+    fn pairing_table_matches_wired_pid_too() {
+        let scan = [0x01, 0xA0, 0x00, 0x00, 0x01, 0x00, 0x63, 0x1B, 0x00, 0x00];
+        assert_eq!(parse_pairing_table(&scan, &[0x1B65, 0x1B63]), Some(0));
+    }
     use super::*;
 
     #[test]
