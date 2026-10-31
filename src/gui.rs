@@ -652,25 +652,12 @@ fn handle_act(a: Act, env: &UiEnv) {
             }
         }
 
-        Act::SetCloseMode(idx) => {
-            let mode = match idx {
-                1 => "minimize",
-                2 => "quit",
-                _ => "ask",
-            };
-            env.set_cfg(|c| c.close_mode = mode.to_string());
-        }
 
         Act::ToggleRail => {
             env.canvas.with_ui_mut(|u| u.rail = !u.rail);
             env.canvas.repaint_now();
         }
 
-        Act::ToggleTheme => {
-            // 标题栏小按钮：在显式浅色/深色之间来回切（不参与「跟随系统」）。
-            let m = env.canvas.with_ui(|u| u.mode.flipped());
-            apply_theme_pref(env, m.as_str());
-        }
 
         Act::SetTheme(idx) => {
             let pref = match idx {
@@ -681,10 +668,6 @@ fn handle_act(a: Act, env: &UiEnv) {
             apply_theme_pref(env, pref);
         }
 
-        Act::Refresh => {
-            env.signal.request_refresh();
-            env.say("正在刷新 ……");
-        }
 
         Act::OpenDrop(d) => {
             env.canvas.with_ui_mut(|u| u.set_open_drop(Some(d)));
@@ -736,15 +719,10 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::CommitSlide(s) => commit_slide(env, s),
 
         // `on_press` 只把它写进 `pressed_slide`，不需要额外处理。
-        Act::SlidePress(_) => {}
 
         Act::Toggle(p) => toggle_pref(env, p),
 
         // 按键页已经改成 `Drop::ButtonTarget` 真下拉，这条只为穷尽 match 保留。
-        Act::ResetButton(slot) => {
-            let _ = slot;
-            env.say("请用下拉框选择按键功能");
-        }
 
         Act::Backup => pick_backup_file(env, true),
         Act::Restore => pick_backup_file(env, false),
@@ -755,11 +733,6 @@ fn handle_act(a: Act, env: &UiEnv) {
             open_in_explorer(env, &dir);
         }
 
-        Act::OpenSettingsFolder => {
-            let p = crate::paths::settings_file();
-            let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or(p);
-            open_in_explorer(env, &dir);
-        }
 
         Act::ChangeHistoryPath => pick_save_path(env, SavePathKind::History),
         Act::ChangeSettingsPath => pick_save_path(env, SavePathKind::Settings),
@@ -1085,30 +1058,6 @@ fn apply_edit(env: &UiEnv, e: Edit) {
             });
         }
 
-        Edit::LightBright => {
-            let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
-            let live = env.canvas.with_ui(|u| u.live_frac(Slide::LightBright));
-            let dev = st.as_ref().map(|s| s.light_bright).unwrap_or(50);
-            let v = match txt.as_deref().and_then(parse_num) {
-                Some(v) if (0..=100).contains(&v) => v as u8,
-                Some(_) => {
-                    env.say("✘ 亮度必须在 0–100 之间");
-                    return;
-                }
-                // 没敲字就按滑块位置（用户可能只拖了滑块）
-                None => live.map(|f| (f * 100.0).round() as u8).unwrap_or(dev),
-            };
-            let mode = st.as_ref().map(|s| s.light_mode).unwrap_or(1);
-            drop_draft(env, e);
-            env.submit(Cmd::Light {
-                mode,
-                bright: Some(v),
-                rgb: None,
-                dir: None,
-                random: None,
-                speed: None,
-            });
-        }
 
         Edit::LightColor => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
@@ -1139,45 +1088,7 @@ fn apply_edit(env: &UiEnv, e: Edit) {
             });
         }
 
-        Edit::LightSpeed => {
-            let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
-            let live = env.canvas.with_ui(|u| u.live_frac(Slide::LightSpeed));
-            let dev = st.as_ref().map(|s| s.light_speed).unwrap_or(50);
-            let v = match txt.as_deref().and_then(parse_num) {
-                Some(v) if (0..=100).contains(&v) => v as u8,
-                Some(_) => {
-                    env.say("✘ 速度必须在 0–100 之间");
-                    return;
-                }
-                None => live.map(|f| (f * 100.0).round() as u8).unwrap_or(dev),
-            };
-            let mode = st.as_ref().map(|s| s.light_mode).unwrap_or(1);
-            env.submit(Cmd::Light {
-                mode,
-                bright: None,
-                rgb: None,
-                dir: None,
-                random: None,
-                speed: Some(v),
-            });
-        }
 
-        Edit::Button(slot) => {
-            let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
-            let slot = (slot as usize) & 7;
-            match parse_button_dst(txt.as_deref().unwrap_or("")) {
-                Ok(Some(dst)) => {
-                    drop_draft(env, e);
-                    env.submit(Cmd::Button {
-                        slot,
-                        dst,
-                        confirmed: true,
-                    });
-                }
-                Ok(None) => env.say("✘ 请输入目标值（示例：01F0）"),
-                Err(msg) => env.say(format!("✘ {msg}")),
-            }
-        }
     }
 }
 
@@ -1190,7 +1101,6 @@ fn drop_draft(env: &UiEnv, e: Edit) {
 /// 只有这一处会写 —— 拖动过程中的几十个 `SetSlide` 只改显示。
 fn commit_slide(env: &UiEnv, s: Slide) {
     let frac = env.canvas.with_ui(|u| u.live_frac(s));
-    let st = env.state();
     match s {
         Slide::Tune => {
             let f = frac.unwrap_or(0.5);
@@ -1199,34 +1109,6 @@ fn commit_slide(env: &UiEnv, s: Slide) {
             let v = (raw / 5).clamp(-4, 4) * 5;
             env.canvas.with_ui_mut(|u| u.clear_live_frac(s));
             env.submit(Cmd::Tuning(v));
-        }
-        Slide::LightBright => {
-            let f = frac.unwrap_or(0.5);
-            let v = (f * 100.0).round().clamp(0.0, 100.0) as u8;
-            let mode = st.as_ref().map(|s| s.light_mode).unwrap_or(1);
-            env.canvas.with_ui_mut(|u| u.clear_live_frac(s));
-            env.submit(Cmd::Light {
-                mode,
-                bright: Some(v),
-                rgb: None,
-                dir: None,
-                random: None,
-                speed: None,
-            });
-        }
-        Slide::LightSpeed => {
-            let f = frac.unwrap_or(0.5);
-            let v = (f * 100.0).round().clamp(0.0, 100.0) as u8;
-            let mode = st.as_ref().map(|s| s.light_mode).unwrap_or(1);
-            env.canvas.with_ui_mut(|u| u.clear_live_frac(s));
-            env.submit(Cmd::Light {
-                mode,
-                bright: None,
-                rgb: None,
-                dir: None,
-                random: None,
-                speed: Some(v),
-            });
         }
     }
 }
@@ -1265,18 +1147,6 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
         Pref::AngleSnap => {
             let cur = st.as_ref().map(|s| s.angle_snap).unwrap_or(0);
             env.submit(Cmd::Snap(if cur == 0 { 1 } else { 0 }));
-        }
-        Pref::LightRandom => {
-            let cur = st.as_ref().map(|s| s.light_random != 0).unwrap_or(false);
-            let mode = st.as_ref().map(|s| s.light_mode).unwrap_or(1);
-            env.submit(Cmd::Light {
-                mode,
-                bright: None,
-                rgb: None,
-                dir: None,
-                random: Some(if cur { 0 } else { 1 }),
-                speed: None,
-            });
         }
     }
 }
@@ -1447,13 +1317,7 @@ fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
         Edit::LowWarn => st.map(|s| s.low_warn).unwrap_or(20).to_string(),
         Edit::Dpi(i) => st.map(|s| s.dpi((i as usize) & 3)).unwrap_or(800).to_string(),
         Edit::DpiColor(i) => hex(st.map(|s| s.rgb[(i as usize) & 3]).unwrap_or([0, 0, 0])),
-        Edit::LightBright => st.map(|s| s.light_bright).unwrap_or(50).to_string(),
         Edit::LightColor => hex(st.map(|s| s.light_rgb).unwrap_or([0, 0, 0])),
-        Edit::LightSpeed => st.map(|s| s.light_speed).unwrap_or(50).to_string(),
-        Edit::Button(slot) => format!(
-            "{:04X}",
-            st.map(|s| s.buttons[(slot as usize) & 7]).unwrap_or(0)
-        ),
     }
 }
 
@@ -2075,18 +1939,6 @@ fn parse_num(s: &str) -> Option<i64> {
 /// **裸写的数字一律当十六进制**，和 CLI 的 `setbutton <slot> <dstHex>` 一致。
 /// 这里不能复用 [`parse_num`]：那个把裸数字当十进制（DPI 需要那样），
 /// 于是 `01F0` 会解析失败 —— 用户照着提示输，程序却说输入框是空的。
-fn parse_button_dst(s: &str) -> Result<Option<u16>, String> {
-    let t = s.trim();
-    if t.is_empty() {
-        return Ok(None);
-    }
-    let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
-    match u32::from_str_radix(hex, 16) {
-        Ok(v) if v <= 0xFFFF => Ok(Some(v as u16)),
-        Ok(v) => Err(format!("0x{v:X} 超出 0x0000..0xFFFF")),
-        Err(_) => Err(format!("「{t}」不是合法的十六进制（示例：01F0）")),
-    }
-}
 
 /// 解析用户输入的颜色。允许 `ff1929` / `#ff1929` / `FF1929`。
 fn parse_color(s: &str) -> Result<Option<[u8; 3]>, String> {
@@ -2789,34 +2641,6 @@ mod tests {
         };
         assert!(!no_hint.toast().contains('；'), "{}", no_hint.toast());
     }
-    /// 按键页的占位符写的是「如 01F0」、警告行写的是「填 0000」，
-    /// 用户照着输就该成功。这条测试锁死「裸十六进制」这个约定 ——
-    /// 之前用十进制解析时，`01F0` 直接失败并误报「输入框是空的」。
-    #[test]
-    fn button_dst_accepts_bare_hex() {
-        assert_eq!(parse_button_dst("01F0"), Ok(Some(0x01F0)));
-        assert_eq!(parse_button_dst("01f0"), Ok(Some(0x01F0)));
-        assert_eq!(parse_button_dst("  01E4  "), Ok(Some(0x01E4)));
-        assert_eq!(parse_button_dst("0x01F0"), Ok(Some(0x01F0)));
-        assert_eq!(parse_button_dst("0X01F0"), Ok(Some(0x01F0)));
-        // 0x0000 = 禁用，必须解析成 0 而不是当成空
-        assert_eq!(parse_button_dst("0000"), Ok(Some(0)));
-        assert_eq!(parse_button_dst("0x0000"), Ok(Some(0)));
-        assert_eq!(parse_button_dst("FFFF"), Ok(Some(0xFFFF)));
-    }
-
-    #[test]
-    fn button_dst_rejects_junk_and_empty() {
-        // 空输入框是 Ok(None) —— 调用方要提示「请填目标值」，
-        // 不能和「填错了」混成一句话。
-        assert_eq!(parse_button_dst(""), Ok(None));
-        assert_eq!(parse_button_dst("   "), Ok(None));
-        // 超出 u16 要报错，不能静默截断（截断会把 1F000 变成 F000）
-        assert!(parse_button_dst("1F000").is_err());
-        assert!(parse_button_dst("ZZZZ").is_err());
-        assert!(parse_button_dst("-1").is_err());
-    }
-
     /// DPI 走的是十进制，这条不能被上面的十六进制改动带偏。
     #[test]
     fn dpi_numbers_stay_decimal() {
@@ -2866,15 +2690,9 @@ mod tests {
     fn edit_initial_matches_device_values() {
         let mut st = proto::State::default();
         st.low_warn = 15;
-        st.light_bright = 70;
         st.light_rgb = [0x11, 0x22, 0x33];
-        st.light_speed = 40;
-        st.buttons[2] = 0x01E4;
         assert_eq!(edit_initial(Edit::LowWarn, Some(&st)), "15");
-        assert_eq!(edit_initial(Edit::LightBright, Some(&st)), "70");
         assert_eq!(edit_initial(Edit::LightColor, Some(&st)), "112233");
-        assert_eq!(edit_initial(Edit::LightSpeed, Some(&st)), "40");
-        assert_eq!(edit_initial(Edit::Button(2), Some(&st)), "01E4");
         // 没读到设备时要有兜底值，不能是空串（空串会让输入框看起来是空的）
         assert_eq!(edit_initial(Edit::LowWarn, None), "20");
         assert!(!edit_initial(Edit::Dpi(0), None).is_empty());

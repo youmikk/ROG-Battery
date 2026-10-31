@@ -22,8 +22,6 @@
 //! 「点 (x,y) 应该产生哪个 Act」，而不用起窗口。这是这一层最大的价值 ——
 //! 布局算错、命中区重叠这类 bug 全部能在 `cargo test` 里抓到。
 
-#![allow(dead_code)]
-
 use super::gfx::R;
 
 /// 五个页面。
@@ -134,14 +132,7 @@ pub enum Edit {
     DpiColor(u8),
     /// 电量页：低电量阈值（0–100）。
     LowWarn,
-    /// 灯光页：亮度（0–100）。
-    LightBright,
-    /// 灯光页：颜色（6 位十六进制）。
     LightColor,
-    /// 灯光页：速度（0–100）。
-    LightSpeed,
-    /// 按键页：第 N 槽的绑定码（4 位十六进制）。
-    Button(u8),
 }
 
 impl Edit {
@@ -149,7 +140,6 @@ impl Edit {
     pub fn allows(self, ch: char) -> bool {
         match self {
             Edit::DpiColor(_) | Edit::LightColor => ch.is_ascii_hexdigit(),
-            Edit::Button(_) => ch.is_ascii_hexdigit(),
             // DPI 最大值 42000，5 位；阈值/亮度/速度都是 3 位以内
             _ => ch.is_ascii_digit(),
         }
@@ -160,27 +150,21 @@ impl Edit {
         match self {
             Edit::Dpi(_) => 5,
             Edit::DpiColor(_) | Edit::LightColor => 6,
-            Edit::Button(_) => 4,
             Edit::LowWarn => 3,
-            Edit::LightBright | Edit::LightSpeed => 3,
         }
     }
 }
 
 /// 滑块。
 ///
-/// `#[repr(usize)]` + 显式判别值：`live` 数组用它当下标，靠「声明顺序恰好
-/// 是 0,1,2」是**隐含约定**，以后有人插一个新滑块进来就会静默错位（表现是
-/// 拖 A 滑块 B 跟着动）。写出来之后，位置由这里的数字决定。
+/// `#[repr(usize)]` + 显式判别值：`live` 数组用它当下标，靠「声明顺序」是
+/// **隐含约定**，以后有人插一个新滑块进来就会静默错位（表现是拖 A 滑块 B
+/// 跟着动）。写出来之后，位置由这里的数字决定。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(usize)]
 pub enum Slide {
-    /// 灯光亮度（0–100）。
-    LightBright = 0,
     /// 角度微调（−20..20）。
-    Tune = 1,
-    /// 灯光速度（0–100）。
-    LightSpeed = 2,
+    Tune = 0,
 }
 
 impl Slide {
@@ -212,8 +196,6 @@ pub enum Pref {
     FullEffect,
     /// 性能页：角度吸附开关。
     AngleSnap,
-    /// 灯光页：随机颜色开关。
-    LightRandom,
 }
 
 /// 一个可以点的东西要做的事。
@@ -223,11 +205,6 @@ pub enum Act {
     Nav(Page),
     /// 侧栏展开 / 收成图标轨道。
     ToggleRail,
-    /// 浅色 / 深色切换。
-    ToggleTheme,
-    /// 电量页的「立即刷新」。
-    Refresh,
-    /// 打开一个下拉弹层。
     OpenDrop(Drop),
     /// 在下拉弹层里选第 `index` 项。
     PickDrop(Drop, usize),
@@ -241,15 +218,7 @@ pub enum Act {
     Toggle(Pref),
     /// 拖动滑块到某个比例（0–1），拖拽过程中连续触发。
     SetSlide(Slide, f32),
-    /// 按下滑块。真正的新值由随后连续的 [`Act::SetSlide`] 给出，
-    /// 这个动作只负责让 `Ui` 记住「现在拖的是哪一条」。
-    SlidePress(Slide),
-    /// 松手，滑块拖动结束。页面据此决定要不要把值写进设备
-    ///（拖动过程中每一帧都写设备会打爆 HID 带宽）。
     CommitSlide(Slide),
-    /// 按键页：把某一槽恢复成默认值。
-    ResetButton(u8),
-    /// 折叠面板开合。0 = 性能页「高级」，1 = 灯光页「高级」。
     ToggleAdv(u8),
     /// 指定配色偏好。设置页的「外观」分段控件用：
     /// 0 = 跟随系统，1 = 浅色，2 = 深色。
@@ -268,9 +237,6 @@ pub enum Act {
     ChangeSettingsPath,
     /// 设置页：恢复设置文件默认位置。
     ResetSettingsPath,
-    /// 设置页：打开设置文件所在文件夹。
-    OpenSettingsFolder,
-    /// 设置页：清空历史记录。
     ClearHistory,
     /// 设置页「关于」：打开开源仓库。
     OpenRepo,
@@ -292,10 +258,6 @@ pub enum Act {
     ConfirmCloseDialog,
     /// 取消关闭对话框。
     CancelCloseDialog,
-    /// 设置窗口关闭模式：0=每次询问，1=最小化到托盘，2=直接退出。
-    SetCloseMode(u8),
-    /// 键盘焦点在输入框里按了回车 —— 和 `ApplyEdit` 等价，
-    /// 但要用当前编辑中的文本，不是已提交的值。
     None,
 }
 
@@ -424,7 +386,7 @@ pub struct Ui {
     /// 页面画滑块时读的是**设备状态**（`d.state`）。拖拽期间鼠标已经移开了，
     /// 写设备却要几十毫秒、读回还得再来一轮 —— 中间那几帧滑块会卡在原地不动，
     /// 松手才「跳」到新位置。`None` = 这一条没有正在拖，页面回落到设备值。
-    pub live: [Option<f32>; 3],
+    pub live: [Option<f32>; 1],
     /// 状态栏文字（右下角/底部浮层）。
     pub status: String,
     /// 状态栏提示的触发时间（用于自动在 ~2s 后消失）。
@@ -486,7 +448,7 @@ impl Default for Ui {
             hover: None,
             pressed: None,
             pressed_slide: None,
-            live: [None; 3],
+            live: [None; 1],
             status: String::new(),
             status_time: None,
             anim_hint: false,
@@ -750,20 +712,6 @@ impl Ui {
         (*s - before).abs() > 0.01
     }
 
-    /// 让某个区域滚进可视区（点输入框时保证光标可见）。
-    pub fn ensure_visible(&mut self, rect: R, view_h: f32) -> bool {
-        let p = self.page;
-        let max = (self.content_h(p) - view_h).max(0.0);
-        let s = self.scroll_mut(p);
-        let before = *s;
-        if rect.y < *s {
-            *s = rect.y.clamp(0.0, max);
-        } else if rect.bottom() > *s + view_h {
-            *s = (rect.bottom() - view_h).clamp(0.0, max);
-        }
-        (*s - before).abs() > 0.01
-    }
-
     // ---- 事件处理（canvas 的 WNDPROC 调这里） ----
 
     /// 侧栏当前宽度（逻辑像素）。
@@ -940,11 +888,11 @@ mod tests {
     #[test]
     fn hover_ignores_slider_fraction() {
         // 滑块比例随鼠标位置连续变化，不能算「悬停变了」——否则每移动一像素重绘整页
-        let a = Some(Act::SetSlide(Slide::LightBright, 0.31));
-        let b = Some(Act::SetSlide(Slide::LightBright, 0.32));
+        let a = Some(Act::SetSlide(Slide::Tune, 0.31));
+        let b = Some(Act::SetSlide(Slide::Tune, 0.32));
         assert!(hover_same(a, b), "同一条滑块、比例不同应视为同一个悬停目标");
-        // 换一条滑块就算变了
-        assert!(!hover_same(a, Some(Act::SetSlide(Slide::Tune, 0.31))));
+        // 滑块和别的动作当然不同
+        assert!(!hover_same(a, Some(Act::None)));
         // 色环同理
         assert!(hover_same(
             Some(Act::SetCustomHue(Drop::Palette(0), 12.0)),
@@ -961,7 +909,7 @@ mod tests {
         // 否则之后不按键移动鼠标，滑块还会跟着跑。
         let mut u = ui();
         u.begin_frame();
-        u.hot(R::new(10.0, 10.0, 100.0, 20.0), Act::SetSlide(Slide::LightBright, 0.5));
+        u.hot(R::new(10.0, 10.0, 100.0, 20.0), Act::SetSlide(Slide::Tune, 0.5));
         // 复刻 canvas 的顺序：先记指针按下，再交给 on_press 判定命中
         u.pointer.x = 60.0;
         u.pointer.y = 20.0;
@@ -990,10 +938,10 @@ mod tests {
         let mut u = ui();
         u.begin_frame();
         // 两个重叠区域，后登记的在上面
-        u.hot(R::new(0.0, 0.0, 100.0, 100.0), Act::Refresh);
+        u.hot(R::new(0.0, 0.0, 100.0, 100.0), Act::RefreshLighting);
         u.hot(R::new(50.0, 50.0, 100.0, 100.0), Act::ToggleRail);
 
-        assert_eq!(u.hit(10.0, 10.0, 0.0), Some(Act::Refresh));
+        assert_eq!(u.hit(10.0, 10.0, 0.0), Some(Act::RefreshLighting));
         // 重叠区取上层
         assert_eq!(u.hit(60.0, 60.0, 0.0), Some(Act::ToggleRail));
         assert_eq!(u.hit(200.0, 10.0, 0.0), None);
@@ -1004,11 +952,11 @@ mod tests {
         let mut u = ui();
         u.begin_frame();
         // 内容坐标 y=500 处有个按钮
-        u.hot(R::new(10.0, 500.0, 100.0, 30.0), Act::Refresh);
+        u.hot(R::new(10.0, 500.0, 100.0, 30.0), Act::RefreshLighting);
         // 没滚动时它在窗口 y=500（可视区 600 内可见）
-        assert_eq!(u.hit(50.0, 510.0, 0.0), Some(Act::Refresh));
+        assert_eq!(u.hit(50.0, 510.0, 0.0), Some(Act::RefreshLighting));
         // 滚到 400 之后，它显示在窗口 y=100
-        assert_eq!(u.hit(50.0, 110.0, 400.0), Some(Act::Refresh));
+        assert_eq!(u.hit(50.0, 110.0, 400.0), Some(Act::RefreshLighting));
         // 而窗口 y=510 现在对应内容 y=910，不该命中
         assert_eq!(u.hit(50.0, 510.0, 400.0), None);
     }
@@ -1028,7 +976,7 @@ mod tests {
     fn 弹层空白处吃掉点击不穿透到下层() {
         let mut u = ui();
         u.begin_frame();
-        u.hot(R::new(0.0, 0.0, 400.0, 400.0), Act::Refresh);
+        u.hot(R::new(0.0, 0.0, 400.0, 400.0), Act::RefreshLighting);
         // 弹层放在中间，但只登记了两个选项
         u.hot(
             R::new(100.0, 100.0, 120.0, 30.0),
@@ -1047,7 +995,7 @@ mod tests {
         // 弹层内的空白（选项下方）：必须是 CloseDrop，不能是 Refresh
         assert_eq!(u.hit(150.0, 200.0, 0.0), Some(Act::CloseDrop));
         // 弹层外仍然正常
-        assert_eq!(u.hit(20.0, 20.0, 0.0), Some(Act::Refresh));
+        assert_eq!(u.hit(20.0, 20.0, 0.0), Some(Act::RefreshLighting));
     }
 
     #[test]
@@ -1108,21 +1056,6 @@ mod tests {
     }
 
     #[test]
-    fn 让区域可见() {
-        let mut u = ui();
-        u.set_content_h(Page::Battery, 2000.0);
-        u.page = Page::Battery;
-        // 区域在可视区下方 → 滚下去
-        assert!(u.ensure_visible(R::new(0.0, 900.0, 100.0, 30.0), 600.0));
-        assert_eq!(u.scroll_y(Page::Battery), 330.0);
-        // 再调一次不该再动
-        assert!(!u.ensure_visible(R::new(0.0, 900.0, 100.0, 30.0), 600.0));
-        // 区域在可视区上方 → 滚上来
-        assert!(u.ensure_visible(R::new(0.0, 100.0, 100.0, 30.0), 600.0));
-        assert_eq!(u.scroll_y(Page::Battery), 100.0);
-    }
-
-    #[test]
     fn 输入框字符限制() {
         // DPI 颜色只收十六进制
         assert!(Edit::DpiColor(0).allows('f'));
@@ -1136,7 +1069,6 @@ mod tests {
         assert_eq!(Edit::Dpi(0).max_len(), 5); // 42000
         assert_eq!(Edit::LowWarn.max_len(), 3); // 100
         assert_eq!(Edit::DpiColor(0).max_len(), 6); // RRGGBB
-        assert_eq!(Edit::Button(0).max_len(), 4); // 01F0
     }
 
     #[test]

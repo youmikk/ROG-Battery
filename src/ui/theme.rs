@@ -157,6 +157,7 @@ impl Mode {
     }
 
     /// 反色。给标题栏的主题切换按钮用。
+    #[cfg(test)]
     pub fn flipped(self) -> Mode {
         match self {
             Mode::Light => Mode::Dark,
@@ -165,6 +166,7 @@ impl Mode {
     }
 
     /// 存进 `settings.ini` 的字符串。
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Light => "light",
