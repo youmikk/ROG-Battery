@@ -17,15 +17,7 @@ pub const DPI_MIN: i32 = 100;
 pub const DPI_MAX: i32 = 42000;
 /// 由 [`DPI_MIN`] / [`DPI_MAX`] 推出的编码边界。
 ///
-/// `DPI_ENC_MIN = (100-50)/50 = 1`（对应 100 DPI），
-/// `DPI_ENC_MAX = (42000-50)/50 = 839`（对应 42000 DPI）。
-///
-/// **注意下限是 1 不是 0**：`decode_dpi(0) == 50`，低于 [`DPI_MIN`]。
-/// 设备本身接受 50 DPI，但我们统一的对外范围是 100 起，所以编码 0 要拒掉。
-///
-/// 存在的理由：`restore` 路径直接写编码值、绕过了 `ops::set_dpi` 的范围校验，
-/// 需要在这里有个权威边界可查。**不要硬编码 1 / 839** —— 万一将来改
-/// [`DPI_MIN`] / [`DPI_MAX`] / [`DPI_STEP`]，这两个常量要跟着走。
+// 编码边界由 DPI_MIN/DPI_STEP 算出（见下方常量），改参数时自动跟着变。
 pub const DPI_ENC_MIN: i32 = (DPI_MIN - DPI_STEP) / DPI_STEP;
 pub const DPI_ENC_MAX: i32 = (DPI_MAX - DPI_STEP) / DPI_STEP;
 /// 按键槽位数量
@@ -134,25 +126,12 @@ pub fn debounce_name(code: u8) -> String {
 
 /// 休眠设置里表示「永不自动关机」的代码。
 ///
-/// 语义来源是**两个互不相关的第三方逆向实现**，逐项一致：
-///
-/// - G-Helper `_ghelper\AsusMouse.cs:9-17`：
-///   `enum PowerOffSetting { Minutes1=0, Minutes2=1, Minutes3=2, Minutes5=3, Minutes10=4, Never=0xFF }`
-/// - RigStats `_research\_rigstats\Mouse_MouseProtocol.cs:71-80`：
-///   `PowerOffMinutes = { [0]=1, [1]=2, [2]=3, [3]=5, [4]=10, [0xFF]=null }`
-///
-/// 另外 `4 → 10 分钟` 有物理实测佐证（鼠标空闲 600 秒整正好入睡）。
-///
-/// ⚠️ 这是**枚举值不是分钟数** —— 5..254 全是无定义值。
+// 语义来源：G-Helper 与 RigStats 两个独立实现逐项一致，见 docs/hardware-notes.md。
 pub const SLEEP_NEVER: u8 = 0xFF;
 
 /// 休眠档位是不是一个有定义的值。
 ///
-/// 真机实测（2026-10-21，逐值写入 + 读回 15 次）：设备**完全不校验**这个字节，
-/// 写 5/6/7/8/9/15/16/100/254 全部原样存进 flash。所以：
-///
-/// **这里的范围校验不是防御性编程，而是唯一的安全网** —— 一旦让 5..254 这种
-/// 无定义值落进设备，没有任何命令能读回它的语义，也没有恢复命令。
+// 设备不校验该字节，5..254 是未定义值，这里必须挡住。
 pub fn sleep_code_valid(code: u8) -> bool {
     matches!(code, 0..=4 | SLEEP_NEVER)
 }
@@ -160,9 +139,6 @@ pub fn sleep_code_valid(code: u8) -> bool {
 /// 休眠时间代码 → 人话。
 ///
 /// 映射本身已由两个独立的第三方实现确认（见 [`SLEEP_NEVER`]），但
-/// **1/2/3 档的实际触发时长没有逐档掐表验证过** —— 值是从枚举名推出来的。
-/// `0`（事故中观察到「1 分钟」）、`4`（空闲 600 秒入睡）、`0xFF`（事故中
-/// 观察到永不休眠）是物理实测的。这个区别对用户没影响，UI 正常显示即可。
 pub fn sleep_mode_name(code: u8) -> String {
     match code {
         0 => "1 分钟".into(),
@@ -597,13 +573,6 @@ pub fn write_dpi(
 
 /// 写能量块 `51 37`。
 ///
-/// **读写偏移不一样**（文档第 5 节事故记录的根因）：
-/// ```text
-/// 写 tail[0]=00 tail[1]=00 tail[2]=休眠 tail[3]=00 tail[4]=低电量 tail[5]=00 tail[6]=充满效果
-/// 读 aligned[6]=休眠 aligned[7]=低电量 aligned[12]=充满效果
-/// ```
-/// 即 `tail[n]` 对应 `aligned[n+4]`。正确帧样例：`51 37 00 00 04 00 14 00 01`
-/// = 10 分钟 / 20% / 充满效果开。
 pub fn write_energy(
     dev: &mut HidDevice,
     rid: u8,
