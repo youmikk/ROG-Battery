@@ -377,15 +377,30 @@ pub fn now_unix() -> u64 {
 
 impl Snapshot {
     pub fn to_cache_text(&self) -> String {
-        let mut s = String::new();
+        // 17 帧 × 64 字节 = 1088 次格式化。每字节一次 `format!` 就是 1088 次堆分配，
+        // 而这张表只用来写一个 30 秒一次的缓存文件 —— 用查表直接拼，零分配。
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(96 + self.frames.len() * 160);
         s.push_str(CACHE_MAGIC);
         s.push('\n');
-        s.push_str(&format!("taken_unix={}\n", self.taken_unix));
-        s.push_str(&format!("link_mode={}\n", self.link_mode));
-        s.push_str(&format!("report_id={}\n", self.report_id));
+        s.push_str("taken_unix=");
+        s.push_str(&self.taken_unix.to_string());
+        s.push('\n');
+        s.push_str("link_mode=");
+        s.push_str(&self.link_mode);
+        s.push('\n');
+        s.push_str("report_id=");
+        s.push_str(&self.report_id.to_string());
+        s.push('\n');
         for (k, v) in &self.frames {
-            let hex: String = v.iter().map(|b| format!("{b:02x}")).collect();
-            s.push_str(&format!("frame {k} {hex}\n"));
+            s.push_str("frame ");
+            s.push_str(k);
+            s.push(' ');
+            for b in v {
+                s.push(HEX[(b >> 4) as usize] as char);
+                s.push(HEX[(b & 0x0F) as usize] as char);
+            }
+            s.push('\n');
         }
         s
     }
@@ -476,11 +491,10 @@ pub struct SnapshotCache {
 /// 抽出来是为了两条读路径共用一份逻辑，也便于测试「命中时共享同一份分配」。
 fn cached_hit(
     slot: &Option<std::sync::Arc<Snapshot>>,
-    allow_stale: bool,
     ttl: Duration,
 ) -> Option<std::sync::Arc<Snapshot>> {
     let s = slot.as_ref()?;
-    if allow_stale || s.is_fresh(ttl) {
+    if s.is_fresh(ttl) {
         Some(std::sync::Arc::clone(s))
     } else {
         None
@@ -506,7 +520,7 @@ impl SnapshotCache {
     /// 返回 `None` 表示连第一帧都没读到 —— 即**鼠标休眠**，不是错误。
     pub fn get_light(&mut self, dev: &mut HidDevice, report_id: u8, link_mode: &str) -> Option<FetchOutcome> {
         // 1) 全量快照新鲜：它含这三项，没必要再读
-        if let Some(s) = cached_hit(&self.snapshot, false, self.ttl) {
+        if let Some(s) = cached_hit(&self.snapshot, self.ttl) {
             return Some(FetchOutcome {
                 frames_read: s.frames.len(),
                 elapsed: Duration::ZERO,
@@ -515,7 +529,7 @@ impl SnapshotCache {
         }
 
         // 2) 轻量快照新鲜
-        if let Some(s) = cached_hit(&self.light, false, self.ttl) {
+        if let Some(s) = cached_hit(&self.light, self.ttl) {
             return Some(FetchOutcome {
                 frames_read: s.frames.len(),
                 elapsed: Duration::ZERO,
@@ -536,18 +550,15 @@ impl SnapshotCache {
 
     /// 取一份可用的快照：内存命中 → 磁盘命中 → 真读设备。
     ///
-    /// `allow_stale` 为真时允许返回过期缓存（GUI 在后台刷新时用，
-    /// 这样界面先显示旧数据、随后原地更新，不会白屏）。
     pub fn get(
         &mut self,
         dev: &mut HidDevice,
         all_interfaces: &[crate::hid::HidInterface],
         report_id: u8,
         link_mode: &str,
-        allow_stale: bool,
     ) -> FetchOutcome {
         // 1) 内存
-        if let Some(s) = cached_hit(&self.snapshot, allow_stale, self.ttl) {
+        if let Some(s) = cached_hit(&self.snapshot, self.ttl) {
             return FetchOutcome {
                 frames_read: s.frames.len(),
                 elapsed: Duration::ZERO,
@@ -558,7 +569,7 @@ impl SnapshotCache {
         // 2) 磁盘（跨进程复用，CLI 每次都重启，没有这层缓存就没意义）
         if let Some(s) = load_disk_cache() {
             let fresh = s.wall_age_sec() < self.ttl.as_secs();
-            if allow_stale || fresh {
+            if fresh {
                 let s = std::sync::Arc::new(s);
                 self.snapshot = Some(std::sync::Arc::clone(&s));
                 return FetchOutcome {
@@ -623,6 +634,28 @@ mod tests {
     /// 回归：过去用 `&hex[i..i+2]` 按字节切 `&str`，遇到「é」这类字符会
     /// `byte index 1 is not a char boundary` 直接 panic，而 `load_disk_cache`
     /// 用 `.ok()` 接不住 panic。
+    #[test]
+    fn cache_text_roundtrip_keeps_frames_and_header() {
+        let mut snap = Snapshot {
+            report_id: 7,
+            link_mode: "Wired".to_string(),
+            taken_unix: 1_800_000_000,
+            ..Snapshot::default()
+        };
+        snap.frames.insert("12:07:00".to_string(), vec![0x00, 0x12, 0x07, 0xAB, 0xFF]);
+        snap.frames.insert("12:04:00".to_string(), vec![0x00, 0x12, 0x04]);
+
+        let text = snap.to_cache_text();
+        // 小写、无空格、定长两字符 —— 和旧实现逐字节一致
+        assert!(text.contains("frame 12:07:00 001207abff\n"), "{text}");
+
+        let back = Snapshot::from_cache_text(&text).expect("自己写的缓存必须能读回");
+        assert_eq!(back.report_id, 7);
+        assert_eq!(back.link_mode, "Wired");
+        assert_eq!(back.taken_unix, 1_800_000_000);
+        assert_eq!(back.frames, snap.frames);
+    }
+
     #[test]
     fn disk_restored_snapshot_uses_wall_clock_freshness() {
         // 刚写的缓存：内存判定应当算新鲜，否则每帧都要重新读盘。
@@ -827,17 +860,15 @@ mod tests {
         let arc = std::sync::Arc::new(snap);
         let slot = Some(std::sync::Arc::clone(&arc));
 
-        let hit = cached_hit(&slot, false, Duration::from_secs(60)).expect("新鲜快照应命中");
+        let hit = cached_hit(&slot, Duration::from_secs(60)).expect("新鲜快照应命中");
         assert!(
             std::sync::Arc::ptr_eq(&hit, &arc),
             "命中必须共享同一份快照，不能深拷贝"
         );
 
-        // 过期且不允许陈旧 → 不命中，调用方会去读设备
-        assert!(cached_hit(&slot, false, Duration::from_secs(0)).is_none());
-        // 过期但允许陈旧 → 仍然命中
-        assert!(cached_hit(&slot, true, Duration::from_secs(0)).is_some());
+        // 过期 → 不命中，调用方会去读设备
+        assert!(cached_hit(&slot, Duration::from_secs(0)).is_none());
         // 空槽位永远不命中
-        assert!(cached_hit(&None, true, Duration::from_secs(60)).is_none());
+        assert!(cached_hit(&None, Duration::from_secs(60)).is_none());
     }
 }

@@ -1593,7 +1593,6 @@ fn read_once(
             &link.all_interfaces,
             link.report_id,
             &link.mode,
-            false,
         ))
     } else {
         cache.get_light(&mut dev, link.report_id, &link.mode)

@@ -37,19 +37,18 @@ impl<'a> Ctx<'a> {
     }
 
     /// 取快照：内存 → 磁盘 → 真读设备。
-    fn snapshot(&mut self, dev: &mut HidDevice, allow_stale: bool) -> FetchOutcome {
+    fn snapshot(&mut self, dev: &mut HidDevice) -> FetchOutcome {
         self.cache.get(
             dev,
             &self.link.all_interfaces,
             self.link.report_id,
             &self.link.mode,
-            allow_stale,
         )
     }
 
     /// 当前完整状态（缓存优先）。
     fn state(&mut self, dev: &mut HidDevice) -> Result<State, String> {
-        let out = self.snapshot(dev, false);
+        let out = self.snapshot(dev);
         if out.snapshot.state.poll_code == 0
             && out.snapshot.state.enc == [0; DPI_STAGES]
             && out.snapshot.failed.contains_key("12:04:00")
@@ -127,7 +126,7 @@ pub fn cmd_info(ctx: &mut Ctx, dev: &mut HidDevice, force_fresh: bool) -> Result
     if force_fresh {
         ctx.cache.invalidate();
     }
-    let out = ctx.snapshot(dev, false);
+    let out = ctx.snapshot(dev);
     let snap = &out.snapshot;
 
     if snap.frames.is_empty() {
@@ -246,7 +245,7 @@ pub fn cmd_quick(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
 ///
 /// 快照里已经包含 `12 06`（LOD 与表面标定），不需要再单独读一次。
 pub fn cmd_backup(ctx: &mut Ctx, dev: &mut HidDevice, path: &str) -> Result<(), String> {
-    let out = ctx.snapshot(dev, false);
+    let out = ctx.snapshot(dev);
     let st = out.snapshot.state.clone();
     if out.snapshot.frames.is_empty() {
         return Err("读不到设备状态，无法备份".into());
