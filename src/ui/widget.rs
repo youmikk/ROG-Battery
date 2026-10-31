@@ -309,6 +309,26 @@ pub enum CloseChoice {
 }
 
 /// 一个可交互区域。
+/// 电量历史曲线的像素级几何（`draw_chart` 每帧都要用，但只在数据或
+/// 绘图区尺寸变化时才需要重算）。
+///
+/// 充电动画期间整帧 60fps 重绘，而采样 30 秒才更新一次；把「归一化坐标 →
+/// 像素」这一步与三份 Vec（采样点 / 平滑曲线 / 面积多边形）连同充电底带
+/// 一起缓存，热路径就只剩三次 GDI+ 调用。
+#[derive(Clone, Debug)]
+pub struct ChartGeom {
+    /// 缓存键：`Plot` 地址 + 绘图区四个边界 + 纵轴上下界。
+    pub key: (usize, u32, u32, u32, u32, u32, u32),
+    /// 采样点（像素）。
+    pub pts: Vec<(f32, f32)>,
+    /// 平滑曲线（像素）。
+    pub curve: Vec<(f32, f32)>,
+    /// 面积多边形（曲线 + 首尾拉到底边）。
+    pub area: Vec<(f32, f32)>,
+    /// 充电时段底带。
+    pub bands: Vec<R>,
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Hot {
     pub rect: R,
@@ -415,6 +435,8 @@ pub struct Ui {
     /// canvas 的 16ms 定时器据此判断「还要不要继续跑」：光靠「用户想要动效」
     /// 这个标志会漏掉「动效已经结束」，结果定时器一路空转到下一次刷新。
     pub anim_hint: bool,
+    /// 电量历史曲线的几何缓存，见 [`ChartGeom`]。
+    pub chart: Option<ChartGeom>,
     /// 色盘模式：0 = 常用预设，1 = 自定义色环。
     pub palette_tab: u8,
     /// 自定义色环当前选中的色相（0.0 .. 360.0）。
@@ -468,6 +490,7 @@ impl Default for Ui {
             status: String::new(),
             status_time: None,
             anim_hint: false,
+            chart: None,
             palette_tab: 0,
             custom_hue: 0.0,
             hover_btn: None,

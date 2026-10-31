@@ -1906,7 +1906,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     // 原来写 `168 + 56 + 28 = 252` 是照抄原型的 SVG viewBox，
     // 底下会空出 46px 一条白边；132 的绘图区又太扁，曲线被压成一条带子。
     let chart = c.card(p, 220.0);
-    draw_chart(p, chart, d);
+    draw_chart(p, chart, d, ui);
     // 卡片不会自己推进游标（它的返回值才是位置），必须手动前移 ——
     // 漏了这一步，「电源管理」的标题会画在图表卡片上面。
     c.y = chart.bottom();
@@ -2028,7 +2028,87 @@ fn cur_stage(s: &crate::proto::State) -> usize {
 }
 
 /// 画电量曲线（含标题行、网格、面积、折线、数据点）。
-fn draw_chart(p: &mut Painter, card: R, d: &Data) {
+/// 把 `Plot`（归一化坐标）烘成像素几何，供 `draw_chart` 每帧直接使用。
+///
+/// `span` 是纵轴范围（`hi - lo`，已保证 ≥1）。抽成纯函数便于单测：
+/// 这块几何一旦算歪，曲线会整体上下错位或跑到绘图区外。
+fn chart_geom(
+    pl: &crate::chart::Plot,
+    plot: R,
+    lo: i32,
+    span: f32,
+) -> crate::ui::widget::ChartGeom {
+    let area_w = (crate::chart::AREA_W as f32).max(1.0);
+    let map_x = |px: i32| -> f32 {
+        let fx = (px - crate::chart::AREA_X) as f32 / area_w;
+        plot.x + fx.clamp(0.0, 1.0) * plot.w
+    };
+    let map_y = |level: u8| -> f32 {
+        let fy = (level as i32 - lo) as f32 / span;
+        plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
+    };
+    let map_fx = |fx: f32| -> f32 { plot.x + fx.clamp(0.0, 1.0) * plot.w };
+    let map_yf = |level: f32| -> f32 {
+        let fy = (level - lo as f32) / span;
+        plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
+    };
+
+    let pts: Vec<(f32, f32)> = pl
+        .points
+        .iter()
+        .map(|pt| (map_x(pt.x), map_y(pt.level)))
+        .collect();
+
+    let mut bands: Vec<R> = Vec::new();
+    for w in pl.points.windows(2) {
+        if w[0].charging && w[1].charging {
+            let x0 = map_x(w[0].x);
+            let x1 = map_x(w[1].x);
+            if x1 - x0 > 0.5 {
+                bands.push(R::new(x0, plot.y, x1 - x0, plot.h));
+            }
+        }
+    }
+
+    let curve: Vec<(f32, f32)> = pl
+        .curve
+        .iter()
+        .map(|c| (map_fx(c.fx), map_yf(c.level)))
+        .collect();
+
+    // 面积：曲线 + 首尾各拉到底边。起点用曲线自己的 x，不要用 plot.x ——
+    // 第一个采样点可能晚于窗口起点（休眠、刚装完），从 plot.x 硬拉
+    // 会多出一块三角形空填充，看着像画错了。
+    let area = if curve.len() >= 2 {
+        let x0 = curve.first().map(|p| p.0).unwrap_or(plot.x);
+        let x1 = curve.last().map(|p| p.0).unwrap_or(plot.right());
+        let mut a: Vec<(f32, f32)> = Vec::with_capacity(curve.len() + 2);
+        a.push((x0, plot.bottom()));
+        a.extend(curve.iter().copied());
+        a.push((x1, plot.bottom()));
+        a
+    } else {
+        Vec::new()
+    };
+
+    crate::ui::widget::ChartGeom {
+        key: (
+            pl as *const _ as usize,
+            plot.x.to_bits(),
+            plot.y.to_bits(),
+            plot.w.to_bits(),
+            plot.h.to_bits(),
+            lo as u32,
+            (lo as f32 + span) as u32,
+        ),
+        pts,
+        curve,
+        area,
+        bands,
+    }
+}
+
+fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui) {
     let t = p.t;
     let head_y = card.y + 16.0;
     p.text(
@@ -2125,24 +2205,8 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
     };
     let span = (hi - lo).max(1) as f32;
 
-    // x / y 映射：`build` 用它自己的矩形算 x，这里按比例搬到当前 plot，
-    // 两份实现各自算时间→x 一定会漂移，所以只搬比例。
-    let area_w = (crate::chart::AREA_W as f32).max(1.0);
-    let map_x = |px: i32| -> f32 {
-        let fx = (px - crate::chart::AREA_X) as f32 / area_w;
-        plot.x + fx.clamp(0.0, 1.0) * plot.w
-    };
-    let map_y = |level: u8| -> f32 {
-        let fy = (level as i32 - lo) as f32 / span;
-        plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
-    };
-    // 平滑后的曲线点按比例搬过来：`chart::build` 已经算好，这里只做映射。
-    let map_fx = |fx: f32| -> f32 { plot.x + fx.clamp(0.0, 1.0) * plot.w };
-    let map_yf = |level: f32| -> f32 {
-        let fy = (level - lo as f32) / span;
-        plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
-    };
-
+    // 归一化坐标 → 像素的那几步在 `chart_geom` 里做，结果按
+    // (Plot, 绘图区, 纵轴范围) 缓存，不在每帧重算。
     // 底轴：比网格线略深一点，给图表一条"地面"
     p.line(
         plot.x,
@@ -2195,49 +2259,36 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data) {
         }
         Some(pl) => {
             let n = pl.points.len();
-            let pts: Vec<(f32, f32)> = pl
-                .points
-                .iter()
-                .map(|pt| (map_x(pt.x), map_y(pt.level)))
-                .collect();
+            // 像素几何只在「数据变了 / 绘图区尺寸变了 / 纵轴范围变了」时重算。
+            // 充电动画每 16ms 重绘整帧，但采样 30 秒才更新一次 —— 不缓存的话
+            // 每秒白建 60 遍三份 Vec（最多两千多点），全在 UI 线程上。
+            let key = (
+                pl as *const _ as usize,
+                plot.x.to_bits(),
+                plot.y.to_bits(),
+                plot.w.to_bits(),
+                plot.h.to_bits(),
+                lo as u32,
+                hi as u32,
+            );
+            if ui.chart.as_ref().map(|g| g.key) != Some(key) {
+                ui.chart = Some(chart_geom(pl, plot, lo, span));
+            }
+            let g = ui.chart.as_ref().expect("上一行刚填过");
+            let pts = &g.pts;
 
             // 充电时段：整列淡绿底带。比在折线上换颜色更直观 ——
             // 一眼就能看出"这段在充、那段在放"。
-            for w in pl.points.windows(2) {
-                if w[0].charging && w[1].charging {
-                    let x0 = map_x(w[0].x);
-                    let x1 = map_x(w[1].x);
-                    if x1 - x0 > 0.5 {
-                        p.rect(
-                            R::new(x0, plot.y, x1 - x0, plot.h),
-                            with_alpha(t.green, 0x12),
-                        );
-                    }
-                }
+            for band in &g.bands {
+                p.rect(*band, with_alpha(t.green, 0x12));
             }
 
-            // 平滑与插值已在 `chart::build` 做完（数据 30 秒才变一次，
-            // 没必要充电时每秒重算 60 遍），这里只把归一化坐标映射成像素。
-            let curve: Vec<(f32, f32)> = pl
-                .curve
-                .iter()
-                .map(|c| (map_fx(c.fx), map_yf(c.level)))
-                .collect();
-
-            // 面积：曲线 + 首尾各拉到底边。起点用曲线自己的 x，不要用 plot.x ——
-            // 第一个采样点可能晚于窗口起点（休眠、刚装完），从 plot.x 硬拉
-            // 会多出一块三角形空填充，看着像画错了。
-            if curve.len() >= 2 {
-                let x0 = curve.first().map(|p| p.0).unwrap_or(plot.x);
-                let x1 = curve.last().map(|p| p.0).unwrap_or(plot.right());
-                let mut area: Vec<(f32, f32)> = Vec::with_capacity(curve.len() + 2);
-                area.push((x0, plot.bottom()));
-                area.extend(curve.iter().copied());
-                area.push((x1, plot.bottom()));
-                p.fill_polygon(&area, with_alpha(t.accent, 0x4A), with_alpha(t.accent, 0x00));
+            // 面积 + 曲线：平滑与插值已在 `chart::build` 做完。
+            if g.area.len() >= 2 {
+                p.fill_polygon(&g.area, with_alpha(t.accent, 0x4A), with_alpha(t.accent, 0x00));
             }
             // 整条曲线一次描边。逐段 `polyline` 在接缝处会叠出「串珠」感。
-            p.stroke_path(&curve, t.accent, 2.0);
+            p.stroke_path(&g.curve, t.accent, 2.0);
 
             // 数据点：点多了就只标最新那个，否则满屏小圈
             if n <= 14 {
@@ -3123,6 +3174,79 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    /// 曲线几何必须落在绘图区内、x 单调不减；充电点要生成底带。
+    #[test]
+    fn chart_geom_stays_inside_the_plot_and_marks_charging() {
+        use crate::chart::{CurvePt, Plot, Pt};
+        let plot_rect = R::new(100.0, 50.0, 200.0, 100.0);
+        let mut points = Vec::new();
+        for i in 0..10 {
+            points.push(Pt {
+                x: crate::chart::AREA_X + i * 10,
+                level: if i < 3 { 60 } else { 80 },
+                charging: i >= 3 && i < 6,
+            });
+        }
+        let curve: Vec<CurvePt> = points
+            .iter()
+            .map(|p| CurvePt {
+                fx: (p.x - crate::chart::AREA_X) as f32 / crate::chart::AREA_W as f32,
+                level: p.level as f32,
+            })
+            .collect();
+        let pl = Plot {
+            points,
+            curve,
+            first_ts: 1_800_000_000,
+            last_ts: 1_800_001_000,
+        };
+
+        let g = chart_geom(&pl, plot_rect, 50, 40.0);
+        assert_eq!(g.pts.len(), 10);
+        assert_eq!(g.curve.len(), 10);
+        // x 单调不减，且都在绘图区内
+        let mut prev = f32::MIN;
+        for (x, y) in &g.pts {
+            assert!(*x >= prev - 0.01, "x 回退了");
+            prev = *x;
+            assert!(*x >= plot_rect.x - 0.01 && *x <= plot_rect.right() + 0.01);
+            assert!(*y >= plot_rect.y - 0.01 && *y <= plot_rect.bottom() + 0.01);
+        }
+        // 3..6 连续充电 → 至少一条底带；且带都在绘图区内
+        assert!(!g.bands.is_empty());
+        for b in &g.bands {
+            assert!(b.y >= plot_rect.y - 0.01 && b.bottom() <= plot_rect.bottom() + 0.01);
+        }
+        // 面积多边形 = 曲线 + 首尾两点
+        assert_eq!(g.area.len(), g.curve.len() + 2);
+    }
+
+    /// 缓存键要能区分「数据换了」和「绘图区挪了」。
+    #[test]
+    fn chart_geom_key_changes_with_plot_or_rect() {
+        use crate::chart::{CurvePt, Plot, Pt};
+        let mk = |level: u8| Plot {
+            points: vec![
+                Pt { x: crate::chart::AREA_X, level, charging: false },
+                Pt { x: crate::chart::AREA_X + 100, level, charging: false },
+            ],
+            curve: vec![
+                CurvePt { fx: 0.0, level: level as f32 },
+                CurvePt { fx: 1.0, level: level as f32 },
+            ],
+            first_ts: 1,
+            last_ts: 2,
+        };
+        let a = mk(70);
+        let b = mk(70);
+        let r = R::new(100.0, 50.0, 200.0, 100.0);
+        let ka = chart_geom(&a, r, 50, 40.0).key;
+        let kb = chart_geom(&b, R::new(101.0, 50.0, 200.0, 100.0), 50, 40.0).key;
+        assert_ne!(ka, kb, "绘图区变了键必须变");
+        // 同一份 Plot + 同一个矩形 → 键稳定（才能命中缓存）
+        assert_eq!(ka, chart_geom(&a, r, 50, 40.0).key);
+    }
 
     /// hero 卡必须装得下它自己画的 KPI：`kv_y + 行数*行距 - 行距 + 底边距`
     /// 不能超过 `hero_h`。窄屏（单列 4 行）是曾经画到卡外、压住下一个标题的那档。
