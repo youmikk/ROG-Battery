@@ -240,12 +240,16 @@ pub struct State {
 }
 
 impl State {
+    /// 取某档 DPI 的解析值。
+    ///
+    /// `stage` 来自界面/备份文件/CLI 参数，越界时按最后一档处理 —— 这类下标
+    /// 越界不该让整个进程 panic。逻辑上的范围校验在 `ops` 层已经做过。
     pub fn dpi(&self, stage: usize) -> i32 {
-        decode_dpi(self.enc[stage])
+        decode_dpi(self.enc[stage.min(DPI_STAGES - 1)])
     }
 
     pub fn rgb_hex(&self, stage: usize) -> String {
-        let c = self.rgb[stage];
+        let c = self.rgb[stage.min(DPI_STAGES - 1)];
         format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
     }
 
@@ -718,12 +722,19 @@ pub fn write_light(
     )
 }
 
+/// 第 `slot` 个按键的固定源码；越界返回 `None`。
+pub fn button_src(slot: usize) -> Option<u16> {
+    BUTTON_SRC.get(slot).copied()
+}
+
 /// 写按键绑定（独立命令族）：
 /// `{rid, 0x51, 0x21, 0x00, 0x00, srcLo, srcHi, dstLo, dstHi}`
 ///
 /// `src` 是该物理键的固定源码（不可改），`dst` 是动作码；**`dst = 0x0000` 等于禁用该键**。
 pub fn write_button(dev: &mut HidDevice, rid: u8, slot: usize, dst: u16) -> Option<Vec<u8>> {
-    let src = BUTTON_SRC[slot];
+    // 最后一道防线：`ops` 层已校验过槽位范围，这里直接返回 None 而不是
+    // 下标 panic（越界会让整个 GUI 崩掉，代价远大于写不进去）。
+    let src = button_src(slot)?;
     dev.xfer(
         rid,
         0x51,
@@ -898,4 +909,30 @@ pub fn print_identity(id: &Identity, mode: &str, rid: u8, product: &str, serial:
             "不支持（仅 125/250/500/1000）"
         }
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_index_is_clamped() {
+        let mut st = State::default();
+        st.enc = [7, 15, 23, 31];
+        st.rgb = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]];
+
+        assert_eq!(st.dpi(0), decode_dpi(7));
+        assert_eq!(st.dpi(DPI_STAGES - 1), decode_dpi(31));
+        // 越界不该 panic，按最后一档处理
+        assert_eq!(st.dpi(99), decode_dpi(31));
+        assert_eq!(st.rgb_hex(99), "#0a0b0c");
+    }
+
+    #[test]
+    fn button_src_is_bounded() {
+        assert_eq!(button_src(0), Some(BUTTON_SRC[0]));
+        assert_eq!(button_src(BUTTON_SLOTS - 1), Some(BUTTON_SRC[BUTTON_SLOTS - 1]));
+        assert_eq!(button_src(BUTTON_SLOTS), None);
+        assert_eq!(button_src(999), None);
+    }
 }
