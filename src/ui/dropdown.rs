@@ -21,7 +21,38 @@ pub fn option_value(drop: Drop, idx: usize) -> Option<usize> {
 ///
 /// 抽成独立函数是因为 [`option_value`] 也要用同一张表 —— 表一旦分成两份，
 /// 改了一处忘了另一处，界面显示的和实际写进设备的值就会错位。
-pub fn raw_options(drop: Drop) -> Vec<(String, usize)> {
+pub fn raw_options(drop: Drop) -> &'static [(String, usize)] {
+    RAW[slot_of(drop)].get_or_init(|| build_options(drop)).as_slice()
+}
+
+/// `Drop` → 缓存槽位下标。只用于选表，语义必须与 `build_options` 的分支一一对应。
+fn slot_of(drop: Drop) -> usize {
+    match drop {
+        Drop::Sleep => 0,
+        Drop::Poll => 1,
+        Drop::Stage => 2,
+        Drop::Debounce => 3,
+        Drop::Lod => 4,
+        Drop::LightMode => 5,
+        Drop::Refresh => 6,
+        Drop::CacheTtl => 7,
+        Drop::ButtonTarget(_) => 8,
+        Drop::Palette(_) => 9,
+        Drop::CloseMode => 10,
+    }
+}
+
+const DROP_SLOTS: usize = 11;
+
+/// 每种下拉的候选表一辈子都不变，却原来每帧重建一次（`format!` 逐个分配
+/// `String`）。设置页四五个下拉打开时，一帧就是几十次堆分配。
+///
+/// 这里按 `Drop` 分槽缓存。`ButtonTarget(_)` 八个槽位共用一张表
+/// （`button_target_name` 只按码查名字），`Palette(_)` 故意给空表。
+static RAW: [std::sync::OnceLock<Vec<(String, usize)>>; DROP_SLOTS] =
+    [const { std::sync::OnceLock::new() }; DROP_SLOTS];
+
+fn build_options(drop: Drop) -> Vec<(String, usize)> {
     // 每个分支写全 `Vec<(String, usize)>`：不加这个标注，
     // arms 各自是不同的 iterator 类型，`collect()` 推不出目标类型。
     let items: Vec<(String, usize)> = match drop {
@@ -210,7 +241,7 @@ pub const BUTTON_TARGETS: [u16; 9] = [
 ];
 
 /// 某个下拉框的候选项（文字, 值）。
-pub fn options(drop: Drop, d: &Data) -> Vec<(String, usize)> {
+pub fn options(drop: Drop, d: &Data) -> &'static [(String, usize)] {
     // 候选文字目前不依赖 `d`，保留参数是为了将来加「当前值」标记时不用改所有调用点。
     let _ = d;
     raw_options(drop)
@@ -219,6 +250,21 @@ pub fn options(drop: Drop, d: &Data) -> Vec<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 候选表按 `Drop` 缓存：同一个下拉两次取到的必须是同一份内存，
+    /// 不同下拉不能串表（槽位下标写错就会串）。
+    #[test]
+    fn raw_options_is_cached_not_rebuilt() {
+        let a = raw_options(Drop::Poll);
+        let b = raw_options(Drop::Poll);
+        assert!(std::ptr::eq(a, b), "候选表应当复用同一份，不该每次重建");
+        assert_eq!(a.len(), 4);
+        assert!(
+            !std::ptr::eq(raw_options(Drop::Sleep), raw_options(Drop::Poll)),
+            "不同下拉必须落到不同槽位"
+        );
+        assert!(raw_options(Drop::Palette(0)).is_empty(), "色盘走单独一支");
+    }
 
     /// 每个下拉的「第 i 项」都要能翻成设备值，且项数与候选表一致；
     /// `None` 只允许出现在越界下标上。

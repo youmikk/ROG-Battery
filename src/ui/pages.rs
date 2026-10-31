@@ -3013,7 +3013,7 @@ mod tests {
             frames: 0,
             elapsed_ms: 0,
         };
-        let modes: Vec<usize> = options(Drop::LightMode, &d).into_iter().map(|(_, v)| v).collect();
+        let modes: Vec<usize> = options(Drop::LightMode, &d).iter().map(|(_, v)| *v).collect();
         assert!(!modes.contains(&3), "3 = Rainbow 不该出现在候选里");
         assert!(!modes.contains(&5), "5 = Comet 不该出现在候选里");
         assert!(modes.contains(&0));
