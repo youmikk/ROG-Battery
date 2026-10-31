@@ -989,10 +989,20 @@ fn apply_edit(env: &UiEnv, e: Edit) {
             let col_txt =
                 env.canvas.with_ui(|u| u.edit_text(Edit::DpiColor(i as u8)).map(str::to_string));
 
-            let cur_dpi = st.as_ref().map(|s| s.dpi(i)).unwrap_or(800);
-            let cur_rgb = st.as_ref().map(|s| s.rgb[i]).unwrap_or([0, 0, 0]);
+            // 用户没填的那一半要沿用设备当前值。设备读不到时**不能**编一个
+            // 800 DPI / 纯黑出来写回去 —— 那会把用户那一档 DPI 和指示灯颜色
+            // 一起改掉，而界面上看不出发生过什么。
+            let typed_dpi = dpi_txt.as_deref().and_then(parse_num);
+            let typed_rgb = match col_txt.as_deref() {
+                Some(t) if !t.trim().is_empty() => Some(t.to_string()),
+                _ => None,
+            };
+            if st.is_none() && (typed_dpi.is_none() || typed_rgb.is_none()) {
+                env.say("✘ 读不到设备当前设置，先动一下鼠标再改");
+                return;
+            }
 
-            let dpi = match dpi_txt.as_deref().and_then(parse_num) {
+            let dpi = match typed_dpi {
                 Some(v) if (proto::DPI_MIN as i64..=proto::DPI_MAX as i64).contains(&v) => v as i32,
                 Some(_) => {
                     env.say(format!(
@@ -1003,19 +1013,19 @@ fn apply_edit(env: &UiEnv, e: Edit) {
                     ));
                     return;
                 }
-                None => cur_dpi,
+                None => st.as_ref().map(|s| s.dpi(i)).unwrap_or(proto::DPI_MIN as i32),
             };
 
-            let rgb = match col_txt.as_deref() {
-                Some(t) if !t.trim().is_empty() => match parse_color(t) {
+            let rgb = match typed_rgb.as_deref() {
+                Some(t) => match parse_color(t) {
                     Ok(Some(c)) => c,
-                    Ok(None) => cur_rgb,
+                    Ok(None) => st.as_ref().map(|s| s.rgb[i]).unwrap_or([0, 0, 0]),
                     Err(msg) => {
                         env.say(format!("✘ {msg}"));
                         return;
                     }
                 },
-                _ => cur_rgb,
+                None => st.as_ref().map(|s| s.rgb[i]).unwrap_or([0, 0, 0]),
             };
 
             drop_draft(env, Edit::Dpi(i as u8));
