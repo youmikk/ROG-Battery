@@ -23,7 +23,6 @@
 //! 全部是**逻辑像素**（96 DPI 下的 px），和设计稿 `ui-prototype.html` 的
 //! CSS px 一一对应。这样对着原型调间距时不用换算。
 
-#![allow(dead_code)]
 
 use crate::ui::gfx::{with_alpha, Align, Painter, R};
 use crate::ui::layout::{self, font, Breakpoint, Frame};
@@ -66,8 +65,6 @@ pub struct Data<'a> {
     /// 帧耗时（侧栏底部「19 帧 · 588 ms」）。
     pub frames: usize,
     pub elapsed_ms: u128,
-    /// 数据是否来自缓存。
-    pub from_cache: bool,
 }
 
 // ───────────────────────── 通用小工具 ─────────────────────────
@@ -111,11 +108,6 @@ impl Cursor {
         }
     }
 
-    fn skip(&mut self, h: f32) -> f32 {
-        let top = self.y;
-        self.y += h;
-        top
-    }
 
     /// 页标题（h1）。原型：26px / 600 / letter-spacing −.4 / margin 10px 0 20px。
     fn h1(&mut self, p: &mut Painter, s: &str) {
@@ -2714,181 +2706,6 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     c.y += nw + 16.0;
 }
 
-/// 【已停用】旧的厂商私有协议灯效界面。
-///
-/// 保留是因为 CLI 的 `setlight` 仍然走 `ops::set_light`，这里是它的可视化版本；
-/// 但实测灯根本不在 0xFF01 集合上（见 `dynlight.rs` 顶部），点这些控件不会有效果，
-/// 所以 UI 不再给入口。留着是为了以后要回退时不用重新写一遍。
-#[allow(dead_code)]
-fn light_vendor(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
-    let t = p.t;
-    c.h1(p, "灯光");
-    let st = d.state;
-
-    // ---- 模式 ----
-    c.h2(p, "模式", true);
-    let card = c.card(p, layout::ROW_H + 8.0);
-    {
-        let area = R::new(card.x + 18.0, card.y + 4.0, card.w - 36.0, layout::ROW_H);
-        let ctl = row_label(p, area, "灯效模式", None, 180.0);
-        drop_button(
-            p,
-            ui,
-            R::new(ctl.x, ctl.cy() - 15.0, 180.0, 30.0),
-            Drop::LightMode,
-            d,
-        );
-    }
-    c.y = card.bottom();
-    c.y += 10.0;
-    p.text_wrap(
-        "可选：静置 / 呼吸 / 循环 / 响应 / 跟随电量 / 关闭。Rainbow 与 Comet 本型号不认，设备会静默回落到循环，因此不列出。",
-        R::new(c.x, c.y, c.w, 34.0),
-        11.5,
-        t.text3,
-    );
-    c.y += 38.0;
-
-    // ---- 亮度与颜色 ----
-    c.h2(p, "亮度与颜色", false);
-    let card = c.card(p, layout::ROW_H * 2.0);
-    {
-        let area = R::new(card.x + 18.0, card.y, card.w - 36.0, layout::ROW_H);
-        let dev_bright = st.map(|s| s.light_bright).unwrap_or(50);
-        // 同一行里数字框和滑块必须显示**同一个值**。否则拖滑块时框里还是旧数字。
-        // 正在编辑框时以草稿为准（用户手输的优先），否则看拖拽值，最后才落到设备值。
-        let live = ui.live_frac(Slide::LightBright);
-        let bright = match (live, ui.edit_text(Edit::LightBright)) {
-            (_, Some(t)) => t.parse::<u8>().unwrap_or(dev_bright),
-            (Some(f), None) => (f * 100.0).round() as u8,
-            (None, None) => dev_bright,
-        };
-        let ctl = row_label(p, area, "亮度", None, 320.0);
-        let edit = Edit::LightBright;
-        let txt = ui
-            .edit_text(edit)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| bright.to_string());
-        let box_r = R::new(ctl.x, ctl.cy() - 15.0, 52.0, 30.0);
-        num_box(p, box_r, &txt, ui.focus == Some(edit));
-        ui.hot(box_r, Act::Focus(edit));
-        p.text(
-            "%",
-            R::new(box_r.right() + 4.0, ctl.y, 14.0, ctl.h),
-            12.0,
-            false,
-            t.text2,
-            Align::Left,
-        );
-        let track = R::new(box_r.right() + 26.0, ctl.cy() - 9.0, 220.0, 18.0);
-        let frac = live.unwrap_or(bright as f32 / 100.0);
-        p.slider(track, frac, st.is_some());
-        ui.hot(track, Act::SetSlide(Slide::LightBright, frac));
-        p.hline(card.x, card.right(), area.bottom(), t.border);
-    }
-    {
-        let area = R::new(card.x + 18.0, card.y + layout::ROW_H, card.w - 36.0, layout::ROW_H);
-        let rgb = st.map(|s| s.light_rgb);
-        let ctl = row_label(p, area, "颜色", None, 180.0);
-        let sw = R::new(ctl.x, ctl.cy() - 15.0, 30.0, 30.0);
-        color_button(p, ui, sw, crate::ui::widget::LIGHT_COLOR_SLOT, rgb);
-        let edit = Edit::LightColor;
-        let txt = ui.edit_text(edit).map(|s| s.to_string()).unwrap_or_else(|| {
-            rgb.map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
-                .unwrap_or_else(|| "—".into())
-        });
-        let box_r = R::new(sw.right() + 8.0, ctl.cy() - 15.0, 92.0, 30.0);
-        num_box(p, box_r, &txt, ui.focus == Some(edit));
-        ui.hot(box_r, Act::Focus(edit));
-        let btn = R::new(box_r.right() + 8.0, ctl.cy() - 15.0, 50.0, 30.0);
-        button(p, ui, btn, "应用", false, Act::ApplyEdit(edit));
-    }
-    c.y = card.bottom();
-
-    // ---- 高级 ----
-    c.h2(p, "高级", false);
-    let open = ui.adv[1];
-    let h = 46.0 + if open { layout::ROW_H * 2.0 + 46.0 } else { 0.0 };
-    let card = c.card(p, h);
-    {
-        let head = R::new(card.x + 18.0, card.y, card.w - 36.0, 46.0);
-        let act = Act::ToggleAdv(1);
-        if ui.hover == Some(act) {
-            p.round(head, layout::R_CTL, with_alpha(t.text, 0x08));
-        }
-        let cx = head.x + 6.0;
-        let cy = head.cy();
-        if open {
-            p.polyline(
-                &[(cx - 3.5, cy - 1.5), (cx, cy + 2.0), (cx + 3.5, cy - 1.5)],
-                t.text3,
-                1.3,
-            );
-        } else {
-            p.polyline(
-                &[(cx - 1.5, cy - 3.5), (cx + 2.0, cy), (cx - 1.5, cy + 3.5)],
-                t.text3,
-                1.3,
-            );
-        }
-        p.text(
-            "高级",
-            R::new(head.x + 18.0, head.y, head.w - 30.0, head.h),
-            13.0,
-            false,
-            t.text2,
-            Align::Left,
-        );
-        ui.hot(head, act);
-    }
-    if open {
-        // 方向
-        let dy = card.y + 46.0;
-        let area = R::new(card.x + 18.0, dy, card.w - 36.0, layout::ROW_H);
-        p.hline(card.x, card.right(), area.y, t.border);
-        let ctl = row_label(p, area, "方向", None, 160.0);
-        let sel = st.map(|s| s.light_dir as usize).unwrap_or(0).min(1);
-        segmented(
-            p,
-            ui,
-            R::new(ctl.x, ctl.cy() - 15.0, 160.0, 30.0),
-            &["正向", "反向"],
-            sel,
-            |i| Act::PickDrop(Drop::LightMode, 100 + i),
-        );
-
-        // 随机颜色
-        let ry = dy + layout::ROW_H;
-        let area = R::new(card.x + 18.0, ry, card.w - 36.0, layout::ROW_H);
-        let ctl = row_label(p, area, "随机颜色", None, 40.0);
-        let rnd = st.map(|s| s.light_random != 0).unwrap_or(false);
-        let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
-        p.switch(sw, rnd, st.is_some());
-        ui.hot(sw, Act::Toggle(Pref::LightRandom));
-
-        // 速度
-        let sy = ry + layout::ROW_H;
-        let area = R::new(card.x + 18.0, sy, card.w - 36.0, 46.0);
-        let dev_spd = st.map(|s| s.light_speed).unwrap_or(50);
-        let frac = ui
-            .live_frac(Slide::LightSpeed)
-            .unwrap_or(dev_spd as f32 / 100.0);
-        let spd = (frac * 100.0).round() as u8;
-        let ctl = row_label(p, area, "速度", None, 280.0);
-        let track = R::new(ctl.x, ctl.cy() - 9.0, 220.0, 18.0);
-        p.slider(track, frac, st.is_some());
-        ui.hot(track, Act::SetSlide(Slide::LightSpeed, frac));
-        p.text(
-            &format!("{spd}"),
-            R::new(ctl.right() - 34.0, ctl.y, 34.0, ctl.h),
-            12.5,
-            false,
-            t.text2,
-            Align::Right,
-        );
-    }
-    c.y = card.bottom();
-}
 
 // ───────────────────────── 按键页 ─────────────────────────
 
@@ -3328,7 +3145,6 @@ mod tests {
             version: "test",
             frames: 0,
             elapsed_ms: 0,
-            from_cache: false,
         };
         let modes: Vec<usize> = options(Drop::LightMode, &d).into_iter().map(|(_, v)| v).collect();
         assert!(!modes.contains(&3), "3 = Rainbow 不该出现在候选里");
@@ -3388,7 +3204,6 @@ mod tests {
             version: "test",
             frames: 0,
             elapsed_ms: 0,
-            from_cache: false,
         };
         let opts = options(Drop::Sleep, &d);
         // 0..4 五档 + 永不

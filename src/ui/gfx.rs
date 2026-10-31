@@ -2158,7 +2158,6 @@ mod tests {
             version: crate::gui::APP_VERSION,
             frames: 19,
             elapsed_ms: 588,
-            from_cache: false,
         };
 
         let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch");

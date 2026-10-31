@@ -252,7 +252,6 @@ struct Shared {
     status: Status,
     frames: usize,
     elapsed_ms: u128,
-    from_cache: bool,
     /// 历史样本（由历史线程每 30 秒重读一次）。
     rows: Vec<crate::history::HistoryRow>,
     /// 曲线点集。`None` = 历史线程还没读完第一遍。
@@ -291,7 +290,6 @@ impl Shared {
             status: Status::Idle,
             frames: 0,
             elapsed_ms: 0,
-            from_cache: false,
             rows: Vec::new(),
             plot: None,
             estimate: crate::history::Estimate::default(),
@@ -1472,7 +1470,6 @@ fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
 /// 把一次读取的结果搬进 [`Shared`]。返回本轮的电量快照（供记历史）。
 fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
     // `elapsed` 为零 = 缓存命中（`SnapshotCache` 的约定）
-    let from_cache = out.elapsed.is_zero();
     let snap = &out.snapshot;
     // 链路模式跟着快照一起更新（`fetch` / `fetch_light` 都会写这个字段）。
     if !snap.link_mode.is_empty() {
@@ -1495,7 +1492,6 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
         };
         s.full = None;
         s.quick = None;
-        s.from_cache = false;
         s.elapsed_ms = 0;
         return None;
     }
@@ -1512,7 +1508,6 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
         // 保留上一轮的电量显示（比清成「—」更不吓人），但**不产生新采样**。
         s.frames = out.frames_read;
         s.elapsed_ms = out.elapsed.as_millis();
-        s.from_cache = from_cache;
         s.status = Status::Asleep;
         return None;
     }
@@ -1541,7 +1536,6 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
 
     s.frames = out.frames_read;
     s.elapsed_ms = out.elapsed.as_millis();
-    s.from_cache = from_cache;
     s.status = Status::Ok;
     Some(q)
 }
@@ -2385,7 +2379,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 version: APP_VERSION,
                 frames,
                 elapsed_ms: elapsed,
-                from_cache: false,
             };
             canvas::draw_frame(inner, fonts, ui, args, &theme, &data)
         }));
