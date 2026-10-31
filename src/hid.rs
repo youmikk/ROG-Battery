@@ -308,6 +308,10 @@ pub struct HidDevice {
     read_buf: Vec<u8>,
     /// 一次读挂起期间必须复用同一个 OVERLAPPED，否则 GetOverlappedResult 拿不到结果
     read_ov: Overlapped,
+    /// 写也走 overlapped：同步句柄上 WriteFile 没有超时，驱动卡住就会把调用线程
+    /// （GUI 的刷新线程）钉死。
+    write_event: Handle,
+    write_ov: Overlapped,
     /// 这次读是否在 ReadFile 里同步完成了（少数情况，HID 一般都会 pending）
     read_completed_sync: bool,
     /// 同步完成时实际读到的字节数
@@ -333,7 +337,7 @@ impl HidDevice {
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 core::ptr::null_mut(),
                 OPEN_EXISTING,
-                0,
+                FILE_FLAG_OVERLAPPED,
                 core::ptr::null_mut(),
             )
         };
@@ -389,8 +393,26 @@ impl HidDevice {
             ));
         }
 
+        let write_event = unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) };
+        if write_event.is_null() || write_event == INVALID_HANDLE_VALUE {
+            unsafe {
+                CloseHandle(read_event);
+                CloseHandle(read_handle);
+                CloseHandle(write_handle);
+            }
+            return Err(format!(
+                "CreateEventW 失败（GetLastError={}）",
+                last_error()
+            ));
+        }
+
         Ok(HidDevice {
             write_handle,
+            write_event,
+            write_ov: Overlapped {
+                h_event: write_event,
+                ..Default::default()
+            },
             read_handle,
             read_event,
             read_buf: vec![0u8; 4096],
@@ -502,6 +524,31 @@ impl HidDevice {
         Some(self.read_buf[..xfer as usize].to_vec())
     }
 
+    /// 收尾一次写：同步完成直接成功；挂起则等到 `timeout_ms`，超时取消并判失败。
+    ///
+    /// 写句柄是 overlapped 打开的，所以驱动卡住时能把控制权抢回来——以前用同步
+    /// 句柄写，`WriteFile` 没有超时，设备一挂就把整个刷新线程钉死。
+    fn finish_write(&mut self, ok: i32, written: u32, timeout_ms: u32) -> bool {
+        if ok != 0 {
+            return written > 0;
+        }
+        if last_error() != ERROR_IO_PENDING {
+            return false;
+        }
+        let wait = unsafe { WaitForSingleObject(self.write_event, timeout_ms) };
+        if wait != WAIT_OBJECT_0 {
+            unsafe {
+                CancelIoEx(self.write_handle, &mut self.write_ov);
+                let mut xfer: u32 = 0;
+                GetOverlappedResult(self.write_handle, &mut self.write_ov, &mut xfer, 1);
+            }
+            return false;
+        }
+        let mut xfer: u32 = 0;
+        let done = unsafe { GetOverlappedResult(self.write_handle, &mut self.write_ov, &mut xfer, 0) };
+        done != 0 && xfer > 0
+    }
+
     /// 发一帧并等应答。`tail` 从 `pkt[3]` 开始写（可以为空）。
     ///
     /// 返回的数组**已经把 report id 放在下标 0**（与文档对齐约定一致）。
@@ -530,6 +577,10 @@ impl HidDevice {
             }
         }
 
+        self.write_ov = Overlapped {
+            h_event: self.write_event,
+            ..Default::default()
+        };
         let mut written: u32 = 0;
         let ok = unsafe {
             WriteFile(
@@ -537,10 +588,10 @@ impl HidDevice {
                 pkt.as_ptr() as *const c_void,
                 pkt.len() as u32,
                 &mut written,
-                core::ptr::null_mut(),
+                &mut self.write_ov,
             )
         };
-        if ok == 0 {
+        if !self.finish_write(ok, written, timeout_ms) {
             return None;
         }
 
@@ -603,6 +654,9 @@ impl Drop for HidDevice {
         unsafe {
             if !self.read_event.is_null() && self.read_event != INVALID_HANDLE_VALUE {
                 CloseHandle(self.read_event);
+            }
+            if !self.write_event.is_null() && self.write_event != INVALID_HANDLE_VALUE {
+                CloseHandle(self.write_event);
             }
             if !self.read_handle.is_null() && self.read_handle != INVALID_HANDLE_VALUE {
                 CloseHandle(self.read_handle);
