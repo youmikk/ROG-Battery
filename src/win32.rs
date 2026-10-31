@@ -543,6 +543,21 @@ pub fn tray_remove(hwnd: Handle, guid: Guid) -> bool {
     unsafe { Shell_NotifyIconW(NIM_DELETE, &n) != 0 }
 }
 
+/// 注册一个自定义窗口消息，取回消息号。
+///
+/// 现在只用一次：`"TaskbarCreated"` —— 资源管理器重启后所有托盘图标都会消失，
+/// 系统会**广播**这条消息给所有顶层窗口，收到就得重新 `NIM_ADD`。
+/// 它在 `user32`，返回值是消息 ID（同一名字全系统一致，0 表示失败）。
+pub fn register_window_message(name: &str) -> u32 {
+    #[link(name = "user32")]
+    extern "system" {
+        fn RegisterWindowMessageW(name: *const u16) -> u32;
+    }
+    let w = crate::win32::to_wide(name);
+    // SAFETY: `w` 是以 NUL 结尾的宽字符串，调用期间一直有效。
+    unsafe { RegisterWindowMessageW(w.as_ptr()) }
+}
+
 // ============ user32 ============
 #[link(name = "user32")]
 extern "system" {    /// 查找顶层窗口（单实例检测用）。
@@ -830,5 +845,22 @@ pub fn attach_console() -> bool {
             SetStdHandle(STD_INPUT_HANDLE, h_in);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taskbar_created_message_id_is_stable() {
+        // 同名消息在任何进程里都是同一个号，重复注册也不会变。
+        let a = register_window_message("TaskbarCreated");
+        let b = register_window_message("TaskbarCreated");
+        assert_ne!(a, 0, "注册失败会返回 0");
+        assert_eq!(a, b, "同一名字必须拿到同一个消息号");
+        // 不同名字必须是不同号，否则托盘回调会被别的消息误触发。
+        let c = register_window_message("RogBatteryTestOnlyMessage");
+        assert_ne!(a, c);
     }
 }

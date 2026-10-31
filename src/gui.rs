@@ -494,6 +494,32 @@ impl TrayCtl {
         last.clear();
         last.push_str(tip);
     }
+
+    /// 资源管理器重启后托盘图标会整片消失：系统会广播 `TaskbarCreated`
+    /// 给所有顶层窗口，收到就重新 `NIM_ADD` 一次，把图标（和稍后的提示）
+    /// 放回任务栏。不处理的话用户会以为程序被关掉了。
+    fn re_add(&self) {
+        if !self.visible.get() {
+            return;
+        }
+        let cur = self.cur.get();
+        let icon = if cur.is_null() {
+            match crate::tray_icon::render_unknown() {
+                Some(h) => h,
+                None => return,
+            }
+        } else {
+            cur
+        };
+        if win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, "R Battery", win32::TRAY_GUID) {
+            self.cur.set(icon);
+            // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
+            // 「内容没变」的判断会把真实提示吞掉。
+            self.last_tip.borrow_mut().clear();
+        } else if icon != cur {
+            unsafe { win32::DestroyIcon(icon) };
+        }
+    }
 }
 
 /// 处理一个 `Act` 时要用到的一堆句柄。
@@ -2238,7 +2264,12 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     // 托盘图标自己管（见 `TrayCtl` 注释：nwg 不暴露 guidItem，做不到跨版本固定）。
     // 图标在消息循环起来之后再添加 —— 那时 `msg_window` 才能收回调消息。
-    let tray = TrayCtl::new(msg_window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as win32::Handle);
+    //
+    // 用 `Arc` 包一层：主窗口处理器（要建 `UiEnv`，里面借 `&TrayCtl`）和托盘
+    // 回调处理器（要处理 explorer 重启后的 `TaskbarCreated`）都得拿到它。
+    let tray = std::sync::Arc::new(TrayCtl::new(
+        msg_window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as win32::Handle
+    ));
     if cfg.tray_enabled {
         tray.set_visibility(true);
     }
@@ -2505,6 +2536,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let signal_e = Arc::clone(&signal);
     let canvas_e = canvas.clone();
 
+    // explorer 重启后系统广播这条消息，收到要把托盘图标重新加回去。
+    // 消息号要在主处理器 move 走 `tray` 之前先备好一份 Arc。
+    let taskbar_created = crate::win32::register_window_message("TaskbarCreated");
+    let tray_tb = std::sync::Arc::clone(&tray);
+
     // 闭包要 `move` 走 `window`，而 `full_bind_event_handler` 又要借用它的
     // 句柄 —— 先克隆一份句柄再绑，否则报 E0505（不能一边借一边移）。
     let wh = window.handle.clone();
@@ -2633,6 +2669,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 通道已经不参与，所以这里用裸处理器。
     let tray_handler = unsafe {
         nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |_h, msg, _wp, lp| {
+            // 资源管理器重启：所有托盘图标都没了，重新加一次。
+            if taskbar_created != 0 && msg == taskbar_created {
+                tray_tb.re_add();
+                return Some(0);
+            }
             if msg != TRAY_CALLBACK_MSG {
                 return None;
             }
