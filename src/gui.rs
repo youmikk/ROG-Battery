@@ -419,6 +419,12 @@ struct TrayCtl {
     /// 当前显示的图标句柄。**必须一直有效** —— `Shell_NotifyIconW` 不拷贝图标，
     /// 句柄销毁了任务栏上就是一片空白。
     cur: std::cell::Cell<win32::Handle>,
+    /// 上一次写进托盘的悬停提示。
+    ///
+    /// 提示只在电量/连接/DPI 变化时才该变，但 `OnNotice` 每条消息都来一次，
+    /// 拖滑块时是 100+ 次/秒。每次 `NIM_MODIFY` 都是跨进程调用，加上重建
+    /// 四行文本的字符串分配 —— 缓存一下，内容没变就不发。
+    last_tip: std::cell::RefCell<String>,
 }
 
 impl TrayCtl {
@@ -427,6 +433,7 @@ impl TrayCtl {
             hwnd,
             visible: std::cell::Cell::new(false),
             cur: std::cell::Cell::new(std::ptr::null_mut()),
+            last_tip: std::cell::RefCell::new(String::new()),
         }
     }
 
@@ -443,6 +450,9 @@ impl TrayCtl {
             if win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", win32::TRAY_GUID) {
                 self.cur.set(h);
                 self.visible.set(true);
+                // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
+                // 「内容没变」的判断会把真实提示吞掉。
+                self.last_tip.borrow_mut().clear();
             } else {
                 unsafe { win32::DestroyIcon(h) };
             }
@@ -469,9 +479,17 @@ impl TrayCtl {
     }
 
     fn set_tip(&self, tip: &str) {
-        if self.visible.get() {
-            win32::tray_update(self.hwnd, None, Some(tip), win32::TRAY_GUID);
+        if !self.visible.get() {
+            return;
         }
+        // 内容没变就不发：拖滑块时每条鼠标消息都会走到这里。
+        if self.last_tip.borrow().as_str() == tip {
+            return;
+        }
+        win32::tray_update(self.hwnd, None, Some(tip), win32::TRAY_GUID);
+        let mut last = self.last_tip.borrow_mut();
+        last.clear();
+        last.push_str(tip);
     }
 }
 
