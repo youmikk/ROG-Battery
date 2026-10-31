@@ -256,7 +256,10 @@ struct Shared {
     /// 历史样本（由历史线程每 30 秒重读一次）。
     rows: Vec<crate::history::HistoryRow>,
     /// 曲线点集。`None` = 历史线程还没读完第一遍。
-    plot: Option<crate::chart::Plot>,
+    ///
+    /// 用 `Arc` 而不是裸 `Plot`：绘制闭包每帧都要把数据拷出来（不能在锁里画），
+    /// 48 小时的采样点是上千个，每帧深拷贝一次纯属浪费。
+    plot: Option<Arc<crate::chart::Plot>>,
     estimate: crate::history::Estimate,
     /// 本地设置。界面改了就更新这里再落盘。
     cfg: Settings,
@@ -2356,7 +2359,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 // 常驻错误文字（读不到设备的原因 / 正在写设备）。
                 // 瞬时提示走 `ui.status`，由 `pages::draw_toast` 优先显示。
                 status: err_text,
-                plot: plot.as_ref(),
+                plot: plot.as_deref(),
                 estimate: &estimate,
                 rows: rows_n,
                 cfg: &cfg,
@@ -2387,7 +2390,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             {
                 let mut s = lock_shared(&shared_c);
                 s.rows = rows;
-                s.plot = Some(plot);
+                s.plot = Some(Arc::new(plot));
             }
             sender_c.notice();
 
