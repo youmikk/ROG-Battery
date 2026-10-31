@@ -2928,7 +2928,7 @@ mod tests {
         let mut snap = snapshot::Snapshot::default();
         snap.link_mode = "Wireless24G".to_string();
         let out = snapshot::FetchOutcome {
-            snapshot: snap,
+            snapshot: std::sync::Arc::new(snap),
             elapsed: std::time::Duration::from_millis(120),
             frames_read: 0, // 走「一帧都没读到」的早退分支，链路模式仍要抄进去
         };

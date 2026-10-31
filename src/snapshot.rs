@@ -132,7 +132,10 @@ const DONGLE_FRAMES: &[(&str, u8, u8)] = &[
 
 /// 抓取结果：快照 + 实际耗时。
 pub struct FetchOutcome {
-    pub snapshot: Snapshot,
+    /// 用 `Arc` 而不是值：命中缓存时要交给调用方一份快照，值语义就得整份
+    /// 深拷贝（17 帧 `BTreeMap<String, Vec<u8>>` + 两个解析结构），而这份
+    /// 数据在多个消费者手里都是只读的。
+    pub snapshot: std::sync::Arc<Snapshot>,
     pub elapsed: Duration,
     pub frames_read: usize,
 }
@@ -200,7 +203,7 @@ where
                     snap.taken_unix = unix_now();
                     parse_all(&mut snap);
                     return FetchOutcome {
-                        snapshot: snap,
+                        snapshot: std::sync::Arc::new(snap),
                         elapsed: started.elapsed(),
                         frames_read,
                     };
@@ -214,7 +217,7 @@ where
     parse_all(&mut snap);
 
     FetchOutcome {
-        snapshot: snap,
+        snapshot: std::sync::Arc::new(snap),
         elapsed: started.elapsed(),
         frames_read,
     }
@@ -281,7 +284,7 @@ pub fn fetch(
     parse_all(&mut snap);
 
     FetchOutcome {
-        snapshot: snap,
+        snapshot: std::sync::Arc::new(snap),
         elapsed: started.elapsed(),
         frames_read,
     }
@@ -451,14 +454,30 @@ impl Snapshot {
 
 /// 缓存管理器：内存 + 磁盘双层，带显式失效。
 pub struct SnapshotCache {
-    pub snapshot: Option<Snapshot>,
+    pub snapshot: Option<std::sync::Arc<Snapshot>>,
     pub ttl: Duration,
     /// 轻量读取的独立槽位（只含 3 帧）。
     ///
     /// **刻意与 `snapshot` 分开、也刻意不写磁盘**：3 帧的快照不是完整快照，
     /// 写进磁盘缓存会被下一个进程误当成 17 帧全量读出来用，
     /// 导致 DPI 档位、灯光、按键全显示默认值。
-    pub light: Option<Snapshot>,
+    pub light: Option<std::sync::Arc<Snapshot>>,
+}
+
+/// 内存命中的统一判定：新鲜（或允许陈旧）就把 `Arc` 交出去。
+///
+/// 抽出来是为了两条读路径共用一份逻辑，也便于测试「命中时共享同一份分配」。
+fn cached_hit(
+    slot: &Option<std::sync::Arc<Snapshot>>,
+    allow_stale: bool,
+    ttl: Duration,
+) -> Option<std::sync::Arc<Snapshot>> {
+    let s = slot.as_ref()?;
+    if allow_stale || s.is_fresh(ttl) {
+        Some(std::sync::Arc::clone(s))
+    } else {
+        None
+    }
 }
 
 impl SnapshotCache {
@@ -480,25 +499,21 @@ impl SnapshotCache {
     /// 返回 `None` 表示连第一帧都没读到 —— 即**鼠标休眠**，不是错误。
     pub fn get_light(&mut self, dev: &mut HidDevice, report_id: u8, link_mode: &str) -> Option<FetchOutcome> {
         // 1) 全量快照新鲜：它含这三项，没必要再读
-        if let Some(s) = &self.snapshot {
-            if s.is_fresh(self.ttl) {
-                return Some(FetchOutcome {
-                    frames_read: s.frames.len(),
-                    elapsed: Duration::ZERO,
-                    snapshot: s.clone(),
-                });
-            }
+        if let Some(s) = cached_hit(&self.snapshot, false, self.ttl) {
+            return Some(FetchOutcome {
+                frames_read: s.frames.len(),
+                elapsed: Duration::ZERO,
+                snapshot: s,
+            });
         }
 
         // 2) 轻量快照新鲜
-        if let Some(s) = &self.light {
-            if s.is_fresh(self.ttl) {
-                return Some(FetchOutcome {
-                    frames_read: s.frames.len(),
-                    elapsed: Duration::ZERO,
-                    snapshot: s.clone(),
-                });
-            }
+        if let Some(s) = cached_hit(&self.light, false, self.ttl) {
+            return Some(FetchOutcome {
+                frames_read: s.frames.len(),
+                elapsed: Duration::ZERO,
+                snapshot: s,
+            });
         }
 
         // 3) 真读
@@ -525,21 +540,20 @@ impl SnapshotCache {
         allow_stale: bool,
     ) -> FetchOutcome {
         // 1) 内存
-        if let Some(s) = &self.snapshot {
-            if allow_stale || s.is_fresh(self.ttl) {
-                return FetchOutcome {
-                    frames_read: s.frames.len(),
-                    elapsed: Duration::ZERO,
-                    snapshot: s.clone(),
-                };
-            }
+        if let Some(s) = cached_hit(&self.snapshot, allow_stale, self.ttl) {
+            return FetchOutcome {
+                frames_read: s.frames.len(),
+                elapsed: Duration::ZERO,
+                snapshot: s,
+            };
         }
 
         // 2) 磁盘（跨进程复用，CLI 每次都重启，没有这层缓存就没意义）
         if let Some(s) = load_disk_cache() {
             let fresh = s.wall_age_sec() < self.ttl.as_secs();
             if allow_stale || fresh {
-                self.snapshot = Some(s.clone());
+                let s = std::sync::Arc::new(s);
+                self.snapshot = Some(std::sync::Arc::clone(&s));
                 return FetchOutcome {
                     frames_read: s.frames.len(),
                     elapsed: Duration::ZERO,
@@ -553,11 +567,11 @@ impl SnapshotCache {
         if !out.snapshot.frames.is_empty() {
             save_disk_cache(&out.snapshot);
         }
-        self.snapshot = Some(out.snapshot.clone());
+        self.snapshot = Some(std::sync::Arc::clone(&out.snapshot));
         FetchOutcome {
             frames_read: out.frames_read,
             elapsed: out.elapsed,
-            snapshot: out.snapshot,
+            snapshot: std::sync::Arc::clone(&out.snapshot),
         }
     }
 
@@ -777,5 +791,27 @@ mod tests {
         assert_eq!(asked, 3, "NAK 是三帧都给否定应答，应该问完三帧");
         assert_eq!(out.frames_read, 0);
         assert_eq!(out.snapshot.failed.len(), 3);
+    }
+
+    #[test]
+    fn cached_hit_returns_the_same_allocation() {
+        let mut snap = Snapshot::default();
+        snap.taken = Some(Instant::now());
+        snap.link_mode = "Wired".to_string();
+        let arc = std::sync::Arc::new(snap);
+        let slot = Some(std::sync::Arc::clone(&arc));
+
+        let hit = cached_hit(&slot, false, Duration::from_secs(60)).expect("新鲜快照应命中");
+        assert!(
+            std::sync::Arc::ptr_eq(&hit, &arc),
+            "命中必须共享同一份快照，不能深拷贝"
+        );
+
+        // 过期且不允许陈旧 → 不命中，调用方会去读设备
+        assert!(cached_hit(&slot, false, Duration::from_secs(0)).is_none());
+        // 过期但允许陈旧 → 仍然命中
+        assert!(cached_hit(&slot, true, Duration::from_secs(0)).is_some());
+        // 空槽位永远不命中
+        assert!(cached_hit(&None, true, Duration::from_secs(60)).is_none());
     }
 }
