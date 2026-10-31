@@ -80,25 +80,29 @@ impl LampInfo {
 /// 界面每帧都会调 [`info`]，而枚举 HID 要打开十几个句柄。
 static CACHE: Mutex<Option<Option<LampInfo>>> = Mutex::new(None);
 
+/// 取缓存锁。中毒了就取回内部值继续用：这里没有「破了就不能用」的不变量，
+/// 而 `if let Ok(g) = CACHE.lock()` 的旧写法一旦中毒就会**每帧**重跑全量枚举。
+fn cache() -> std::sync::MutexGuard<'static, Option<Option<LampInfo>>> {
+    CACHE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 取探测结果（只读缓存；第一次调用才会真正探测）。
+///
+/// 探测放在**持锁**区间内：枚举要开十几个句柄、耗时几十毫秒，并发首调各跑一遍
+/// 既浪费又会在界面首帧叠出明显卡顿。持锁期间不做任何回调，不会自锁。
 pub fn info() -> Option<LampInfo> {
-    if let Ok(g) = CACHE.lock() {
-        if let Some(v) = *g {
-            return v;
-        }
+    let mut g = cache();
+    if let Some(v) = *g {
+        return v;
     }
     let v = probe();
-    if let Ok(mut g) = CACHE.lock() {
-        *g = Some(v);
-    }
+    *g = Some(v);
     v
 }
 
 /// 重新探测（「重新检测」按钮 / 设备热插拔后）。
 pub fn refresh() -> Option<LampInfo> {
-    if let Ok(mut g) = CACHE.lock() {
-        *g = None;
-    }
+    *cache() = None;
     info()
 }
 
@@ -235,6 +239,17 @@ fn read_attributes(path: &str) -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn info_is_cached_and_refresh_does_not_panic() {
+        // 有设备返回 Some、没设备返回 None，两种都要：连续两次必须一致（命中缓存），
+        // refresh 之后也要稳定，而不是每次重跑一遍枚举还不知道对不对。
+        let key = |v: Option<super::LampInfo>| v.map(|i| (i.lamp_count, i.kind));
+        assert_eq!(key(super::info()), key(super::info()));
+        let after_refresh = key(super::refresh());
+        assert_eq!(after_refresh, key(super::info()));
+    }
+
 
     #[test]
     fn 属性报表解析_实测字节() {
