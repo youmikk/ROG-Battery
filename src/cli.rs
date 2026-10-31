@@ -11,6 +11,7 @@ use crate::backup;
 use crate::hid::{is_nak, HidDevice, HidInterface, Link};
 use crate::ops::{self, ApplyReport, ErrorKind, OpsError, StateReader};
 use crate::proto::{self, State, BUTTON_NAME, BUTTON_SLOTS, DPI_STAGES, LIGHT_ZONE};
+use crate::report;
 use crate::snapshot::{FetchOutcome, SnapshotCache};
 
 // ==================== 上下文 ====================
@@ -134,7 +135,7 @@ pub fn cmd_info(ctx: &mut Ctx, dev: &mut HidDevice, force_fresh: bool) -> Result
     }
 
     println!("== 设备身份 ==");
-    proto::print_identity(
+    report::print_identity(
         &snap.identity,
         &ctx.link.mode,
         ctx.link.report_id,
@@ -154,12 +155,12 @@ pub fn cmd_info(ctx: &mut Ctx, dev: &mut HidDevice, force_fresh: bool) -> Result
     if snap.failed.contains_key("12:07:00") {
         println!("  读取失败：{}", snap.failed["12:07:00"]);
     } else {
-        proto::print_power(&snap.state);
+        report::print_power(&snap.state);
     }
 
     println!();
     println!("== 性能与设置 ==");
-    proto::print_state(&snap.state);
+    report::print_state(&snap.state);
 
     // 缓存与耗时：让人一眼看出这次是「真读了」还是「吃缓存」
     let from_cache = out.elapsed.is_zero();
@@ -262,7 +263,7 @@ pub fn cmd_backup(ctx: &mut Ctx, dev: &mut HidDevice, path: &str) -> Result<(), 
         .map_err(|e| format!("写文件 {path} 失败：{e}"))?;
 
     println!("== 备份 ==");
-    proto::print_state(&st);
+    report::print_state(&st);
     println!();
     println!("已写入 {path}（{} 个键）", backup::BACKUP_KEYS.len());
     println!(
@@ -772,7 +773,7 @@ pub fn cmd_save(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
     println!("== save（提交进 flash）==");
     // 提交前先把当前状态打印出来，让用户知道到底把什么写进去了
     let st = ctx.state(dev)?;
-    proto::print_state(&st);
+    report::print_state(&st);
 
     let rid = ctx.rid();
     // 归类规则只有一份：无应答 → Asleep、NAK → Rejected、回全零 → Ok。
@@ -896,7 +897,7 @@ pub fn cmd_raw_on(
                 return Err("设备拒绝该命令（NAK）".to_string());
             }
             println!("应答        {} 字节", m.len());
-            proto::hex_dump(&m);
+            report::hex_dump(&m);
             // 标出关键下标，偏移核对时最有用
             let n = m.len().min(24);
             println!();

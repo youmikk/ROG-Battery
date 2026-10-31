@@ -28,6 +28,7 @@ mod history;
 mod ops;
 mod paths;
 mod proto;
+mod report;
 mod settings;
 mod snapshot;
 mod tray_icon;

@@ -309,7 +309,7 @@ fn probe_interface(hid: &HidApi, path: &str) -> Result<HidInterface, String> {
 /// ASUS 自己的 `UnifyDGDevice.xml` / `deviceinfo.ini` 也只记 12 位。
 ///
 /// 代价：若将来遇到序列号里带 `-` 或空格的设备会被截断。可接受 ——
-/// **权威值来自协议字段，HID 字符串只用于显示**（见 `proto.rs::print_identity`）。
+/// **权威值来自协议字段，HID 字符串只用于显示**（见 `report::print_identity`）。
 fn read_hid_string(hid: &HidApi, h: Handle, which: u8) -> String {
     let mut buf = vec![0u16; 256];
     let cap = (buf.len() * 2) as u32;
