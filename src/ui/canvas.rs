@@ -359,6 +359,9 @@ pub fn draw_frame(
     let is_max = !parent.is_null() && crate::ui::frame::is_maximized(parent);
     let hover_btn = ui.hover_btn;
 
+    // 整帧只开一个 Graphics：5 层复用同一套渲染状态（省 4 次建上下文 + 16 次属性设置）。
+    inner.begin_frame_paint(theme);
+
     // ① 整窗底色铺底：从 0 开始铺满整个可视区，绝无未绘制黑框
     inner.paint(
         fonts,
@@ -426,6 +429,7 @@ pub fn draw_frame(
             },
         );
     }
+    inner.end_frame_paint();
     mem
 }
 

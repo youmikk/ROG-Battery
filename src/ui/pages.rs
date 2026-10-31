@@ -2874,6 +2874,9 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 #[cfg(test)]
 mod tests {
 
+    use crate::ui::dropdown::button_target_name;
+    use crate::ui::palette::palette_color;
+
     /// 曲线几何必须落在绘图区内、x 单调不减；充电点要生成底带。
     #[test]
     fn chart_geom_stays_inside_the_plot_and_marks_charging() {

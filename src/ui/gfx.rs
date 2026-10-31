@@ -176,6 +176,7 @@ extern "system" {
     ) -> i32;
     fn GdipDeleteMatrix(matrix: *mut c_void) -> i32;
     fn GdipSetWorldTransform(g: *mut c_void, matrix: *mut c_void) -> i32;
+    fn GdipResetWorldTransform(g: *mut c_void) -> i32;
 
     fn GdipCreateSolidFill(argb: u32, brush: *mut *mut c_void) -> i32;
     fn GdipDeleteBrush(brush: *mut c_void) -> i32;
@@ -1442,12 +1443,15 @@ pub struct Canvas {
     old: Gdi,
     w: i32,
     h: i32,
+    /// 本帧共享的 GDI+ 上下文（`begin_frame_paint` 建、`end_frame_paint` 删）。
+    /// 为空时 `paint` 自己建一次性上下文，画完即删。
+    frame_g: *mut c_void,
 }
 
 impl Canvas {
     /// 建一个空画布。真正的位图在第一次 `ensure` 时创建。
     pub fn new() -> Canvas {
-        Canvas { dc: 0, bmp: 0, old: 0, w: 0, h: 0 }
+        Canvas { dc: 0, bmp: 0, old: 0, w: 0, h: 0, frame_g: std::ptr::null_mut() }
     }
 
     /// 保证画布尺寸至少是 `w × h`，返回真正的绘制 DC。
@@ -1490,6 +1494,7 @@ impl Canvas {
     /// （`gdi_select_object` / `gdi_delete_object` / `gdi_delete_dc`），
     /// 它们内部才碰 FFI 并负责 `Gdi` ↔ `Handle` 的空值转换。
     pub fn release(&mut self) {
+        self.end_frame_paint();
         if self.dc != 0 {
             if self.old != 0 {
                 gdi_select_object(self.dc, self.old);
@@ -1530,6 +1535,49 @@ impl Canvas {
     /// - `view_h`：可视区高度（逻辑像素）
     ///
     /// 闭包拿到 `Painter`，坐标全是**逻辑像素、内容坐标**。
+    /// 开一帧：建一个 `Graphics` 并把渲染状态设好，供本帧后续 [`Canvas::paint`] 复用。
+    ///
+    /// 一帧要画 5 层（底色 / 页面 / 导航 / 标题栏 / 弹窗）。以前每层各建一次
+    /// `Graphics`，等于每帧 5 次 `GdipCreateFromHDC` + 20 次属性设置 + 5 次底色
+    /// 亮度计算 —— 这些跟「画哪一层」毫无关系，纯浪费。
+    pub fn begin_frame_paint(&mut self, theme: &Theme) {
+        if self.dc == 0 || !self.frame_g.is_null() {
+            return;
+        }
+        unsafe {
+            let mut g: *mut c_void = std::ptr::null_mut();
+            if GdipCreateFromHDC(self.dc, &mut g) != OK || g.is_null() {
+                return;
+            }
+            // 4 = AntiAlias
+            GdipSetSmoothingMode(g, 4);
+            // 浅底 ClearTypeGridFit(5)，深底 AntiAliasGridFit(3)
+            let bg = theme.bg;
+            let r = ((bg >> 16) & 0xFF) as u32;
+            let gg = ((bg >> 8) & 0xFF) as u32;
+            let b = (bg & 0xFF) as u32;
+            let lum = (r * 299 + gg * 587 + b * 114) / 1000;
+            GdipSetTextRenderingHint(g, if lum < 128 { 3 } else { 5 });
+            // 3 = None：不做 0.5px 偏移，避免整片发糊
+            GdipSetPixelOffsetMode(g, 3);
+            self.frame_g = g;
+        }
+    }
+
+    /// 收一帧：删掉 [`Canvas::begin_frame_paint`] 建的 `Graphics`。
+    pub fn end_frame_paint(&mut self) {
+        if self.frame_g.is_null() {
+            return;
+        }
+        unsafe { GdipDeleteGraphics(self.frame_g) };
+        self.frame_g = std::ptr::null_mut();
+    }
+
+    /// 画一层。`scale` 是 DPI 缩放（96 DPI = 1.0），`scroll` 是纵向滚动（逻辑像素），
+    /// `view_w` / `view_h` 是视口尺寸，只用于 [`Painter`] 的可见性剔除。
+    ///
+    /// 一帧内：第一层之前 [`Canvas::begin_frame_paint`]，最后一层之后
+    /// [`Canvas::end_frame_paint`]，中间各层复用同一个 `Graphics`。
     pub fn paint<F: FnOnce(&mut Painter<'_>)>(
         &mut self,
         fonts: &mut Fonts,
@@ -1544,35 +1592,27 @@ impl Canvas {
             return;
         }
         let scale = if scale > 0.1 { scale } else { 1.0 };
+        // 没有共享上下文（单测/零散重绘）就自己建一个，画完删掉。
+        let own = self.frame_g.is_null();
         unsafe {
-            let mut g: *mut c_void = std::ptr::null_mut();
-            if GdipCreateFromHDC(self.dc, &mut g) != OK || g.is_null() {
-                return;
+            let mut g = self.frame_g;
+            if own {
+                if GdipCreateFromHDC(self.dc, &mut g) != OK || g.is_null() {
+                    return;
+                }
+                GdipSetSmoothingMode(g, 4);
+                let bg = theme.bg;
+                let r = ((bg >> 16) & 0xFF) as u32;
+                let gg = ((bg >> 8) & 0xFF) as u32;
+                let b = (bg & 0xFF) as u32;
+                let lum = (r * 299 + gg * 587 + b * 114) / 1000;
+                GdipSetTextRenderingHint(g, if lum < 128 { 3 } else { 5 });
+                GdipSetPixelOffsetMode(g, 3);
             }
-            // 4 = AntiAlias
-            GdipSetSmoothingMode(g, 4);
 
-            // 文字渲染：按底色亮度挑 hint。
-            //   浅色底用 5 = ClearTypeGridFit，256 灰阶 + 像素网格吸附，最锐利；
-            //   深色底用 3 = AntiAliasGridFit，避免 ClearType 次像素在深底上留红/青彩边。
-            // 用 theme.bg 的 0xAARRGGBB 取 RGB 算亮度。
-            let bg = theme.bg;
-            let r = ((bg >> 16) & 0xFF) as u32;
-            let gg = ((bg >> 8) & 0xFF) as u32;
-            let b = (bg & 0xFF) as u32;
-            let lum = (r * 299 + gg * 587 + b * 114) / 1000;
-            let dark = lum < 128;
-            GdipSetTextRenderingHint(g, if dark { 3 } else { 5 });
-
-            // **3 = None**：不再做 0.5px 偏移。原来写 2（注释误标 Half，其实 2 =
-            // HighQuality）会让所有文字整体挪半格、糊成一片；None 才让字落回像素网格。
-            GdipSetPixelOffsetMode(g, 3);
-
-            // 世界变换：先缩放，再按 scroll 上移（内容坐标 → 设备坐标）。
-            //
-            // **单位变换时千万别设**：GDI+ 只要挂了 world transform，就会丢掉文字的
-            // GridFit（哪怕矩阵是单位阵），文字立刻变柔和——这正是"整个软件发糊"的
-            // 主因之一。scale≈1 且 scroll≈0 时本来就不需要变换，直接跳过。
+            // 世界变换 = 缩放 + 滚动。
+            // **单位变换时千万别挂**：GDI+ 只要挂着 world transform 就会丢整数
+            // GridFit，字会发糊。共享上下文时上一层的变换必须显式复位。
             let needs_xf = (scale - 1.0).abs() > 1e-3 || scroll.abs() > 1e-3;
             if needs_xf {
                 let mut m: *mut c_void = std::ptr::null_mut();
@@ -1582,6 +1622,8 @@ impl Canvas {
                     GdipSetWorldTransform(g, m);
                     GdipDeleteMatrix(m);
                 }
+            } else if !own {
+                GdipResetWorldTransform(g);
             }
 
             let clip = R::new(0.0, scroll, view_w, view_h + scroll);
@@ -1590,12 +1632,14 @@ impl Canvas {
                 let mut p = Painter { g, obj: &mut obj, fonts, t: theme, clip, scale };
                 f(&mut p);
             }
-            // 对象必须在 Graphics 之前释放：先删 Graphics 会让残留的
-            // brush/pen 失去所属设备上下文。
+            // 先释放画刷/画笔，再删 Graphics —— 反过来它们会失去所属设备上下文
             obj.clear();
-            GdipDeleteGraphics(g);
+            if own {
+                GdipDeleteGraphics(g);
+            }
         }
     }
+
 }
 
 impl Default for Canvas {
@@ -1625,6 +1669,19 @@ pub fn blit(dst: Gdi, src: Gdi, w: i32, h: i32) {
 
 #[cfg(test)]
 mod tests {
+
+    /// 没有位图（还没 ensure）时开/收帧都是空操作，不能 panic。
+    /// 有共享上下文时第二层不再自己建 Graphics —— 由渲染快照测试覆盖真实路径。
+    #[test]
+    fn frame_paint_without_bitmap_is_a_noop() {
+        let mut c = Canvas::new();
+        let t = crate::ui::theme::LIGHT;
+        c.begin_frame_paint(&t);
+        c.begin_frame_paint(&t);
+        assert!(!c.covers(64, 64));
+        c.end_frame_paint();
+        c.end_frame_paint();
+    }
     use super::*;
 
     #[test]
