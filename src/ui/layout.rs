@@ -46,8 +46,6 @@ pub const H2_H: f32 = 32.0;
 pub const R_CARD: f32 = 8.0;
 /// 控件圆角（CSS `--radius-ctl: 4px`）。
 pub const R_CTL: f32 = 4.0;
-/// 卡片间距。
-pub const GAP: f32 = 18.0;
 
 /// 设置行的最小高度（CSS `.row { min-height: 62px }`）。
 pub const ROW_H: f32 = 62.0;

@@ -954,7 +954,7 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     let mut c = Cursor::new(f);
     match ui.page {
         Page::Battery => battery(p, ui, d, f, &mut c),
-        Page::Perf => perf(p, ui, d, f, &mut c),
+        Page::Perf => perf(p, ui, d, &mut c),
         Page::Light => light(p, ui, d, f, &mut c),
         Page::Keys => keys(p, ui, d, f, &mut c),
         Page::Settings => settings(p, ui, d, f, &mut c),
@@ -1743,7 +1743,6 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         );
         c.y += 22.0;
     }
-    let _ = layout::GAP;
 }
 
 /// 当前档位下标（`active_stage` 是 1-based，可能为 0）。
@@ -2083,7 +2082,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
 
 // ───────────────────────── 性能页 ─────────────────────────
 
-fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
+fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let t = p.t;
     c.h1(p, "性能");
     let st = d.state;
@@ -2328,9 +2327,8 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         let val = (frac * 40.0 - 20.0).round() as i16;
         let ctl = row_label(p, area, "角度微调", None, 260.0);
         let track = R::new(ctl.x, ctl.cy() - 9.0, 190.0, 18.0);
-        let knob_x = p.slider(track, frac, st.is_some());
+        p.slider(track, frac, st.is_some());
         ui.hot(track, Act::SetSlide(Slide::Tune, frac));
-        let _ = knob_x;
         p.text(
             &format!("{val:+}"),
             R::new(ctl.right() - 40.0, ctl.y, 40.0, ctl.h),
@@ -2381,9 +2379,6 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         true,
     );
     c.y += nw;
-
-    let _ = f;
-    let _ = t;
 }
 
 // ───────────────────────── 灯光页 ─────────────────────────
