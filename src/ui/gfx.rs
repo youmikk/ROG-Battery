@@ -1511,6 +1511,15 @@ impl Canvas {
         (self.w, self.h)
     }
 
+    /// 位图是否已经够大（够大就不必重新要屏幕 DC 当格式模板）。
+    ///
+    /// `ensure` 在位图够大时直接返回，但调用方为了给它递模板 DC 会先
+    /// `GetDC(NULL)` —— 那是每帧两次系统调用，尺寸不变时纯属白花。
+    /// 60fps 的充电动效下这是每秒 120 次多余的 GDI 调用。
+    pub fn covers(&self, w: i32, h: i32) -> bool {
+        self.dc != 0 && self.w >= w.max(1) && self.h >= h.max(1)
+    }
+
     /// 在画布上开一次 GDI+ 绘制。
     ///
     /// - `scale`：DPI 缩放（96 DPI = 1.0）
@@ -1617,6 +1626,14 @@ pub fn blit(dst: Gdi, src: Gdi, w: i32, h: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 空画布永远需要重建位图() {
+        // 没建过位图时必须让调用方去要模板 DC（covers 只负责「已经有了就别说要」）。
+        let c = Canvas::new();
+        assert!(!c.covers(100, 100));
+        assert_eq!(c.size(), (0, 0));
+    }
 
     #[test]
     fn 矩形几何() {

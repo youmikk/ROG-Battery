@@ -315,12 +315,19 @@ pub fn draw_frame(
     // 建内存位图要一个「参考 DC」。**不能用空句柄**：
     // `CreateCompatibleBitmap(NULL, w, h)` 会返回一张 **1bpp 单色**位图 ——
     // 它不报错，只是画出来全是黑白噪点。所以必须取一次屏幕 DC。
-    // 取/还各一次系统调用，比缓存一个长期句柄安全得多（屏幕 DC 不该长持）。
-    let sdc = unsafe { crate::win32::GetDC(std::ptr::null_mut()) };
-    let mem = inner.ensure(sdc as crate::ui::gfx::Gdi, a.pixel_w, a.pixel_h);
-    if !sdc.is_null() {
-        unsafe { crate::win32::ReleaseDC(std::ptr::null_mut(), sdc) };
-    }
+    //
+    // 位图只增不减，尺寸没变时 `ensure` 会原样返回，模板 DC 根本用不上 ——
+    // 这时连取都不用取（`covers` 先判，省掉每帧一次 GetDC/ReleaseDC）。
+    let mem = if inner.covers(a.pixel_w, a.pixel_h) {
+        inner.ensure(0, a.pixel_w, a.pixel_h)
+    } else {
+        let sdc = unsafe { crate::win32::GetDC(std::ptr::null_mut()) };
+        let mem = inner.ensure(sdc as crate::ui::gfx::Gdi, a.pixel_w, a.pixel_h);
+        if !sdc.is_null() {
+            unsafe { crate::win32::ReleaseDC(std::ptr::null_mut(), sdc) };
+        }
+        mem
+    };
     if mem == 0 {
         return 0;
     }
