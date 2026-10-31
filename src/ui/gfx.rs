@@ -616,8 +616,137 @@ pub enum Align {
 ///
 /// **所有坐标都是逻辑像素、内容坐标**（y=0 是内容顶部，不是窗口顶部）。
 /// 缩放和滚动由 Graphics 的世界变换处理，见模块文档。
+/// 一帧内复用的 GDI+ 对象表。
+///
+/// 绘制层原来每个图元都现场 `GdipCreateSolidFill` / `GdipCreatePen1` 再立刻
+/// `Delete`，单帧数百对 FFI 调用。同一帧里颜色种类其实很少（十几种），所以按
+/// 参数缓存起来、帧末统一释放，命中率接近 100%。
+///
+/// 生命周期严格限定在一帧内（`paint()` 建、画完 `clear()`）：GDI+ 对象跨帧
+/// 持有会被 DPI 变化或设备丢失搞成野句柄，收益不值这个风险。
+#[derive(Default)]
+struct ObjCache {
+    brushes: Vec<(u32, *mut c_void)>,
+    /// 键：`(argb, width 的位模式, 是否圆头圆角)`。
+    pens: Vec<((u32, u32, bool), *mut c_void)>,
+    /// 键：`(水平对齐, 是否单行)`。
+    fmts: Vec<((i32, bool), *mut c_void)>,
+}
+
+impl ObjCache {
+    fn brush(&mut self, argb: u32) -> *mut c_void {
+        for (c, h) in &self.brushes {
+            if *c == argb {
+                return *h;
+            }
+        }
+        let mut b: *mut c_void = std::ptr::null_mut();
+        if unsafe { GdipCreateSolidFill(argb, &mut b) } != OK {
+            return std::ptr::null_mut();
+        }
+        self.brushes.push((argb, b));
+        b
+    }
+
+    fn pen(&mut self, argb: u32, width: f32) -> *mut c_void {
+        self.pen_inner(argb, width, false)
+    }
+
+    /// 圆头圆角笔：折线与曲线要它，否则拐角出尖刺。
+    ///
+    /// 圆头和方头必须有各自的缓存条目 —— 圆头笔帽会把线端各延长半个线宽，
+    /// 拿圆头笔去画 UI 边框会在四个角上露出小凸起。
+    fn pen_round(&mut self, argb: u32, width: f32) -> *mut c_void {
+        self.pen_inner(argb, width, true)
+    }
+
+    fn pen_inner(&mut self, argb: u32, width: f32, round: bool) -> *mut c_void {
+        let key = (argb, width.to_bits(), round);
+        for (k, h) in &self.pens {
+            if *k == key {
+                return *h;
+            }
+        }
+        let mut p: *mut c_void = std::ptr::null_mut();
+        if unsafe { GdipCreatePen1(argb, width, 2, &mut p) } != OK {
+            return std::ptr::null_mut();
+        }
+        if round {
+            unsafe {
+                // 2 = Round
+                GdipSetPenLineJoin(p, 2);
+                GdipSetPenStartCap(p, 2);
+                GdipSetPenEndCap(p, 2);
+            }
+        }
+        self.pens.push((key, p));
+        p
+    }
+
+    /// 单行文字格式（超宽省略号 + 禁折行）。`align` 0=左 1=中 2=右。
+    fn fmt_oneline(&mut self, align: i32) -> *mut c_void {
+        self.fmt_inner(align, true)
+    }
+
+    /// 多行文字格式（竖直靠上、允许折行）。
+    fn fmt_wrap(&mut self) -> *mut c_void {
+        self.fmt_inner(0, false)
+    }
+
+    fn fmt_inner(&mut self, align: i32, oneline: bool) -> *mut c_void {
+        let key = (align, oneline);
+        for (k, h) in &self.fmts {
+            if *k == key {
+                return *h;
+            }
+        }
+        let mut fmt: *mut c_void = std::ptr::null_mut();
+        if unsafe { GdipCreateStringFormat(0, 0, &mut fmt) } != OK {
+            return std::ptr::null_mut();
+        }
+        unsafe {
+            GdipSetStringFormatAlign(fmt, align);
+            if oneline {
+                // 1 = Center（竖直居中）
+                GdipSetStringFormatLineAlign(fmt, 1);
+                // 3 = EllipsisCharacter：超宽截断加省略号
+                GdipSetStringFormatTrimming(fmt, 3);
+                // 0x0000_1000 = StringFormatFlagsNoWrap。光设 Trimming 不够：
+                // GDI+ 默认允许自动折行，一串没有空格的连续字符（输入框里的
+                // `400900`）会在框宽处硬断成两行并溢出框外。
+                GdipSetStringFormatFlags(fmt, 0x0000_1000);
+            } else {
+                // 0 = Near（竖直靠上）
+                GdipSetStringFormatLineAlign(fmt, 0);
+            }
+        }
+        self.fmts.push((key, fmt));
+        fmt
+    }
+
+    fn clear(&mut self) {
+        for (_, h) in self.brushes.drain(..) {
+            unsafe {
+                GdipDeleteBrush(h);
+            }
+        }
+        for (_, h) in self.pens.drain(..) {
+            unsafe {
+                GdipDeletePen(h);
+            }
+        }
+        for (_, h) in self.fmts.drain(..) {
+            unsafe {
+                GdipDeleteStringFormat(h);
+            }
+        }
+    }
+}
+
 pub struct Painter<'a> {
     g: *mut c_void,
+    /// 本帧的 GDI+ 对象缓存（见 [`ObjCache`]）。
+    obj: &'a mut ObjCache,
     fonts: &'a mut Fonts,
     pub t: &'a Theme,
     /// 可见区域（内容坐标）。页面用它跳过滚出屏幕的卡片。
@@ -644,13 +773,12 @@ impl<'a> Painter<'a> {
         if !self.visible(r) {
             return;
         }
+        let b = self.obj.brush(color);
+        if b.is_null() {
+            return;
+        }
         unsafe {
-            let mut b: *mut c_void = std::ptr::null_mut();
-            if GdipCreateSolidFill(color, &mut b) != OK {
-                return;
-            }
             GdipFillRectangle(self.g, b, r.x, r.y, r.w, r.h);
-            GdipDeleteBrush(b);
         }
     }
 
@@ -659,12 +787,13 @@ impl<'a> Painter<'a> {
         if !self.visible(r) {
             return;
         }
+        let b = self.obj.brush(color);
+        if b.is_null() {
+            return;
+        }
+        let g = self.g;
         self.with_path(r, radius, |p| unsafe {
-            let mut b: *mut c_void = std::ptr::null_mut();
-            if GdipCreateSolidFill(color, &mut b) == OK {
-                GdipFillPath(self.g as *mut c_void, b, p);
-                GdipDeleteBrush(b);
-            }
+            GdipFillPath(g, b, p);
         });
     }
 
@@ -674,20 +803,20 @@ impl<'a> Painter<'a> {
             return;
         }
         let g = self.g;
+        let b = self.obj.brush(fill);
+        // alpha = 0 的描边等于「不描边」。透明色的边框画出来其实看不见，
+        // 但会多一次 path stroke，能省就省。
+        let pen = if stroke >> 24 != 0 {
+            self.obj.pen(stroke, 1.0)
+        } else {
+            std::ptr::null_mut()
+        };
         self.with_path(r, radius, |p| unsafe {
-            let mut b: *mut c_void = std::ptr::null_mut();
-            if GdipCreateSolidFill(fill, &mut b) == OK {
+            if !b.is_null() {
                 GdipFillPath(g, b, p);
-                GdipDeleteBrush(b);
             }
-            // alpha = 0 的描边等于「不描边」。透明色的边框画出来其实看不见，
-            // 但会多一次 path stroke，能省就省。
-            if stroke >> 24 != 0 {
-                let mut pen: *mut c_void = std::ptr::null_mut();
-                if GdipCreatePen1(stroke, 1.0, 2, &mut pen) == OK {
-                    GdipDrawPath(g, pen, p);
-                    GdipDeletePen(pen);
-                }
+            if !pen.is_null() {
+                GdipDrawPath(g, pen, p);
             }
         });
     }
@@ -698,12 +827,12 @@ impl<'a> Painter<'a> {
             return;
         }
         let g = self.g;
+        let pen = self.obj.pen(color, width);
+        if pen.is_null() {
+            return;
+        }
         self.with_path(r, radius, |p| unsafe {
-            let mut pen: *mut c_void = std::ptr::null_mut();
-            if GdipCreatePen1(color, width, 2, &mut pen) == OK {
-                GdipDrawPath(g, pen, p);
-                GdipDeletePen(pen);
-            }
+            GdipDrawPath(g, pen, p);
         });
     }
 
@@ -737,13 +866,12 @@ impl<'a> Painter<'a> {
         if !self.visible(r) || color >> 24 == 0 {
             return;
         }
+        let pen = self.obj.pen(color, width);
+        if pen.is_null() {
+            return;
+        }
         unsafe {
-            let mut pen: *mut c_void = std::ptr::null_mut();
-            if GdipCreatePen1(color, width, 2, &mut pen) != OK {
-                return;
-            }
             GdipDrawLine(self.g, pen, x1, y1, x2, y2);
-            GdipDeletePen(pen);
         }
     }
 
@@ -764,17 +892,14 @@ impl<'a> Painter<'a> {
         if !self.visible(R::new(x_min, y_min, x_max - x_min, y_max - y_min)) {
             return;
         }
+        let pen = self.obj.pen_round(color, width);
+        if pen.is_null() {
+            return;
+        }
         unsafe {
-            let mut pen: *mut c_void = std::ptr::null_mut();
-            if GdipCreatePen1(color, width, 2, &mut pen) != OK {
-                return;
-            }
-            // 2 = Round join：折线拐角是圆的，不会出现尖角的毛刺
-            GdipSetPenLineJoin(pen, 2);
             for w in pts.windows(2) {
                 GdipDrawLine(self.g, pen, w[0].0, w[0].1, w[1].0, w[1].1);
             }
-            GdipDeletePen(pen);
         }
     }
 
@@ -802,14 +927,9 @@ impl<'a> Painter<'a> {
             for w in pts.windows(2) {
                 GdipAddPathLine(path, w[0].0, w[0].1, w[1].0, w[1].1);
             }
-            let mut pen: *mut c_void = std::ptr::null_mut();
-            if GdipCreatePen1(color, width, 2, &mut pen) == OK {
-                // 2 = Round：拐角与两端都是圆的
-                GdipSetPenLineJoin(pen, 2);
-                GdipSetPenStartCap(pen, 2);
-                GdipSetPenEndCap(pen, 2);
+            let pen = self.obj.pen_round(color, width);
+            if !pen.is_null() {
                 GdipDrawPath(self.g, pen, path);
-                GdipDeletePen(pen);
             }
             GdipDeletePath(path);
         }
@@ -1040,15 +1160,15 @@ impl<'a> Painter<'a> {
             return;
         }
         unsafe {
-            let mut pen: *mut c_void = std::ptr::null_mut();
-            if GdipCreatePen1(color, width, 2, &mut pen) == OK {
+            // 平头笔：色环由 36 段圆弧拼成，圆头笔帽会让相邻段互相咬进去
+            let pen = self.obj.pen(color, width);
+            if !pen.is_null() {
                 let mut path: *mut c_void = std::ptr::null_mut();
                 if GdipCreatePath(0, &mut path) == OK {
                     GdipAddPathArc(path, box_r.x, box_r.y, box_r.w, box_r.h, start_deg, sweep_deg);
                     GdipDrawPath(self.g, pen, path);
                     GdipDeletePath(path);
                 }
-                GdipDeletePen(pen);
             }
         }
     }
@@ -1065,35 +1185,18 @@ impl<'a> Painter<'a> {
         }
         let u: Vec<u16> = s.encode_utf16().collect();
         let layout = RectF { x: r.x, y: r.y, w: r.w, h: r.h };
+        let a = match align {
+            Align::Left => 0,
+            Align::Center => 1,
+            Align::Right => 2,
+        };
+        let fmt = self.obj.fmt_oneline(a);
+        let brush = self.obj.brush(color);
+        if fmt.is_null() || brush.is_null() {
+            return;
+        }
         unsafe {
-            let mut brush: *mut c_void = std::ptr::null_mut();
-            if GdipCreateSolidFill(color, &mut brush) != OK {
-                return;
-            }
-            let mut fmt: *mut c_void = std::ptr::null_mut();
-            if GdipCreateStringFormat(0, 0, &mut fmt) == OK {
-                let a = match align {
-                    Align::Left => 0,
-                    Align::Center => 1,
-                    Align::Right => 2,
-                };
-                GdipSetStringFormatAlign(fmt, a);
-                // 1 = Center（竖直居中）
-                GdipSetStringFormatLineAlign(fmt, 1);
-                // 3 = EllipsisCharacter：超宽截断加省略号，不换行
-                GdipSetStringFormatTrimming(fmt, 3);
-                // 0x0000_1000 = StringFormatFlagsNoWrap。
-                //
-                // 光设 Trimming **不够**：GDI+ 默认允许自动折行，一串没有空格
-                // 的连续字符（输入框里的 `400900`）会在框宽处硬断成两行，
-                // 第二行还溢出到框外。`text()` 语义就是「画一行」，必须显式禁折行。
-                GdipSetStringFormatFlags(fmt, 0x0000_1000);
-            }
             GdipDrawString(self.g, u.as_ptr(), u.len() as i32, font, &layout, fmt, brush);
-            if !fmt.is_null() {
-                GdipDeleteStringFormat(fmt);
-            }
-            GdipDeleteBrush(brush);
         }
     }
 
@@ -1108,22 +1211,13 @@ impl<'a> Painter<'a> {
         }
         let u: Vec<u16> = s.encode_utf16().collect();
         let layout = RectF { x: r.x, y: r.y, w: r.w, h: r.h };
+        let fmt = self.obj.fmt_wrap();
+        let brush = self.obj.brush(color);
+        if fmt.is_null() || brush.is_null() {
+            return;
+        }
         unsafe {
-            let mut brush: *mut c_void = std::ptr::null_mut();
-            if GdipCreateSolidFill(color, &mut brush) != OK {
-                return;
-            }
-            let mut fmt: *mut c_void = std::ptr::null_mut();
-            if GdipCreateStringFormat(0, 0, &mut fmt) == OK {
-                GdipSetStringFormatAlign(fmt, 0);
-                // 0 = Near（竖直靠上）
-                GdipSetStringFormatLineAlign(fmt, 0);
-            }
             GdipDrawString(self.g, u.as_ptr(), u.len() as i32, font, &layout, fmt, brush);
-            if !fmt.is_null() {
-                GdipDeleteStringFormat(fmt);
-            }
-            GdipDeleteBrush(brush);
         }
     }
 
@@ -1266,12 +1360,12 @@ impl<'a> Painter<'a> {
         if !self.visible(r) {
             return;
         }
+        let pen = self.obj.pen(color, width);
+        if pen.is_null() {
+            return;
+        }
         unsafe {
-            let mut pen: *mut c_void = std::ptr::null_mut();
-            if GdipCreatePen1(color, width, 2, &mut pen) == OK {
-                GdipDrawEllipse(self.g, pen, r.x, r.y, r.w, r.h);
-                GdipDeletePen(pen);
-            }
+            GdipDrawEllipse(self.g, pen, r.x, r.y, r.w, r.h);
         }
     }
 
@@ -1481,8 +1575,14 @@ impl Canvas {
             }
 
             let clip = R::new(0.0, scroll, view_w, view_h + scroll);
-            let mut p = Painter { g, fonts, t: theme, clip, scale };
-            f(&mut p);
+            let mut obj = ObjCache::default();
+            {
+                let mut p = Painter { g, obj: &mut obj, fonts, t: theme, clip, scale };
+                f(&mut p);
+            }
+            // 对象必须在 Graphics 之前释放：先删 Graphics 会让残留的
+            // brush/pen 失去所属设备上下文。
+            obj.clear();
             GdipDeleteGraphics(g);
         }
     }
@@ -1602,8 +1702,10 @@ mod tests {
             assert_ne!(dc, 0, "CreateCompatibleDC 失败");
             assert_eq!(GdipCreateFromHDC(dc, &mut g), OK);
             let t = &super::super::theme::LIGHT;
+            let mut obj = ObjCache::default();
             let mut p = Painter {
                 g,
+                obj: &mut obj,
                 fonts: &mut fonts,
                 t,
                 clip: R::new(0.0, 0.0, 800.0, 600.0),
@@ -1933,6 +2035,36 @@ mod tests {
             }
         }
         rows
+    }
+
+    #[test]
+    fn 绘制对象缓存命中后不再新建() {
+        // 同一帧里同一颜色/线宽会被反复用（背景、分隔线、几十处文字），
+        // 缓存必须让第二次调用直接返回同一个句柄。
+        assert!(start());
+        let mut obj = ObjCache::default();
+
+        let b1 = obj.brush(0xFF112233);
+        let b2 = obj.brush(0xFF112233);
+        assert!(!b1.is_null());
+        assert_eq!(b1, b2, "同色画刷没有复用");
+        assert_ne!(b1, obj.brush(0xFF445566), "不同色必须是不同画刷");
+        assert_eq!(obj.brushes.len(), 2);
+
+        let p1 = obj.pen(0xFF000000, 1.0);
+        assert_eq!(p1, obj.pen(0xFF000000, 1.0), "同参数画笔没有复用");
+        // 圆头/平头是不同条目：拿圆头笔画 UI 边框会在四角露出凸起
+        assert_ne!(p1, obj.pen_round(0xFF000000, 1.0));
+        // 线宽不同的必须是不同条目
+        assert_ne!(p1, obj.pen(0xFF000000, 2.0));
+
+        let f1 = obj.fmt_oneline(1);
+        assert_eq!(f1, obj.fmt_oneline(1), "同对齐的字符串格式没有复用");
+        assert_ne!(f1, obj.fmt_wrap());
+
+        // clear 之后句柄全部释放，表清空（下一次 paint 重新建）
+        obj.clear();
+        assert!(obj.brushes.is_empty() && obj.pens.is_empty() && obj.fmts.is_empty());
     }
 
     #[test]
