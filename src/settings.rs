@@ -173,12 +173,12 @@ pub fn load() -> Settings {
 }
 
 /// 写设置。失败时返回错误（调用方决定是警告还是致命）。
+///
+/// 走原子写：中途崩溃留下半份 settings.ini，下次启动会把整份配置读成默认值。
 #[allow(dead_code)]
 pub fn save(s: &Settings) -> Result<(), String> {
-    let dir = paths::config_dir();
-    paths::ensure_dir(&dir)?;
     let p = paths::settings_file();
-    std::fs::write(&p, s.to_text()).map_err(|e| format!("写 {} 失败：{e}", p.display()))
+    paths::write_atomic(&p, s.to_text().as_bytes())
 }
 
 /// 用于备份文件名的**本地**时间戳 `YYYYMMDD-HHMMSS`。

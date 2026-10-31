@@ -257,13 +257,10 @@ pub fn cmd_backup(ctx: &mut Ctx, dev: &mut HidDevice, path: &str) -> Result<(), 
 
     let text = backup::render(&st, &ctx.link.mode, ctx.link.report_id, &timestamp);
 
-    // 备份目录不存在就先建（配置/数据放系统标准位置，不是 exe 同目录）
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            crate::paths::ensure_dir(parent)?;
-        }
-    }
-    std::fs::write(path, text.as_bytes()).map_err(|e| format!("写文件 {path} 失败：{e}"))?;
+    // 备份目录不存在就先建（配置/数据放系统标准位置，不是 exe 同目录）；
+    // 走原子写 —— 备份是 set_lod 重置标定之后唯一的退路，不能留半份。
+    crate::paths::write_atomic(std::path::Path::new(path), text.as_bytes())
+        .map_err(|e| format!("写文件 {path} 失败：{e}"))?;
 
     println!("== 备份 ==");
     proto::print_state(&st);

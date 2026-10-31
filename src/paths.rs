@@ -124,6 +124,31 @@ pub fn ensure_dir(p: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(p).map_err(|e| format!("无法创建目录 {}：{e}", p.display()))
 }
 
+/// 原子写文件：先写同目录的临时文件，再整份改名覆盖。
+///
+/// 直接 `fs::write` 中途崩溃/断电会留下截断文件；备份和设置都是「唯一的
+/// 恢复手段」，截断等于把用户的后路烧掉。改名在同一卷上是原子的。
+pub fn write_atomic(p: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            ensure_dir(parent)?;
+        }
+    }
+    let mut tmp = p.to_path_buf().into_os_string();
+    tmp.push(format!(".tmp{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写临时文件 {} 失败：{e}", tmp.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, p) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("替换 {} 失败：{e}", p.display()));
+    }
+    Ok(())
+}
+
 /// 把用户给的路径解析成绝对路径。
 ///
 /// - 空 / 只是文件名 → 落到备份目录
@@ -140,5 +165,28 @@ pub fn resolve_backup_path(arg: Option<&str>, default_name: &str) -> PathBuf {
                 p
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 原子写覆盖旧内容且不留临时文件() {
+        let dir = PathBuf::from("target/test-atomic");
+        let f = dir.join("a.txt");
+        write_atomic(&f, b"old").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"old");
+        write_atomic(&f, b"new-content").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"new-content");
+        // 目录里只应剩目标文件
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.txt".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
