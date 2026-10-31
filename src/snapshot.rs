@@ -412,16 +412,21 @@ impl Snapshot {
             } else if let Some(rest) = line.strip_prefix("frame ") {
                 let mut it = rest.splitn(2, ' ');
                 let key = it.next().unwrap_or("").to_string();
-                let hex = it.next().unwrap_or("");
+                // 按字节处理：缓存文件被手改/写坏时可能混进多字节字符，用 &str 切片
+                // （`&hex[i..i+2]`）会在非字符边界 panic，而 load_disk_cache 用 .ok()
+                // 接不住 panic。
+                let hex = it.next().unwrap_or("").trim().as_bytes();
                 if key.is_empty() || hex.len() % 2 != 0 {
                     continue;
                 }
                 let mut bytes = Vec::with_capacity(hex.len() / 2);
                 let mut ok = true;
                 for i in (0..hex.len()).step_by(2) {
-                    match u8::from_str_radix(&hex[i..i + 2], 16) {
-                        Ok(b) => bytes.push(b),
-                        Err(_) => {
+                    let hi = (hex[i] as char).to_digit(16);
+                    let lo = (hex[i + 1] as char).to_digit(16);
+                    match (hi, lo) {
+                        (Some(h), Some(l)) => bytes.push(((h as u8) << 4) | l as u8),
+                        _ => {
                             ok = false;
                             break;
                         }
@@ -591,6 +596,24 @@ fn save_disk_cache(s: &Snapshot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 缓存文件里混进多字节字符时不能 panic，只能跳过那一行。
+    ///
+    /// 回归：过去用 `&hex[i..i+2]` 按字节切 `&str`，遇到「é」这类字符会
+    /// `byte index 1 is not a char boundary` 直接 panic，而 `load_disk_cache`
+    /// 用 `.ok()` 接不住 panic。
+    #[test]
+    fn cache_with_multibyte_garbage_does_not_panic() {
+        let text = format!(
+            "{CACHE_MAGIC}\ntaken_unix=1761900000\nlink_mode=Wireless24G\nreport_id=3\nframe 12:07:00 é1é1\nframe 12:04:00 0312\n"
+        );
+        let snap = Snapshot::from_cache_text(&text).expect("坏行应被跳过而不是整体失败");
+        assert!(
+            !snap.frames.contains_key("12:07:00"),
+            "含非十六进制字符的帧必须被丢弃"
+        );
+        assert!(snap.frames.contains_key("12:04:00"), "好行仍要解析出来");
+    }
 
     /// 轻量读取的帧清单必须只含 3 项，且电量排第一。
     ///
