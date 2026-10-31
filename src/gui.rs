@@ -70,7 +70,7 @@ use crate::win32;
 /// 注意：托盘图标现在由 `TrayCtl` 自己画（要固定 GUID），不再走这个字节流。
 /// 留着它是为了**编译期校验** `assets/tray.ico` 一定存在且被打进 exe ——
 /// `assets/app.rc` 靠它生成 exe 的图标资源，删了会让构建悄悄少一份资源。
-#[allow(dead_code)]
+#[used]
 static TRAY_ICON: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/tray.ico"));
 
 /// 窗口标题。用产品名，不写具体型号 —— 这是个通用 ROG 鼠标工具。
@@ -114,15 +114,6 @@ enum Status {
     Busy,
     /// 真的出错了，要用户去排查。
     Error(String),
-}
-
-impl Status {
-    /// 用没用得上 `is_busy` 都不影响语义：队列本身已经承担了「有活在排队」
-    /// 的表达，`Busy` 只是给界面看的显示态。
-    #[allow(dead_code)]
-    fn is_busy(&self) -> bool {
-        matches!(self, Status::Busy)
-    }
 }
 
 /// 一条要写设备的命令。
@@ -203,7 +194,8 @@ struct CmdResult {
     label: String,
     ok: Option<String>,
     err: Option<String>,
-    #[allow(dead_code)]
+    /// 失败时该提醒用户做什么（「请确认鼠标接收器已插好」这类）。
+    /// 由后台线程在出事那一刻查好，避免把 [`crate::ops::ErrorKind`] 搬过线程边界。
     hint: &'static str,
 }
 
@@ -219,12 +211,19 @@ impl CmdResult {
                 }
             }
             (None, Some(m)) => {
-                if m.contains("错误码 5") || m.contains("Win32 错误码 5") {
+                let base = if m.contains("错误码 5") || m.contains("Win32 错误码 5") {
                     format!("✘ {}失败：权限不足 (错误 5)", self.label)
                 } else if m.starts_with("无法写入") || m.starts_with("打开") {
                     format!("✘ {}：{m}", self.label)
                 } else {
                     format!("✘ {}失败：{m}", self.label)
+                };
+                // `hint` 以前只写不读 —— 后台线程辛苦查出的「请确认接收器已插好」
+                // 从来没到过用户眼前。失败时补在后面，成功时无关。
+                if self.hint.is_empty() {
+                    base
+                } else {
+                    format!("{base}；{}", self.hint)
                 }
             }
             (None, None) => format!("✔ {}", self.label),
@@ -1350,13 +1349,6 @@ impl SavePathKind {
         match self {
             SavePathKind::History => "历史文件",
             SavePathKind::Settings => "设置文件",
-        }
-    }
-    #[allow(dead_code)]
-    fn default_file(self) -> &'static str {
-        match self {
-            SavePathKind::History => "history.tsv",
-            SavePathKind::Settings => "settings.ini",
         }
     }
     fn current(self) -> std::path::PathBuf {
@@ -2768,6 +2760,35 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn toast_appends_hint_only_on_failure() {
+        let ok = CmdResult {
+            label: "备份".into(),
+            ok: Some("已生效".into()),
+            err: None,
+            hint: "不该出现",
+        };
+        assert_eq!(ok.toast(), "✔ 备份已生效");
+
+        let bad = CmdResult {
+            label: "备份".into(),
+            ok: None,
+            err: Some("设备无应答".into()),
+            hint: "请确认鼠标接收器已插好",
+        };
+        let t = bad.toast();
+        assert!(t.contains("设备无应答"), "{t}");
+        assert!(t.contains("请确认鼠标接收器已插好"), "{t}");
+
+        let no_hint = CmdResult {
+            label: "备份".into(),
+            ok: None,
+            err: Some("设备无应答".into()),
+            hint: "",
+        };
+        assert!(!no_hint.toast().contains('；'), "{}", no_hint.toast());
+    }
     /// 按键页的占位符写的是「如 01F0」、警告行写的是「填 0000」，
     /// 用户照着输就该成功。这条测试锁死「裸十六进制」这个约定 ——
     /// 之前用十进制解析时，`01F0` 直接失败并误报「输入框是空的」。
