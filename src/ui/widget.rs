@@ -1214,4 +1214,18 @@ mod tests {
         assert_eq!(u.on_release(20.0, 110.0, 0.0), Some(Act::Nav(Page::Battery)));
     }
 
+    #[test]
+    fn focus_then_typing_replaces_device_value() {
+        // 回归：点进输入框（Act::Focus → begin_edit）之后敲字必须能改草稿，
+        // 且第一个字符替换设备原值（等价「全选后输入」），否则 400 改 1600 会变 4001。
+        let mut u = Ui::default();
+        u.begin_frame();
+        u.begin_edit(Edit::Dpi(0), "800".to_string());
+        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("800"));
+        assert!(u.type_char('1'));
+        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("1"));
+        assert!(u.type_char('6'));
+        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("16"));
+    }
+
 }
