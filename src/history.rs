@@ -13,6 +13,10 @@ use std::sync::Mutex;
 
 use crate::win32;
 
+mod format;
+
+pub use format::{ago_text, dur_short, dur_text, reason_text, Why};
+
 // ==================== 常量（逐字照抄 C# 版） ====================
 
 /// 保留最近 48 小时（覆盖两晚）。
@@ -665,17 +669,6 @@ const STICKY_MAX_AGE_SEC: i64 = 1800;
 /// 最近一次成功估算。用于 [`predict_sticky`] 的「沿用」。
 static LAST_GOOD: Mutex<Option<(Estimate, i64)>> = Mutex::new(None);
 
-/// 把秒数说成人话（"刚刚" / "12 分钟" / "1 小时"）。
-pub fn ago_text(sec: i64) -> String {
-    if sec < 60 {
-        "刚刚".to_string()
-    } else if sec < 3600 {
-        format!("{} 分钟", sec / 60)
-    } else {
-        format!("{} 小时", sec / 3600)
-    }
-}
-
 /// 带「沿用」的预测：计算本身仍交给 [`predict_from_rows`]，这里只加一层缓存。
 ///
 /// 为什么需要：一次刷新里算不出来（刚跳变 / 刚插拔 / 一瞬间读不到设备）时，
@@ -737,9 +730,9 @@ pub fn predict_from_rows(
         return Estimate {
             samples: phase.len(),
             text: if rows.len() >= 3 {
-                just_switched_text(now_charging)
+                reason_text(Why::JustSwitched, now_charging)
             } else {
-                not_enough_text(now_charging)
+                reason_text(Why::NotEnough, now_charging)
             },
             ..Default::default()
         };
@@ -755,7 +748,7 @@ pub fn predict_from_rows(
     if conflict {
         return Estimate {
             samples: phase.len(),
-            text: jumped_text(now_charging),
+            text: reason_text(Why::Jumped, now_charging),
             ..Default::default()
         };
     }
@@ -766,7 +759,7 @@ pub fn predict_from_rows(
     if sel.len() < 3 {
         return Estimate {
             samples: sel.len(),
-            text: jumped_text(now_charging),
+            text: reason_text(Why::Jumped, now_charging),
             ..Default::default()
         };
     }
@@ -802,7 +795,7 @@ fn predict_from_series(
     if sel.len() < 3 {
         return Estimate {
             samples: sel.len(),
-            text: not_enough_text(now_charging),
+            text: reason_text(Why::NotEnough, now_charging),
             ..Default::default()
         };
     }
@@ -828,7 +821,7 @@ fn predict_from_series(
         return Estimate {
             samples: sel.len(),
             span_minutes,
-            text: no_change_text(now_charging),
+            text: reason_text(Why::NoChange, now_charging),
             ..Default::default()
         };
     }
@@ -849,7 +842,7 @@ fn predict_from_series(
         return Estimate {
             samples: sel.len(),
             span_minutes,
-            text: span_too_short_text(now_charging),
+            text: reason_text(Why::SpanTooShort, now_charging),
             ..Default::default()
         };
     }
@@ -859,7 +852,7 @@ fn predict_from_series(
         return Estimate {
             samples: sel.len(),
             span_minutes,
-            text: too_slow_text(now_charging),
+            text: reason_text(Why::TooSlow, now_charging),
             ..Default::default()
         };
     }
@@ -964,105 +957,6 @@ fn direction_start(rows: &[HistoryRow], charging: bool) -> usize {
         prev = Some(r.level);
     }
     start
-}
-
-fn dur_text(hours: f64) -> String {
-    let mut total_min = (hours * 60.0).round() as i64;
-    if total_min < 1 {
-        total_min = 1;
-    }
-    let days = total_min / (24 * 60);
-    let rem = total_min % (24 * 60);
-    let h = rem / 60;
-    let m = rem % 60;
-    if days > 0 {
-        if h == 0 {
-            format!("{days} 天")
-        } else {
-            format!("{days} 天 {h} 小时")
-        }
-    } else if h == 0 {
-        format!("{m} 分钟")
-    } else if m == 0 {
-        format!("{h} 小时")
-    } else {
-        format!("{h} 小时 {m} 分钟")
-    }
-}
-
-/// `dur_text` 的紧凑版：环下面那格只有一百多像素，省掉「钟」字就够用。
-fn dur_short(hours: f64) -> String {
-    let mut total_min = (hours * 60.0).round() as i64;
-    if total_min < 1 {
-        total_min = 1;
-    }
-    let days = total_min / (24 * 60);
-    let rem = total_min % (24 * 60);
-    let h = rem / 60;
-    let m = rem % 60;
-    if days > 0 {
-        if h == 0 {
-            format!("{days} 天")
-        } else {
-            format!("{days} 天 {h} 小时")
-        }
-    } else if h == 0 {
-        format!("{m} 分钟")
-    } else if m == 0 {
-        format!("{h} 小时")
-    } else {
-        format!("{h} 小时 {m} 分")
-    }
-}
-
-// ---- 文案：用户看惯了这些句子，别润色 ----
-
-fn not_enough_text(charging: bool) -> String {
-    if charging {
-        "预计充满时间：样本不足".to_string()
-    } else {
-        "预计可用时间：样本不足".to_string()
-    }
-}
-
-fn just_switched_text(charging: bool) -> String {
-    if charging {
-        "预计充满时间：刚切换，重新观察中".to_string()
-    } else {
-        "预计可用时间：刚切换，重新观察中".to_string()
-    }
-}
-
-fn jumped_text(charging: bool) -> String {
-    if charging {
-        "预计充满时间：电量刚跳变，重新观察中".to_string()
-    } else {
-        "预计可用时间：电量刚跳变，重新观察中".to_string()
-    }
-}
-
-fn no_change_text(charging: bool) -> String {
-    if charging {
-        "预计充满时间：电量还没变化（需要再多观察一会儿）".to_string()
-    } else {
-        "预计可用时间：电量还没变化（需要再多观察一会儿）".to_string()
-    }
-}
-
-fn span_too_short_text(charging: bool) -> String {
-    if charging {
-        "预计充满时间：数据跨度太短".to_string()
-    } else {
-        "预计可用时间：数据跨度太短".to_string()
-    }
-}
-
-fn too_slow_text(charging: bool) -> String {
-    if charging {
-        "预计充满时间：变化太慢，暂时测不出".to_string()
-    } else {
-        "预计可用时间：变化太慢，暂时测不出".to_string()
-    }
 }
 
 // ==================== 单测 ====================
