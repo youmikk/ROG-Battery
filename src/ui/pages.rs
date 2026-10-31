@@ -238,6 +238,16 @@ fn row_area(card: R, y: f32) -> R {
     R::new(card.x + 18.0, y, card.w - 36.0, layout::ROW_H)
 }
 
+/// 行与行之间的分隔线：铺到卡片左右内边界，画在这一行的底部。
+///
+/// 这个式子手写过 14 次，且每处都要记得取 `t.border`；漏一处就是那一段
+/// 没有分隔线，看起来像是两行并成了一行。
+fn row_rule(p: &mut Painter, card: R, area: R) {
+    let t = p.t;
+    p.hline(card.x, card.right(), area.bottom(), t.border);
+}
+
+
 /// 分段控件（`.seg`）。返回是否命中，命中时给出第几段。
 ///
 /// 原型：外层 `padding:2px`、`gap:2px`、圆角 4；内层按钮高 26、padding 0 12、圆角 3。
@@ -1669,7 +1679,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
         drop_button(p, ui, R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0), Drop::Sleep, d);
         if i + 1 < rows.len() {
-            p.hline(card.x, card.right(), area.bottom(), t.border);
+            row_rule(p, card, area);
         }
         ry += layout::ROW_H;
         i += 1;
@@ -1698,7 +1708,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         );
         let btn = R::new(ctl.right() - 56.0, ctl.cy() - 15.0, 56.0, 30.0);
         button(p, ui, btn, "应用", false, Act::ApplyEdit(edit));
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
         ry += layout::ROW_H;
         i += 1;
     }
@@ -2231,7 +2241,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             t.text3,
             Align::Left,
         );
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
     }
     {
         let area = row_area(card, card.y + layout::ROW_H);
@@ -2287,7 +2297,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, on, st.is_some());
         ui.hot(sw, Act::Toggle(Pref::AngleSnap));
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
     }
     // 「高级」折叠头
     {
@@ -2347,7 +2357,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             t.text2,
             Align::Right,
         );
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
 
         // 加减速：设备不支持，明确说明而不是画一个假控件
         let ny = sy + 46.0;
@@ -2547,7 +2557,7 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         let dst = R::new(area.right() - 160.0, area.cy() - 15.0, 160.0, 30.0);
         drop_button(p, ui, dst, Drop::ButtonTarget(slot as u8), d);
         if slot + 1 < rows {
-            p.hline(card.x, card.right(), area.bottom(), t.border);
+            row_rule(p, card, area);
         }
     }
     c.y = card.bottom() + 16.0;
@@ -2579,7 +2589,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, d.cfg.tray_enabled, true);
         ui.hot(sw, Act::Toggle(Pref::TrayEnabled));
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
         y += layout::ROW_H;
     }
     // 关闭窗口动作
@@ -2599,7 +2609,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             Drop::CloseMode,
             d,
         );
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
         y += layout::ROW_H;
     }
     // 开机自启
@@ -2613,7 +2623,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, on, true);
         ui.hot(sw, Act::Toggle(Pref::AutoStart));
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
         y += layout::ROW_H;
     }
     // 刷新间隔
@@ -2645,7 +2655,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             Drop::CacheTtl,
             d,
         );
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
         y += layout::ROW_H;
     }
     // 备份与还原
@@ -2656,7 +2666,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         button(p, ui, b1, "备份到文件", false, Act::Backup);
         let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 110.0, 30.0);
         button(p, ui, b2, "从文件还原", false, Act::Restore);
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
         y += layout::ROW_H;
     }
     // 历史记录
@@ -2684,7 +2694,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         button(p, ui, b1, "更改", false, Act::ChangeHistoryPath);
         let b2 = R::new(b1.x - 64.0, ctl.cy() - 15.0, 56.0, 30.0);
         button(p, ui, b2, "默认", false, Act::ResetHistoryPath);
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
     }
     {
         // 设置文件
@@ -2739,7 +2749,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             t.text,
             Align::Right,
         );
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
     }
     {
         // 开源仓库
@@ -2758,7 +2768,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             false,
             Act::OpenRepo,
         );
-        p.hline(card.x, card.right(), area.bottom(), t.border);
+        row_rule(p, card, area);
     }
     {
         // 商店页
