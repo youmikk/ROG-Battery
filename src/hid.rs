@@ -560,21 +560,42 @@ impl HidDevice {
                 continue;
             };
 
-            // 应答自带 report id
-            if r.len() >= 3 && r[0] == report_id && r[1] == cmd && r[2] == sub {
-                return Some(r);
-            }
-            // 应答从 cmd 字节开始，需要补一个 report id 到下标 0
-            if r.len() >= 2 && r[0] == cmd && r[1] == sub {
-                let mut m = Vec::with_capacity(r.len() + 1);
-                m.push(report_id);
-                m.extend_from_slice(&r);
+            if let Some(m) = align_reply(report_id, cmd, sub, &r) {
                 return Some(m);
             }
             // 其它帧（例如主动推送的电量帧）丢掉，继续等
         }
         None
     }
+}
+
+/// 把一帧读到的数据对齐成「下标 0 = report id」的形式；与本次请求无关返回 `None`。
+///
+/// 四种合法形状（`rid` 为本次请求的 report id）：
+/// - `<rid> <cmd> <sub> ...` —— 正常应答，原样返回
+/// - `<rid> FF AA` —— 否定应答，原样返回（`is_nak` 认得）
+/// - `FF AA` —— 省略 report id 的否定应答，补一个 rid
+/// - `<cmd> <sub> ...` —— 省略 report id 的正常应答，补一个 rid
+///
+/// 否定应答必须显式放行：它的第二字节是 `0xFF` 而不是 `cmd`，只比 cmd/sub 会把它
+/// 当「其它帧」丢掉，于是 proto/snapshot/ops/cli 里所有 `is_nak` 判定都不可达，
+/// 设备明确拒绝会被误报成「鼠标无应答」并白等满一次超时。
+fn align_reply(report_id: u8, cmd: u8, sub: u8, r: &[u8]) -> Option<Vec<u8>> {
+    if r.len() >= 3 && r[0] == report_id && r[1] == cmd && r[2] == sub {
+        return Some(r.to_vec());
+    }
+    if is_nak(r) && r[0] == report_id {
+        return Some(r.to_vec());
+    }
+    let needs_prefix = (r.len() >= 2 && r[0] == 0xFF && r[1] == 0xAA)
+        || (r.len() >= 2 && r[0] == cmd && r[1] == sub);
+    if needs_prefix {
+        let mut m = Vec::with_capacity(r.len() + 1);
+        m.push(report_id);
+        m.extend_from_slice(r);
+        return Some(m);
+    }
+    None
 }
 
 impl Drop for HidDevice {
@@ -695,4 +716,53 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
         iface: iface.clone(),
         all_interfaces: all.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nak_frame_is_detected() {
+        assert!(is_nak(&[0x03, 0xFF, 0xAA]));
+        assert!(!is_nak(&[0x03, 0x12, 0x07]));
+        assert!(!is_nak(&[0xFF]));
+    }
+
+    #[test]
+    fn align_reply_keeps_report_id_frame() {
+        let r = [0x03, 0x12, 0x07, 0x00, 0x5F];
+        let m = align_reply(0x03, 0x12, 0x07, &r).expect("正常应答应被接受");
+        assert_eq!(m, r);
+    }
+
+    #[test]
+    fn align_reply_prefixes_bare_answer() {
+        // 有线模式实测：回复不带 report id
+        let r = [0x12, 0x07, 0x00, 0x5F];
+        let m = align_reply(0x00, 0x12, 0x07, &r).expect("裸应答应被接受");
+        assert_eq!(m, vec![0x00, 0x12, 0x07, 0x00, 0x5F]);
+    }
+
+    #[test]
+    fn align_reply_accepts_nak_with_report_id() {
+        // 回归：NAK 的 r[1] 是 0xFF 而非 cmd，过去会被当「其它帧」丢掉
+        let m = align_reply(0x03, 0x12, 0x07, &[0x03, 0xFF, 0xAA]).expect("NAK 必须被接受");
+        assert!(is_nak(&m), "接受后仍要能被 is_nak 认出");
+        assert_eq!(m[0], 0x03);
+    }
+
+    #[test]
+    fn align_reply_prefixes_bare_nak() {
+        let m = align_reply(0x00, 0x12, 0x07, &[0xFF, 0xAA]).expect("裸 NAK 必须被接受");
+        assert_eq!(m, vec![0x00, 0xFF, 0xAA]);
+        assert!(is_nak(&m));
+    }
+
+    #[test]
+    fn align_reply_ignores_unrelated_frame() {
+        // 主动推送的电量帧（cmd 0x12 之外）不应被当成应答
+        assert_eq!(align_reply(0x03, 0x12, 0x07, &[0x03, 0x99, 0x99, 0x00]), None);
+        assert_eq!(align_reply(0x03, 0x12, 0x07, &[]), None);
+    }
 }
