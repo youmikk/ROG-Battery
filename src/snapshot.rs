@@ -390,8 +390,10 @@ impl Snapshot {
         s
     }
 
-    /// 从缓存文本恢复。时间戳无法恢复成 `Instant`，所以 `taken` 留 `None`，
-    /// 由调用方用 `taken_unix` 的年龄做判断。
+    /// 从缓存文本恢复。
+    ///
+    /// `taken` 由 `taken_unix` 的墙钟年龄反推出来：留 `None` 的话，这份快照被
+    /// `get()` 塞进内存槽之后 `is_fresh()` 永远判过期，每帧都重新读盘解析。
     pub fn from_cache_text(text: &str) -> Result<Snapshot, String> {
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("");
@@ -442,6 +444,11 @@ impl Snapshot {
         }
 
         snap.taken_unix = wall;
+        // 用墙钟年龄反推 `Instant`；`checked_sub` 防止年龄超出开机时长时 panic。
+        if wall > 0 {
+            let age = std::time::Duration::from_secs(unix_now().saturating_sub(wall));
+            snap.taken = std::time::Instant::now().checked_sub(age);
+        }
         parse_all(&mut snap);
         Ok(snap)
     }
@@ -616,6 +623,25 @@ mod tests {
     /// 回归：过去用 `&hex[i..i+2]` 按字节切 `&str`，遇到「é」这类字符会
     /// `byte index 1 is not a char boundary` 直接 panic，而 `load_disk_cache`
     /// 用 `.ok()` 接不住 panic。
+    #[test]
+    fn disk_restored_snapshot_uses_wall_clock_freshness() {
+        // 刚写的缓存：内存判定应当算新鲜，否则每帧都要重新读盘。
+        let text = format!(
+            "{}\ntaken_unix={}\nlink_mode=Wireless24G\nreport_id=3\nframe 12:07:00 0312\n",
+            CACHE_MAGIC,
+            unix_now()
+        );
+        let snap = Snapshot::from_cache_text(&text).expect("刚写的缓存应当能解析");
+        assert!(snap.taken.is_some(), "taken 必须被反推出来");
+        assert!(snap.is_fresh(Duration::from_secs(60)));
+
+        // 一年前的缓存：仍然不新鲜。
+        let old = format!("{}\ntaken_unix=1761900000\n", CACHE_MAGIC);
+        let snap = Snapshot::from_cache_text(&old).expect("旧缓存也应当能解析");
+        assert!(snap.taken.is_some());
+        assert!(!snap.is_fresh(Duration::from_secs(60)));
+    }
+
     #[test]
     fn cache_with_multibyte_garbage_does_not_panic() {
         let text = format!(
