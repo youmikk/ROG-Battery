@@ -684,14 +684,18 @@ impl Ui {
             return Some(Act::CloseDrop);
         }
 
-        for h in self.hots.iter().rev() {
-            if h.rect.contains(x, cy) {
+        // 侧栏先于内容区：侧栏钉在窗口上、且永远画在内容之上，内容区的
+        // 登记区（尤其是铺满整页的背景/卡片「吃掉点击」项）不该盖住它。
+        // 之前顺序反了，任何一次「整页登记 Act::None」都会把导航项吞掉，
+        // 表现就是「点左侧页面名不跳转」。
+        for h in self.chrome.iter().rev() {
+            // 侧栏不随滚动移动 —— 这里用原始 `y`
+            if h.rect.contains(x, y) {
                 return Some(h.act);
             }
         }
-        for h in self.chrome.iter().rev() {
-            // 侧栏钉在窗口上，不随滚动移动 —— 这里用原始 `y`
-            if h.rect.contains(x, y) {
+        for h in self.hots.iter().rev() {
+            if h.rect.contains(x, cy) {
                 return Some(h.act);
             }
         }
@@ -1156,4 +1160,14 @@ mod tests {
         assert_eq!(u.edit_text(Edit::Dpi(0)), Some("1600"), "草稿留给页面校验");
         assert_eq!(u.commit_focus(), None, "焦点已收，第二次回车不重复提交");
     }
+    #[test]
+    fn sidebar_wins_over_full_page_hot_zone() {
+        // 回归：内容区的「整页吃掉点击」登记区不能盖住侧栏，否则点页面名不跳转。
+        let mut u = Ui::default();
+        u.begin_frame();
+        u.hot(R::new(0.0, 0.0, 1200.0, 800.0), Act::None);
+        u.chrome_hot(R::new(10.0, 100.0, 38.0, 36.0), Act::Nav(Page::Battery));
+        assert_eq!(u.hit(20.0, 110.0, 0.0), Some(Act::Nav(Page::Battery)));
+    }
+
 }
