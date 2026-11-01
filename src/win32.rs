@@ -22,6 +22,14 @@ pub type Handle = *mut c_void;
 /// 赋给 `isize` 直接编译失败。
 pub type Gdi = isize;
 
+/// 宽度必须与 [`Handle`] 相同：边界上会以 `as` 在整数与指针之间互转（如
+/// `GdipCreateFromHDC` 的 HDC 参数）。用编译期断言把这条约束钉住。
+///
+/// 复核（审计 85）：保持 `isize`。`HDC`/`HBITMAP` 是不透明整数值，改成指针
+/// 类型会让全部 `== 0` 哨兵判定与 `ensure(0, ...)` 调用点被迫改写成
+/// `null_mut()`，换来只是拼写统一。
+const _: () = assert!(core::mem::size_of::<Gdi>() == core::mem::size_of::<Handle>());
+
 pub const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 
 // ---- 访问权限 / 打开方式 ----
@@ -829,6 +837,14 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gdi_and_handle_are_the_same_width() {
+        assert_eq!(core::mem::size_of::<Gdi>(), core::mem::size_of::<Handle>());
+        assert_eq!(core::mem::size_of::<Gdi>(), core::mem::size_of::<usize>());
+        // 哨兵值必须是 0：全仓库用 `g != 0` 判「有没有句柄」。
+        assert_eq!(0 as Gdi, 0);
+    }
 
     #[test]
     fn reg_open_of_missing_subkey_reports_failure() {
