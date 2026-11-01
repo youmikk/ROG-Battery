@@ -71,13 +71,8 @@ use super::theme::Theme;
 
 // ==================== 类型 ====================
 
-/// GDI 句柄（`HDC` / `HBITMAP` / `HBRUSH` / `HPEN` …）。
-///
-/// 统一用 `isize` 而不是 `*mut c_void`：GDI 句柄是**不透明值**，不是指针。
-/// 用指针类型会诱使人写 `std::ptr::null_mut()`，而 `null_mut()` 是
-/// `*mut _`，赋给 `isize` 直接 `expected isize, found *mut _` 编译失败
-/// —— 这个坑我在写探针时踩过。
-pub type Gdi = isize;
+// 句柄类型的唯一定义在 `crate::win32`；这里再导出，保持 `ui::gfx::Gdi` 这条路可用。
+pub use crate::win32::Gdi;
 
 /// 成功的 GDI+ 返回值。
 pub const OK: i32 = 0;
@@ -125,6 +120,21 @@ struct GdiplusStartupInput {
 
 #[link(name = "gdiplus")]
 extern "system" {
+    // 位图图标专用的 5 个入口。托盘图标（`crate::tray_icon`）要用，但它不该
+    // 为这 5 个再开一份 `#[link(name = "gdiplus")]` —— 一个 DLL 只有一份声明。
+    pub(crate) fn GdipCreateBitmapFromScan0(
+        width: i32,
+        height: i32,
+        stride: i32,
+        format: i32,
+        scan0: *const u8,
+        bitmap: *mut *mut c_void,
+    ) -> i32;
+    pub(crate) fn GdipDisposeImage(image: *mut c_void) -> i32;
+    pub(crate) fn GdipGetImageGraphicsContext(image: *mut c_void, g: *mut *mut c_void) -> i32;
+    pub(crate) fn GdipGraphicsClear(g: *mut c_void, color: u32) -> i32;
+    pub(crate) fn GdipCreateHICONFromBitmap(bitmap: *mut c_void, hicon: *mut *mut c_void) -> i32;
+
     fn GdiplusStartup(
         token: *mut usize,
         input: *const GdiplusStartupInput,
@@ -1635,6 +1645,18 @@ pub fn blit(dst: Gdi, src: Gdi, w: i32, h: i32) {
 
 #[cfg(test)]
 mod tests {
+    /// 句柄类型只有一个出处：`crate::win32::Gdi`。`ui::gfx::Gdi` 只是再导出，
+    /// 两条路径必须是同一个类型，否则跨模块传句柄会要求到处加 `as`。
+    #[test]
+    fn gdi_handle_is_the_win32_alias() {
+        let _: crate::win32::Gdi = 0;
+        let _: crate::ui::gfx::Gdi = 0;
+        assert_eq!(
+            std::mem::size_of::<crate::ui::gfx::Gdi>(),
+            std::mem::size_of::<usize>()
+        );
+    }
+
 
     /// 没有位图（还没 ensure）时开/收帧都是空操作，不能 panic。
     /// 有共享上下文时第二层不再自己建 Graphics —— 由渲染快照测试覆盖真实路径。

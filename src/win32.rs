@@ -14,6 +14,14 @@ use core::ffi::c_void;
 
 pub type Handle = *mut c_void;
 
+/// GDI 句柄（`HDC` / `HBITMAP` / `HBRUSH` / `HPEN` …）。
+///
+/// 与 [`Handle`] 同名同源的都是不透明句柄，但 GDI 句柄在 Win32 头文件里是
+/// `HANDLE`/`HGDIOBJ` 的整数形式，所以这里仍然用 `isize` 而不是指针 ——
+/// 用指针类型会诱使人写 `std::ptr::null_mut()`，而 `null_mut()` 是 `*mut _`，
+/// 赋给 `isize` 直接编译失败。
+pub type Gdi = isize;
+
 pub const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 
 // ---- 访问权限 / 打开方式 ----

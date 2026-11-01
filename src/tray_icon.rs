@@ -123,7 +123,6 @@ fn colorref(c: [u8; 3]) -> u32 {
 // —— alpha 通道原样保留，托盘上就是「透明底白字」。
 
 mod gdiplus {
-    use core::ffi::c_void;
     // PixelFormat32bppARGB = 10 | (32<<8) | Alpha(0x40000) | GDI(0x20000) | Canonical(0x200000)
     pub const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
 
@@ -139,22 +138,11 @@ mod gdiplus {
         GdipSetTextRenderingHint, RectF,
     };
 
-    // 只有托盘图标自己用到的 5 个（gfx 只画界面、不画位图图标），保留在这里。
-    #[link(name = "gdiplus")]
-    extern "system" {
-        pub fn GdipCreateBitmapFromScan0(
-            width: i32,
-            height: i32,
-            stride: i32,
-            format: i32,
-            scan0: *const u8,
-            bitmap: *mut *mut c_void,
-        ) -> i32;
-        pub fn GdipDisposeImage(image: *mut c_void) -> i32;
-        pub fn GdipGetImageGraphicsContext(image: *mut c_void, g: *mut *mut c_void) -> i32;
-        pub fn GdipGraphicsClear(g: *mut c_void, color: u32) -> i32;
-        pub fn GdipCreateHICONFromBitmap(bitmap: *mut c_void, hicon: *mut *mut c_void) -> i32;
-    }
+    // 位图图标专用的 5 个入口也是 GDI+ 那一套，声明在 `ui::gfx`（唯一一份）。
+    pub(crate) use crate::ui::gfx::{
+        GdipCreateBitmapFromScan0, GdipCreateHICONFromBitmap, GdipDisposeImage,
+        GdipGetImageGraphicsContext, GdipGraphicsClear,
+    };
 }
 
 /// 透明背景上数字的颜色：自适应浅色/深色任务栏。
