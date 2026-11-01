@@ -438,17 +438,10 @@ pub fn draw_frame(
 }
 
 
-/// `WNDPROC` 需要的全部状态。
 ///
-/// # 为什么和 [`Canvas`] 分成两份
-///
-/// 窗口过程和 gui.rs **同时**需要 `ui` / `acts` / `damage`，但两者的生命周期
-/// 不同：`WM_DESTROY` 一定早于 `run()` 返回，而 `Canvas` 活到消息循环结束。
-///
-/// 早先的写法是「`Box::into_raw` 塞进 `GWLP_USERDATA`，再把 `*Box::from_raw`
-/// 移出来返回给调用方」—— 那个 Box 在 return 的那一刻就被释放了，
-/// 而 `GWLP_USERDATA` 还留着那个地址：**每一个鼠标消息都在解引用已释放的内存**。
-/// 现在改成两边各持 `Rc` 克隆，窗口过程独占这一份 `Ctx`，谁先死都安全。
+/// 所以状态不能 `Box::into_raw` 塞进 `GWLP_USERDATA`：那个地址的生命周期
+/// 跟 `run()` 里的消息循环对不上，窗口一销毁就是野指针。改成两边各自克隆
+/// `Rc`，进程内只留一份 `Ctx`。
 struct Ctx {
     ui: Rc<RefCell<Ui>>,
     acts: Rc<RefCell<Vec<Act>>>,
@@ -1144,13 +1137,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
             0
         }
 
-        // ── 自绘标题栏的窗口行为 ──────────────────────────────
-        //
-        // 内容区子窗口铺满整个客户区，所以**鼠标消息全先到这里**，主窗口
-        // 收不到 `WM_NCHITTEST`。这就是为什么标题栏的命中测试必须在这里做。
-        //
-        // 我第一版把子类挂到主窗口上（`nwg::bind_raw_event_handler`），
-        // 结果整个标题栏拖不动、三条按钮点不动 —— 消息压根没到主窗口。
+        // 子窗口吃下客户区全部鼠标消息：主窗口那边只负责非客户区，命中判定
+        // 只能在这里做，否则点击会被吞进消息循环、按钮全哑。
         WM_NCHITTEST => {
             let c = match ctx_of(hwnd) {
                 Some(c) => c,

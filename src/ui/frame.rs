@@ -20,8 +20,8 @@
 //! [`logical_hit`] 里算（纯函数，可单测），
 //! 真正把意图转交系统（`WM_NCLBUTTONDOWN`）由 `canvas.rs` 做。
 //!
-//! 这一点我第一版想反了：在 `gui.rs` 里给主窗口挂 `WM_NCHITTEST` 子类，
-//! 结果整个标题栏拖不动 —— 消息压根没到主窗口。
+//! 判定必须在 canvas（子窗口）做，不能挂到主窗口的 `WM_NCHITTEST` 上：
+//! 那一层收不到客户区消息，点击会被吞掉。
 //!
 //! # 拖动为什么不自己实现
 //!
@@ -29,8 +29,8 @@
 //! （拖到屏幕顶最大化、拖到左右边缘半屏）、双击最大化、高 DPI 跟手
 //! 全是系统原生那份。自己 `SetWindowPos` 跟鼠标会把这些全部丢掉。
 //!
-//! 我第一版就是自己算偏移跟手，实测：拖到屏幕顶不吸附、拖到边缘不贴靠、
-//! 双屏之间拖不过去、125% 缩放下抖。
+//! 自己算偏移跟手不会有 Aero Snap、边缘吸附、双击最大化、DPI 变化这些系统
+//! 行为，所以拖动交给 `HTCAPTION` 的默认实现。
 
 use crate::win32::Handle;
 use crate::win32::{GetMonitorInfoW, MonitorFromWindow, MonitorInfo};
