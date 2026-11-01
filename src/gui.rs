@@ -59,7 +59,6 @@ use crate::proto;
 use crate::settings::{self, Settings};
 use crate::snapshot::{self, FetchOutcome};
 use crate::ui::canvas::{self, Canvas};
-use crate::ui::pages;
 use crate::ui::widget::{Act, Drop, Edit, Page, Pref, Slide};
 use crate::win32;
 
@@ -1904,7 +1903,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 )
             };
             let theme = *ui.mode.theme();
-            let data = pages::Data {
+            let data = crate::ui::viewdata::Data {
                 state: state.as_ref(),
                 ident: ident.as_ref(),
                 link_mode: &link_mode,

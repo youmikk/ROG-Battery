@@ -34,5 +34,6 @@ pub mod gfx;
 pub mod layout;
 pub mod pages;
 pub mod theme;
+pub mod viewdata;
 pub mod titlebar;
 pub mod widget;
