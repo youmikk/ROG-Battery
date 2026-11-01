@@ -145,6 +145,14 @@ extern "system" {
     pub fn GdipDeleteGraphics(g: *mut c_void) -> i32;
     pub fn GdipSetSmoothingMode(g: *mut c_void, mode: i32) -> i32;
     pub fn GdipSetTextRenderingHint(g: *mut c_void, hint: i32) -> i32;
+    fn GdipSetClipRect(
+        g: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        combine: i32,
+    ) -> i32;
     fn GdipSetPixelOffsetMode(g: *mut c_void, mode: i32) -> i32;
 
     fn GdipCreateMatrix2(
@@ -598,6 +606,15 @@ pub enum Align {
 ///
 /// 生命周期严格限定在一帧内（`paint()` 建、画完 `clear()`）：GDI+ 对象跨帧
 /// 持有会被 DPI 变化或设备丢失搞成野句柄，收益不值这个风险。
+/// 一层的可视区（世界坐标，滚动已经折算进去）。
+///
+/// 和 `Painter.clip`（图元剔除用的那个）**逐字一致**，包括高度多带的
+/// `scroll`：裁剪面若比剔除面小，就会出现「visible() 说该画、GDI+ 却裁掉」
+/// 的半屏空白。宁可多画一点点，也不让两者分叉。
+fn clip_rect_for(scroll: f32, view_w: f32, view_h: f32) -> R {
+    R::new(0.0, scroll, view_w, view_h + scroll)
+}
+
 #[derive(Default)]
 struct ObjCache {
     brushes: Vec<(u32, *mut c_void)>,
@@ -1602,7 +1619,10 @@ impl Canvas {
                 GdipResetWorldTransform(g);
             }
 
-            let clip = R::new(0.0, scroll, view_w, view_h + scroll);
+            let clip = clip_rect_for(scroll, view_w, view_h);
+            // 交给 GDI+ 自己裁：滚动时超出可视区的图元不再逐个栅格化。
+            // 失败也只是退回「不裁剪」，不影响正确性。
+            let _ = GdipSetClipRect(g, clip.x, clip.y, clip.w, clip.h, 0);
             let mut obj = ObjCache::default();
             {
                 let mut p = Painter { g, obj: &mut obj, fonts, t: theme, clip, scale };
@@ -1671,6 +1691,16 @@ mod tests {
         c.end_frame_paint();
     }
     use super::*;
+
+    #[test]
+    fn clip_rect_follows_the_scroll_offset() {
+        let c = clip_rect_for(0.0, 1100.0, 740.0);
+        assert_eq!((c.x, c.y, c.w, c.h), (0.0, 0.0, 1100.0, 740.0));
+        // 往下滚 200：从 200 起，高度 740+200（多出的 200 是剔除面的余量）
+        let c = clip_rect_for(200.0, 1100.0, 740.0);
+        assert_eq!((c.x, c.y, c.w, c.h), (0.0, 200.0, 1100.0, 940.0));
+        assert!((c.bottom() - 1140.0).abs() < 0.01, "bottom={}", c.bottom());
+    }
 
     #[test]
     fn 空画布永远需要重建位图() {
