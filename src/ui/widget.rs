@@ -1228,4 +1228,22 @@ mod tests {
         assert_eq!(u.edit_text(Edit::Dpi(0)), Some("16"));
     }
 
+    /// 双击的第二次按下在消息层是 `WM_LBUTTONDBLCLK`（`canvas.rs` 现在把它转成
+    /// 一个新的 `WM_LBUTTONDOWN`）。控件层必须保证「按下-抬起」走两遍就得到两次
+    /// 激活，否则双击开关只会切一次。
+    #[test]
+    fn double_click_activates_the_button_twice() {
+        let mut u = Ui::default();
+        u.begin_frame();
+        u.hot(R::new(10.0, 10.0, 80.0, 24.0), Act::ToggleRail);
+        let mut got: Vec<Act> = Vec::new();
+        for _ in 0..2 {
+            u.on_press(20.0, 20.0, 0.0);
+            if let Some(a) = u.on_release(20.0, 20.0, 0.0) {
+                got.push(a);
+            }
+        }
+        assert_eq!(got, vec![Act::ToggleRail, Act::ToggleRail]);
+    }
+
 }

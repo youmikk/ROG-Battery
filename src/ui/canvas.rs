@@ -143,6 +143,7 @@ extern "system" {
         param: *mut core::ffi::c_void,
     ) -> Handle;
     fn DefWindowProcW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn SendMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> isize;
     fn SetWindowLongPtrW(hwnd: Handle, index: i32, value: isize) -> isize;
     fn GetWindowLongPtrW(hwnd: Handle, index: i32) -> isize;
     fn InvalidateRect(hwnd: Handle, rect: *const Rect, erase: i32) -> i32;
@@ -1218,8 +1219,14 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                     return 0;
                 }
             }
-            // 不是标题栏就按普通点击处理（让页面拿到这次点击）
-            DefWindowProcW(hwnd, msg, wp, lp)
+            // 不是标题栏就按普通点击处理。
+            //
+            // 双击时系统只会给第一下发 `WM_LBUTTONDOWN`，第二次按下变成这里
+            // 的 `WM_LBUTTONDBLCLK`；以前直接交给 `DefWindowProc`，页面根本
+            // 收不到 —— 表现是双击开关、双击「刷新」这类操作第二下被吞掉。
+            // 转一手同坐标的 `WM_LBUTTONDOWN` 让按下/抬起链路完整走两遍。
+            unsafe { SendMessageW(hwnd, WM_LBUTTONDOWN, wp, lp) };
+            0
         }
 
         WM_KEYDOWN => {
