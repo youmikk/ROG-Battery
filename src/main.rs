@@ -19,6 +19,7 @@ mod autostart;
 mod backup;
 mod chart;
 mod cli;
+mod commands;
 mod devices;
 mod dwm;
 mod dynlight;

@@ -61,7 +61,6 @@ pub fn icon_size() -> i32 {
 #[cfg(test)]
 const BG: [u8; 3] = [0x20, 0x24, 0x2B];
 #[cfg(test)]
-const FG: [u8; 3] = [0xFF, 0xFF, 0xFF];
 
 /// 电量对应的图标底色。三档，够用户一眼分辨「还早 / 该充了 / 快没电」。
 #[cfg(test)]
