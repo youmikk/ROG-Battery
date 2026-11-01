@@ -659,6 +659,8 @@ fn handle_act(a: Act, env: &UiEnv) {
 
             if choice == crate::ui::widget::CloseChoice::Minimize {
                 env.window.set_visible(false);
+                // 藏起来了，把位图和字体还回去；恢复后首帧自动重建。
+                env.canvas.release_render_memory();
             } else {
                 env.signal.request_quit();
                 nwg::stop_thread_dispatch();
@@ -2090,6 +2092,25 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     // 闭包要 `move` 走 `window`，而 `full_bind_event_handler` 又要借用它的
     // 句柄 —— 先克隆一份句柄再绑，否则报 E0505（不能一边借一边移）。
+    // 最小化后窗口不再重绘，立刻归还渲染内存（位图 + 字体）。
+    //
+    // 不用 nwg 的 `OnResize`：它不把 `WM_SIZE(SIZE_MINIMIZED)` 转成该事件 ——
+    // 实测最小化后回调根本不触发（`IsIconic` 那时已经是 1，但分支永远走不到）。
+    // 最小化后窗口不再重绘，立刻归还渲染内存（位图 + 字体）。
+    //
+    // 不用 nwg 的 `OnResize`：它不把 `WM_SIZE(SIZE_MINIMIZED)` 转成该事件 ——
+    // 实测最小化后回调根本不触发（那时 `IsIconic` 已经是 1，分支永远走不到）。
+    let canvas_min = canvas_e.clone();
+    // 第二个参数是**处理器 id**（nwg 要求 > 0xFFFF），要过滤的消息在回调里判。
+    let min_handler = nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
+        // SIZE_MINIMIZED = 1
+        if msg == 0x0005 && wp as usize == 1 {
+            canvas_min.release_render_memory();
+        }
+        None
+    })
+    .map_err(|e| format!("绑 WM_SIZE 处理器失败：{e}"))?;
+
     let wh = window.handle.clone();
     let handler = nwg::full_bind_event_handler(&wh, move |evt, evt_data, _handle| {
         use nwg::Event as E;
@@ -2118,6 +2139,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         d.close(false);
                     }
                     window.set_visible(false);
+                    // 同上：收进托盘后不再重绘，渲染内存全部归还。
+                    canvas_e.release_render_memory();
                 } else {
                     signal_e.request_quit();
                     nwg::stop_thread_dispatch();
@@ -2126,6 +2149,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
             // 拉窗口大小 / 最大化 → 内容区子窗口必须跟着长。
             E::OnResize | E::OnWindowMaximize => {
+                // 最小化时窗口不可见，回收渲染内存（恢复时首帧会重新分配）。
+                if unsafe { crate::win32::IsIconic(hwnd) } != 0 {
+                    canvas_e.release_render_memory();
+                }
                 canvas.refit();
             }
 
@@ -2292,6 +2319,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     nwg::unbind_event_handler(&handler);
     nwg::unbind_event_handler(&msg_handler);
     let _ = nwg::unbind_raw_event_handler(&tray_handler);
+    let _ = nwg::unbind_raw_event_handler(&min_handler);
     // 托盘图标必须显式移除，否则任务栏上留一个点不动的幽灵图标。
     // `tray` 已被主处理器闭包 move 走，这里直接按 GUID 移除。
     if let Some(h) = msg_window.handle.hwnd() {

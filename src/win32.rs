@@ -216,6 +216,11 @@ extern "system" {
 
     /// 释放互斥体。返回 0 表示成功。
     pub fn ReleaseMutex(h: Handle) -> i32;
+
+    /// 伪句柄 `(HANDLE)-1`，恒指当前进程，不需要关闭。
+    pub fn GetCurrentProcess() -> Handle;
+    /// 传 `-1, -1` 让系统把工作集里的页尽量换出（`EmptyWorkingSet` 的内核实现）。
+    pub fn SetProcessWorkingSetSize(process: Handle, min: usize, max: usize) -> i32;
 }
 
 /// `SYSTEMTIME`（wYear..wMilliseconds 共 8 个 WORD）。只用到年月日时分秒。
@@ -550,12 +555,6 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     /// （`CreateCompatibleDC` 要一个参考 DC，否则内存位图的色彩格式可能和屏幕不一致）。
     pub fn GetDC(hwnd: Handle) -> Handle;
     pub fn ReleaseDC(hwnd: Handle, hdc: Handle) -> i32;
-    /// 取当前进程的**伪句柄**（不需要 CloseHandle）。
-    /// 配合 `GetGuiResources` 读自己的 GDI/USER 对象数，用来测泄漏。
-    ///
-    /// `cfg(test)`：只有泄漏回归测试用它，正式构建留着就是死代码（会 warning）。
-    #[cfg(test)]
-    pub fn GetCurrentProcess() -> Handle;
     /// 读进程当前持有的 GDI（`flag = 0`）或 USER（`flag = 1`）对象数。
     ///
     /// 托盘图标自绘的回归测试靠它：`Gdi::drop` 漏一个 `DeleteObject`
@@ -568,6 +567,9 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     /// 取系统度量（`SM_CXSMICON = 49`）。托盘的泄漏回归测试拿它算图标边长。
     #[cfg(test)]
     pub fn GetSystemMetrics(index: i32) -> i32;
+
+    /// 窗口是否处于最小化。最小化后不再重绘，可据此回收渲染内存。
+    pub fn IsIconic(hwnd: Handle) -> i32;
 }
 
 // ============ gdi32 ============

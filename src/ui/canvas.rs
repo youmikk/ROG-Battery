@@ -53,6 +53,7 @@ const WM_PAINT: u32 = 0x000F;
 const WM_ERASEBKGND: u32 = 0x0014;
 /// 窗口显示状态变化。注意 wparam 是「**即将**显示/隐藏」而不是当前状态。
 const WM_SHOWWINDOW: u32 = 0x0018;
+const SIZE_MINIMIZED: usize = 1;
 const WM_SETCURSOR: u32 = 0x0020;
 const WM_GETDLGCODE: u32 = 0x0087;
 const WM_KEYDOWN: u32 = 0x0100;
@@ -697,6 +698,30 @@ impl Canvas {
         repaint_hwnd(self.hwnd);
     }
 
+    /// 窗口不可见（最小化 / 收进托盘）时把渲染内存还给系统。
+    ///
+    /// 释放的是那张与窗口同大的 GDI+ 位图（1100×740×4 ≈ 3.1 MiB，最大化到
+    /// 2K 时约 14 MiB）和按字号缓存的字体。恢复显示后的第一次 `WM_PAINT`
+    /// 会走 `ensure()` 重建位图、`Fonts` 重建字体，用户看不出区别。
+    ///
+    /// 只在**确实不可见**时调：窗口还露着就释放，下一帧立刻又分配回来，
+    /// 白折腾一遍还要多一次 3 MB 的分配。
+    pub fn release_render_memory(&self) {
+        self.inner.borrow_mut().release();
+        self.fonts.borrow_mut().clear();
+        // 删掉 GDI+ 位图只是归还给私有堆，那些页仍然算在进程头上；窗口都不可见了，
+        // 顺手把工作集清空，任务管理器里才看得见下降（恢复后按需重新换入）。
+        unsafe {
+            crate::win32::SetProcessWorkingSetSize(
+                crate::win32::GetCurrentProcess(),
+                usize::MAX,
+                usize::MAX,
+            );
+        }
+        // 图表几何按位图尺寸换算，一并丢掉，恢复后按新尺寸重算。
+        self.ui.borrow_mut().chart = None;
+    }
+
     /// 拿到子窗口句柄。`gui.rs` 需要在 `Canvas` 被 move 进闭包之前
     /// 留一份句柄，供「显示窗口前先画首帧」用。
     pub fn hwnd(&self) -> Handle {
@@ -881,9 +906,15 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
 
         WM_SIZE => {
             if let Some(c) = ctx_of(hwnd) {
-                // SAFETY: 传空矩形 = 整个客户区。
-                InvalidateRect(hwnd, std::ptr::null(), 0);
-                (c.damage)();
+                if wp == SIZE_MINIMIZED {
+                    // 最小化后没有可见像素：位图（最大一块）和字体缓存先还回去，
+                    // 恢复时 ensure() 会按当时的尺寸重建。
+                    release_render_memory(&c);
+                } else {
+                    // SAFETY: 传空矩形 = 整个客户区。
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    (c.damage)();
+                }
             }
             0
         }
@@ -948,6 +979,13 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
             let showing = wp != 0;
             if let Some(c) = ctx_of(hwnd) {
                 set_timer(hwnd, showing && c.anim_wanted.get());
+                if showing {
+                    // 隐藏期间位图已释放：立刻补一帧，别让用户看到第一帧空白。
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    (c.damage)();
+                } else {
+                    release_render_memory(&c);
+                }
             }
             0
         }
@@ -1387,4 +1425,13 @@ mod tests {
         assert!('\r'.is_control());
         assert!('\t'.is_control());
     }
+}
+
+/// 把渲染用的内存还回去：画布位图 + 字体缓存。窗口重新可见时按需重建。
+///
+/// 最小化或收进托盘后没有任何可见像素，留着一张 32bpp 位图（1100x740 约
+/// 3.1 MB、曾最大化则约 14 MB）纯属浪费。
+fn release_render_memory(c: &Ctx) {
+    c.inner.borrow_mut().release();
+    c.fonts.borrow_mut().clear();
 }

@@ -491,6 +491,18 @@ impl Fonts {
         self.cache.insert(key, font);
         font
     }
+
+    /// 释放所有已缓存的字号，**保留字体家族**。
+    ///
+    /// 窗口最小化/收进托盘时调用：`GpFont` 只有绘制时才用得上，藏着等于白占
+    /// 内存。恢复后 `get()` 按需重建（每个字号一次 `GdipCreateFont`）。
+    pub fn clear(&mut self) {
+        for (_, f) in self.cache.drain() {
+            if !f.is_null() {
+                unsafe { GdipDeleteFont(f) };
+            }
+        }
+    }
 }
 
 impl Drop for Fonts {
@@ -1443,6 +1455,34 @@ pub struct Canvas {
     frame_g: *mut c_void,
 }
 
+/// 位图复用策略（纯函数，便于单测）。
+#[derive(Debug, PartialEq)]
+pub(crate) enum BitmapAction {
+    Keep,
+    Grow,
+    Recreate,
+}
+
+/// 已有位图 `have` 对需求 `need` 该怎么处理。
+///
+/// 比需要的大 25% 以上就换小：32bpp 下 2560x1440 约 14 MB，曾最大化过的窗口
+/// 还原后白背着这块内存没有收益。阈值取 25% 是为了避免拖拽缩放时反复重建位图
+/// （内核对象分配比复用贵得多）。
+pub(crate) fn bitmap_action(have: Option<(i32, i32)>, need: (i32, i32)) -> BitmapAction {
+    let (nw, nh) = (need.0.max(1), need.1.max(1));
+    let Some((hw, hh)) = have else {
+        return BitmapAction::Grow;
+    };
+    if hw > nw + nw / 4 || hh > nh + nh / 4 {
+        return BitmapAction::Recreate;
+    }
+    if hw >= nw && hh >= nh {
+        BitmapAction::Keep
+    } else {
+        BitmapAction::Grow
+    }
+}
+
 impl Canvas {
     /// 建一个空画布。真正的位图在第一次 `ensure` 时创建。
     pub fn new() -> Canvas {
@@ -1457,8 +1497,16 @@ impl Canvas {
     pub fn ensure(&mut self, screen_dc: Gdi, w: i32, h: i32) -> Gdi {
         let w = w.max(1);
         let h = h.max(1);
-        if self.dc != 0 && self.w >= w && self.h >= h {
+        let action = if self.dc == 0 {
+            BitmapAction::Grow
+        } else {
+            bitmap_action(Some((self.w, self.h)), (w, h))
+        };
+        if action == BitmapAction::Keep {
             return self.dc;
+        }
+        if action == BitmapAction::Recreate {
+            self.release();
         }
         let nw = if self.w == 0 { w } else { self.w.max(w) };
         let nh = if self.h == 0 { h } else { self.h.max(h) };
@@ -1673,6 +1721,25 @@ pub fn blit(dst: Gdi, src: Gdi, w: i32, h: i32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bitmap_is_kept_when_it_already_fits() {
+        assert_eq!(bitmap_action(Some((1200, 800)), (1100, 740)), BitmapAction::Keep);
+    }
+
+    #[test]
+    fn bitmap_grows_when_too_small() {
+        assert_eq!(bitmap_action(Some((800, 600)), (1100, 740)), BitmapAction::Grow);
+        assert_eq!(bitmap_action(None, (1100, 740)), BitmapAction::Grow);
+    }
+
+    #[test]
+    fn bitmap_is_recreated_only_when_much_too_large() {
+        // 最大化到 2560x1440 再还原：换小，别背着 14 MB
+        assert_eq!(bitmap_action(Some((2560, 1440)), (1100, 740)), BitmapAction::Recreate);
+        // 只大一点就留着，免得拖拽缩放时反复重建
+        assert_eq!(bitmap_action(Some((1300, 800)), (1100, 740)), BitmapAction::Keep);
+    }
+
     /// 句柄类型只有一个出处：`crate::win32::Gdi`。`ui::gfx::Gdi` 只是再导出，
     /// 两条路径必须是同一个类型，否则跨模块传句柄会要求到处加 `as`。
     #[test]
@@ -1857,9 +1924,19 @@ mod tests {
         });
 
         // 再画一次（尺寸变化路径：位图只会变大不会变小）
-        let mem2 = canvas.ensure(dc, 200, 150);
-        assert_eq!(mem2, mem, "缩小尺寸时不该重建位图");
+        // 小幅缩小：沿用原位图，多留一点内存但省一次分配
+        let mem2 = canvas.ensure(dc, 380, 280);
+        assert_eq!(mem2, mem, "小幅缩小不该重建位图");
         assert_eq!(canvas.size(), (400, 300));
+
+        // 大幅缩小：换一张小位图，把大块还给系统
+        let small = canvas.ensure(dc, 200, 150);
+        assert_ne!(small, 0);
+        assert_ne!(small, mem, "大幅缩小应换一张小位图");
+        assert_eq!(canvas.size(), (200, 150));
+        let small = canvas.ensure(dc, 200, 150);
+        assert_ne!(small, 0);
+        assert_eq!(canvas.size(), (200, 150));
 
         // 变大会重建
         let mem3 = canvas.ensure(dc, 800, 600);
