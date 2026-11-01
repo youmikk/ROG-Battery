@@ -494,6 +494,11 @@ pub struct Canvas {
     paint: Rc<RefCell<Option<PaintFn>>>,
     /// 与 `Ctx.anim_wanted` 指向同一个 `Cell`。
     anim_wanted: Rc<Cell<bool>>,
+    /// 父窗口句柄：第一次用时取一次就记住（GetParent 每次拖动都会进 WM_SIZE）。
+    parent: Cell<Handle>,
+    /// 上一次铺满时的客户区像素尺寸。WM_SIZE 与「最大化」会为同一次尺寸变化
+    /// 各发一条消息，靠它把第二次（以及拖拽时尺寸没变的帧）挡在系统调用之前。
+    last_fit: Cell<Option<(i32, i32)>>,
 }
 
 impl Canvas {
@@ -576,6 +581,8 @@ impl Canvas {
             damage,
             paint: Rc::new(RefCell::new(None)),
             anim_wanted: Rc::new(Cell::new(false)),
+            parent: Cell::new(std::ptr::null_mut()),
+            last_fit: Cell::new(None),
         };
 
         // 窗口过程那份状态。两边是**独立**的 `Rc` 克隆，不是指向 `Canvas` 的指针
@@ -648,22 +655,32 @@ impl Canvas {
     ///
     /// 用 `SetWindowPos` 而不是 `MoveWindow`：后者会顺带 `InvalidateRect`，
     /// 而我们紧接着自己要重画一帧，多刷一次只会闪。
-    pub fn fit_parent(&self) {
-        let parent = unsafe { GetParent(self.hwnd) };
+    pub fn refit(&self) {
+        let mut parent = self.parent.get();
         if parent.is_null() {
+            parent = unsafe { GetParent(self.hwnd) };
+            if parent.is_null() {
+                return;
+            }
+            self.parent.set(parent);
+        }
+        let size = client_pixel_size(parent);
+        if !refit_needed(self.last_fit.get(), size) {
             return;
         }
-        let (w, h) = client_pixel_size(parent);
+        self.last_fit.set(Some(size));
         unsafe {
             SetWindowPos(
                 self.hwnd,
                 std::ptr::null_mut(),
                 0,
                 0,
-                w,
-                h,
+                size.0,
+                size.1,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            // 尺寸变了必须自己标脏：SetWindowPos 不替我们重画。
+            InvalidateRect(self.hwnd, std::ptr::null(), 0);
         }
     }
 
@@ -770,6 +787,11 @@ fn hi_word(v: isize) -> i32 {
 ///
 /// 单独抽出来是因为 `WM_SIZE` 的 `lparam` 和 `GetClientRect` 在窗口最小化时
 /// 结果不同（前者是 0×0，后者也给 0×0），而 `WM_PAINT` 里只能靠后者。
+/// 尺寸没变就不用再发 SetWindowPos + InvalidateRect。
+fn refit_needed(last: Option<(i32, i32)>, now: (i32, i32)) -> bool {
+    last != Some(now)
+}
+
 fn client_pixel_size(hwnd: Handle) -> (i32, i32) {
     let mut r = Rect::new(0, 0, 0, 0);
     unsafe { GetClientRect(hwnd, &mut r) };
@@ -1318,6 +1340,16 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refit_skips_when_the_size_is_unchanged() {
+        assert!(refit_needed(None, (1100, 740)), "first fit must run");
+        assert!(
+            !refit_needed(Some((1100, 740)), (1100, 740)),
+            "resize+maximize fire twice for one change"
+        );
+        assert!(refit_needed(Some((1100, 740)), (1101, 740)));
+    }
 
     #[test]
     fn 鼠标坐标按有符号16位解码() {

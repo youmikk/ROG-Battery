@@ -2126,8 +2126,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
             // 拉窗口大小 / 最大化 → 内容区子窗口必须跟着长。
             E::OnResize | E::OnWindowMaximize => {
-                canvas.fit_parent();
-                canvas.invalidate();
+                canvas.refit();
             }
 
             E::OnNotice => {
