@@ -112,6 +112,16 @@ pub fn draw(p: &mut Painter, win_w: f32, nav_w: f32, theme: &Theme) {
 }
 
 
+/// 三条按钮图标的笔宽与几何（逻辑像素）。
+///
+/// 取值照 Win11 原生按钮的观感：主笔 1.2、细笔 1.1，图标半边长 5 —— 也就是
+/// 最宽 10px 的图形摆在 46px 宽的按钮正中，左右各留 18px 空白。
+const GLYPH_HALF: f32 = 5.0;
+const BOX_HALF: f32 = 4.5;
+const RESTORE_BOX: f32 = 7.0;
+const STROKE: f32 = 1.2;
+const STROKE_THIN: f32 = 1.1;
+
 /// Win11 关闭按钮的 hover 底色。
 ///
 /// **必须带不透明 alpha（`0xFF…`）**：`Painter` 的颜色是 `0xAARRGGBB`，
@@ -145,23 +155,62 @@ pub fn draw_buttons(p: &mut Painter, win_w: f32, t: &Theme, is_max: bool, hover:
         let cy = r.cy();
         match b {
             // 最小化：一条横线
-            Btn::Minimize => p.line(cx - 5.0, cy, cx + 5.0, cy, fg, 1.2),
+            Btn::Minimize => p.line(
+                cx - GLYPH_HALF,
+                cy,
+                cx + GLYPH_HALF,
+                cy,
+                fg,
+                STROKE,
+            ),
             // 最大化/还原：方框（还原是两个错开的方框）
             Btn::Maximize => {
                 if is_max {
                     // 还原：两个错开的方框
-                    p.round_stroke(R::new(cx - 5.0, cy - 3.0, 7.0, 7.0), 1.0, fg, 1.1);
-                    p.line(cx - 3.0, cy - 5.0, cx + 5.0, cy - 5.0, fg, 1.1);
-                    p.line(cx + 5.0, cy - 5.0, cx + 5.0, cy + 3.0, fg, 1.1);
-                    p.line(cx + 5.0, cy + 3.0, cx + 2.0, cy + 3.0, fg, 1.1);
+                    // 后框（右下错开）先画、前框后画，与原生一致
+                    p.round_stroke(
+                        R::new(cx - GLYPH_HALF, cy - 3.0, RESTORE_BOX, RESTORE_BOX),
+                        1.0,
+                        fg,
+                        STROKE_THIN,
+                    );
+                    p.line(
+                        cx - 3.0,
+                        cy - GLYPH_HALF,
+                        cx + GLYPH_HALF,
+                        cy - GLYPH_HALF,
+                        fg,
+                        STROKE_THIN,
+                    );
+                    p.line(
+                        cx + GLYPH_HALF,
+                        cy - GLYPH_HALF,
+                        cx + GLYPH_HALF,
+                        cy + 3.0,
+                        fg,
+                        STROKE_THIN,
+                    );
+                    p.line(
+                        cx + GLYPH_HALF,
+                        cy + 3.0,
+                        cx + 2.0,
+                        cy + 3.0,
+                        fg,
+                        STROKE_THIN,
+                    );
                 } else {
-                    p.round_stroke(R::new(cx - 4.5, cy - 4.5, 9.0, 9.0), 1.0, fg, 1.1);
+                    p.round_stroke(
+                        R::new(cx - BOX_HALF, cy - BOX_HALF, BOX_HALF * 2.0, BOX_HALF * 2.0),
+                        1.0,
+                        fg,
+                        STROKE_THIN,
+                    );
                 }
             }
             // 关闭：X
             Btn::Close => {
-                p.line(cx - 4.5, cy - 4.5, cx + 4.5, cy + 4.5, fg, 1.2);
-                p.line(cx + 4.5, cy - 4.5, cx - 4.5, cy + 4.5, fg, 1.2);
+                p.line(cx - BOX_HALF, cy - BOX_HALF, cx + BOX_HALF, cy + BOX_HALF, fg, STROKE);
+                p.line(cx + BOX_HALF, cy - BOX_HALF, cx - BOX_HALF, cy + BOX_HALF, fg, STROKE);
             }
         }
     }
@@ -222,6 +271,19 @@ mod tests {
         assert!(!in_bar(TITLE_H + 1.0));
         // 负 y（拖出窗口）
         assert_eq!(hit(cl.cx(), -1.0, w), None);
+    }
+
+    #[test]
+    fn 图标不会溢出按钮() {
+        // 最宽的图标是关闭的 X 和最大化的方框（半边长 5 / 4.5）。
+        // 按钮 46 宽，左右至少各留 8px，否则 hover 红底上图标会贴边甚至压到邻键。
+        let widest = GLYPH_HALF.max(BOX_HALF) * 2.0;
+        assert!(
+            (BTN_W - widest) / 2.0 >= 8.0,
+            "图标 {widest} 太宽，按钮只有 {BTN_W}"
+        );
+        // 笔宽必须小于图标边长，否则画成一坨
+        assert!(STROKE < GLYPH_HALF && STROKE_THIN < BOX_HALF);
     }
 
     #[test]
