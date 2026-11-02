@@ -222,10 +222,64 @@ pub fn launched_at_logon() -> bool {
     if package_identity() != Some(true) {
         return false;
     }
-    match crate::win32::parent_exe_name(std::process::id()) {
-        Some(name) => !name.eq_ignore_ascii_case("explorer.exe"),
-        None => false,
+    let me = std::process::id();
+    let parent_is_explorer = crate::win32::parent_exe_name(me)
+        .map(|n| n.eq_ignore_ascii_case("explorer.exe"))
+        .unwrap_or(false);
+    let gap = parent_gap_secs(me);
+    let autostart_on = state().0.is_enabled();
+    let hidden = decide_hidden(parent_is_explorer, autostart_on, gap);
+    note_launch(parent_is_explorer, gap, autostart_on, hidden);
+    hidden
+}
+
+/// 登录自启的时间窗（秒）。
+///
+/// 为什么需要它：Win11 的 `desktop:StartupTask` 有时由 **explorer.exe** 拉起
+/// （和用户双击图标一模一样），光看父进程名分不出来。改成看「我们和父进程谁先
+/// 出生」——登录自启时 explorer 刚起来、我们紧跟其后；用户手动点图标时 explorer
+/// 已经跑了几小时，差值很大。
+const LOGON_WINDOW_SECS: i64 = 120;
+
+/// 纯决策函数，方便单测。
+pub fn decide_hidden(
+    parent_is_explorer: bool,
+    autostart_on: bool,
+    parent_gap_secs: Option<i64>,
+) -> bool {
+    // 父进程是系统激活宿主（svchost / RuntimeBroker …）→ 一定是登录自启。
+    if !parent_is_explorer {
+        return true;
     }
+    // 父进程是 explorer：只有「自启开着 + 我们紧跟 explorer 出生」才算。
+    match parent_gap_secs {
+        Some(gap) if autostart_on && (0..=LOGON_WINDOW_SECS).contains(&gap) => true,
+        _ => false,
+    }
+}
+
+/// 我们比父进程晚出生多少秒（父进程更早为正）。
+fn parent_gap_secs(me: u32) -> Option<i64> {
+    let parent = crate::win32::parent_pid(me)?;
+    let mine = crate::win32::process_start_ticks(me)?;
+    let theirs = crate::win32::process_start_ticks(parent)?;
+    Some((mine as i64 - theirs as i64) / 10_000_000)
+}
+
+/// 把这次启动的判定依据落到 `last-launch.txt`。
+///
+/// 为什么留这个文件：登录自启的父进程到底是谁，只有用户真重启一次才知道；
+/// 没有现场记录就只能猜。写入失败一律忽略 —— 诊断信息不该影响启动。
+fn note_launch(parent_is_explorer: bool, gap: Option<i64>, autostart_on: bool, hidden: bool) {
+    let path = crate::paths::settings_file().with_file_name("last-launch.txt");
+    let line = format!(
+        "packaged=yes parent_is_explorer={parent_is_explorer} gap_secs={gap:?} autostart_on={autostart_on} hidden={hidden}\n"
+    );
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
 // ============================================================
@@ -1296,5 +1350,29 @@ mod tests {
 
         guard.armed = false;
         println!("往返测试通过，已恢复原状");
+    }
+
+    #[test]
+    fn hidden_when_parent_is_a_system_host() {
+        // svchost / RuntimeBroker 之类拉起 → 一定是登录自启
+        assert!(decide_hidden(false, false, None));
+        assert!(decide_hidden(false, false, Some(9999)));
+    }
+
+    #[test]
+    fn hidden_when_explorer_just_started_and_autostart_is_on() {
+        // 登录自启：explorer 刚起来几秒，自启开着
+        assert!(decide_hidden(true, true, Some(3)));
+        assert!(decide_hidden(true, true, Some(LOGON_WINDOW_SECS)));
+    }
+
+    #[test]
+    fn shown_when_user_launched_it_manually() {
+        // explorer 已经跑了两小时 → 是用户自己点的图标
+        assert!(!decide_hidden(true, true, Some(7200)));
+        // 自启没开时，紧跟 explorer 出生也不能藏（可能用户刚登录就点了）
+        assert!(!decide_hidden(true, false, Some(3)));
+        // 拿不到父进程创建时间：宁可多弹一次窗口
+        assert!(!decide_hidden(true, true, None));
     }
 }

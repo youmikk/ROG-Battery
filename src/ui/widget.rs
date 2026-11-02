@@ -508,6 +508,24 @@ impl Ui {
         self.content_h[Self::page_index(p)]
     }
 
+    /// 视口高度变了（缩放 / 最大化 / 还原）之后，把当前页的滚动量夹回合法范围。
+    ///
+    /// 不做这一步的表现：窗口放大后 `content_h - view_h` 变小，而滚动量还停在
+    /// 旧值 → 内容整体被推到视口上方，底部一片空白，用户得再滚一下才恢复。
+    pub fn clamp_scroll(&mut self, view_h: f32) -> bool {
+        let p = self.page;
+        let ch = self.content_h(p);
+        if ch <= 0.0 {
+            // 这一页还没画过，不知道内容多高 —— 别乱动。
+            return false;
+        }
+        let max = (ch - view_h).max(0.0);
+        let s = self.scroll_mut(p);
+        let before = *s;
+        *s = s.clamp(0.0, max);
+        (*s - before).abs() > 0.01
+    }
+
     /// 开始新一帧：清空登记的命中区与动效标记。
     pub fn begin_frame(&mut self) {
         self.hots.clear();
@@ -1246,4 +1264,27 @@ mod tests {
         assert_eq!(got, vec![Act::ToggleRail, Act::ToggleRail]);
     }
 
+    #[test]
+    fn clamp_scroll_pulls_back_when_viewport_grows() {
+        let mut u = ui();
+        u.set_content_h(Page::Battery, 2000.0);
+        u.wheel(-100.0, 600.0); // 滚到底
+        let deep = u.scroll_y(Page::Battery);
+        assert!(deep > 1000.0, "先滚下去，实际 {deep}");
+
+        // 视口放大到 1800 → 上限只剩 200，必须被拉回来
+        assert!(u.clamp_scroll(1800.0));
+        assert_eq!(u.scroll_y(Page::Battery), 200.0);
+
+        // 已经在范围内就什么都不做
+        assert!(!u.clamp_scroll(1800.0));
+    }
+
+    #[test]
+    fn clamp_scroll_ignores_pages_that_were_never_drawn() {
+        let mut u = ui();
+        // content_h 还是 0：不知道多高，不能把滚动量清成 0
+        u.wheel(-1.0, 600.0);
+        assert!(!u.clamp_scroll(600.0));
+    }
 }

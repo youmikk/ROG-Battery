@@ -309,6 +309,7 @@ pub fn on_getminmaxinfo(hwnd: Handle, lparam: isize) {
     }
     let work = mi.rc_work;
     let full = mi.rc_monitor;
+    let (min_w, min_h) = crate::ui::layout::min_window_size(crate::dwm::system_scale());
 
     // SAFETY: `lparam` 是系统给的 `MINMAXINFO*`，按文档布局写。
     // 用 `*mut i32` 逐字段写而不是声明一个 Rust 结构体：那个结构体
@@ -322,6 +323,10 @@ pub fn on_getminmaxinfo(hwnd: Handle, lparam: isize) {
         // 不是屏幕绝对坐标 —— 多显示器时写绝对坐标会让窗口跳到主屏左上角。
         *base.add(4) = work.left - full.left;
         *base.add(5) = work.top - full.top;
+        // ptMinTrackSize（偏移 24 = 第 6、7 个 i32）：拖边框时系统不会让我们
+        // 缩到比这更小，页面也就不会挤成一条缝。
+        *base.add(6) = min_w;
+        *base.add(7) = min_h;
     }
 }
 

@@ -164,6 +164,14 @@ extern "system" {
     pub fn WriteFile(h: Handle, buf: *const c_void, to_write: u32, written: *mut u32, ov: *mut Overlapped) -> i32;
 
     pub fn CloseHandle(h: Handle) -> i32;
+    pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+    pub fn GetProcessTimes(
+        proc: Handle,
+        creation: *mut u64,
+        exit: *mut u64,
+        kernel: *mut u64,
+        user: *mut u64,
+    ) -> i32;
 
     pub fn CreateEventW(sec: *mut c_void, manual_reset: i32, initial: i32, name: *const u16) -> Handle;
 
@@ -359,11 +367,11 @@ extern "system" {
 ///
 /// 一次快照把「pid → (父 pid, 名字)」全读出来再走链，比
 /// `NtQueryInformationProcess` 稳 —— 后者结构体布局随系统版本变。
-pub fn parent_exe_name(pid: u32) -> Option<String> {
+fn process_table() -> Vec<(u32, u32, String)> {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap.is_null() || snap == INVALID_HANDLE_VALUE {
-            return None;
+            return Vec::new();
         }
         let mut rows: Vec<(u32, u32, String)> = Vec::new();
         let mut e: ProcessEntry32W = std::mem::zeroed();
@@ -377,11 +385,37 @@ pub fn parent_exe_name(pid: u32) -> Option<String> {
             ok = Process32NextW(snap, &mut e) != 0;
         }
         CloseHandle(snap);
+        rows
+    }
+}
 
-        let ppid = rows.iter().find(|(p, _, _)| *p == pid)?.1;
-        rows.iter()
-            .find(|(p, _, _)| *p == ppid)
-            .map(|(_, _, n)| n.clone())
+/// 父进程 pid。拿不到（快照失败 / pid 不存在）返回 `None`。
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    process_table().iter().find(|(p, _, _)| *p == pid).map(|(_, pp, _)| *pp)
+}
+
+pub fn parent_exe_name(pid: u32) -> Option<String> {
+    let rows = process_table();
+    let ppid = rows.iter().find(|(p, _, _)| *p == pid)?.1;
+    rows.iter().find(|(p, _, _)| *p == ppid).map(|(_, _, n)| n.clone())
+}
+
+/// 进程创建时间（`FILETIME` 的 100ns 刻度）。拿不到返回 `None`。
+pub fn process_start_ticks(pid: u32) -> Option<u64> {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let (mut created, mut exited, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+        let ok = GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user);
+        CloseHandle(h);
+        if ok == 0 {
+            None
+        } else {
+            Some(created)
+        }
     }
 }
 

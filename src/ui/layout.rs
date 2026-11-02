@@ -18,6 +18,22 @@
 //! 到底是展开（240）还是收成轨道（56），比 CSS 的相对判断更直接。
 
 /// 侧栏展开时的宽度（CSS `.sidebar { width: 240px }`）。
+/// 窗口能缩到的最小逻辑尺寸。
+///
+/// 再小的话内容区放不下电量卡的 4 行 KPI（窄屏单列需要约 270 逻辑像素），
+/// 用户只能靠滚动看半截内容 —— 与其让人滚，不如不让缩。
+pub const MIN_WIN_W: f32 = 720.0;
+pub const MIN_WIN_H: f32 = 520.0;
+
+/// 最小窗口尺寸（物理像素）。
+pub fn min_window_size(scale: f32) -> (i32, i32) {
+    let s = if scale > 0.1 { scale } else { 1.0 };
+    (
+        (MIN_WIN_W * s).round() as i32,
+        (MIN_WIN_H * s).round() as i32,
+    )
+}
+
 pub const NAV_W_EXPANDED: f32 = 240.0;
 /// 侧栏收成图标轨道时的宽度（CSS `--sb-w: 56px`）。
 pub const NAV_W_RAIL: f32 = 56.0;
@@ -232,5 +248,13 @@ mod tests {
         let f = Frame::new(200.0, 400.0, NAV_W_RAIL);
         assert!(f.width > 0.0, "宽度算成了 {}", f.width);
         assert!(f.width >= 60.0);
+    }
+
+    #[test]
+    fn min_window_size_scales_with_dpi() {
+        assert_eq!(min_window_size(1.0), (720, 520));
+        assert_eq!(min_window_size(1.5), (1080, 780));
+        // 传 0 / 负数时退回 1.0，别让窗口变成 0×0。
+        assert_eq!(min_window_size(0.0), (720, 520));
     }
 }
