@@ -270,6 +270,46 @@ pub enum CloseChoice {
     Quit,
 }
 
+impl Act {
+    /// 这个动作要读写设备吗？
+    ///
+    /// 读不到设备时点这些动作只会失败，`gui` 那边统一换成一句提示；
+    /// 本地动作（切页、折叠侧栏、改本地设置）照常执行。
+    pub fn needs_device(self) -> bool {
+        match self {
+            Act::ApplyEdit(Edit::Dpi(_)) | Act::CommitSlide(_) => true,
+            Act::Backup | Act::Restore | Act::RefreshLighting => true,
+            Act::Toggle(p) => p.needs_device(),
+            Act::PickDrop(d, _) => d.needs_device(),
+            _ => false,
+        }
+    }
+}
+
+impl Pref {
+    /// 这一项是写设备的开关吗（托盘、开机自启是本地设置）。
+    pub fn needs_device(self) -> bool {
+        matches!(self, Pref::FullEffect | Pref::AngleSnap)
+    }
+}
+
+impl Drop {
+    /// 这个下拉框选完要写设备吗（刷新间隔、缓存有效期、关闭动作都是本地的）。
+    pub fn needs_device(self) -> bool {
+        matches!(
+            self,
+            Drop::Sleep
+                | Drop::Poll
+                | Drop::Stage
+                | Drop::Debounce
+                | Drop::Lod
+                | Drop::LightMode
+                | Drop::ButtonTarget(_)
+                | Drop::Palette(_)
+        )
+    }
+}
+
 /// 一个可交互区域。
 /// 电量历史曲线的像素级几何（`draw_chart` 每帧都要用，但只在数据或
 /// 绘图区尺寸变化时才需要重算）。
@@ -544,11 +584,9 @@ impl Ui {
 
     /// 登记一个内容区可交互区域（**内容坐标**，随滚动移动）。
     ///
-    /// 页面被锁定时整条丢弃：不登记就不可能有命中，也就不会产生动作。
+    /// 读不到设备时**照样登记**：控件要有悬停/按压反馈，点了再由 `gui`
+    /// 判断该不该提示「读不到设备」—— 静默吞掉点击才是真的坏了。
     pub fn hot(&mut self, rect: R, act: Act) {
-        if self.locked {
-            return;
-        }
         self.hots.push(Hot { rect, act });
     }
 
@@ -1200,23 +1238,30 @@ mod tests {
     }
 
     #[test]
-    fn locked_page_ignores_content_clicks() {
-        // 读不到设备时，设备页的控件一律不登记 —— 点哪儿都不会产生动作。
+    fn locked_page_still_reports_the_action() {
+        // 读不到设备时控件照常可点：命中要能拿到动作，由 gui 决定提示什么。
+        // 以前这里直接不登记命中，结果点了毫无反应，用户以为界面坏了。
         let mut u = Ui::default();
         u.begin_frame();
         u.locked = true;
         u.hot(R::new(0.0, 0.0, 400.0, 40.0), Act::OpenDrop(Drop::Poll));
-        assert_eq!(u.hit(10.0, 10.0, 0.0), None, "锁定后内容区不该有命中");
-
-        // 侧栏与标题栏不受影响：锁定只作用于内容区。
-        u.chrome_hot(R::new(10.0, 100.0, 38.0, 36.0), Act::Nav(Page::Perf));
-        assert_eq!(u.hit(20.0, 110.0, 0.0), Some(Act::Nav(Page::Perf)));
-
-        // 解锁后同一块区域立刻恢复可点。
-        u.locked = false;
-        u.begin_frame();
-        u.hot(R::new(0.0, 0.0, 400.0, 40.0), Act::OpenDrop(Drop::Poll));
         assert_eq!(u.hit(10.0, 10.0, 0.0), Some(Act::OpenDrop(Drop::Poll)));
+    }
+
+    #[test]
+    fn device_actions_are_told_apart_from_local_ones() {
+        // 设备类动作：读不到设备时只提示，不进队列。
+        assert!(Act::OpenDrop(Drop::Poll).needs_device() == false, "开弹层是本地动作");
+        assert!(Act::PickDrop(Drop::Poll, 2).needs_device());
+        assert!(Act::PickDrop(Drop::Refresh, 1).needs_device() == false);
+        assert!(Act::Toggle(Pref::FullEffect).needs_device());
+        assert!(Act::Toggle(Pref::TrayEnabled).needs_device() == false);
+        assert!(Act::CommitSlide(Slide::Tune).needs_device());
+        assert!(Act::Backup.needs_device() && Act::Restore.needs_device());
+        // 本地动作
+        assert!(!Act::Nav(Page::Battery).needs_device());
+        assert!(!Act::ToggleRail.needs_device());
+        assert!(!Act::SetTheme(2).needs_device());
     }
 
     #[test]

@@ -773,16 +773,16 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
     // ---- 品牌图标 ----
     // 侧栏顶部原来是一条空带，现在放 exe 资源里的应用图标（用户给的原画）。
     // 轨道模式只有 56px，图标居中；展开模式图标 + 产品名一行。
-    let mut y = top + 10.0;
+    let mut y = top + 6.0;
     let icon = crate::ui::gfx::app_icon_bitmap();
     if rail {
-        let d = 30.0;
+        let d = 36.0;
         let r = R::new((nav_w - d) / 2.0, y, d, d);
         p.image_rounded(icon, r, 7.0);
         y = r.bottom() + 10.0;
     } else {
-        let d = 28.0;
-        let r = R::new(12.0, y + 1.0, d, d);
+        let d = 32.0;
+        let r = R::new(12.0, y, d, d);
         p.image_rounded(icon, r, 7.0);
         p.text(
             "R Battery",
@@ -802,7 +802,7 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
             .ident
             .map(|i| i.display_name())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "ROG 鼠标".to_string());
+            .unwrap_or_else(|| "未找到设备".to_string());
         p.text(
             &model,
             R::new(dc.x + 12.0, dc.y + 10.0, dc.w - 24.0, 18.0),
@@ -829,7 +829,7 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
             if connected { t.green } else { t.text3 },
         );
         p.text(
-            if connected { "使用中" } else { "休眠中" },
+            if connected { "已连接" } else { "未找到设备" },
             R::new(dc.x + 23.0, line_y - 2.0, 60.0, 16.0),
             12.0,
             false,
@@ -964,51 +964,12 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
 
 // ───────────────────────── 入口 ─────────────────────────
 
-/// 锁定遮罩：盖住内容区并说明原因。
-///
-/// 用**屏幕坐标**画（`frame.content`），所以滚动内容不会把提示带走；生产路径由
-/// `canvas::draw_frame` 在页面之后调用，渲染测试也调同一份，保证看到的就是用户看到的。
-pub fn draw_lock_veil(p: &mut Painter, frame: &Frame, theme: &crate::ui::theme::Theme) {
-    let cr = frame.content;
-    // 遮罩用背景色加不透明度：浅色主题压成白雾、深色主题压成黑雾，都不会糊成灰板。
-    let veil = (0xB4u32 << 24) | (theme.bg & 0x00FF_FFFF);
-    p.rect(cr, veil);
-    // 提示卡放视口正中：贴顶会压住页面标题，看起来像排版坏了。
-    let w = 380.0_f32.min(cr.w - 64.0);
-    let h = 68.0;
-    let bar = R::new(cr.x + (cr.w - w) / 2.0, cr.y + (cr.h - h) / 2.0, w, h);
-    p.card(bar, 10.0, theme.card, theme.border);
-    p.text(
-        "读不到设备，设置已锁定",
-        R::new(bar.x + 16.0, bar.y + 15.0, bar.w - 32.0, 20.0),
-        13.5,
-        true,
-        theme.text,
-        Align::Center,
-    );
-    p.text(
-        "插好接收器或动一下鼠标后再试",
-        R::new(bar.x + 16.0, bar.y + 38.0, bar.w - 32.0, 18.0),
-        11.5,
-        false,
-        theme.text2,
-        Align::Center,
-    );
-}
-
-/// 该页是否依赖设备状态（读不到设备时整页锁定）。
-///
-/// 性能页改 DPI / 回报率 / 去抖，按键页改按键映射，都只有拿到当前值才写得对；
-/// 拿不到时让用户点开下拉再报「读不到设备」，不如一开始就不给点。
-pub fn locks_without_device(page: Page) -> bool {
-    matches!(page, Page::Perf | Page::Keys)
-}
 
 /// 画当前页正文（内容坐标，滚动由 canvas 施加）。
 pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     // 读不到设备时，只有**依赖设备状态**的页面才锁定：设置页、灯光页、电量页
     // 的内容要么是本地设置、要么是只读展示，锁了反而没法用。
-    ui.locked = locks_without_device(ui.page) && d.state.is_none();
+    ui.locked = d.state.is_none();
 
     let mut c = Cursor::new(f);
     match ui.page {
@@ -1663,7 +1624,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         let by = ly + 4.0;
         let pill_h = 21.0;
         let (label, fg, bg) = if st.is_none() {
-            ("休眠中", t.text3, t.bg_sunken)
+            ("未连接", t.text3, t.bg_sunken)
         } else if charging {
             ("充电中", t.warn, t.warn_soft)
         } else if level <= 15 {
@@ -1703,8 +1664,8 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     // 输入框+按钮、开关 40）。曾经这里多一个宽度字段，三处调用全都无视它、
     // 直接写字面量，于是那个字段从没被读过，第三行的 60 还和实际用的 40 对不上。
     let rows: [(&str, Option<&str>); 3] = [
-        ("自动休眠", Some("鼠标静止多久后进入休眠以省电")),
-        ("低电量阈值", Some("低于该电量时鼠标上的指示灯会闪")),
+        ("自动休眠", Some("设备静止多久后进入休眠以省电")),
+        ("低电量阈值", Some("低于该电量时设备指示灯会闪")),
         ("充满效果", Some("充满电时播放一次灯效")),
     ];
     let total_h: f32 = rows.iter().map(|_| layout::ROW_H).sum();
@@ -2238,7 +2199,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     }
     // 说明
     p.text_wrap(
-        "范围 100–42000 DPI，步进 50。颜色是该档位在鼠标上的指示灯颜色。",
+        "范围 100–42000 DPI，步进 50。颜色是该档位在设备上的指示灯颜色。",
         R::new(card.x + 18.0, y + 6.0, card.w - 36.0, 32.0),
         11.5,
         t.text3,
@@ -2284,7 +2245,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     }
     {
         let area = row_area(card, card.y + layout::ROW_H);
-        let ctl = row_label(p, area, "当前档位", Some("同时决定鼠标的 DPI 和档位指示灯"), 220.0);
+        let ctl = row_label(p, area, "当前档位", Some("同时决定设备的 DPI 和档位指示灯"), 220.0);
         segmented(
             p,
             ui,
@@ -2434,7 +2395,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        "写 LOD 会重置鼠标的表面标定（厂商确认没有恢复命令）。本机标定已被重置过。",
+        "写 LOD 会重置设备的表面标定（厂商确认没有恢复命令）。本机标定已被重置过。",
         true,
     );
     c.y += nw;
@@ -2555,7 +2516,7 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        "把某个键绑成「无功能」（0000）后，该键在鼠标上将完全失效 —— 如需恢复必须重新写入完整映射配置。",
+        "把某个键绑成「无功能」（0000）后，该键在设备上将完全失效 —— 如需恢复必须重新写入完整映射配置。",
         true,
     );
     c.y += nw + 16.0;
@@ -2668,7 +2629,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     // 刷新间隔
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "后台刷新间隔", Some("读取鼠标状态的频率"), 150.0);
+        let ctl = row_label(p, area, "后台刷新间隔", Some("读取设备状态的频率"), 150.0);
         drop_button(
             p,
             ui,
@@ -2777,7 +2738,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             p,
             area,
             "版本",
-            Some("R Battery · 不依赖 ASUS 驱动的 ROG 鼠标参数工具"),
+            Some("R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具"),
             96.0,
         );
         p.text(
@@ -2932,21 +2893,6 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
 #[cfg(test)]
 mod tests {
-
-    /// 只有依赖设备状态的页面才锁；设置页、灯光页、电量页读不到设备也能用。
-    #[test]
-    fn only_device_pages_lock_without_a_device() {
-        for page in [crate::ui::widget::Page::Perf, crate::ui::widget::Page::Keys] {
-            assert!(locks_without_device(page), "{page:?} 该锁");
-        }
-        for page in [
-            crate::ui::widget::Page::Battery,
-            crate::ui::widget::Page::Light,
-            crate::ui::widget::Page::Settings,
-        ] {
-            assert!(!locks_without_device(page), "{page:?} 不该锁");
-        }
-    }
 
     use crate::ui::dropdown::button_target_name;
     use crate::ui::palette::palette_color;

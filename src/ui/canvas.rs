@@ -65,6 +65,16 @@ const WM_CHAR: u32 = 0x0102;
 /// 编译只报 `warning: unused variable`，运行起来整个窗口过程全走那一支。
 /// 我这次真踩了：加完 `WM_TIMER` 分支就收到这两条警告。
 const WM_TIMER: u32 = 0x0113;
+/// 拖边框缩放开始 / 结束（`WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE`）。
+const WM_ENTERSIZEMOVE: u32 = 0x0231;
+const WM_EXITSIZEMOVE: u32 = 0x0232;
+
+/// 窗口正在被拖动缩放。
+///
+/// 缩放期间系统每帧都要重排，而我们一帧要重画整块内存位图（全屏时 2560×1440，
+/// 约 14 MB），两边抢 CPU 就是用户说的「缩小页面明显卡顿」。缩放期间把 60fps
+/// 动效定时器关掉，松手后下一帧按需重开。
+static RESIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// 捕获被系统收回（切窗口、弹窗抢焦点等）。
 const WM_CAPTURECHANGED: u32 = 0x0215;
 /// 系统要求放弃当前模态状态（拖拽中按 Esc、菜单弹出等）。
@@ -398,19 +408,6 @@ pub fn draw_frame(
 
     // ②b 锁定遮罩：盖住内容区并说明原因。画在页面之后、导航之前，
     // 所以导航和标题栏照常可点（切页、缩放、关闭都不受影响）。
-    if ui.locked {
-        inner.paint(
-            fonts,
-            theme,
-            a.scale,
-            0.0,
-            a.view_w,
-            a.view_h,
-            |p: &mut Painter| {
-                pages::draw_lock_veil(p, &frame, theme);
-            },
-        );
-    }
 
     // ③ 导航侧栏（不滚动，固定在左侧）
     inner.paint(
@@ -854,6 +851,8 @@ fn fill_background(target: Handle, hwnd: Handle) {
 /// 但 `KillTimer` 一个不存在的 id 会失败（无害）。所以两个方向都不需要
 /// 先查询当前状态，直接调即可。
 fn set_timer(hwnd: Handle, on: bool) {
+    // 缩放期间一律不开动效定时器（见 `RESIZING`）。
+    let on = on && !RESIZING.load(std::sync::atomic::Ordering::Relaxed);
     unsafe {
         if on {
             SetTimer(hwnd, ANIM_TIMER_ID, ANIM_INTERVAL_MS, 0);
@@ -963,6 +962,19 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
         // 重画一次 —— 用 `InvalidateRect` 而不是 `UpdateWindow`：定时器每 16ms
         // 来一次，同步重画会把消息队列堵住（用户拖窗口时明显卡）。
         // 定时器回调只负责「标脏」，真正的绘制仍是 WM_PAINT 那次。
+        WM_ENTERSIZEMOVE => {
+            RESIZING.store(true, std::sync::atomic::Ordering::Relaxed);
+            set_timer(hwnd, false);
+            0
+        }
+
+        WM_EXITSIZEMOVE => {
+            RESIZING.store(false, std::sync::atomic::Ordering::Relaxed);
+            // 松手补一帧：缩放中画的是中间尺寸，最后一帧要按最终尺寸重画。
+            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            0
+        }
+
         WM_TIMER => {
             if wp == ANIM_TIMER_ID {
                 // 上一帧画完才知道「还需不需要继续动」：充电结束、toast 淡出

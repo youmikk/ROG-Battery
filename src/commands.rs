@@ -207,11 +207,11 @@ pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
 
     let api = match crate::win32::HidApi::load() {
         Ok(a) => a,
-        Err(e) => return fail(e, "请确认鼠标接收器已插好"),
+        Err(e) => return fail(e, "请确认接收器已插好"),
     };
     let link = match hid::open_link(&api) {
         Ok(l) => l,
-        Err(e) => return fail(e, "请确认鼠标接收器已插好"),
+        Err(e) => return fail(e, "请确认接收器已插好"),
     };
     let mut dev = match HidDevice::open(&link.iface) {
         Ok(d) => d,

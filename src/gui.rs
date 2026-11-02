@@ -611,6 +611,14 @@ fn handle_act(a: Act, env: &UiEnv) {
         env.canvas.with_ui_mut(|u| u.clear_status());
     }
 
+    // 读不到设备时，凡是要读写设备的动作都只回一句话：
+    // 控件照常响应点击（有按压反馈），但不进队列、不改任何状态。
+    // 以前是整页锁死不登记命中，点了毫无反应，用户只会以为界面坏了。
+    if a.needs_device() && env.canvas.with_ui(|u| u.locked) {
+        env.say("✘ 读不到设备：插好接收器，或动一下设备再试");
+        return;
+    }
+
     match a {
         Act::None => {}
 
@@ -855,7 +863,7 @@ fn pick_palette(env: &UiEnv, slot: u8, idx: usize) {
         // 就只能猜（以前猜 800），猜错就是把用户那一档的 DPI 一起改掉 ——
         // 用户点的是颜色，结果灵敏度变了，这是最糟的一种「顺手改坏」。
         let Some(st) = env.state() else {
-            env.say("✘ 读不到设备，先动一下鼠标再选颜色");
+            env.say("✘ 读不到设备，动一下设备再选颜色");
             return;
         };
         let dpi = st.dpi(i);
@@ -1037,7 +1045,7 @@ fn apply_edit(env: &UiEnv, e: Edit) {
                 _ => None,
             };
             if st.is_none() && (typed_dpi.is_none() || typed_rgb.is_none()) {
-                env.say("✘ 读不到设备当前设置，先动一下鼠标再改");
+                env.say("✘ 读不到设备，动一下设备再改");
                 return;
             }
 
@@ -1564,7 +1572,7 @@ fn tray_tip_full(s: &Shared) -> String {
         .as_ref()
         .map(|i| i.display_name())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "ROG 鼠标".to_string());
+        .unwrap_or_else(|| "未找到设备".to_string());
 
     let conn = conn_text(s);
 
@@ -1577,7 +1585,7 @@ fn tray_tip_full(s: &Shared) -> String {
             }
         }
         None => match &s.status {
-            Status::Asleep => "电量 —（休眠中，动一下鼠标）".to_string(),
+            Status::Asleep => "电量 —（设备未响应）".to_string(),
             Status::Error(_) => "电量 —（读取出错）".to_string(),
             _ => "电量 —".to_string(),
         },
@@ -2347,11 +2355,11 @@ mod tests {
             label: "备份".into(),
             ok: None,
             err: Some("设备无应答".into()),
-            hint: "请确认鼠标接收器已插好",
+            hint: "请确认接收器已插好",
         };
         let t = bad.toast();
         assert!(t.contains("设备无应答"), "{t}");
-        assert!(t.contains("请确认鼠标接收器已插好"), "{t}");
+        assert!(t.contains("请确认接收器已插好"), "{t}");
 
         let no_hint = CmdResult {
             label: "备份".into(),

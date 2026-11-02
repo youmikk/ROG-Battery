@@ -102,7 +102,7 @@ impl std::fmt::Display for OpsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // 休眠这类「不是错误的错误」前面加统一后缀，日志里一眼能认出来
         match self.kind {
-            ErrorKind::Asleep => write!(f, "{}（鼠标休眠中？先移动一下鼠标）", self.message),
+            ErrorKind::Asleep => write!(f, "{}（设备未响应，动一下设备再试）", self.message),
             _ => write!(f, "{}", self.message),
         }
     }
@@ -1202,10 +1202,10 @@ mod tests {
     #[test]
     fn asleep_display_has_hint() {
         let e = OpsError::asleep("写入无应答");
-        assert!(e.to_string().contains("移动一下鼠标"));
+        assert!(e.to_string().contains("动一下设备"));
         // 参数非法不该带休眠提示
         let e = OpsError::invalid("亮度范围 0-100");
-        assert!(!e.to_string().contains("移动一下鼠标"));
+        assert!(!e.to_string().contains("动一下设备"));
     }
 
     #[test]

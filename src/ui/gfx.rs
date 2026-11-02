@@ -826,16 +826,6 @@ impl<'a> Painter<'a> {
         }
     }
 
-    /// 画一张已解码的位图（应用图标）。坐标是逻辑像素，缩放交给世界变换。
-    pub fn image(&mut self, img: *mut c_void, r: R) {
-        if img.is_null() || !self.visible(r) {
-            return;
-        }
-        unsafe {
-            GdipDrawImageRect(self.g, img, r.x, r.y, r.w, r.h);
-        }
-    }
-
     /// 画位图并裁成圆角。
     ///
     /// 应用图标自带的浅蓝底是方的，直接贴到侧栏上会露出一块生硬的白边方角；
@@ -2405,9 +2395,6 @@ mod tests {
             // ② 页面
             canvas.paint(fonts, theme, 1.0, scroll, w as f32, h as f32, |p| {
                 super::super::pages::page(p, ui, data_ref, &frame);
-                if ui.locked {
-                    super::super::pages::draw_lock_veil(p, &frame, theme);
-                }
                 if let Some(extra) = draw_extra {
                     extra(p, &frame);
                 }
