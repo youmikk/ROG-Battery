@@ -1508,6 +1508,10 @@ pub struct Canvas {
     /// 本帧共享的 GDI+ 上下文（`begin_frame_paint` 建、`end_frame_paint` 删）。
     /// 为空时 `paint` 自己建一次性上下文，画完即删。
     frame_g: *mut c_void,
+    /// 上一帧请求的尺寸，用来判断「尺寸还在变」。
+    last_need: (i32, i32),
+    /// 尺寸连续没变的帧数（见 `STABLE_FRAMES`）。
+    stable: u32,
 }
 
 /// 位图复用策略（纯函数，便于单测）。
@@ -1538,10 +1542,24 @@ pub(crate) fn bitmap_action(have: Option<(i32, i32)>, need: (i32, i32)) -> Bitma
     }
 }
 
+/// 尺寸连续这么多帧没变，才认为「缩放停了」，允许把位图换小。
+///
+/// 60fps 下约 0.3 秒；空闲时每帧间隔几百毫秒，也就是一两帧就够。
+const STABLE_FRAMES: u32 = 20;
+
 impl Canvas {
     /// 建一个空画布。真正的位图在第一次 `ensure` 时创建。
     pub fn new() -> Canvas {
-        Canvas { dc: 0, bmp: 0, old: 0, w: 0, h: 0, frame_g: std::ptr::null_mut() }
+        Canvas {
+            dc: 0,
+            bmp: 0,
+            old: 0,
+            w: 0,
+            h: 0,
+            frame_g: std::ptr::null_mut(),
+            last_need: (0, 0),
+            stable: 0,
+        }
     }
 
     /// 保证画布尺寸至少是 `w × h`，返回真正的绘制 DC。
@@ -1552,10 +1570,23 @@ impl Canvas {
     pub fn ensure(&mut self, screen_dc: Gdi, w: i32, h: i32) -> Gdi {
         let w = w.max(1);
         let h = h.max(1);
+        // 尺寸还在变（拖边框、最大化/还原动画）就先别缩：`CreateCompatibleBitmap`
+        // 是内核对象分配，全屏 2560×1440 那张要 14 MB，塞在动画帧里就是明显卡顿。
+        // 连续 `STABLE_FRAMES` 帧尺寸没变，才认为「停下来了」，此时再换小位图。
+        if (w, h) == self.last_need {
+            self.stable = self.stable.saturating_add(1);
+        } else {
+            self.last_need = (w, h);
+            self.stable = 0;
+        }
+        let settled = self.stable >= STABLE_FRAMES;
         let action = if self.dc == 0 {
             BitmapAction::Grow
         } else {
-            bitmap_action(Some((self.w, self.h)), (w, h))
+            match bitmap_action(Some((self.w, self.h)), (w, h)) {
+                BitmapAction::Recreate if !settled => BitmapAction::Keep,
+                other => other,
+            }
         };
         if action == BitmapAction::Keep {
             return self.dc;
@@ -1984,10 +2015,13 @@ mod tests {
         assert_eq!(mem2, mem, "小幅缩小不该重建位图");
         assert_eq!(canvas.size(), (400, 300));
 
-        // 大幅缩小：换一张小位图，把大块还给系统
-        let small = canvas.ensure(dc, 200, 150);
+        // 大幅缩小：等尺寸稳定几帧后才换小位图（缩放动画期间不分配，否则卡顿）
+        let mut small = 0;
+        for _ in 0..STABLE_FRAMES + 1 {
+            small = canvas.ensure(dc, 200, 150);
+        }
         assert_ne!(small, 0);
-        assert_ne!(small, mem, "大幅缩小应换一张小位图");
+        assert_ne!(small, mem, "尺寸稳定后应换一张小位图");
         assert_eq!(canvas.size(), (200, 150));
         let small = canvas.ensure(dc, 200, 150);
         assert_ne!(small, 0);

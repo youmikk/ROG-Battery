@@ -109,6 +109,37 @@ pub fn draw(p: &mut Painter, win_w: f32, nav_w: f32, theme: &Theme) {
     }
     // 内容那一段：和页面背景同一个色，连成一片
     p.rect(R::new(nw, 0.0, win_w - nw, TITLE_H), t.bg);
+
+    // 左上角品牌图标：就放在标题栏那一条里，和右边的窗口按钮同一水平线。
+    if nw >= 40.0 {
+        let r = logo_rect(nw);
+        p.image_rounded(crate::ui::gfx::app_icon_bitmap(), r, 6.0);
+        // 展开侧栏时右边还有空位，补上产品名；轨道模式只有 56px，放不下就省了。
+        if nw > 64.0 {
+            p.text(
+                "R Battery",
+                R::new(r.right() + 10.0, r.y, nw - r.right() - 22.0, r.h),
+                13.0,
+                true,
+                t.text,
+                crate::ui::gfx::Align::Left,
+            );
+        }
+    }
+}
+
+/// 左上角 logo 的矩形（窗口坐标）。
+///
+/// 轨道模式居中在 56px 的侧栏里；展开模式靠左留 14px。两种宽度都压在标题栏
+/// 那一条内（36px 高、图标 26px，上下各留 5px），不会越界到导航区。
+pub fn logo_rect(nav_w: f32) -> R {
+    let d = 26.0;
+    let x = if nav_w <= 64.0 {
+        ((nav_w - d) / 2.0).max(4.0)
+    } else {
+        14.0
+    };
+    R::new(x, (TITLE_H - d) / 2.0, d, d)
 }
 
 /// 三条按钮图标的笔宽与几何（逻辑像素）。
