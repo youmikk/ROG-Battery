@@ -291,6 +291,12 @@ impl Act {
             Act::Backup | Act::Restore | Act::RefreshLighting => true,
             Act::Toggle(p) => p.needs_device(),
             Act::PickDrop(d, _) => d.needs_device(),
+            // 打开色盘本身就是去挑一个要写进设备的颜色；其它下拉只是展开，
+            // 选中时才写（那一步由 `PickDrop` 管）。
+            Act::OpenDrop(Drop::Palette(_)) => true,
+            // 色盘：开面板、切页签、拖色相、点色块，全都要写设备
+            Act::SetPaletteTab(_) | Act::SetCustomHue(Drop::Palette(_), _) => true,
+            // `Focus` 由 `gui` 里那一支单独处理（它还要把焦点环退回去）
             _ => false,
         }
     }
@@ -960,6 +966,18 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn palette_actions_need_the_device() {
+        // 读不到设备时点色块不该弹出色盘（曾经漏判，点了照样开）。
+        assert!(Act::OpenDrop(Drop::Palette(0)).needs_device());
+        assert!(Act::SetPaletteTab(1).needs_device());
+        assert!(Act::SetCustomHue(Drop::Palette(0), 180.0).needs_device());
+        assert!(Act::PickDrop(Drop::Palette(0), 5).needs_device());
+        // 本地动作不受影响
+        assert!(!Act::OpenDrop(Drop::Refresh).needs_device());
+        assert!(!Act::Nav(crate::ui::widget::Page::Battery).needs_device());
+    }
     use super::*;
 
     fn ui() -> Ui {
