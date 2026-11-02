@@ -396,6 +396,22 @@ pub fn draw_frame(
         },
     );
 
+    // ②b 锁定遮罩：盖住内容区并说明原因。画在页面之后、导航之前，
+    // 所以导航和标题栏照常可点（切页、缩放、关闭都不受影响）。
+    if ui.locked {
+        inner.paint(
+            fonts,
+            theme,
+            a.scale,
+            0.0,
+            a.view_w,
+            a.view_h,
+            |p: &mut Painter| {
+                pages::draw_lock_veil(p, &frame, theme);
+            },
+        );
+    }
+
     // ③ 导航侧栏（不滚动，固定在左侧）
     inner.paint(
         fonts,

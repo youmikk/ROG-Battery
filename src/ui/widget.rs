@@ -418,6 +418,11 @@ pub struct Ui {
     pub close_choice: CloseChoice,
     /// 关闭对话框里的「记住我的选择」复选框。
     pub close_remember: bool,
+    /// 读不到设备时的整页锁定。
+    ///
+    /// 由 `pages::page` 每帧按页面决定（设备页为 true）。锁定时 `hot` 不登记
+    /// 命中区，点哪儿都不产生动作；画面上另有一层遮罩说明原因。
+    pub locked: bool,
 }
 
 impl Default for Ui {
@@ -459,6 +464,7 @@ impl Default for Ui {
             show_close_dialog: false,
             close_choice: CloseChoice::Minimize,
             close_remember: false,
+            locked: false,
         }
     }
 }
@@ -537,7 +543,12 @@ impl Ui {
     }
 
     /// 登记一个内容区可交互区域（**内容坐标**，随滚动移动）。
+    ///
+    /// 页面被锁定时整条丢弃：不登记就不可能有命中，也就不会产生动作。
     pub fn hot(&mut self, rect: R, act: Act) {
+        if self.locked {
+            return;
+        }
         self.hots.push(Hot { rect, act });
     }
 
@@ -1186,6 +1197,26 @@ mod tests {
         u.hot(R::new(0.0, 0.0, 1200.0, 800.0), Act::None);
         u.chrome_hot(R::new(10.0, 100.0, 38.0, 36.0), Act::Nav(Page::Battery));
         assert_eq!(u.hit(20.0, 110.0, 0.0), Some(Act::Nav(Page::Battery)));
+    }
+
+    #[test]
+    fn locked_page_ignores_content_clicks() {
+        // 读不到设备时，设备页的控件一律不登记 —— 点哪儿都不会产生动作。
+        let mut u = Ui::default();
+        u.begin_frame();
+        u.locked = true;
+        u.hot(R::new(0.0, 0.0, 400.0, 40.0), Act::OpenDrop(Drop::Poll));
+        assert_eq!(u.hit(10.0, 10.0, 0.0), None, "锁定后内容区不该有命中");
+
+        // 侧栏与标题栏不受影响：锁定只作用于内容区。
+        u.chrome_hot(R::new(10.0, 100.0, 38.0, 36.0), Act::Nav(Page::Perf));
+        assert_eq!(u.hit(20.0, 110.0, 0.0), Some(Act::Nav(Page::Perf)));
+
+        // 解锁后同一块区域立刻恢复可点。
+        u.locked = false;
+        u.begin_frame();
+        u.hot(R::new(0.0, 0.0, 400.0, 40.0), Act::OpenDrop(Drop::Poll));
+        assert_eq!(u.hit(10.0, 10.0, 0.0), Some(Act::OpenDrop(Drop::Poll)));
     }
 
     #[test]

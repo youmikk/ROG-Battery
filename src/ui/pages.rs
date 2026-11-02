@@ -940,8 +940,52 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
 
 // ───────────────────────── 入口 ─────────────────────────
 
+/// 锁定遮罩：盖住内容区并说明原因。
+///
+/// 用**屏幕坐标**画（`frame.content`），所以滚动内容不会把提示带走；生产路径由
+/// `canvas::draw_frame` 在页面之后调用，渲染测试也调同一份，保证看到的就是用户看到的。
+pub fn draw_lock_veil(p: &mut Painter, frame: &Frame, theme: &crate::ui::theme::Theme) {
+    let cr = frame.content;
+    // 遮罩用背景色加不透明度：浅色主题压成白雾、深色主题压成黑雾，都不会糊成灰板。
+    let veil = (0xB4u32 << 24) | (theme.bg & 0x00FF_FFFF);
+    p.rect(cr, veil);
+    // 提示卡放视口正中：贴顶会压住页面标题，看起来像排版坏了。
+    let w = 380.0_f32.min(cr.w - 64.0);
+    let h = 68.0;
+    let bar = R::new(cr.x + (cr.w - w) / 2.0, cr.y + (cr.h - h) / 2.0, w, h);
+    p.card(bar, 10.0, theme.card, theme.border);
+    p.text(
+        "读不到设备，设置已锁定",
+        R::new(bar.x + 16.0, bar.y + 15.0, bar.w - 32.0, 20.0),
+        13.5,
+        true,
+        theme.text,
+        Align::Center,
+    );
+    p.text(
+        "插好接收器或动一下鼠标后再试",
+        R::new(bar.x + 16.0, bar.y + 38.0, bar.w - 32.0, 18.0),
+        11.5,
+        false,
+        theme.text2,
+        Align::Center,
+    );
+}
+
+/// 该页是否依赖设备状态（读不到设备时整页锁定）。
+///
+/// 性能页改 DPI / 回报率 / 去抖，按键页改按键映射，都只有拿到当前值才写得对；
+/// 拿不到时让用户点开下拉再报「读不到设备」，不如一开始就不给点。
+pub fn locks_without_device(page: Page) -> bool {
+    matches!(page, Page::Perf | Page::Keys)
+}
+
 /// 画当前页正文（内容坐标，滚动由 canvas 施加）。
 pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
+    // 读不到设备时，只有**依赖设备状态**的页面才锁定：设置页、灯光页、电量页
+    // 的内容要么是本地设置、要么是只读展示，锁了反而没法用。
+    ui.locked = locks_without_device(ui.page) && d.state.is_none();
+
     let mut c = Cursor::new(f);
     match ui.page {
         Page::Battery => battery(p, ui, d, f, &mut c),
@@ -2864,6 +2908,21 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    /// 只有依赖设备状态的页面才锁；设置页、灯光页、电量页读不到设备也能用。
+    #[test]
+    fn only_device_pages_lock_without_a_device() {
+        for page in [crate::ui::widget::Page::Perf, crate::ui::widget::Page::Keys] {
+            assert!(locks_without_device(page), "{page:?} 该锁");
+        }
+        for page in [
+            crate::ui::widget::Page::Battery,
+            crate::ui::widget::Page::Light,
+            crate::ui::widget::Page::Settings,
+        ] {
+            assert!(!locks_without_device(page), "{page:?} 不该锁");
+        }
+    }
 
     use crate::ui::dropdown::button_target_name;
     use crate::ui::palette::palette_color;

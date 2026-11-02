@@ -2340,6 +2340,9 @@ mod tests {
             // ② 页面
             canvas.paint(fonts, theme, 1.0, scroll, w as f32, h as f32, |p| {
                 super::super::pages::page(p, ui, data_ref, &frame);
+                if ui.locked {
+                    super::super::pages::draw_lock_veil(p, &frame, theme);
+                }
                 if let Some(extra) = draw_extra {
                     extra(p, &frame);
                 }
