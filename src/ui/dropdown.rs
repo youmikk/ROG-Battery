@@ -132,6 +132,10 @@ fn build_options(drop: Drop) -> Vec<(String, usize)> {
 
 /// 某个下拉框当前该显示什么文字。
 pub fn drop_current(drop: Drop, d: &Data) -> String {
+    // 读不到设备（或只有占位值）时不要编一个「1000Hz」出来，直接显示「—」。
+    if d.state.map(super::pages::placeholder_state).unwrap_or(true) {
+        return "—".to_string();
+    }
     let st = d.state;
     match drop {
         Drop::Sleep => st

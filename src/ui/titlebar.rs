@@ -139,7 +139,7 @@ pub fn logo_rect(nav_w: f32) -> R {
     } else {
         14.0
     };
-    R::new(x, (TITLE_H - d) / 2.0, d, d)
+    R::new(x, (TITLE_H - d) / 2.0 + 5.0, d, d)
 }
 
 /// 三条按钮图标的笔宽与几何（逻辑像素）。

@@ -2078,11 +2078,25 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
 
 // ───────────────────────── 性能页 ─────────────────────────
 
+/// 设备状态是不是「占位值」。
+///
+/// `State::default()` 解出来正好是 800 DPI + 纯黑，和真实读数长得一模一样：
+/// 读不到设备时把 `enc/rgb` 原样画出来，用户会以为那就是设备当前设置，
+/// 点「应用」才发现改的是个编出来的值。这里把「全零 = 没读到」判出来。
+pub(crate) fn placeholder_state(st: &crate::proto::State) -> bool {
+    st.enc.iter().all(|&e| e == 0) && st.rgb.iter().all(|c| *c == [0, 0, 0])
+}
+
+/// 可信的设备状态：读不到设备、或只有占位值时给 `None`。
+fn known_state<'a>(d: &'a Data) -> Option<&'a crate::proto::State> {
+    d.state.filter(|s| !placeholder_state(s))
+}
+
 fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let t = p.t;
     c.h1(p, "性能");
-    let st = d.state;
-    let cur = st.map(cur_stage).unwrap_or(0);
+    let st = known_state(d);
+    let cur = st.map(cur_stage);
 
     // ---- DPI 档位 ----
     c.h2(p, "DPI 档位", true);
@@ -2090,7 +2104,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let card = c.card(p, dpi_h);
     let mut y = card.y + 4.0;
     for i in 0..crate::proto::DPI_STAGES {
-        let is_cur = i == cur && st.is_some();
+        let is_cur = Some(i) == cur;
         let row = R::new(card.x, y, card.w, 46.0);
         if is_cur {
             p.rect(row, t.accent_soft);
@@ -2194,7 +2208,8 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             Some("越高越跟手，也越耗电"),
             330.0,
         );
-        let sel = st.map(|s| s.poll_code as usize).unwrap_or(3).min(3);
+        // 读不到设备时不高亮任何一档（默认 1000Hz 是编出来的值）
+        let sel = st.map(|s| (s.poll_code as usize).min(3)).unwrap_or(usize::MAX);
         // 分段控件让出 30px 给右边的「Hz」。
         //
         // 原先把 330px 全给分段、再把「Hz」画在 `ctl.right() - 2.0` ——
@@ -2227,7 +2242,8 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             ui,
             R::new(ctl.x, ctl.cy() - 15.0, 220.0, 30.0),
             &["1", "2", "3", "4"],
-            cur,
+            // 读不到设备时不给任何一项打高亮
+            cur.unwrap_or(usize::MAX),
             |i| Act::PickDrop(Drop::Stage, i),
         );
     }
@@ -2356,7 +2372,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     {
         let area = row_area(card, card.y);
         let ctl = row_label(p, area, "抬起距离（LOD）", Some("低省电，高更容易追踪"), 160.0);
-        let sel = st.map(|s| s.lod as usize).unwrap_or(0).min(1);
+        let sel = st.map(|s| (s.lod as usize).min(1)).unwrap_or(usize::MAX);
         segmented(
             p,
             ui,
@@ -2869,6 +2885,18 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn placeholder_state_is_told_from_a_real_one() {
+        // 读不到设备时 `State::default()` 解出来是 800 DPI + 纯黑，
+        // 必须判成「没读到」，否则界面会把编出来的值当真实设置显示。
+        let empty = crate::proto::State::default();
+        assert!(super::placeholder_state(&empty));
+
+        let mut real = crate::proto::State::default();
+        real.enc[0] = 15; // 800 DPI 的真实编码
+        assert!(!super::placeholder_state(&real), "有真值就不该当占位");
+    }
 
     use crate::ui::dropdown::button_target_name;
     use crate::ui::palette::palette_color;
