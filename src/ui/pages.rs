@@ -945,7 +945,8 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
 pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     // 读不到设备时，只有**依赖设备状态**的页面才锁定：设置页、灯光页、电量页
     // 的内容要么是本地设置、要么是只读展示，锁了反而没法用。
-    ui.locked = d.state.is_none();
+    // 占位状态（`State::default()`）也算读不到 —— 否则开关/下拉照常可点。
+    ui.locked = !d.state.is_some_and(|s| !placeholder_state(s));
 
     let mut c = Cursor::new(f);
     match ui.page {
@@ -1666,11 +1667,11 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         let area = row_area(card, ry);
         let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
         let edit = Edit::LowWarn;
-        let cur = st.map(|s| s.low_warn).unwrap_or(20);
         let txt = ui
             .edit_text(edit)
             .map(|s| s.to_string())
-            .unwrap_or_else(|| cur.to_string());
+            .or_else(|| known_state(d).map(|s| s.low_warn.to_string()))
+            .unwrap_or_else(|| "—".to_string());
         let box_r = R::new(ctl.x, ctl.cy() - 15.0, 62.0, 30.0);
         num_box(p, box_r, &txt, ui.focus == Some(edit));
         ui.hot(box_r, Act::Focus(edit));

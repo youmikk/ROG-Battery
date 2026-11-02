@@ -124,6 +124,16 @@ pub enum Drop {
 pub const LIGHT_COLOR_SLOT: u8 = 255;
 
 /// 文本输入框的种类。
+impl Edit {
+    /// 这个输入框写的是设备上的值（读不到设备时不该进编辑态）。
+    pub fn is_device(self) -> bool {
+        matches!(
+            self,
+            Edit::LowWarn | Edit::Dpi(_) | Edit::DpiColor(_) | Edit::LightColor
+        )
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Edit {
     /// 性能页：第 N 档 DPI 的数值（0–3）。

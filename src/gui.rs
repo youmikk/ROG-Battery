@@ -725,6 +725,16 @@ fn handle_act(a: Act, env: &UiEnv) {
             // `focus`，`edits` 里还是空的。不建草稿的话 `type_char` 找不到槽位
             // 直接返回 `false`，表现是「点进输入框后敲字没反应」。
             let st = env.state();
+            // 读不到设备时进编辑态等于让用户改一个编出来的值（800 / 000000），
+            // 改完写回设备才知道读的是假的 —— 直接拦住。
+            if e.is_device() && !device_known(st.as_ref()) {
+                // `on_press` 已经把焦点移过来了，这里要退回去 —— 留着焦点环
+                // 用户会以为能输入，敲字却毫无反应。
+                env.canvas.with_ui_mut(|u| u.focus = None);
+                env.canvas.repaint_now();
+                env.say("✘ 读不到设备：插好接收器，或动一下设备再试");
+                return;
+            }
             let init = edit_initial(e, st.as_ref());
             env.canvas.with_ui_mut(|u| u.begin_edit(e, init));
             env.canvas.repaint_now();
@@ -1333,13 +1343,25 @@ fn reset_custom_path(env: &UiEnv, kind: SavePathKind) {
 
 /// 输入框的初始文本。**必须和 `pages.rs` 里 `unwrap_or_else` 显示的值逐字一致**，
 /// 否则点进输入框的一瞬间数字会跳一下。
+/// 设备状态是不是真的读到了（占位值不算）。
+fn device_known(st: Option<&proto::State>) -> bool {
+    st.is_some_and(|s| !crate::ui::pages::placeholder_state(s))
+}
+
+/// 进编辑态时的草稿初值。
+///
+/// 读不到设备时返回空串 —— 编一个 800 / 000000 出来，用户会以为那就是设备
+/// 当前值，改完写回设备才发现读的是假的。
 fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
+    let known = st.filter(|s| !crate::ui::pages::placeholder_state(s));
     let hex = |c: [u8; 3]| format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
     match e {
-        Edit::LowWarn => st.map(|s| s.low_warn).unwrap_or(20).to_string(),
-        Edit::Dpi(i) => st.map(|s| s.dpi((i as usize) & 3)).unwrap_or(800).to_string(),
-        Edit::DpiColor(i) => hex(st.map(|s| s.rgb[(i as usize) & 3]).unwrap_or([0, 0, 0])),
-        Edit::LightColor => hex(st.map(|s| s.light_rgb).unwrap_or([0, 0, 0])),
+        Edit::LowWarn => known.map(|s| s.low_warn.to_string()).unwrap_or_default(),
+        Edit::Dpi(i) => known
+            .map(|s| s.dpi((i as usize) & 3).to_string())
+            .unwrap_or_default(),
+        Edit::DpiColor(i) => known.map(|s| hex(s.rgb[(i as usize) & 3])).unwrap_or_default(),
+        Edit::LightColor => known.map(|s| hex(s.light_rgb)).unwrap_or_default(),
     }
 }
 
@@ -2417,13 +2439,19 @@ mod tests {
     #[test]
     fn edit_initial_matches_device_values() {
         let mut st = proto::State::default();
+        // 真实读数：四档 DPI 都有编码（全 0 会被判成「没读到」）
+        st.enc = [15, 15, 15, 15];
         st.low_warn = 15;
         st.light_rgb = [0x11, 0x22, 0x33];
         assert_eq!(edit_initial(Edit::LowWarn, Some(&st)), "15");
         assert_eq!(edit_initial(Edit::LightColor, Some(&st)), "112233");
-        // 没读到设备时要有兜底值，不能是空串（空串会让输入框看起来是空的）
-        assert_eq!(edit_initial(Edit::LowWarn, None), "20");
-        assert!(!edit_initial(Edit::Dpi(0), None).is_empty());
+        // 读不到设备时给空串，绝不编值
+        assert_eq!(edit_initial(Edit::LowWarn, None), "");
+        assert_eq!(edit_initial(Edit::Dpi(0), None), "");
+        assert_eq!(edit_initial(Edit::DpiColor(0), None), "");
+        assert!(!device_known(None));
+        assert!(!device_known(Some(&proto::State::default())));
+        assert!(device_known(Some(&st)));
     }
 
     /// 三种状态不能混：休眠是正常态，错误要用户排查。
