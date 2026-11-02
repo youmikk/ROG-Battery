@@ -133,7 +133,9 @@ fn build_options(drop: Drop) -> Vec<(String, usize)> {
 /// 某个下拉框当前该显示什么文字。
 pub fn drop_current(drop: Drop, d: &Data) -> String {
     // 读不到设备（或只有占位值）时不要编一个「1000Hz」出来，直接显示「—」。
-    if d.state.map(super::pages::placeholder_state).unwrap_or(true) {
+    // 只有写设备的下拉才显示「—」；关闭窗口动作、刷新间隔、缓存有效期
+    // 是本地设置，和设备在不在没关系，照常显示当前值。
+    if drop.needs_device() && d.state.map(super::pages::placeholder_state).unwrap_or(true) {
         return "—".to_string();
     }
     let st = d.state;
@@ -253,6 +255,34 @@ pub fn options(drop: Drop, d: &Data) -> &'static [(String, usize)] {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn local_drops_keep_their_value_without_a_device() {
+        // 设置页这三项跟设备没关系，读不到设备也必须显示当前值，不能是「—」。
+        let st = crate::proto::State::default();
+        let cfg = crate::settings::Settings::default();
+        let d = super::super::pages::Data {
+            state: Some(&st),
+            ident: None,
+            link_mode: "",
+            status: String::new(),
+            plot: None,
+            estimate: &crate::history::Estimate::default(),
+            rows: 0,
+            cfg: &cfg,
+            autostart_text: "",
+            autostart_on: false,
+            version: "test",
+            frames: 0,
+            elapsed_ms: 0,
+        };
+        assert_ne!(drop_current(Drop::CloseMode, &d), "—");
+        assert_ne!(drop_current(Drop::Refresh, &d), "—");
+        assert_ne!(drop_current(Drop::CacheTtl, &d), "—");
+        // 设备项照旧显示「—」
+        assert_eq!(drop_current(Drop::Sleep, &d), "—");
+        assert_eq!(drop_current(Drop::Poll, &d), "—");
+    }
     use super::*;
 
     /// 候选表按 `Drop` 缓存：同一个下拉两次取到的必须是同一份内存，

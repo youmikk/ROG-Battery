@@ -167,6 +167,7 @@ extern "system" {
 /// 清掉裁剪面。共享 Graphics 时上一层装过的裁剪必须复位，否则下一层被误裁。
 fn GdipResetClip(g: *mut c_void) -> i32;
     fn GdipSetPixelOffsetMode(g: *mut c_void, mode: i32) -> i32;
+    fn GdipSetInterpolationMode(g: *mut c_void, mode: i32) -> i32;
 
     fn GdipCreateMatrix2(
         m11: f32,
@@ -625,10 +626,12 @@ pub fn app_icon_bitmap() -> *mut c_void {
     *CACHE.get_or_init(|| unsafe {
         let hicon = crate::win32::LoadImageW(
             crate::win32::GetModuleHandleW(std::ptr::null()),
-            1 as *const u16,
+            // 资源 2 = 标题栏专用的小图标（从原画裁到角色占满画面），
+            // 资源 1 是应用/托盘图标，两者构图不同。
+            2 as *const u16,
             crate::win32::IMAGE_ICON,
-            256,
-            256,
+            48,
+            48,
             0,
         );
         if hicon.is_null() {
@@ -838,7 +841,13 @@ impl<'a> Painter<'a> {
         self.with_path(r, radius, |path| unsafe {
             // 1 = Intersect：与已有裁剪取交集，不会把外面画脏
             GdipSetClipPath(g, path, 1);
+            // 256px 原图缩到 24px，默认插值会糊成一团：换高质量双三次 +
+            // 高质量像素偏移，边缘才立得住。
+            GdipSetInterpolationMode(g, 7);
+            GdipSetPixelOffsetMode(g, 2);
             GdipDrawImageRect(g, img, r.x, r.y, r.w, r.h);
+            GdipSetInterpolationMode(g, 0);
+            GdipSetPixelOffsetMode(g, 3);
             GdipResetClip(g);
         });
     }
