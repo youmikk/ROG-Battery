@@ -871,7 +871,7 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
     }
 
     // ---- 底部：折叠按钮 + 版本 ----
-    // 用户 m09924：「切换收缩的功能放在左侧功能栏最下方」
+    // 折叠开关放在左栏最下方。
     let foot_y = (win_h - 30.0 - 10.0).max(y + 12.0);
     let toggle = if rail {
         R::new((nav_w - 38.0) / 2.0, foot_y, 38.0, 30.0)
@@ -3014,7 +3014,7 @@ mod tests {
 
     #[test]
     fn 电量环颜色按优先级判() {
-        // 用户 m12899：「20%以下为红色，充电的时候是绿色」。
+        // 低电量 20% 以下用红色，充电中用绿色。
         // 难点全在优先级上，逐条钉死。
         let t = &crate::ui::theme::LIGHT;
 

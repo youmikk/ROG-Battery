@@ -424,9 +424,9 @@ impl Default for Ui {
     fn default() -> Self {
         Ui {
             page: Page::Battery,
-            // 用户 m09924：「默认收缩模式，切换收缩的功能放在左侧功能栏最下方」
+            // 默认折叠，折叠开关在左栏最下方。
             rail: true,
-            // 用户 m09701：「默认浅色页面吧」
+            // 默认浅色主题。
             mode: super::theme::Mode::Light,
             // 默认「跟随系统」
             theme_pref: 0,
