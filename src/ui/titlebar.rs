@@ -109,6 +109,73 @@ pub fn draw(p: &mut Painter, win_w: f32, nav_w: f32, theme: &Theme) {
     }
     // 内容那一段：和页面背景同一个色，连成一片
     p.rect(R::new(nw, 0.0, win_w - nw, TITLE_H), t.bg);
+
+    // 左上角品牌 logo：侧栏那一段的顶部原本空着一条，放个图标正好压住。
+    if nw >= 40.0 {
+        let r = logo_rect(nw);
+        draw_logo(p, r);
+        // 展开侧栏时右边还有空位，补上产品名；轨道模式只有 56px，放不下就省了。
+        if nw > 64.0 {
+            p.text(
+                "R Battery",
+                R::new(r.x + r.w + 10.0, r.y, nw - r.x - r.w - 22.0, r.h),
+                13.0,
+                true,
+                t.text,
+                crate::ui::gfx::Align::Left,
+            );
+        }
+    }
+}
+
+/// 品牌 logo 的配色（取自应用图标）。
+const LOGO_TILE: u32 = 0xFFBF_DDF5;
+const LOGO_BODY: u32 = 0xFFAD_E987;
+const LOGO_INK: u32 = 0xFF4C_4B4B;
+
+/// 左上角 logo 的矩形（**窗口坐标**）。
+///
+/// 轨道模式（侧栏 56px）居中摆，展开模式靠左留 14px —— 两种宽度下都压在
+/// 第一个导航图标正上方，不会和它抢位置。
+pub fn logo_rect(nav_w: f32) -> R {
+    let d = 24.0;
+    let x = if nav_w <= 64.0 {
+        ((nav_w - d) / 2.0).max(4.0)
+    } else {
+        14.0
+    };
+    R::new(x, (TITLE_H - d) / 2.0, d, d)
+}
+
+/// 画品牌 logo：浅蓝圆角方块里一只绿色小电池（电极帽 + 两只眼睛）。
+///
+/// 不加载图片：`assets/app-icon-1024.png` 是 1024px 的商店图标，24px 下要现缩放；
+/// 这里用矢量画一遍，任何 DPI 都清楚，也不用管 MSIX 里的资源路径。
+pub fn draw_logo(p: &mut Painter, r: R) {
+    p.round(r, 7.0, LOGO_TILE);
+
+    // 电极帽
+    let cap_w = (r.w * 0.34).max(4.0);
+    p.round(
+        R::new(
+            r.x + (r.w - cap_w) / 2.0,
+            r.y + r.h * 0.17,
+            cap_w,
+            (r.h * 0.11).max(2.0),
+        ),
+        1.5,
+        LOGO_INK,
+    );
+
+    // 电池身
+    let body = R::new(r.x + r.w * 0.13, r.y + r.h * 0.30, r.w * 0.74, r.h * 0.48);
+    p.round(body, body.h * 0.30, LOGO_BODY);
+
+    // 两只眼睛
+    let eye_r = (r.w * 0.070).max(1.0);
+    let ey = body.y + body.h * 0.40;
+    p.circle(body.x + body.w * 0.33, ey, eye_r, LOGO_INK);
+    p.circle(body.x + body.w * 0.67, ey, eye_r, LOGO_INK);
 }
 
 
@@ -218,6 +285,22 @@ pub fn draw_buttons(p: &mut Painter, win_w: f32, t: &Theme, is_max: bool, hover:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logo_sits_inside_the_rail_and_above_the_nav_icons() {
+        // 轨道 56px 与展开 200px 两种宽度下，logo 都必须完整落在侧栏那一段里，
+        // 且不越出标题栏高度 —— 越界就会被裁掉半截，看起来像画错了。
+        for nav in [56.0_f32, 200.0] {
+            let r = super::logo_rect(nav);
+            assert!(r.x >= 4.0, "左边距过小: {nav}");
+            assert!(r.x + r.w <= nav, "logo 超出侧栏宽度: {nav}");
+            assert!(r.y >= 0.0 && r.y + r.h <= super::TITLE_H, "logo 越出标题栏: {nav}");
+        }
+        // 轨道模式下居中在 56px 里
+        let r = super::logo_rect(56.0);
+        assert!((r.cx() - 28.0).abs() < 0.01, "轨道模式该居中");
+    }
+
+
     use super::*;
 
     #[test]
