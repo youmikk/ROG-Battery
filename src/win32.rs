@@ -610,6 +610,7 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     ) -> Handle;
 
     pub fn GetModuleHandleW(name: *const u16) -> Handle;
+    pub fn SendMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> isize;
     /// 取系统度量（`SM_CXSMICON = 49`）。托盘的泄漏回归测试拿它算图标边长。
     #[cfg(test)]
     pub fn GetSystemMetrics(index: i32) -> i32;
@@ -620,6 +621,39 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
 
 /// `LoadImageW` 的图标类型。
 pub const IMAGE_ICON: u32 = 1;
+
+/// `WM_SETICON` 的 wParam：0 = 小图标（标题栏/alt+tab），1 = 大图标。
+pub const ICON_SMALL: usize = 0;
+pub const ICON_BIG: usize = 1;
+
+/// 从 exe 资源里取应用图标（资源 1）。失败返回空句柄。
+pub fn load_app_icon(size: i32) -> Handle {
+    unsafe {
+        LoadImageW(
+            GetModuleHandleW(std::ptr::null()),
+            1 as *const u16,
+            IMAGE_ICON,
+            size,
+            size,
+            0,
+        )
+    }
+}
+
+/// 给窗口装上任务栏 / alt+tab 用的图标。
+///
+/// 窗口类没设图标、窗口自己也没设过的话，alt+tab 里就是一块空白 ——
+/// 必须显式 `WM_SETICON`，系统不会自动回落到 exe 图标。
+pub fn set_window_icon(hwnd: Handle, big: Handle, small: Handle) {
+    unsafe {
+        if !big.is_null() {
+            SendMessageW(hwnd, 0x0080, ICON_BIG, big as isize);
+        }
+        if !small.is_null() {
+            SendMessageW(hwnd, 0x0080, ICON_SMALL, small as isize);
+        }
+    }
+}
 
 // ============ gdi32 ============
 //
@@ -887,6 +921,17 @@ extern "system" {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn app_icon_resource_is_loadable() {
+        // alt+tab 的图标来自 exe 资源 1；资源没编进去时这里是空的。
+        let big = load_app_icon(32);
+        let small = load_app_icon(16);
+        assert!(!big.is_null(), "32px 应用图标加载失败");
+        assert!(!small.is_null(), "16px 应用图标加载失败");
+        // 空句柄不该炸
+        set_window_icon(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+    }
     use super::*;
 
     #[test]

@@ -1742,6 +1742,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 深色标题栏要和界面配色一起决定，否则浅色界面配深色标题栏很割裂。
     crate::dwm::set_dark_titlebar(hwnd, mode == crate::ui::theme::Mode::Dark);
 
+    // alt+tab / 任务栏取的是窗口图标，窗口不显式设置就是一块空白。
+    crate::win32::set_window_icon(
+        hwnd,
+        crate::win32::load_app_icon(32),
+        crate::win32::load_app_icon(16),
+    );
+
     // ── 去掉系统标题栏 ──────────────────────────────────────
     //
     // 顺序是**承重的**，不能调换：
