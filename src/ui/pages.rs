@@ -770,7 +770,31 @@ pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
     let item_h = layout::NAV_ITEM_H;
 
     // ---- 设备卡（仅展开时）----
-    let mut y = top + 12.0;
+    // ---- 品牌图标 ----
+    // 侧栏顶部原来是一条空带，现在放 exe 资源里的应用图标（用户给的原画）。
+    // 轨道模式只有 56px，图标居中；展开模式图标 + 产品名一行。
+    let mut y = top + 10.0;
+    let icon = crate::ui::gfx::app_icon_bitmap();
+    if rail {
+        let d = 30.0;
+        let r = R::new((nav_w - d) / 2.0, y, d, d);
+        p.image_rounded(icon, r, 7.0);
+        y = r.bottom() + 10.0;
+    } else {
+        let d = 28.0;
+        let r = R::new(12.0, y + 1.0, d, d);
+        p.image_rounded(icon, r, 7.0);
+        p.text(
+            "R Battery",
+            R::new(r.right() + 10.0, r.y + 3.0, nav_w - r.right() - 22.0, 22.0),
+            14.0,
+            true,
+            t.text,
+            Align::Left,
+        );
+        y = r.bottom() + 12.0;
+    }
+
     if !rail {
         let dc = R::new(4.0, y, nav_w - 12.0, 66.0);
         p.card(dc, 8.0, t.card, t.border);

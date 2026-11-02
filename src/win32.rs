@@ -598,6 +598,18 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     /// 自建的 HICON **必须** `DestroyIcon`：图标句柄属于 User 对象，
     /// 不回收会一直涨（每刷新一次多一个，几十次就能看出来）。
     pub fn DestroyIcon(icon: Handle) -> i32;
+
+    /// 从 exe 资源里取图标。`name` 传 `1 as *const u16`（MAKEINTRESOURCE）。
+    pub fn LoadImageW(
+        hinst: Handle,
+        name: *const u16,
+        typ: u32,
+        cx: i32,
+        cy: i32,
+        flags: u32,
+    ) -> Handle;
+
+    pub fn GetModuleHandleW(name: *const u16) -> Handle;
     /// 取系统度量（`SM_CXSMICON = 49`）。托盘的泄漏回归测试拿它算图标边长。
     #[cfg(test)]
     pub fn GetSystemMetrics(index: i32) -> i32;
@@ -605,6 +617,9 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     /// 窗口是否处于最小化。最小化后不再重绘，可据此回收渲染内存。
     pub fn IsIconic(hwnd: Handle) -> i32;
 }
+
+/// `LoadImageW` 的图标类型。
+pub const IMAGE_ICON: u32 = 1;
 
 // ============ gdi32 ============
 //

@@ -131,6 +131,16 @@ extern "system" {
         bitmap: *mut *mut c_void,
     ) -> i32;
     pub(crate) fn GdipDisposeImage(image: *mut c_void) -> i32;
+    fn GdipCreateBitmapFromHICON(hicon: crate::win32::Handle, out: *mut *mut c_void) -> i32;
+    fn GdipSetClipPath(g: *mut c_void, path: *mut c_void, combine: i32) -> i32;
+    fn GdipDrawImageRect(
+        g: *mut c_void,
+        image: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> i32;
     pub(crate) fn GdipGetImageGraphicsContext(image: *mut c_void, g: *mut *mut c_void) -> i32;
     pub(crate) fn GdipGraphicsClear(g: *mut c_void, color: u32) -> i32;
     pub(crate) fn GdipCreateHICONFromBitmap(bitmap: *mut c_void, hicon: *mut *mut c_void) -> i32;
@@ -605,6 +615,34 @@ pub enum Align {
     Right,
 }
 
+/// 应用图标解码一次就缓存：exe 资源 1 号 ICON（`assets/app.rc` 里的
+/// `1 ICON "tray.ico"`，也就是用户给的那张原画生成的 ico）。
+///
+/// 不用 `include_bytes!` + 流解码：图标已经在资源里，`LoadImageW` 直接给
+/// HICON，`GdipCreateBitmapFromHICON` 再转成可绘制位图，省掉解码器。
+pub fn app_icon_bitmap() -> *mut c_void {
+    static CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| unsafe {
+        let hicon = crate::win32::LoadImageW(
+            crate::win32::GetModuleHandleW(std::ptr::null()),
+            1 as *const u16,
+            crate::win32::IMAGE_ICON,
+            256,
+            256,
+            0,
+        );
+        if hicon.is_null() {
+            return 0;
+        }
+        let mut bmp: *mut c_void = std::ptr::null_mut();
+        if GdipCreateBitmapFromHICON(hicon, &mut bmp) != 0 {
+            return 0;
+        }
+        // HICON 留着不销毁：位图可能仍引用它，进程退出时一并回收。
+        bmp as usize
+    }) as *mut c_void
+}
+
 // ==================== 绘制上下文 ====================
 
 /// 一次绘制的上下文：一个 GDI+ Graphics + 一套配色 + 字体表。
@@ -786,6 +824,33 @@ impl<'a> Painter<'a> {
         unsafe {
             GdipFillRectangle(self.g, b, r.x, r.y, r.w, r.h);
         }
+    }
+
+    /// 画一张已解码的位图（应用图标）。坐标是逻辑像素，缩放交给世界变换。
+    pub fn image(&mut self, img: *mut c_void, r: R) {
+        if img.is_null() || !self.visible(r) {
+            return;
+        }
+        unsafe {
+            GdipDrawImageRect(self.g, img, r.x, r.y, r.w, r.h);
+        }
+    }
+
+    /// 画位图并裁成圆角。
+    ///
+    /// 应用图标自带的浅蓝底是方的，直接贴到侧栏上会露出一块生硬的白边方角；
+    /// 裁成圆角后和整个界面的圆角语言一致。
+    pub fn image_rounded(&mut self, img: *mut c_void, r: R, radius: f32) {
+        if img.is_null() || !self.visible(r) {
+            return;
+        }
+        let g = self.g;
+        self.with_path(r, radius, |path| unsafe {
+            // 1 = Intersect：与已有裁剪取交集，不会把外面画脏
+            GdipSetClipPath(g, path, 1);
+            GdipDrawImageRect(g, img, r.x, r.y, r.w, r.h);
+            GdipResetClip(g);
+        });
     }
 
     /// 圆角实心矩形。
