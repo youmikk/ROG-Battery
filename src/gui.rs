@@ -444,7 +444,9 @@ const TRAY_CALLBACK_MSG: u32 = 0x8000 + 100;
 struct TrayCtl {
     /// 回调消息的接收窗口（`msg_window`，托盘必须挂在 MessageWindow 上）。
     hwnd: win32::Handle,
-    visible: std::cell::Cell<bool>,
+    /// 当前托盘图标的身份（固定 GUID，或加不上时退回的编号）。
+    /// `None` = 现在没有图标。
+    id: std::cell::Cell<Option<win32::TrayId>>,
     /// 当前显示的图标句柄。**必须一直有效** —— `Shell_NotifyIconW` 不拷贝图标，
     /// 句柄销毁了任务栏上就是一片空白。
     cur: std::cell::Cell<win32::Handle>,
@@ -460,7 +462,7 @@ impl TrayCtl {
     fn new(hwnd: win32::Handle) -> Self {
         Self {
             hwnd,
-            visible: std::cell::Cell::new(false),
+            id: std::cell::Cell::new(None),
             cur: std::cell::Cell::new(std::ptr::null_mut()),
             last_tip: std::cell::RefCell::new(String::new()),
         }
@@ -468,7 +470,7 @@ impl TrayCtl {
 
     /// 添加/移除托盘图标。退出时必须调，否则任务栏上留一个点不动的幽灵图标。
     fn set_visibility(&self, on: bool) {
-        if on == self.visible.get() {
+        if on == self.id.get().is_some() {
             return;
         }
         if on {
@@ -476,31 +478,35 @@ impl TrayCtl {
             let Some(h) = crate::tray_icon::render_unknown() else {
                 return;
             };
-            if win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", win32::TRAY_GUID) {
-                self.cur.set(h);
-                self.visible.set(true);
-                // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
-                // 「内容没变」的判断会把真实提示吞掉。
-                self.last_tip.borrow_mut().clear();
-            } else {
-                unsafe { win32::DestroyIcon(h) };
+            match win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", win32::TRAY_GUID) {
+                Some(id) => {
+                    self.id.set(Some(id));
+                    self.cur.set(h);
+                    // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
+                    // 「内容没变」的判断会把真实提示吞掉。
+                    self.last_tip.borrow_mut().clear();
+                }
+                None => {
+                    unsafe { win32::DestroyIcon(h) };
+                }
             }
         } else {
-            win32::tray_remove(self.hwnd, win32::TRAY_GUID);
+            if let Some(id) = self.id.take() {
+                win32::tray_remove(self.hwnd, id);
+            }
             let old = self.cur.replace(std::ptr::null_mut());
             if !old.is_null() {
                 unsafe { win32::DestroyIcon(old) };
             }
-            self.visible.set(false);
         }
     }
 
     fn set_icon(&self, hicon: win32::Handle) {
-        if !self.visible.get() {
+        let Some(id) = self.id.get() else {
             unsafe { win32::DestroyIcon(hicon) };
             return;
-        }
-        win32::tray_update(self.hwnd, Some(hicon), None, win32::TRAY_GUID);
+        };
+        win32::tray_update(self.hwnd, id, Some(hicon), None);
         let old = self.cur.replace(hicon);
         if !old.is_null() && old != hicon {
             unsafe { win32::DestroyIcon(old) };
@@ -508,14 +514,14 @@ impl TrayCtl {
     }
 
     fn set_tip(&self, tip: &str) {
-        if !self.visible.get() {
+        let Some(id) = self.id.get() else {
             return;
-        }
+        };
         // 内容没变就不发：拖滑块时每条鼠标消息都会走到这里。
         if self.last_tip.borrow().as_str() == tip {
             return;
         }
-        win32::tray_update(self.hwnd, None, Some(tip), win32::TRAY_GUID);
+        win32::tray_update(self.hwnd, id, None, Some(tip));
         let mut last = self.last_tip.borrow_mut();
         last.clear();
         last.push_str(tip);
@@ -525,7 +531,7 @@ impl TrayCtl {
     /// 给所有顶层窗口，收到就重新 `NIM_ADD` 一次，把图标（和稍后的提示）
     /// 放回任务栏。不处理的话用户会以为程序被关掉了。
     fn re_add(&self) {
-        if !self.visible.get() {
+        if self.id.get().is_none() {
             return;
         }
         let cur = self.cur.get();
@@ -537,7 +543,10 @@ impl TrayCtl {
         } else {
             cur
         };
-        if win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, "R Battery", win32::TRAY_GUID) {
+        if let Some(id) =
+            win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, "R Battery", win32::TRAY_GUID)
+        {
+            self.id.set(Some(id));
             self.cur.set(icon);
             // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
             // 「内容没变」的判断会把真实提示吞掉。
@@ -1854,6 +1863,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let tray = std::sync::Arc::new(TrayCtl::new(
         msg_window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as win32::Handle
     ));
+    let tray_exit = std::sync::Arc::clone(&tray);
     if cfg.tray_enabled {
         tray.set_visibility(true);
     }
@@ -2358,10 +2368,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let _ = nwg::unbind_raw_event_handler(&tray_handler);
     let _ = nwg::unbind_raw_event_handler(&min_handler);
     // 托盘图标必须显式移除，否则任务栏上留一个点不动的幽灵图标。
-    // `tray` 已被主处理器闭包 move 走，这里直接按 GUID 移除。
-    if let Some(h) = msg_window.handle.hwnd() {
-        crate::win32::tray_remove(h as crate::win32::Handle, crate::win32::TRAY_GUID);
-    }
+    // 用独立克隆的 `Arc` 走 `set_visibility(false)`：它会按当前身份
+    // （GUID 或退回的编号）删除，也会释放图标句柄。
+    tray_exit.set_visibility(false);
     Ok(())
 }
 

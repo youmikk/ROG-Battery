@@ -435,6 +435,8 @@ pub fn process_start_ticks(pid: u32) -> Option<u64> {
 pub const NIM_ADD: u32 = 0x0000_0000;
 pub const NIM_MODIFY: u32 = 0x0000_0001;
 pub const NIM_DELETE: u32 = 0x0000_0002;
+/// 设托盘版本。不设也能显示，但拿不到 `NIN_*` 通知、菜单定位会退化。
+pub const NIM_SETVERSION: u32 = 0x0000_0004;
 
 pub const NIF_MESSAGE: u32 = 0x0000_0001;
 pub const NIF_ICON: u32 = 0x0000_0002;
@@ -507,20 +509,91 @@ fn copy_tip(dst: &mut [u16; 128], tip: &str) {
     dst[i] = 0;
 }
 
-/// 添加托盘图标（带固定 GUID）。
-pub fn tray_add(hwnd: Handle, callback_message: u32, hicon: Handle, tip: &str, guid: Guid) -> bool {
+/// 托盘图标的身份。
+///
+/// 优先按固定 GUID 记（Windows 按 GUID 记住用户把图标放在哪，MSIX 换目录
+/// 也不丢）。但 Windows 10 上只要同 GUID 被旧进程留下幽灵项，`NIM_ADD`
+/// 会一直失败、任务栏什么都不出现 —— 所以加不上时退回「窗口 + 编号」，
+/// 至少图标还在，只是失去跨版本的位置记忆。
+#[derive(Clone, Copy, Debug)]
+pub struct TrayId {
+    pub guid: Guid,
+    pub uid: u32,
+    pub uses_guid: bool,
+}
+
+/// 非 GUID 模式用的编号，挑一个不会和别的程序撞的值。
+pub const TRAY_FALLBACK_UID: u32 = 1;
+
+impl TrayId {
+    /// 按身份填字段：GUID 模式只看 `guidItem`，另一模式只看 `uID`。
+    fn apply(self, n: &mut NotifyIconDataW) {
+        if self.uses_guid {
+            n.flags |= NIF_GUID;
+            n.guid_item = self.guid;
+        } else {
+            n.uid = self.uid;
+        }
+    }
+}
+
+/// 设一次托盘版本（`uVersion = 4`）。
+fn tray_set_version(hwnd: Handle, id: TrayId) -> bool {
+    let mut n = notify_icon_data(hwnd, 0, id.guid);
+    id.apply(&mut n);
+    n.timeout_or_version = 4;
+    // SAFETY: `n` 已按 `shellapi.h` 布局初始化，指针只在调用期间有效。
+    unsafe { Shell_NotifyIconW(NIM_SETVERSION, &n) != 0 }
+}
+
+/// 添加托盘图标。返回实际用上的身份，`None` 表示两种模式都没加上。
+pub fn tray_add(
+    hwnd: Handle,
+    callback_message: u32,
+    hicon: Handle,
+    tip: &str,
+    guid: Guid,
+) -> Option<TrayId> {
     let mut n = notify_icon_data(hwnd, callback_message, guid);
     n.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_GUID;
     n.hicon = hicon;
     copy_tip(&mut n.sz_tip, tip);
-    // SAFETY: `n` 已按 `shellapi.h` 布局初始化，指针只在调用期间有效。
-    unsafe { Shell_NotifyIconW(NIM_ADD, &n) != 0 }
+    // SAFETY: 同上。
+    let mut ok = unsafe { Shell_NotifyIconW(NIM_ADD, &n) != 0 };
+    if !ok {
+        // 上一个进程异常退出时，同 GUID 的幽灵项还挂在任务栏上，此时
+        // `NIM_ADD` 会一直失败 —— 先删掉再试一次。
+        let mut d = notify_icon_data(hwnd, 0, guid);
+        d.flags = NIF_GUID;
+        // SAFETY: 同上。
+        unsafe { Shell_NotifyIconW(NIM_DELETE, &d) };
+        // SAFETY: 同上。
+        ok = unsafe { Shell_NotifyIconW(NIM_ADD, &n) != 0 };
+    }
+    if ok {
+        let id = TrayId { guid, uid: 0, uses_guid: true };
+        tray_set_version(hwnd, id);
+        return Some(id);
+    }
+
+    let id = TrayId { guid, uid: TRAY_FALLBACK_UID, uses_guid: false };
+    let mut p = notify_icon_data(hwnd, callback_message, guid);
+    p.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    p.uid = id.uid;
+    p.hicon = hicon;
+    copy_tip(&mut p.sz_tip, tip);
+    // SAFETY: 同上。
+    if unsafe { Shell_NotifyIconW(NIM_ADD, &p) } == 0 {
+        return None;
+    }
+    tray_set_version(hwnd, id);
+    Some(id)
 }
 
 /// 改图标和/或提示文字（都传 `None` 等于只刷新一次，不改内容）。
-pub fn tray_update(hwnd: Handle, hicon: Option<Handle>, tip: Option<&str>, guid: Guid) -> bool {
-    let mut n = notify_icon_data(hwnd, 0, guid);
-    n.flags = NIF_GUID;
+pub fn tray_update(hwnd: Handle, id: TrayId, hicon: Option<Handle>, tip: Option<&str>) -> bool {
+    let mut n = notify_icon_data(hwnd, 0, id.guid);
+    id.apply(&mut n);
     if let Some(h) = hicon {
         n.flags |= NIF_ICON;
         n.hicon = h;
@@ -534,9 +607,9 @@ pub fn tray_update(hwnd: Handle, hicon: Option<Handle>, tip: Option<&str>, guid:
 }
 
 /// 移除托盘图标。退出时调用，否则图标会变成「幽灵」留在任务栏上。
-pub fn tray_remove(hwnd: Handle, guid: Guid) -> bool {
-    let mut n = notify_icon_data(hwnd, 0, guid);
-    n.flags = NIF_GUID;
+pub fn tray_remove(hwnd: Handle, id: TrayId) -> bool {
+    let mut n = notify_icon_data(hwnd, 0, id.guid);
+    id.apply(&mut n);
     // SAFETY: 同上。
     unsafe { Shell_NotifyIconW(NIM_DELETE, &n) != 0 }
 }
@@ -921,6 +994,22 @@ extern "system" {
 
 #[cfg(test)]
 mod tests {
+    /// 两种身份各填各的字段：GUID 模式不能碰 `uID`，退回模式不能带 `NIF_GUID`。
+    #[test]
+    fn tray_id_fills_guid_or_uid_only() {
+        let guid = Guid { data1: 1, data2: 2, data3: 3, data4: [4; 8] };
+        let mut n = notify_icon_data(std::ptr::null_mut(), 0, guid);
+
+        TrayId { guid, uid: 0, uses_guid: true }.apply(&mut n);
+        assert!(n.flags & NIF_GUID != 0);
+        assert_eq!(n.uid, 0);
+
+        let mut m = notify_icon_data(std::ptr::null_mut(), 0, guid);
+        TrayId { guid, uid: TRAY_FALLBACK_UID, uses_guid: false }.apply(&mut m);
+        assert_eq!(m.flags & NIF_GUID, 0);
+        assert_eq!(m.uid, TRAY_FALLBACK_UID);
+    }
+
 
     #[test]
     fn app_icon_resource_is_loadable() {
