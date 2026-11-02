@@ -148,7 +148,7 @@ jobs:
           "size      = {0:N0} B" -f $b.Length
           "subsystem = $sub  (2 = WINDOWS_GUI, 3 = WINDOWS_CUI)"
           if ($sub -ne 2) {
-            throw "子系统不是 GUI（$sub）—— 启动会闪黑框，见 docs/startup-modes.md"
+            throw "子系统不是 GUI（$sub）—— 启动会闪黑框，需要的是 GUI 子系统"
           }
 
       - name: 汇总产物 + 算 sha256

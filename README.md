@@ -25,7 +25,6 @@ DPI、回报率、按键去抖、按键映射与电量状态。单文件运行�
 ## 支持的型号
 
 程序内置一张 PID 对照表（75 个 PID、5 种无线接收器），型号名按 PID 查表得出，不依赖固件自报，
-所以插上就能显示正确的中文名。完整对照表见 [docs/device-support.md](docs/device-support.md)。
 
 > 表里收录代表「已知型号名，且使用同一套电量 / 参数协议」。具体某一款能改哪些参数仍取决于该型号，
 > 不支持的项会在界面上标注「本型号不支持」。
@@ -188,32 +187,15 @@ rog-mouse-ctl backup          # 备份为文本
 rog-mouse-ctl estimate        # 查看电量历史与续航估算
 ```
 
-全部子命令、帧格式与返回码见 **[技术文档](docs/technical.md)**。
+全部子命令与返回码见 `rog-mouse-ctl.exe --help`。
 
 ## 从源码构建
 
 ```powershell
 .\tools\vendor-import-libs.ps1     # 仅首次需要：生成 import library
 cargo build --release              # 产物为 target\release\rog-mouse-ctl.exe
-cargo test                         # 148 项测试
+cargo test                         # 238 项测试
 ```
-
-打包 MSIX 与商店上传件：见 [msix/README.md](msix/README.md)。
-
-## 文档
-
-| 文档 | 内容 |
-| --- | --- |
-| [docs/technical.md](docs/technical.md) | **技术总文档**：私有 HID 协议、编译链、CLI 全量参考、真机实测记录、安全设计、踩坑记录 |
-| [docs/device-support.md](docs/device-support.md) | 75 个 ROG 外设 PID 的型号对照表（鼠标 / 键盘 / 手柄 + 5 种接收器） |
-| [docs/autostart.md](docs/autostart.md) | 开机自启的两条路径及其在 MSIX 下的差异 |
-| [docs/gdiplus-rendering.md](docs/gdiplus-rendering.md) | 自绘界面的 GDI+ 渲染细节 |
-| [docs/gdiplus-window-dc.md](docs/gdiplus-window-dc.md) | 窗口 DC 与双缓冲 |
-| [docs/nwg-gotchas.md](docs/nwg-gotchas.md) | GUI 框架选型与踩坑记录 |
-| [docs/startup-modes.md](docs/startup-modes.md) | 启动形态（GUI / CLI / 自启） |
-| [docs/store-publishing-setup.md](docs/store-publishing-setup.md) | 商店自动发布的凭据配置（Entra 应用 + 卖家 ID + GitHub Secrets） |
-| [docs/tray-icon.md](docs/tray-icon.md) | 托盘图标的绘制与自适应配色 |
-| [msix/store/submission-notes.md](msix/store/submission-notes.md) | 商店提审所需的能力说明与认证备注 |
 
 ## 已知限制
 
