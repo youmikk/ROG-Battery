@@ -69,6 +69,11 @@ const WM_TIMER: u32 = 0x0113;
 const WM_ENTERSIZEMOVE: u32 = 0x0231;
 const WM_EXITSIZEMOVE: u32 = 0x0232;
 
+/// 尺寸安定定时器：最大化 / 还原这类「系统自己动」的尺寸变化不走
+/// `WM_ENTERSIZEMOVE`，用一次短定时器把动效停到动画结束。
+const SETTLE_TIMER_ID: usize = 3;
+const SETTLE_MS: u32 = 260;
+
 /// 窗口正在被拖动缩放。
 ///
 /// 缩放期间系统每帧都要重排，而我们一帧要重画整块内存位图（全屏时 2560×1440，
@@ -929,6 +934,12 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                     // 恢复时 ensure() 会按当时的尺寸重建。
                     release_render_memory(&c);
                 } else {
+                    // 最大化 / 还原时系统在放动画，我们这边同时跑 60fps 重绘就是
+                    // 两边抢 CPU（用户反馈「取消全屏明显卡顿」）。先停动效，
+                    // 260ms 后再放开 —— 那时动画已经结束。
+                    RESIZING.store(true, std::sync::atomic::Ordering::Relaxed);
+                    set_timer(hwnd, false);
+                    unsafe { SetTimer(hwnd, SETTLE_TIMER_ID, SETTLE_MS, 0) };
                     // SAFETY: 传空矩形 = 整个客户区。
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                     (c.damage)();
@@ -976,6 +987,12 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
         }
 
         WM_TIMER => {
+            if wp == SETTLE_TIMER_ID {
+                unsafe { KillTimer(hwnd, SETTLE_TIMER_ID) };
+                RESIZING.store(false, std::sync::atomic::Ordering::Relaxed);
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+                return 0;
+            }
             if wp == ANIM_TIMER_ID {
                 // 上一帧画完才知道「还需不需要继续动」：充电结束、toast 淡出
                 // 完成之后没人会再来关这个定时器（`want_anim` 只在收到 Notice
