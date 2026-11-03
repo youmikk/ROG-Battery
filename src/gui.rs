@@ -441,6 +441,34 @@ const TRAY_CALLBACK_MSG: u32 = 0x8000 + 100;
 /// 显示/折叠状态 Windows 是按 **exe 路径** 记的 —— MSIX 每次更新换目录，
 /// 系统就当成新程序，又折叠回溢出区（用户报的「更新之后托盘又被折叠」）。
 /// 注册固定 GUID 后系统按 GUID 记，跨版本保持用户的选择。
+/// 托盘诊断日志：只在异常路径写一行，正常时一个字节都不写。
+///
+/// 用户报「没有托盘」时我们这边复现不了 —— Win11 的 shell 会自己清理残留项，
+/// 只有 Win10 才会因为幽灵 GUID 一直拒绝 `NIM_ADD`。把每次添加的落点记下来，
+/// 让用户发一个文件就能定位，不用靠猜。
+fn tray_log(line: &str) {
+    let Some(dir) = crate::paths::settings_file().parent().map(|p| p.to_path_buf()) else {
+        return;
+    };
+    let path = dir.join("tray.log");
+    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<&str> = old.lines().collect();
+    // 只留最近 20 行，避免一个长期开着的程序把日志写成大文件。
+    if lines.len() >= 20 {
+        lines.drain(..lines.len() - 19);
+    }
+    let mut text = lines.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    text.push_str(&format!("{secs} {line}\n"));
+    let _ = std::fs::write(&path, text);
+}
+
 struct TrayCtl {
     /// 回调消息的接收窗口（`msg_window`，托盘必须挂在 MessageWindow 上）。
     hwnd: win32::Handle,
@@ -480,6 +508,10 @@ impl TrayCtl {
             };
             match win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", win32::TRAY_GUID) {
                 Some(id) => {
+                    // 只有降级到编号模式才记一笔：正常路径不留日志。
+                    if !id.uses_guid {
+                        tray_log("add guid=fail fallback=ok");
+                    }
                     self.id.set(Some(id));
                     self.cur.set(h);
                     // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
@@ -487,6 +519,7 @@ impl TrayCtl {
                     self.last_tip.borrow_mut().clear();
                 }
                 None => {
+                    tray_log("add guid=fail fallback=fail");
                     unsafe { win32::DestroyIcon(h) };
                 }
             }
@@ -546,6 +579,9 @@ impl TrayCtl {
         if let Some(id) =
             win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, "R Battery", win32::TRAY_GUID)
         {
+            if !id.uses_guid {
+                tray_log("re-add guid=fail fallback=ok");
+            }
             self.id.set(Some(id));
             self.cur.set(icon);
             // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
