@@ -26,6 +26,7 @@ mod dynlight;
 mod gui;
 mod hid;
 mod device;
+mod diagnostics;
 mod history;
 mod linkstate;
 mod ops;

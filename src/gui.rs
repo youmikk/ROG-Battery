@@ -1504,6 +1504,25 @@ fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
 }
 
 /// 把一次读取的结果搬进 [`Shared`]。返回本轮的电量快照（供记历史）。
+/// 出错时落一份诊断文本（`<设置目录>/diagnostics.txt`）。
+///
+/// 只在「接收器都不在」时写：休眠是正常状态，不该反复覆盖文件。
+fn write_diagnostics(status: &str, link_mode: &str, family: &str) {
+    let Some(dir) = crate::paths::settings_file().parent().map(|d| d.to_path_buf()) else {
+        return;
+    };
+    let f = crate::diagnostics::Facts {
+        version: env!("CARGO_PKG_VERSION"),
+        status,
+        link_mode,
+        family,
+        frames: 0,
+        elapsed_ms: 0,
+        history_rows: 0,
+    };
+    let _ = crate::diagnostics::write(&dir.join("diagnostics.txt"), &f);
+}
+
 fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option<Quick> {
     // `elapsed` 为零 = 缓存命中（`SnapshotCache` 的约定）
     let snap = &out.snapshot;
@@ -1530,6 +1549,16 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
                 crate::linkstate::describe(link)
             )),
         };
+        // 真读不到设备时落一份诊断文本，用户能直接把事实贴过来。
+        if matches!(link, crate::linkstate::LinkState::Absent) {
+            if let Status::Error(ref text) = s.status {
+                write_diagnostics(
+                    text,
+                    if snap.identity.dongle_sn.trim().is_empty() { "" } else { "2.4G 接收器" },
+                    crate::device::family_of(&snap.identity.model_name).noun(),
+                );
+            }
+        }
         s.full = None;
         s.quick = None;
         s.last_ok_at = None;
