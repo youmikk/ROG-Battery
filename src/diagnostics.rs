@@ -30,14 +30,29 @@ pub fn render(f: &Facts<'_>) -> String {
     out
 }
 
-/// 写到 `path`（覆盖）。父目录不存在就建。
-pub fn write(path: &std::path::Path, f: &Facts<'_>) -> Result<(), String> {
+/// 追加一段到日志文件。父目录不存在就建。
+///
+/// 追加而不是覆盖：同一台机器上「读不到设备」可能发生很多次，覆盖只会留下最后
+/// 一次，而用户往往是过一会儿才把文件发过来。
+pub fn append(path: &std::path::Path, f: &Facts<'_>) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             let _ = std::fs::create_dir_all(dir);
         }
     }
-    crate::paths::write_atomic(path, render(f).as_bytes())
+    use std::io::Write as _;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("打开日志失败：{e}"))?;
+    file.write_all(format!("--- {stamp} ---\n").as_bytes())
+        .and_then(|_| file.write_all(render(f).as_bytes()))
+        .map_err(|e| format!("写日志失败：{e}"))
 }
 
 #[cfg(test)]
@@ -72,13 +87,14 @@ mod tests {
     }
 
     #[test]
-    fn write_creates_the_file() {
+    fn append_keeps_earlier_blocks() {
         // 沙箱里子进程只能写仓库内路径，`%TEMP%` 会 Access denied。
         let p = std::path::PathBuf::from("target/rog-diag-test.txt");
         let _ = std::fs::remove_file(&p);
-        write(&p, &facts()).expect("写诊断文件");
+        append(&p, &facts()).expect("写诊断文件");
+        append(&p, &facts()).expect("再写一次");
         let got = std::fs::read_to_string(&p).expect("读回");
-        assert!(got.contains("R Battery 诊断信息"));
+        assert_eq!(got.matches("R Battery 诊断信息").count(), 2);
         let _ = std::fs::remove_file(&p);
     }
 }

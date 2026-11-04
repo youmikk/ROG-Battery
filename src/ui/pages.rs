@@ -2633,22 +2633,6 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     c.y = card.bottom();
 
-    // ---- 诊断 ----
-    c.h2(p, "诊断", false);
-    let dcard = c.card(p, layout::ROW_H * 3.0);
-    let mut dy = dcard.y;
-    for (title, value) in [
-        ("版本", d.version.to_string()),
-        ("历史样本", format!("{} 条", d.rows)),
-        ("本轮帧数", format!("{} 帧 · {} ms", d.frames, d.elapsed_ms)),
-    ] {
-        let area = row_area(dcard, dy);
-        let _ = row_label(p, area, title, Some(value.as_str()), 40.0);
-        row_rule(p, dcard, area);
-        dy += layout::ROW_H;
-    }
-    c.y = dcard.bottom();
-
     // ---- 数据 ----
     c.h2(p, "数据", false);
     let card = c.card(p, layout::ROW_H * 3.0);
@@ -2800,6 +2784,30 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     c.y = card.bottom();
 
     let _ = Breakpoint::Wide;
+    // ---- 诊断 ----
+    // 放在页面最下面：平时不需要看，出问题时才知道要找它。
+    c.h2(p, "诊断", false);
+    let dcard = c.card(p, layout::ROW_H * 2.0);
+    let mut dy = dcard.y;
+    {
+        let area = row_area(dcard, dy);
+        let _ = row_label(
+            p,
+            area,
+            "诊断日志",
+            Some("点这一行打开日志文件夹，出问题时把日志发给作者"),
+            40.0,
+        );
+        ui.hot(area, Act::OpenLogFolder);
+        row_rule(p, dcard, area);
+        dy += layout::ROW_H;
+    }
+    {
+        let area = row_area(dcard, dy);
+        let _ = row_label(p, area, "版本", Some(d.version), 40.0);
+    }
+    c.y = dcard.bottom();
+
 }
 
 /// 绘制「关闭窗口」确认模态对话框。

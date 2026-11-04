@@ -886,6 +886,13 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::ChangeSettingsPath => pick_save_path(env, SavePathKind::Settings),
         Act::ResetHistoryPath => reset_custom_path(env, SavePathKind::History),
         Act::ResetSettingsPath => reset_custom_path(env, SavePathKind::Settings),
+        Act::OpenLogFolder => {
+            let dir = crate::paths::settings_file()
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            open_in_explorer(env, &dir);
+        }
 
         Act::OpenLightingSettings => {
             if let Err(e) = crate::dynlight::open_settings() {
@@ -1504,7 +1511,7 @@ fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
 }
 
 /// 把一次读取的结果搬进 [`Shared`]。返回本轮的电量快照（供记历史）。
-/// 出错时落一份诊断文本（`<设置目录>/diagnostics.txt`）。
+/// 出错时追加一段诊断日志（`<设置目录>/diagnostics.log`）。
 ///
 /// 只在「接收器都不在」时写：休眠是正常状态，不该反复覆盖文件。
 fn write_diagnostics(status: &str, link_mode: &str, family: &str, frames: usize, elapsed_ms: u128) {
@@ -1520,7 +1527,7 @@ fn write_diagnostics(status: &str, link_mode: &str, family: &str, frames: usize,
         elapsed_ms,
         history_rows: crate::history::read_rows().len(),
     };
-    let _ = crate::diagnostics::write(&dir.join("diagnostics.txt"), &f);
+    let _ = crate::diagnostics::append(&dir.join("diagnostics.log"), &f);
 }
 
 fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option<Quick> {
