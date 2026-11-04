@@ -723,7 +723,7 @@ None
 ///
 /// 优先有线（PID != 接收器 && usage page == 0xFF01），
 /// 否则走接收器：用 `A0 00` 读配对表，从里面找出鼠标的 report id。
-pub fn open_link(hid: &HidApi) -> Result<Link, String> {
+pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
     let report = enumerate_report(hid)?;
     let all = report.interfaces;
     if all.is_empty() {
@@ -735,6 +735,7 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
     // report id 必须试两个：实测有线（PID 0x1B63）走 **report id 0**（无编号帧，
     // 回复首字节 00），无线才走 1 / 配对表给的 id。原来只试 1，有线模式一律超时，
     // 于是链路开不起来、界面只能显示上一次的缓存值。
+    let mut wired: Vec<Link> = Vec::new();
     for iface in &all {
         if iface.product_id == PID_DONGLE || !iface.is_command_channel() {
             continue;
@@ -751,15 +752,21 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
                     if std::env::var_os("ROG_HID_DEBUG").is_some() {
                         eprintln!("[hid] 有线命中 report id {rid}：{}", iface.path);
                     }
-                    return Ok(Link {
+                    wired.push(Link {
                         mode: "Wired".to_string(),
                         report_id: rid,
                         iface: iface.clone(),
                         all_interfaces: all.clone(),
                     });
+                    break;
                 }
             }
         }
+    }
+
+    // 有线可能有不止一条（同时插着鼠标和键盘），全部带回去。
+    if !wired.is_empty() {
+        return Ok(wired);
     }
 
     // 2) 无线：先找接收器控制通道（0xFF02），读配对表拿 report id
@@ -795,12 +802,20 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
     let iface = dongle_mouse
         .or(dongle_ctrl)
         .ok_or("接收器上没有可用的命令通道")?;
-    Ok(Link {
+    Ok(vec![Link {
         mode: "Wireless24G".to_string(),
         report_id,
         iface: iface.clone(),
         all_interfaces: all.clone(),
-    })
+    }])
+}
+
+/// 只取第一条链路。命令行走的是这条 —— 一次只操作一台设备。
+pub fn open_link(hid: &HidApi) -> Result<Link, String> {
+    open_links(hid)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "没有可用的命令通道".to_string())
 }
 
 #[cfg(test)]
