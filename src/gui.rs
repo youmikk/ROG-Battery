@@ -557,6 +557,19 @@ struct TrayCtl {
     /// 拖滑块时是 100+ 次/秒。每次 `NIM_MODIFY` 都是跨进程调用，加上重建
     /// 四行文本的字符串分配 —— 缓存一下，内容没变就不发。
     last_tip: std::cell::RefCell<String>,
+    /// 第 2 个及以后的图标（多设备时每台一个）。
+    ///
+    /// 0 号槽位沿用 `id`/`cur` 那一套（升级前的折叠状态挂在它的 GUID 上），
+    /// 这里只放额外槽位，避免动到主图标的既有逻辑。
+    extra: std::cell::RefCell<Vec<ExtraTray>>,
+}
+
+/// 一个额外槽位的托盘图标。
+struct ExtraTray {
+    slot: u8,
+    id: win32::TrayId,
+    icon: win32::Handle,
+    tip: String,
 }
 
 impl TrayCtl {
@@ -566,6 +579,7 @@ impl TrayCtl {
             id: std::cell::Cell::new(None),
             cur: std::cell::Cell::new(std::ptr::null_mut()),
             last_tip: std::cell::RefCell::new(String::new()),
+            extra: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -603,6 +617,56 @@ impl TrayCtl {
             let old = self.cur.replace(std::ptr::null_mut());
             if !old.is_null() {
                 unsafe { win32::DestroyIcon(old) };
+            }
+            for e in self.extra.borrow_mut().drain(..) {
+                win32::tray_remove(self.hwnd, e.id);
+                if !e.icon.is_null() {
+                    unsafe { win32::DestroyIcon(e.icon) };
+                }
+            }
+        }
+    }
+
+    /// 一次同步全部图标：`items[0]` 走主图标，其余走额外槽位。
+    ///
+    /// 只在「图标集合真的变了」时调用（调用方按签名去重），所以这里不做缓存。
+    fn set_slots(&self, items: &[(win32::Handle, String)]) {
+        if let Some((h, tip)) = items.first() {
+            self.set_icon(*h);
+            self.set_tip(tip);
+        }
+        let mut extra = self.extra.borrow_mut();
+        for (i, (h, tip)) in items.iter().enumerate().skip(1) {
+            let slot = i as u8;
+            if let Some(e) = extra.iter_mut().find(|e| e.slot == slot) {
+                win32::tray_update(self.hwnd, e.id, Some(*h), Some(tip));
+                let old = std::mem::replace(&mut e.icon, *h);
+                if !old.is_null() && old != *h {
+                    unsafe { win32::DestroyIcon(old) };
+                }
+                e.tip.clear();
+                e.tip.push_str(tip);
+            } else if let Some(id) = win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, *h, tip, slot) {
+                extra.push(ExtraTray { slot, id, icon: *h, tip: tip.clone() });
+            } else {
+                unsafe { win32::DestroyIcon(*h) };
+            }
+        }
+        // 设备变少：把多余的槽位撤掉（否则任务栏上留着点不动的旧图标）。
+        let keep = items.len().max(1);
+        let mut gone = Vec::new();
+        extra.retain(|e| {
+            let keep_this = (e.slot as usize) < keep;
+            if !keep_this {
+                gone.push((e.id, e.icon));
+            }
+            keep_this
+        });
+        drop(extra);
+        for (id, icon) in gone {
+            win32::tray_remove(self.hwnd, id);
+            if !icon.is_null() {
+                unsafe { win32::DestroyIcon(icon) };
             }
         }
     }
@@ -2335,6 +2399,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     //
     // 闭包是 `Fn`，所以所有可变状态都要放进 `Cell` / `RefCell`。
     let tray_level: Cell<Option<u8>> = Cell::new(None);
+    // 多图标集合的签名：变了才重建，否则每拍都要重画 N 张图标。
+    let tray_sig = std::cell::RefCell::new(String::new());
 
     let h_mi_quit = mi_quit.handle.clone();
 
@@ -2479,6 +2545,42 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     t
                 };
                 tray.set_tip(&tip);
+                // 多设备：每台一个图标。0 号仍是主图标，其余进额外槽位。
+                let multi: Vec<(u8, bool, String)> = {
+                    let s = lock_shared(&shared_e);
+                    if s.readings.len() > 1 {
+                        s.readings
+                            .iter()
+                            .map(|r| (r.level, r.charging, crate::device::reading_line(r)))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                if !multi.is_empty() {
+                    let sig = multi
+                        .iter()
+                        .map(|(l, c, line)| format!("{l}{c}{line}"))
+                        .collect::<Vec<_>>()
+                        .join("|");
+                    if tray_sig.borrow().as_str() != sig {
+                        let items: Vec<(win32::Handle, String)> = multi
+                            .iter()
+                            .filter_map(|(level, charging, line)| {
+                                let h = if *charging {
+                                    crate::tray_icon::render_charging(*level)
+                                } else {
+                                    crate::tray_icon::render(*level)
+                                };
+                                h.map(|h| (h, line.clone()))
+                            })
+                            .collect();
+                        if !items.is_empty() {
+                            tray.set_slots(&items);
+                            *tray_sig.borrow_mut() = sig;
+                        }
+                    }
+                }
                 // 休眠时不要显示上一次的电量数字，那会误导（用户以为还是 84%）。
                 // 但也不能退回应用图标 —— 那样任务栏上只剩一个图标，看不出是电量，
                 // 用户报过「托盘短暂出现只显示图标而不是数字」。所以读不到就画一条
