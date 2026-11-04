@@ -1,0 +1,6 @@
+# 假设备夹具：ROG_MOCK_DEVICES=<本文件路径> 启动即生效
+# 族|型号|电量|充电(0/1)
+mouse|ROG HARPE ACE MINI|84|1
+keyboard|ROG AZOTH|20|0
+headset|ROG DELTA|55|0
+gamepad|ROG RAIKIRI|70|0

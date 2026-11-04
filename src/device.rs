@@ -10,6 +10,7 @@ pub enum DeviceFamily {
     Mouse,
     Headset,
     Keyboard,
+    Gamepad,
     /// 没认出来，或者根本没读到身份。
     Unknown,
 }
@@ -21,12 +22,16 @@ pub fn family_of(model_name: &str) -> DeviceFamily {
     let m = model_name.to_ascii_uppercase();
     const HEADSET: [&str; 5] = ["HEADSET", "HATSU", "FALCHION", "耳机", "降临"];
     const KEYBOARD: [&str; 6] = ["KEYBOARD", "AZOTH", "FLARE", "STRIX SCOPE", "键盘", "龙骑士"];
+    const GAMEPAD: [&str; 4] = ["GAMEPAD", "RAIKIRI", "手柄", "雷切"];
     const MOUSE: [&str; 8] = ["MOUSE", "HARPE", "GLADIUS", "KERIS", "鼠标", "龙鳞", "战刃", "月刃"];
     if HEADSET.iter().any(|k| m.contains(k)) {
         return DeviceFamily::Headset;
     }
     if KEYBOARD.iter().any(|k| m.contains(k)) {
         return DeviceFamily::Keyboard;
+    }
+    if GAMEPAD.iter().any(|k| m.contains(k)) {
+        return DeviceFamily::Gamepad;
     }
     if MOUSE.iter().any(|k| m.contains(k)) {
         return DeviceFamily::Mouse;
@@ -41,6 +46,7 @@ impl DeviceFamily {
             DeviceFamily::Mouse => "鼠标",
             DeviceFamily::Headset => "耳机",
             DeviceFamily::Keyboard => "键盘",
+            DeviceFamily::Gamepad => "手柄",
             DeviceFamily::Unknown => "设备",
         }
     }

@@ -1785,6 +1785,16 @@ fn tray_tip_full(s: &Shared) -> String {
 
     let conn = conn_text(s);
 
+    // 模拟模式：没有硬件时也让提示反映夹具内容，方便对着截图调样式。
+    if crate::mock::enabled() {
+        if let Some(rows) = crate::mock::readings() {
+            let lines: Vec<String> = rows.iter().map(crate::device::reading_line).collect();
+            if !lines.is_empty() {
+                return format!("{name}\n{}", lines.join("\n"));
+            }
+        }
+    }
+
     let battery = match s.quick {
         Some(q) => crate::device::reading_line(&crate::device::DeviceReading {
             family: s.device_family,

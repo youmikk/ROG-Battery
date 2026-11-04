@@ -29,6 +29,7 @@ mod device;
 mod diagnostics;
 mod history;
 mod linkstate;
+mod mock;
 mod ops;
 mod paths;
 mod proto;
