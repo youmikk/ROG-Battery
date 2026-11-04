@@ -1507,7 +1507,7 @@ fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
 /// 出错时落一份诊断文本（`<设置目录>/diagnostics.txt`）。
 ///
 /// 只在「接收器都不在」时写：休眠是正常状态，不该反复覆盖文件。
-fn write_diagnostics(status: &str, link_mode: &str, family: &str) {
+fn write_diagnostics(status: &str, link_mode: &str, family: &str, frames: usize, elapsed_ms: u128) {
     let Some(dir) = crate::paths::settings_file().parent().map(|d| d.to_path_buf()) else {
         return;
     };
@@ -1516,9 +1516,9 @@ fn write_diagnostics(status: &str, link_mode: &str, family: &str) {
         status,
         link_mode,
         family,
-        frames: 0,
-        elapsed_ms: 0,
-        history_rows: 0,
+        frames,
+        elapsed_ms,
+        history_rows: crate::history::read_rows().len(),
     };
     let _ = crate::diagnostics::write(&dir.join("diagnostics.txt"), &f);
 }
@@ -1556,6 +1556,8 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
                     text,
                     if snap.identity.dongle_sn.trim().is_empty() { "" } else { "2.4G 接收器" },
                     crate::device::family_of(&snap.identity.model_name).noun(),
+                    s.frames,
+                    s.elapsed_ms,
                 );
             }
         }
