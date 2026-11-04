@@ -237,6 +237,27 @@ impl CmdResult {
 /// 取 90 秒：后台刷新间隔是 60 秒，留一次失败重试的余量。
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// 低于这个电量提醒一次。
+const LOW_ALERT_PCT: u8 = 20;
+/// 回充到这个电量以上才重新允许提醒 —— 否则在 20% 附近上下抖动会反复弹。
+const LOW_ALERT_REARM_PCT: u8 = 25;
+
+/// 低电量提醒的判据（纯函数，便于测）。
+///
+/// `armed` 是「还没提醒过」的闸门：跌到阈值以下提醒一次后关闸，回充到
+/// `LOW_ALERT_REARM_PCT` 以上、或者开始充电，才重新上膛。
+fn low_battery_alert(level: u8, charging: bool, armed: &mut bool) -> bool {
+    if charging || level > LOW_ALERT_REARM_PCT {
+        *armed = true;
+        return false;
+    }
+    if level > LOW_ALERT_PCT || !*armed {
+        return false;
+    }
+    *armed = false;
+    true
+}
+
 struct Shared {
     /// 最近一次**全量**快照里解析出的状态。`None` = 还没读全过。
     ///
@@ -258,6 +279,8 @@ struct Shared {
     /// 托盘要能区分「这是现在」和「这是几分钟前的缓存」：刷新线程在设备休眠、
     /// 接收器掉线时会沿用上一次读数，界面上不标注就变成撒谎。
     last_ok_at: Option<std::time::Instant>,
+    /// 低电量提醒的闸门：`true` = 还没提醒过。
+    low_alert_armed: bool,
     status: Status,
     frames: usize,
     elapsed_ms: u128,
@@ -297,6 +320,7 @@ impl Shared {
             link_mode: String::new(),
             quick: None,
             last_ok_at: None,
+            low_alert_armed: true,
             status: Status::Idle,
             frames: 0,
             elapsed_ms: 0,
@@ -2329,6 +2353,17 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         Some(level) => crate::tray_icon::render(level),
                         None => crate::tray_icon::render_unknown(),
                     };
+                    if let Some(level) = want {
+                        let fire = {
+                            let mut s = lock_shared(&shared_e);
+                            low_battery_alert(level, charging, &mut s.low_alert_armed)
+                        };
+                        if fire {
+                            canvas.with_ui_mut(|u| u.set_status("电量低，建议充电".to_string()));
+                            canvas.set_animating(true);
+                            canvas.repaint_now();
+                        }
+                    }
                     if let Some(hicon) = hicon {
                         // `TrayCtl::set_icon` 负责换图并销毁旧句柄。
                         tray.set_icon(hicon);
@@ -2634,6 +2669,31 @@ mod tests {
         // 托盘菜单和关闭对话框可能先后触发，必须幂等
         s.request_quit();
         assert!(s.shutdown.load(Ordering::Relaxed));
+    }
+
+
+    #[test]
+    fn low_battery_alert_fires_once_per_crossing() {
+        let mut armed = true;
+        assert!(low_battery_alert(19, false, &mut armed));
+        assert!(!low_battery_alert(18, false, &mut armed), "同一次掉电只提醒一次");
+        assert!(!low_battery_alert(15, false, &mut armed));
+    }
+
+    #[test]
+    fn low_battery_alert_rearms_after_recharge() {
+        let mut armed = true;
+        assert!(low_battery_alert(20, false, &mut armed));
+        assert!(!low_battery_alert(22, false, &mut armed), "没回到复位线以上不上膛");
+        assert!(!low_battery_alert(26, false, &mut armed));
+        assert!(low_battery_alert(20, false, &mut armed), "回充过之后可以再提醒");
+    }
+
+    #[test]
+    fn low_battery_alert_stays_quiet_while_charging() {
+        let mut armed = true;
+        assert!(!low_battery_alert(5, true, &mut armed));
+        assert!(armed, "充电时上膛");
     }
 
 }
