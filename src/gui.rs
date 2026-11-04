@@ -1779,13 +1779,11 @@ fn tray_tip_full(s: &Shared) -> String {
     let conn = conn_text(s);
 
     let battery = match s.quick {
-        Some(q) => {
-            if q.charging {
-                format!("电量 {}%（充电中）", q.level)
-            } else {
-                format!("电量 {}%", q.level)
-            }
-        }
+        Some(q) => crate::device::reading_line(&crate::device::DeviceReading {
+            family: s.device_family,
+            level: q.level,
+            charging: q.charging,
+        }),
         None => match &s.status {
             Status::Asleep => "电量 —（设备未响应）".to_string(),
             Status::Error(_) => "电量 —（读取出错）".to_string(),

@@ -46,6 +46,27 @@ impl DeviceFamily {
     }
 }
 
+
+/// 一台设备的读数。字段只描述「看到的事实」，不含怎么显示。
+///
+/// 现在链路层只返回一条，`Vec<DeviceReading>` 里通常只有一个元素；但工具提示
+/// 与托盘图标都按列表写，将来枚举出第二条链路时不用再改这两处。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceReading {
+    pub family: DeviceFamily,
+    pub level: u8,
+    pub charging: bool,
+}
+
+/// 一行读数文案，例如「鼠标 84%（充电中）」。
+pub fn reading_line(r: &DeviceReading) -> String {
+    let mut s = format!("{} {}%", r.family.noun(), r.level);
+    if r.charging {
+        s.push_str("（充电中）");
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +84,19 @@ mod tests {
         assert_eq!(family_of(""), DeviceFamily::Unknown);
         assert_eq!(family_of("USB Composite Device"), DeviceFamily::Unknown);
         assert_eq!(family_of("").noun(), "设备");
+    }
+
+    fn reading(family: DeviceFamily, level: u8, charging: bool) -> DeviceReading {
+        DeviceReading { family, level, charging }
+    }
+
+    #[test]
+    fn reading_line_names_the_device_family() {
+        assert_eq!(reading_line(&reading(DeviceFamily::Mouse, 84, false)), "鼠标 84%");
+        assert_eq!(
+            reading_line(&reading(DeviceFamily::Headset, 40, true)),
+            "耳机 40%（充电中）"
+        );
     }
 
     #[test]
