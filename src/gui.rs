@@ -281,6 +281,12 @@ struct Shared {
     last_ok_at: Option<std::time::Instant>,
     /// 低电量提醒的闸门：`true` = 还没提醒过。
     low_alert_armed: bool,
+    /// 写操作代次。每提交一条写命令自增。
+    ///
+    /// 后台读取是「先读设备、再回填」，中间可能隔着几百毫秒。这段时间里用户
+    /// 提交了写命令，读回来的就是**写之前**的状态；不回填还好，回填了界面会
+    /// 把刚写进去的值显示成写之前的（用户看到「设置又跳回去了」）。
+    write_gen: u64,
     status: Status,
     frames: usize,
     elapsed_ms: u128,
@@ -321,6 +327,7 @@ impl Shared {
             quick: None,
             last_ok_at: None,
             low_alert_armed: true,
+            write_gen: 0,
             status: Status::Idle,
             frames: 0,
             elapsed_ms: 0,
@@ -1447,8 +1454,15 @@ fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
 
 // ==================== 结果处理 ====================
 
+/// 这次读取是不是「写命令之前」的旧结果。
+///
+/// 单独抽出来是因为它只有两个数字，但判错方向会让界面永远显示旧值或永远不刷新。
+fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
+    gen_at_read != current
+}
+
 /// 把一次读取的结果搬进 [`Shared`]。返回本轮的电量快照（供记历史）。
-fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
+fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option<Quick> {
     // `elapsed` 为零 = 缓存命中（`SnapshotCache` 的约定）
     let snap = &out.snapshot;
     // 链路模式跟着快照一起更新（`fetch` / `fetch_light` 都会写这个字段）。
@@ -1474,6 +1488,11 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
         s.quick = None;
         s.last_ok_at = None;
         s.elapsed_ms = 0;
+        return None;
+    }
+
+    // 读的过程中用户提交了写命令 → 这份结果是写之前的状态，整轮丢弃。
+    if outcome_is_stale(gen_at_read, s.write_gen) {
         return None;
     }
 
@@ -1544,6 +1563,7 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
         }
         s.pending.push_back(cmd);
         s.status = Status::Busy;
+        s.write_gen = s.write_gen.wrapping_add(1);
     }
     signal.request_refresh();
     true
@@ -2144,17 +2164,17 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 }
 
                 // ③ 一轮读取。
-                let full = {
+                let (full, gen_at_read) = {
                     let mut s = lock_shared(&shared_t);
                     let f = s.want_full;
                     s.want_full = false;
-                    f
+                    (f, s.write_gen)
                 };
                 let res = read_once(&mut cache, full);
                 let sample = {
                     let mut s = lock_shared(&shared_t);
                     match res {
-                        Ok(Some(out)) => apply_outcome(&out, &mut s),
+                        Ok(Some(out)) => apply_outcome(&out, &mut s, gen_at_read),
                         Ok(None) => {
                             // 轻量读取走了缓存之外的分支（不该发生），保守当休眠。
                             s.status = Status::Asleep;
@@ -2632,7 +2652,7 @@ mod tests {
             elapsed: std::time::Duration::from_millis(120),
             frames_read: 0, // 走「一帧都没读到」的早退分支，链路模式仍要抄进去
         };
-        let _ = apply_outcome(&out, &mut s);
+        let _ = apply_outcome(&out, &mut s, 0);
         assert_eq!(s.link_mode, "Wireless24G");
         assert_eq!(conn_text(&s), "2.4G 无线");
     }
@@ -2694,6 +2714,14 @@ mod tests {
         let mut armed = true;
         assert!(!low_battery_alert(5, true, &mut armed));
         assert!(armed, "充电时上膛");
+    }
+
+
+    #[test]
+    fn stale_outcome_is_detected_by_generation() {
+        assert!(!outcome_is_stale(7, 7), "同一代次的结果应当采用");
+        assert!(outcome_is_stale(7, 8), "读完之后用户写过设备，这轮要丢");
+        assert!(outcome_is_stale(0, 1));
     }
 
 }
