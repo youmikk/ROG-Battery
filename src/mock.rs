@@ -7,11 +7,6 @@
 
 use crate::device::{DeviceFamily, DeviceReading};
 
-/// 模拟是否启用。
-pub fn enabled() -> bool {
-    std::env::var_os("ROG_MOCK_DEVICES").is_some()
-}
-
 /// 解析夹具文本。坏行跳过 —— 模拟工具不该因为一行写错就整体失效。
 pub fn parse(text: &str) -> Vec<DeviceReading> {
     let mut out = Vec::new();

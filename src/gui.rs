@@ -283,6 +283,8 @@ struct Shared {
     low_alert_armed: bool,
     /// 当前设备的族（鼠标/耳机/键盘），提示语按它说话。
     device_family: crate::device::DeviceFamily,
+    /// 所有看得到的设备读数。真机只有一条；模拟模式下是夹具里的整张表。
+    pub readings: Vec<crate::device::DeviceReading>,
     /// 写操作代次。每提交一条写命令自增。
     ///
     /// 后台读取是「先读设备、再回填」，中间可能隔着几百毫秒。这段时间里用户
@@ -330,6 +332,7 @@ impl Shared {
             last_ok_at: None,
             low_alert_armed: true,
             device_family: crate::device::DeviceFamily::Unknown,
+            readings: Vec::new(),
             write_gen: 0,
             status: Status::Idle,
             frames: 0,
@@ -1511,6 +1514,25 @@ fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
 }
 
 /// 把一次读取的结果搬进 [`Shared`]。返回本轮的电量快照（供记历史）。
+/// 组装设备读数表：模拟模式用夹具，否则只有当前这一台。
+///
+/// 抽成纯函数是为了能单测「夹具优先」和「单设备兜底」两条路径。
+fn readings_for(
+    mock: Option<Vec<crate::device::DeviceReading>>,
+    family: crate::device::DeviceFamily,
+    level: u8,
+    charging: bool,
+) -> Vec<crate::device::DeviceReading> {
+    match mock {
+        Some(rows) if !rows.is_empty() => rows,
+        _ => vec![crate::device::DeviceReading {
+            family,
+            level,
+            charging,
+        }],
+    }
+}
+
 /// 出错时追加一段诊断日志（`<设置目录>/diagnostics.log`）。
 ///
 /// 只在「接收器都不在」时写：休眠是正常状态，不该反复覆盖文件。
@@ -1605,6 +1627,12 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         active_stage: st.active_stage,
     };
     s.quick = Some(q);
+    s.readings = readings_for(
+        crate::mock::readings(),
+        s.device_family,
+        q.level,
+        q.charging,
+    );
     s.last_ok_at = Some(std::time::Instant::now());
 
     // 全量快照才填 `full`：3 帧轻量读取里 DPI 颜色、按键表都是默认值，
@@ -1785,14 +1813,10 @@ fn tray_tip_full(s: &Shared) -> String {
 
     let conn = conn_text(s);
 
-    // 模拟模式：没有硬件时也让提示反映夹具内容，方便对着截图调样式。
-    if crate::mock::enabled() {
-        if let Some(rows) = crate::mock::readings() {
-            let lines: Vec<String> = rows.iter().map(crate::device::reading_line).collect();
-            if !lines.is_empty() {
-                return format!("{name}\n{}", lines.join("\n"));
-            }
-        }
+    // 多设备：有多条读数就把它们全列出来（真机通常只有一条，等于没变化）。
+    if s.readings.len() > 1 {
+        let lines: Vec<String> = s.readings.iter().map(crate::device::reading_line).collect();
+        return format!("{name}\n{}", lines.join("\n"));
     }
 
     let battery = match s.quick {
