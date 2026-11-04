@@ -161,6 +161,20 @@ pub fn render(level: u8) -> Option<Handle> {
     render_badge(level, false)
 }
 
+/// 缓存读数（设备暂时读不到、沿用的是上一次的值）：灰底 + 近白数字。
+///
+/// 灰底本身就表示「这不是现在的数」，所以不再叠加充电角标。
+pub fn render_stale(level: u8) -> Option<Handle> {
+    render_glyph(
+        &label(level),
+        scaled_font_height(level, ICON_SIZE),
+        [0xF2, 0xF6, 0xFA],
+        crate::autostart::system_uses_light_theme(),
+        Some([0x6B, 0x72, 0x7A]),
+        false,
+    )
+}
+
 /// 充电中的托盘图标：在徽章右上角加一个深色圆 + 白色闪电，数字左移让位。
 pub fn render_charging(level: u8) -> Option<Handle> {
     render_badge(level, true)
@@ -586,6 +600,17 @@ mod tests {
     fn render_charging_produces_an_icon() {
         let h = render_charging(84);
         assert!(h.is_some(), "充电图标应当能生成");
+        if let Some(h) = h {
+            unsafe { crate::win32::DestroyIcon(h) };
+        }
+    }
+
+
+    /// 灰底「历史读数」图标也要能画出来（走的是同一条 GDI+ 链）。
+    #[test]
+    fn render_stale_produces_an_icon() {
+        let h = render_stale(62);
+        assert!(h.is_some(), "历史读数图标应当能生成");
         if let Some(h) = h {
             unsafe { crate::win32::DestroyIcon(h) };
         }

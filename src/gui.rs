@@ -232,6 +232,11 @@ impl CmdResult {
 }
 
 /// 后台线程与 GUI 线程共享的全部状态。
+/// 超过这个时长没读到设备，托盘就把读数标成「历史读数」并转灰。
+///
+/// 取 90 秒：后台刷新间隔是 60 秒，留一次失败重试的余量。
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+
 struct Shared {
     /// 最近一次**全量**快照里解析出的状态。`None` = 还没读全过。
     ///
@@ -248,6 +253,11 @@ struct Shared {
     link_mode: String,
     /// 每轮都会更新的那几项。叠在 `full` 上，电量才是活的。
     quick: Option<Quick>,
+    /// 最近一次**成功**读到电量的时刻。
+    ///
+    /// 托盘要能区分「这是现在」和「这是几分钟前的缓存」：刷新线程在设备休眠、
+    /// 接收器掉线时会沿用上一次读数，界面上不标注就变成撒谎。
+    last_ok_at: Option<std::time::Instant>,
     status: Status,
     frames: usize,
     elapsed_ms: u128,
@@ -286,6 +296,7 @@ impl Shared {
             ident: None,
             link_mode: String::new(),
             quick: None,
+            last_ok_at: None,
             status: Status::Idle,
             frames: 0,
             elapsed_ms: 0,
@@ -1437,6 +1448,7 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
         };
         s.full = None;
         s.quick = None;
+        s.last_ok_at = None;
         s.elapsed_ms = 0;
         return None;
     }
@@ -1466,6 +1478,7 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared) -> Option<Quick> {
         active_stage: st.active_stage,
     };
     s.quick = Some(q);
+    s.last_ok_at = Some(std::time::Instant::now());
 
     // 全量快照才填 `full`：3 帧轻量读取里 DPI 颜色、按键表都是默认值，
     // 拿它刷性能/灯光/按键页会把界面刷成假的（颜色全黑、按键全 0）。
@@ -2288,9 +2301,19 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     (s.quick, matches!(s.status, Status::Asleep))
                 };
                 // `set_tip` 只收 `&str`，所以每次都要造一个新 String。
+                let stale = {
+                    let s = lock_shared(&shared_e);
+                    s.last_ok_at
+                        .map(|t| t.elapsed() > STALE_AFTER)
+                        .unwrap_or(false)
+                };
                 let tip = {
                     let s = lock_shared(&shared_e);
-                    tray_tip_full(&s)
+                    let mut t = tray_tip_full(&s);
+                    if stale {
+                        t.push_str("（历史读数）");
+                    }
+                    t
                 };
                 tray.set_tip(&tip);
                 // 休眠时不要显示上一次的电量数字，那会误导（用户以为还是 84%）。
@@ -2301,6 +2324,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 if want != tray_level.get() {
                     let charging = q.map(|v| v.charging).unwrap_or(false);
                     let hicon = match want {
+                        Some(level) if stale => crate::tray_icon::render_stale(level),
                         Some(level) if charging => crate::tray_icon::render_charging(level),
                         Some(level) => crate::tray_icon::render(level),
                         None => crate::tray_icon::render_unknown(),
