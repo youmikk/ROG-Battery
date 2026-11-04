@@ -19,9 +19,9 @@ pub enum DeviceFamily {
 /// 大小写不敏感：设备回报的型号既有全大写（`ROG HARPE ACE MINI`）也有混合。
 pub fn family_of(model_name: &str) -> DeviceFamily {
     let m = model_name.to_ascii_uppercase();
-    const HEADSET: [&str; 4] = ["HEADSET", "HATSU", "FALCHION", "耳机"];
-    const KEYBOARD: [&str; 4] = ["KEYBOARD", "AZOTH", "FLARE", "STRIX SCOPE"];
-    const MOUSE: [&str; 4] = ["MOUSE", "HARPE", "GLADIUS", "KERIS"];
+    const HEADSET: [&str; 5] = ["HEADSET", "HATSU", "FALCHION", "耳机", "降临"];
+    const KEYBOARD: [&str; 6] = ["KEYBOARD", "AZOTH", "FLARE", "STRIX SCOPE", "键盘", "龙骑士"];
+    const MOUSE: [&str; 8] = ["MOUSE", "HARPE", "GLADIUS", "KERIS", "鼠标", "龙鳞", "战刃", "月刃"];
     if HEADSET.iter().any(|k| m.contains(k)) {
         return DeviceFamily::Headset;
     }
@@ -77,6 +77,8 @@ mod tests {
         assert_eq!(family_of("ROG Gladius III"), DeviceFamily::Mouse);
         assert_eq!(family_of("ROG STRIX FLARE II"), DeviceFamily::Keyboard);
         assert_eq!(family_of("ROG DELTA HEADSET"), DeviceFamily::Headset);
+        // 设备回报的中文型号名（真机实测 `ROG 龙鳞 Ace Mini`）也必须认出来。
+        assert_eq!(family_of("ROG 龙鳞 Ace Mini"), DeviceFamily::Mouse);
     }
 
     #[test]
