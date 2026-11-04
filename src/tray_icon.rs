@@ -64,12 +64,9 @@ pub fn icon_size() -> i32 {
 
 /// 背景色 —— 深色圆角块，白字。和曲线不同，托盘图标必须**不透明**
 /// 才能在浅色/深色任务栏上都看得清（透明图标配白字在浅色栏上会消失）。
-#[cfg(test)]
 const BG: [u8; 3] = [0x20, 0x24, 0x2B];
-#[cfg(test)]
 
 /// 电量对应的图标底色。三档，够用户一眼分辨「还早 / 该充了 / 快没电」。
-#[cfg(test)]
 fn level_color(level: u8) -> [u8; 3] {
     match level {
         0..=20 => [0xD1, 0x3A, 0x2E],   // 红：快没电
@@ -114,7 +111,6 @@ pub fn scaled_font_height(level: u8, size: i32) -> i32 {
 /// 把 `[r, g, b]` 转 `COLORREF`（`0x00BBGGRR`）。
 ///
 /// 顺序写反是最常见的 GDI 错误：红色 `(255,0,0)` 写成 `0x0000FF` 会变蓝。
-#[cfg(test)]
 fn colorref(c: [u8; 3]) -> u32 {
     (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16)
 }
