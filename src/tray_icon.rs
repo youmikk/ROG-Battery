@@ -147,7 +147,8 @@ mod gdiplus {
     // 位图图标专用的 5 个入口也是 GDI+ 那一套，声明在 `ui::gfx`（唯一一份）。
     pub(crate) use crate::ui::gfx::{
         GdipCreateBitmapFromScan0, GdipCreateHICONFromBitmap, GdipDisposeImage,
-        GdipDrawImageRectI, GdipFillRectangleI, GdipGetImageGraphicsContext, GdipGraphicsClear,
+        GdipDrawImageRectI, GdipFillEllipse, GdipFillRectangleI, GdipGetImageGraphicsContext,
+        GdipGraphicsClear,
         GdipSetCompositingMode, GdipSetInterpolationMode, GdipSetPixelOffsetMode,
     };
 }
@@ -156,34 +157,12 @@ mod gdiplus {
 ///
 /// 浅色任务栏（Windows 11 默认/当前）：深炭灰 #1F1F1F，匹配输入法与时钟原生字体；低电警示红、中电橙。
 /// 深色任务栏：纯白 #FFFFFF；低电亮红、中电亮橙。
-fn glyph_color(level: u8, is_light: bool) -> [u8; 3] {
-    if is_light {
-        match level {
-            0..=20 => [0xD1, 0x3A, 0x2E],   // 警示红
-            21..=50 => [0xC4, 0x6E, 0x00],  // 稳健橙
-            _ => [0x1F, 0x1F, 0x1F],        // 原生深炭灰（匹配系统输入法及任务栏深色图标）
-        }
-    } else {
-        match level {
-            0..=20 => [0xEA, 0x4B, 0x3C],   // 亮红
-            21..=50 => [0xEA, 0x9A, 0x2E],  // 亮橙
-            _ => [0xFF, 0xFF, 0xFF],        // 纯白
-        }
-    }
-}
-
 /// 画一张**透明底**、带电量数字的图标（GDI+ 32bpp ARGB）。
 ///
 /// 失败返回 `None`，调用方回落到静态图标 —— **不能让托盘空白**。
 /// 成功返回的 `HICON` 由调用方负责 `DestroyIcon`。
 pub fn render(level: u8) -> Option<Handle> {
-    let is_light = crate::autostart::system_uses_light_theme();
-    render_glyph(
-        &label(level),
-        scaled_font_height(level, ICON_SIZE),
-        glyph_color(level, is_light),
-        is_light,
-    )
+    render_badge(level)
 }
 
 /// 读不到电量（休眠 / 未连接 / 首次启动）时的占位图标：一条短横线。
@@ -197,10 +176,36 @@ pub fn render_unknown() -> Option<Handle> {
     } else {
         [0xD8, 0xD8, 0xD8]
     };
-    render_glyph("—", (ICON_SIZE as f32 * 0.46) as i32, c, is_light)
+    render_glyph("—", (ICON_SIZE as f32 * 0.46) as i32, c, is_light, None)
 }
 
-fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) -> Option<Handle> {
+/// 实心圆徽章样式：等级色圆底 + 深色数字（浅色任务栏用深墨，深色任务栏用近白）。
+///
+/// 与数字样式并存，由调用方挑选；圆底要盖住任务栏的底色，所以数字不能再用
+/// 光晕——光晕是给「直接压在任务栏上」的字形用的。
+pub fn render_badge(level: u8) -> Option<Handle> {
+    let is_light = crate::autostart::system_uses_light_theme();
+    let ink = if is_light {
+        [0x0C, 0x11, 0x15]
+    } else {
+        [0xF2, 0xF6, 0xFA]
+    };
+    render_glyph(
+        &label(level),
+        scaled_font_height(level, ICON_SIZE),
+        ink,
+        is_light,
+        Some(level_color(level)),
+    )
+}
+
+fn render_glyph(
+    text: &str,
+    font_height: i32,
+    color: [u8; 3],
+    is_light: bool,
+    badge: Option<[u8; 3]>,
+) -> Option<Handle> {
     use gdiplus::*;
     // 基础生成尺寸固定为 ICON_SIZE (32px)，生成高质量 32bpp ARGB 图标。
     // Windows Shell_NotifyIcon 接收 32x32 图标后，由 DWM 高保真缩放到任务栏托盘，
@@ -273,6 +278,15 @@ fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) ->
             let mut fg: *mut c_void = ptr::null_mut();
             let _ = GdipCreateSolidFill(argb, &mut fg);
 
+            if let Some(fill) = badge {
+                let mut b: *mut c_void = ptr::null_mut();
+                if GdipCreateSolidFill(colorref(fill), &mut b) == 0 && !b.is_null() {
+                    let d = size as f32 * 0.94;
+                    let o = (size as f32 - d) / 2.0;
+                    GdipFillEllipse(g, b, o, o, d, d);
+                    GdipDeleteBrush(b);
+                }
+            }
             let offs: [(f32, f32); 8] = [
                 (-unit, 0.0),
                 (unit, 0.0),

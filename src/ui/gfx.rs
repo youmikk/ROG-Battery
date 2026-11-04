@@ -242,6 +242,14 @@ fn GdipResetClip(g: *mut c_void) -> i32;
     ) -> i32;
     fn GdipDrawLine(g: *mut c_void, pen: *mut c_void, x1: f32, y1: f32, x2: f32, y2: f32) -> i32;
     fn GdipDrawEllipse(g: *mut c_void, pen: *mut c_void, x: f32, y: f32, w: f32, h: f32) -> i32;
+    pub(crate) fn GdipFillEllipse(
+        g: *mut c_void,
+        brush: *mut c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> i32;
 
     pub fn GdipCreateFontFamilyFromName(
         name: *const u16,
