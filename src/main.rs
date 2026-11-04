@@ -206,6 +206,27 @@ enum Instance {
     Unavailable,
 }
 
+/// 把已经开着的那个窗口叫到前台。
+///
+/// 用户双击图标通常是想看面板；直接静默退出会像「程序打不开」。窗口标题是
+/// [`crate::gui::WINDOW_TITLE`]，用标题找而不靠类名 —— 类名由 nwg 生成，换库
+/// 版本就会变。
+fn wake_existing() -> bool {
+    let title: Vec<u16> = format!("{}\0", crate::gui::WINDOW_TITLE)
+        .encode_utf16()
+        .collect();
+    let hwnd = unsafe { crate::win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if hwnd.is_null() {
+        return false;
+    }
+    unsafe {
+        // SW_RESTORE(9)：最小化或被托盘隐藏时都能显示并激活。
+        crate::win32::ShowWindow(hwnd, 9);
+        crate::win32::SetForegroundWindow(hwnd);
+    }
+    true
+}
+
 /// 单实例互斥检查。已有实例时激活它的窗口并返回 [`Instance::AlreadyRunning`]。
 fn check_single_instance() -> Instance {
     check_instance_named(SINGLE_INSTANCE_MUTEX)
@@ -242,7 +263,10 @@ fn run_gui(start_hidden: bool) -> ExitCode {
     // 单实例互斥锁：防止多开造成 HID 设备冲突与多托盘图标堆叠
     let _guard = match check_single_instance() {
         Instance::Owner(g) => Some(g),
-        Instance::AlreadyRunning => return ExitCode::SUCCESS,
+        Instance::AlreadyRunning => {
+            wake_existing();
+            return ExitCode::SUCCESS;
+        }
         Instance::Unavailable => None,
     };
 
@@ -751,4 +775,13 @@ mod tests {
         drop(second);
         drop(first);
     }
+
+    #[test]
+    fn wake_existing_reports_false_for_a_missing_window() {
+        // 标题不存在时只能安静地返回 false，不能 panic（第二实例会走这条路）。
+        let title: Vec<u16> = "R Battery 不存在的窗口\0".encode_utf16().collect();
+        let hwnd = unsafe { crate::win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
+        assert!(hwnd.is_null());
+    }
+
 }
