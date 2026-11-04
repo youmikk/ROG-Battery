@@ -1600,11 +1600,79 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     c.y = hero.bottom();
 
     // ---- 电量历史 ----
+    // ---- 设备设置 ----
+    c.h2(p, "设备设置", false);
+    // 只管「标题 · 说明」，控件宽度由各行自己按控件类型定（下拉 150、
+    // 输入框+按钮、开关 40）。曾经这里多一个宽度字段，三处调用全都无视它、
+    // 直接写字面量，于是那个字段从没被读过，第三行的 60 还和实际用的 40 对不上。
+    let st = known_state(d);
+    let rows: [(&str, Option<&str>); 3] = [
+        ("自动休眠", Some("设备静止多久后进入休眠以省电")),
+        ("低电量阈值", Some("低于该电量时设备指示灯会闪")),
+        ("充满效果", Some("充满电时播放一次灯效")),
+    ];
+    let total_h: f32 = rows.iter().map(|_| layout::ROW_H).sum();
+    let card = c.card(p, total_h);
+    let mut ry = card.y;
+    let mut i = 0;
+
+    // 自动休眠
+    {
+        let area = row_area(card, ry);
+        let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
+        drop_button(p, ui, R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0), Drop::Sleep, d);
+        if i + 1 < rows.len() {
+            row_rule(p, card, area);
+        }
+        ry += layout::ROW_H;
+        i += 1;
+    }
+
+    // 低电量阈值：输入框 + % + 应用
+    {
+        let area = row_area(card, ry);
+        let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
+        let edit = Edit::LowWarn;
+        let txt = ui
+            .edit_text(edit)
+            .map(|s| s.to_string())
+            .or_else(|| known_state(d).map(|s| s.low_warn.to_string()))
+            .unwrap_or_else(|| "—".to_string());
+        let box_r = R::new(ctl.x, ctl.cy() - 15.0, 62.0, 30.0);
+        num_box(p, box_r, &txt, ui.focus == Some(edit));
+        ui.hot(box_r, Act::Focus(edit));
+        p.text(
+            "%",
+            R::new(box_r.right() + 4.0, ctl.y, 14.0, ctl.h),
+            12.0,
+            false,
+            t.text2,
+            Align::Left,
+        );
+        let btn = R::new(ctl.right() - 56.0, ctl.cy() - 15.0, 56.0, 30.0);
+        button(p, ui, btn, "应用", false, Act::ApplyEdit(edit));
+        row_rule(p, card, area);
+        ry += layout::ROW_H;
+        i += 1;
+    }
+
+    // 充满效果
+    {
+        let area = row_area(card, ry);
+        let ctl = row_label(p, area, rows[i].0, rows[i].1, 40.0);
+        let on = st.map(|s| s.full_effect != 0).unwrap_or(true);
+        let sw = R::new(ctl.right() - 40.0, ctl.cy() - 10.0, 40.0, 20.0);
+        p.switch(sw, on, st.is_some());
+        ui.hot(sw, Act::Toggle(Pref::FullEffect));
+    }
+    c.y = card.bottom();
+
     c.h2(p, "电量历史", false);
     // 卡片高度按 `draw_chart` 的实际内容算：16（上边距）+ 18（标题行）+ 8 +
     // 146（绘图区）+ 20（X 轴时间）+ 12（下边距）= 220。
     // 原来写 `168 + 56 + 28 = 252` 是照抄原型的 SVG viewBox，
     // 底下会空出 46px 一条白边；132 的绘图区又太扁，曲线被压成一条带子。
+
     let chart = c.card(p, 220.0);
     draw_chart(p, chart, d, ui);
     // 卡片不会自己推进游标（它的返回值才是位置），必须手动前移 ——
@@ -2633,72 +2701,6 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     c.y = card.bottom();
 
     // ---- 关于 ----
-    // ---- 设备设置 ----
-    c.h2(p, "设备设置", false);
-    // 只管「标题 · 说明」，控件宽度由各行自己按控件类型定（下拉 150、
-    // 输入框+按钮、开关 40）。曾经这里多一个宽度字段，三处调用全都无视它、
-    // 直接写字面量，于是那个字段从没被读过，第三行的 60 还和实际用的 40 对不上。
-    let st = known_state(d);
-    let rows: [(&str, Option<&str>); 3] = [
-        ("自动休眠", Some("设备静止多久后进入休眠以省电")),
-        ("低电量阈值", Some("低于该电量时设备指示灯会闪")),
-        ("充满效果", Some("充满电时播放一次灯效")),
-    ];
-    let total_h: f32 = rows.iter().map(|_| layout::ROW_H).sum();
-    let card = c.card(p, total_h);
-    let mut ry = card.y;
-    let mut i = 0;
-
-    // 自动休眠
-    {
-        let area = row_area(card, ry);
-        let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
-        drop_button(p, ui, R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0), Drop::Sleep, d);
-        if i + 1 < rows.len() {
-            row_rule(p, card, area);
-        }
-        ry += layout::ROW_H;
-        i += 1;
-    }
-
-    // 低电量阈值：输入框 + % + 应用
-    {
-        let area = row_area(card, ry);
-        let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
-        let edit = Edit::LowWarn;
-        let txt = ui
-            .edit_text(edit)
-            .map(|s| s.to_string())
-            .or_else(|| known_state(d).map(|s| s.low_warn.to_string()))
-            .unwrap_or_else(|| "—".to_string());
-        let box_r = R::new(ctl.x, ctl.cy() - 15.0, 62.0, 30.0);
-        num_box(p, box_r, &txt, ui.focus == Some(edit));
-        ui.hot(box_r, Act::Focus(edit));
-        p.text(
-            "%",
-            R::new(box_r.right() + 4.0, ctl.y, 14.0, ctl.h),
-            12.0,
-            false,
-            t.text2,
-            Align::Left,
-        );
-        let btn = R::new(ctl.right() - 56.0, ctl.cy() - 15.0, 56.0, 30.0);
-        button(p, ui, btn, "应用", false, Act::ApplyEdit(edit));
-        row_rule(p, card, area);
-        ry += layout::ROW_H;
-        i += 1;
-    }
-
-    // 充满效果
-    {
-        let area = row_area(card, ry);
-        let ctl = row_label(p, area, rows[i].0, rows[i].1, 40.0);
-        let on = st.map(|s| s.full_effect != 0).unwrap_or(true);
-        let sw = R::new(ctl.right() - 40.0, ctl.cy() - 10.0, 40.0, 20.0);
-        p.switch(sw, on, st.is_some());
-        ui.hot(sw, Act::Toggle(Pref::FullEffect));
-    }
-    c.y = card.bottom();
 
     c.h2(p, "关于", false);
     let card = c.card(p, layout::ROW_H * 3.0);
