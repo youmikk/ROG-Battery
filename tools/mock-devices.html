@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>假设备夹具编辑器 · R Battery</title>
+<style>
+  :root{
+    --bg:#14161a; --card:#1b1e24; --line:#2a2f38; --fg:#e6e9ee; --dim:#8b93a1;
+    --accent:#4c9aff; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;padding:24px}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:20px}
+  .wrap{display:grid;grid-template-columns:minmax(420px,1fr) minmax(360px,420px);gap:20px;align-items:start}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h2{font-size:13px;font-weight:600;color:var(--dim);margin:0 0 12px;
+           text-transform:uppercase;letter-spacing:.06em}
+  table{width:100%;border-collapse:collapse}
+  th{font-size:12px;color:var(--dim);text-align:left;font-weight:500;padding:0 6px 6px}
+  td{padding:3px 6px}
+  input,select{width:100%;background:#11141a;color:var(--fg);border:1px solid var(--line);
+               border-radius:7px;padding:6px 8px;font:inherit}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  input[type=number]{width:72px}
+  .row-del{background:none;border:none;color:var(--dim);cursor:pointer;font-size:16px;
+           line-height:1;padding:4px 6px;border-radius:6px}
+  .row-del:hover{color:var(--bad);background:#241a1c}
+  .tools{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  button{background:#222833;color:var(--fg);border:1px solid var(--line);border-radius:8px;
+         padding:7px 14px;font:inherit;cursor:pointer}
+  button:hover{border-color:#3a4150;background:#262d39}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#08111f;font-weight:600}
+  button.primary:hover{background:#5ea8ff}
+  textarea{width:100%;height:150px;background:#11141a;color:#cfe3ff;border:1px solid var(--line);
+           border-radius:8px;padding:10px;font:12.5px/1.55 "Cascadia Mono",Consolas,monospace;resize:vertical}
+  .preview{display:flex;gap:18px;flex-wrap:wrap;align-items:center;justify-content:center;
+           padding:18px 0 6px;min-height:96px}
+  .pv{display:flex;flex-direction:column;align-items:center;gap:6px;font-size:11px;color:var(--dim)}
+  canvas{image-rendering:pixelated}
+  .hint{color:var(--dim);font-size:12px;margin-top:10px}
+  code{background:#11141a;border:1px solid var(--line);border-radius:5px;
+       padding:1px 5px;font:12px "Cascadia Mono",Consolas,monospace;color:#cfe3ff}
+  .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);
+         background:#26303f;border:1px solid #3a4a63;color:#dbe7f7;padding:9px 18px;
+         border-radius:9px;opacity:0;transition:.18s;pointer-events:none}
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>假设备夹具编辑器</h1>
+<div class="sub">编辑后用 <code>ROG_MOCK_DEVICES</code> 指向保存的文件启动程序，就能在没有硬件时看多设备界面。</div>
+
+<div class="wrap">
+  <div class="card">
+    <h2>设备</h2>
+    <table>
+      <thead>
+        <tr><th style="width:120px">族</th><th>型号</th><th style="width:92px">电量</th>
+            <th style="width:64px">充电</th><th style="width:36px"></th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="tools">
+      <button onclick="addRow()">＋ 添加一台</button>
+      <button onclick="reset()">恢复样例</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>托盘预览</h2>
+    <div class="preview" id="preview"></div>
+    <div class="hint">按 32px 逻辑尺寸绘制、4 倍超采样后缩回，和程序里的画法一致。绿=正常，黄=偏低，红=告急，深灰=未知。</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:20px">
+  <h2>生成的 mock-devices.txt</h2>
+  <textarea id="out" spellcheck="false"></textarea>
+  <div class="tools">
+    <button class="primary" onclick="copyText()">复制内容</button>
+    <button onclick="download()">下载文件</button>
+  </div>
+  <div class="hint">
+    保存为 <code>D:\codex\rog-mouse-ctl\mock-devices.txt</code>，然后：<br>
+    <code>$env:ROG_MOCK_DEVICES = "D:\codex\rog-mouse-ctl\mock-devices.txt"</code> →
+    <code>.\target\release\rog-mouse-ctl.exe</code>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const FAMILIES = [
+  ['mouse',    '鼠标'],
+  ['keyboard', '键盘'],
+  ['headset',  '耳机'],
+  ['gamepad',  '手柄'],
+];
+
+const SAMPLE = [
+  ['mouse',    'ROG HARPE ACE MINI', 84, true],
+  ['keyboard', 'ROG AZOTH',          20, false],
+  ['headset',  'ROG DELTA',          55, false],
+  ['gamepad',  'ROG RAIKIRI',        70, false],
+];
+
+let rows = SAMPLE.map(r => ({ family: r[0], model: r[1], level: r[2], charging: r[3] }));
+
+/* ---------- 行编辑 ---------- */
+function render() {
+  const body = document.getElementById('rows');
+  body.innerHTML = '';
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+
+    const tdFam = document.createElement('td');
+    const sel = document.createElement('select');
+    FAMILIES.forEach(([v, label]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = label;
+      if (v === r.family) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = () => { rows[i].family = sel.value; refresh(); };
+    tdFam.appendChild(sel);
+
+    const tdModel = document.createElement('td');
+    const inp = document.createElement('input');
+    inp.value = r.model;
+    inp.oninput = () => { rows[i].model = inp.value; refresh(); };
+    tdModel.appendChild(inp);
+
+    const tdLevel = document.createElement('td');
+    const num = document.createElement('input');
+    num.type = 'number'; num.min = 0; num.max = 100; num.value = r.level;
+    num.oninput = () => {
+      rows[i].level = Math.max(0, Math.min(100, Number(num.value) || 0));
+      refresh();
+    };
+    tdLevel.appendChild(num);
+
+    const tdChg = document.createElement('td');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = r.charging;
+    cb.onchange = () => { rows[i].charging = cb.checked; refresh(); };
+    tdChg.appendChild(cb);
+
+    const tdDel = document.createElement('td');
+    const del = document.createElement('button');
+    del.className = 'row-del'; del.textContent = '×'; del.title = '删除这一台';
+    del.onclick = () => { rows.splice(i, 1); refresh(); };
+    tdDel.appendChild(del);
+
+    tr.append(tdFam, tdModel, tdLevel, tdChg, tdDel);
+    body.appendChild(tr);
+  });
+  renderPreview();
+  document.getElementById('out').value = text();
+}
+
+function refresh() { renderPreview(); document.getElementById('out').value = text(); }
+
+function addRow() {
+  rows.push({ family: 'mouse', model: 'ROG ', level: 50, charging: false });
+  refresh();
+}
+
+function reset() {
+  rows = SAMPLE.map(r => ({ family: r[0], model: r[1], level: r[2], charging: r[3] }));
+  refresh();
+}
+
+/* ---------- 输出 ---------- */
+function text() {
+  const head = [
+    '# 假设备夹具：ROG_MOCK_DEVICES=<本文件路径> 启动即生效',
+    '# 族|型号|电量|充电(0/1)',
+  ];
+  const body = rows.map(r =>
+    [r.family, r.model.trim() || 'UNKNOWN', r.level, r.charging ? 1 : 0].join('|'));
+  return head.concat(body).join('\n') + '\n';
+}
+
+async function copyText() {
+  const t = document.getElementById('out').value;
+  try {
+    await navigator.clipboard.writeText(t);
+    toast('已复制到剪贴板');
+  } catch {
+    const ta = document.getElementById('out');
+    ta.select(); document.execCommand('copy');
+    toast('已复制');
+  }
+}
+
+function download() {
+  const blob = new Blob([document.getElementById('out').value], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'mock-devices.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast('已下载 mock-devices.txt');
+}
+
+/* ---------- 托盘图标预览 ---------- */
+const SS = 4;          // 超采样倍数，和 tray_icon.rs 的 SUPERSAMPLE 一致
+const SIZE = 32;
+
+function levelColor(level) {
+  if (level <= 20) return '#f85149';
+  if (level <= 50) return '#d29922';
+  return '#3fb950';
+}
+
+function drawBadge(canvas, level, charging) {
+  const n = SIZE * SS;
+  canvas.width = n; canvas.height = n;
+  canvas.style.width = SIZE + 'px';
+  canvas.style.height = SIZE + 'px';
+  const g = canvas.getContext('2d');
+  g.clearRect(0, 0, n, n);
+
+  const r = (n * 0.94) / 2;
+  const cx = n / 2, cy = n / 2;
+  g.beginPath();
+  g.arc(cx, cy, r, 0, Math.PI * 2);
+  g.fillStyle = levelColor(level);
+  g.fill();
+
+  // 数字：两位比三位大，和 render_glyph 的字号分档一致
+  const label = String(level);
+  const px = label.length >= 3 ? n * 0.40 : n * 0.52;
+  g.fillStyle = '#0c1115';
+  g.font = `600 ${px}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(label, cx, cy + n * 0.02);
+
+  if (charging) {
+    // 右上角深色圆 + 白色闪电
+    const br = n * 0.29 / 2;
+    const bx = n - br * 1.02, by = br * 1.02;
+    g.beginPath();
+    g.arc(bx, by, br, 0, Math.PI * 2);
+    g.fillStyle = '#20242b';
+    g.fill();
+    const u = br / 2;
+    g.fillStyle = '#f2f6fa';
+    g.beginPath();
+    g.moveTo(bx + u * 0.15, by - u * 0.85);
+    g.lineTo(bx - u * 0.55, by + u * 0.1);
+    g.lineTo(bx - u * 0.05, by + u * 0.1);
+    g.lineTo(bx - u * 0.15, by + u * 0.85);
+    g.lineTo(bx + u * 0.55, by - u * 0.1);
+    g.lineTo(bx + u * 0.05, by - u * 0.1);
+    g.closePath();
+    g.fill();
+  }
+}
+
+function renderPreview() {
+  const box = document.getElementById('preview');
+  box.innerHTML = '';
+  if (!rows.length) {
+    box.innerHTML = '<div class="hint">还没有设备。</div>';
+    return;
+  }
+  rows.slice(0, 8).forEach(r => {
+    const wrap = document.createElement('div');
+    wrap.className = 'pv';
+    const c = document.createElement('canvas');
+    drawBadge(c, r.level, r.charging);
+    const cap = document.createElement('div');
+    const label = (FAMILIES.find(f => f[0] === r.family) || [r.family, r.family])[1];
+    cap.textContent = label + ' ' + r.level + '%';
+    wrap.append(c, cap);
+    box.appendChild(wrap);
+  });
+}
+
+/* ---------- 提示 ---------- */
+let toastTimer = null;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('on'), 1600);
+}
+
+render();
+</script>
+</body>
+</html>
