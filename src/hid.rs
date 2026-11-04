@@ -719,6 +719,14 @@ for _ in 0..count {
 None
 }
 
+/// 可能是命令通道的 usage page。
+///
+/// 华硕的私有页集中在 `0xFF00..=0xFF02`：鼠标/键盘/耳机是 `0xFF01`，接收器是
+/// `0xFF02`，老一点的型号用 `0xFF00`。只在这三页上试探，不碰标准 HID 页。
+fn is_command_page(page: u16) -> bool {
+    (0xFF00..=0xFF02).contains(&page)
+}
+
 /// 找命令通道并确定 report id。
 ///
 /// 优先有线（PID != 接收器 && usage page == 0xFF01），
@@ -740,7 +748,9 @@ pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
         if iface.product_id == PID_DONGLE || !iface.is_command_channel() {
             continue;
         }
-        if iface.usage_page != USAGE_PAGE_MOUSE_CTRL {
+        // 不按「鼠标专用页」筛：键盘、耳机、手柄的命令通道也在这几页上，
+        // 认谁不认谁交给「发一帧电量查询、答得上来才算」来判定。
+        if !is_command_page(iface.usage_page) {
             continue;
         }
         let Ok(mut dev) = HidDevice::open(iface) else {
