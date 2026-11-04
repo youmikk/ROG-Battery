@@ -158,7 +158,12 @@ mod gdiplus {
 /// 失败返回 `None`，调用方回落到静态图标 —— **不能让托盘空白**。
 /// 成功返回的 `HICON` 由调用方负责 `DestroyIcon`。
 pub fn render(level: u8) -> Option<Handle> {
-    render_badge(level)
+    render_badge(level, false)
+}
+
+/// 充电中的托盘图标：在徽章右上角加一个深色圆 + 白色闪电，数字左移让位。
+pub fn render_charging(level: u8) -> Option<Handle> {
+    render_badge(level, true)
 }
 
 /// 读不到电量（休眠 / 未连接 / 首次启动）时的占位图标：一条短横线。
@@ -172,14 +177,14 @@ pub fn render_unknown() -> Option<Handle> {
     } else {
         [0xD8, 0xD8, 0xD8]
     };
-    render_glyph("—", (ICON_SIZE as f32 * 0.46) as i32, c, is_light, None)
+    render_glyph("—", (ICON_SIZE as f32 * 0.46) as i32, c, is_light, None, false)
 }
 
 /// 实心圆徽章样式：等级色圆底 + 深色数字（浅色任务栏用深墨，深色任务栏用近白）。
 ///
 /// 与数字样式并存，由调用方挑选；圆底要盖住任务栏的底色，所以数字不能再用
 /// 光晕——光晕是给「直接压在任务栏上」的字形用的。
-pub fn render_badge(level: u8) -> Option<Handle> {
+pub fn render_badge(level: u8, charging: bool) -> Option<Handle> {
     let is_light = crate::autostart::system_uses_light_theme();
     let ink = if is_light {
         [0x0C, 0x11, 0x15]
@@ -192,6 +197,7 @@ pub fn render_badge(level: u8) -> Option<Handle> {
         ink,
         is_light,
         Some(level_color(level)),
+        charging,
     )
 }
 
@@ -201,6 +207,7 @@ fn render_glyph(
     color: [u8; 3],
     is_light: bool,
     badge: Option<[u8; 3]>,
+    charging: bool,
 ) -> Option<Handle> {
     use gdiplus::*;
     // 基础生成尺寸固定为 ICON_SIZE (32px)，生成高质量 32bpp ARGB 图标。
@@ -306,7 +313,7 @@ fn render_glyph(
             }
             let rects: Vec<RectF> = (0..n)
                 .map(|i| RectF {
-                    x: i as f32 * slot_w - 1.2 * unit,
+                    x: i as f32 * slot_w - 1.2 * unit - if charging { 1.7 * unit } else { 0.0 },
                     y: -0.5 * unit,
                     w: slot_w + 2.4 * unit,
                     h: size as f32,
@@ -329,6 +336,39 @@ fn render_glyph(
             if !fg.is_null() {
                 for (ch, rc) in chars.iter().zip(rects.iter()) {
                     GdipDrawString(g, ch.as_ptr(), 1, font, rc, fmt, fg);
+                }
+            }
+
+            // 充电角标：右上深色圆 + 白色闪电。闪电用三条横条拼成 Z 形 ——
+            // `GdipFillPolygon` 不在导入库里（和 `GdipAddPathLines` 同一个坑），
+            // 32px 下这个形状已经足够读作闪电。
+            if charging {
+                let cr = size as f32 * 0.145;
+                let cx = size as f32 - cr * 1.02;
+                let cy = cr * 1.02;
+                let mut ring: *mut c_void = ptr::null_mut();
+                if GdipCreateSolidFill(0xFF20_242B, &mut ring) == 0 && !ring.is_null() {
+                    GdipFillEllipse(g, ring, cx - cr, cy - cr, cr * 2.0, cr * 2.0);
+                    GdipDeleteBrush(ring);
+                }
+                let mut bolt: *mut c_void = ptr::null_mut();
+                if GdipCreateSolidFill(0xFFFF_FFFF, &mut bolt) == 0 && !bolt.is_null() {
+                    let bar = |dy: f32, w: f32, dx: f32| {
+                        (
+                            (cx - cr + dx) as i32,
+                            (cy - cr + dy) as i32,
+                            w as i32,
+                            (cr * 0.42) as i32,
+                        )
+                    };
+                    for (x, y, w, h) in [
+                        bar(cr * 0.52, cr * 1.05, cr * 0.45),
+                        bar(cr * 0.95, cr * 0.85, cr * 0.55),
+                        bar(cr * 1.38, cr * 1.05, cr * 0.45),
+                    ] {
+                        GdipFillRectangleI(g, bolt, x, y, w, h);
+                    }
+                    GdipDeleteBrush(bolt);
                 }
             }
 
@@ -540,4 +580,15 @@ mod tests {
             "画 200 次后 GDI 对象从 {before} 涨到 {after}，疑似泄漏"
         );
     }
+
+    /// 充电角标这条分支必须能画出来（GDI+ 调用链和普通徽章不同）。
+    #[test]
+    fn render_charging_produces_an_icon() {
+        let h = render_charging(84);
+        assert!(h.is_some(), "充电图标应当能生成");
+        if let Some(h) = h {
+            unsafe { crate::win32::DestroyIcon(h) };
+        }
+    }
+
 }

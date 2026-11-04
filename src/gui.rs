@@ -2299,7 +2299,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 // 短横线占位。
                 let want: Option<u8> = if asleep { None } else { q.map(|v| v.level) };
                 if want != tray_level.get() {
+                    let charging = q.map(|v| v.charging).unwrap_or(false);
                     let hicon = match want {
+                        Some(level) if charging => crate::tray_icon::render_charging(level),
                         Some(level) => crate::tray_icon::render(level),
                         None => crate::tray_icon::render_unknown(),
                     };
