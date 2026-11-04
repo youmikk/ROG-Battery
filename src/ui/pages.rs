@@ -950,6 +950,7 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
 
     let mut c = Cursor::new(f);
     match ui.page {
+        Page::Home => home(p, ui, d, f, &mut c),
         Page::Battery => battery(p, ui, d, f, &mut c),
         Page::Perf => perf(p, ui, d, &mut c),
         Page::Light => light(p, ui, d, f, &mut c),
@@ -1303,6 +1304,99 @@ fn hero_geometry(bp: crate::ui::layout::Breakpoint, content_w: f32, ring_d: f32)
         kv_rows,
         kv_y,
     }
+}
+
+/// 设备卡片墙：每台设备一张卡，卡上只有电量环和设备名，点卡片进它的详情页。
+fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
+    let t = p.t;
+    c.h2(p, "设备", false);
+    // 读数表由刷新线程填，界面可能先画一帧；这时用状态里的电量兜一张卡，
+    // 免得首页闪一下「还没有读到设备」。
+    let mut list: Vec<crate::device::DeviceReading> = d.readings.to_vec();
+    if list.is_empty() {
+        if let Some(st) = d.state {
+            list.push(crate::device::DeviceReading {
+                family: crate::device::DeviceFamily::Unknown,
+                level: st.power,
+                charging: st.charging != 0,
+            });
+        }
+    }
+    let readings: &[crate::device::DeviceReading] = &list;
+    if readings.is_empty() {
+        p.text(
+            "还没有读到设备。插好接收器，或动一下设备再试。",
+            R::new(c.x + 6.0, c.y, c.w - 12.0, 18.0),
+            font::HINT,
+            false,
+            t.text3,
+            Align::Left,
+        );
+        c.y += 24.0;
+        return;
+    }
+    let gap = 18.0;
+    let per_row = if c.w >= 900.0 { 3 } else { 2 };
+    let card_w = (c.w - gap * (per_row as f32 - 1.0)) / per_row as f32;
+    let card_h = 152.0;
+    for (i, dev) in readings.iter().enumerate() {
+        let col = i % per_row;
+        let row = i / per_row;
+        let r = R::new(
+            c.x + col as f32 * (card_w + gap),
+            c.y + row as f32 * (card_h + gap),
+            card_w,
+            card_h,
+        );
+        p.card(r, layout::R_CARD, t.card, t.border);
+        ui.hot(r, Act::Nav(Page::Battery));
+
+        let ring_r = 36.0;
+        let cx = r.cx();
+        let cy = r.y + 18.0 + ring_r + 7.0;
+        let color = ring_color(t, true, dev.charging, dev.level);
+        p.ring(cx, cy, ring_r, 8.0, dev.level as f32 / 100.0, color, color, t.border);
+        p.text(
+            &format!("{}", dev.level),
+            R::new(cx - ring_r, cy - 13.0, ring_r * 2.0, 26.0),
+            19.0,
+            true,
+            t.text,
+            Align::Center,
+        );
+
+        let name = if i == 0 {
+            d.ident
+                .map(|id| id.model_name.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| dev.family.noun().to_string())
+        } else {
+            dev.family.noun().to_string()
+        };
+        p.text(
+            &name,
+            R::new(r.x + 10.0, r.bottom() - 44.0, r.w - 20.0, 20.0),
+            13.5,
+            true,
+            t.text,
+            Align::Center,
+        );
+        let sub = if dev.charging {
+            "充电中".to_string()
+        } else {
+            format!("{}%", dev.level)
+        };
+        p.text(
+            &sub,
+            R::new(r.x + 10.0, r.bottom() - 24.0, r.w - 20.0, 16.0),
+            font::HINT,
+            false,
+            t.text3,
+            Align::Center,
+        );
+    }
+    let rows = (readings.len() + per_row - 1) / per_row;
+    c.y += rows as f32 * (card_h + gap);
 }
 
 fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
@@ -3043,6 +3137,7 @@ mod tests {
             version: "test",
             frames: 0,
             elapsed_ms: 0,
+            readings: &[],
         };
         let modes: Vec<usize> = options(Drop::LightMode, &d).iter().map(|(_, v)| *v).collect();
         assert!(!modes.contains(&3), "3 = Rainbow 不该出现在候选里");
@@ -3103,6 +3198,7 @@ mod tests {
             version: "test",
             frames: 0,
             elapsed_ms: 0,
+            readings: &[],
         };
         let opts = options(Drop::Sleep, &d);
         // 0..4 五档 + 永不

@@ -2226,6 +2226,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 )
             };
             let theme = *ui.mode.theme();
+            let readings: Vec<crate::device::DeviceReading> =
+                lock_shared(&shared_p).readings.clone();
             let data = crate::ui::viewdata::Data {
                 state: state.as_ref(),
                 ident: ident.as_ref(),
@@ -2242,6 +2244,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 version: APP_VERSION,
                 frames,
                 elapsed_ms: elapsed,
+                readings: &readings,
             };
             canvas::draw_frame(inner, fonts, ui, args, &theme, &data)
         }));

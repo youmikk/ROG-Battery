@@ -2429,6 +2429,7 @@ mod tests {
         let plot = crate::chart::build(&demo);
         let demo_len = demo.len();
         let data = crate::ui::pages::Data {
+            readings: &[],
             autostart_on: false,
             state: Some(&state),
             ident: Some(&ident),

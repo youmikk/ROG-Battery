@@ -27,6 +27,7 @@ use super::gfx::R;
 /// 五个页面。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
+    Home,
     Battery,
     Perf,
     Light,
@@ -35,8 +36,9 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
-        Page::Battery,
+    pub const ALL: [Page; 6] = [
+        Page::Home,
+    Page::Battery,
         Page::Perf,
         Page::Light,
         Page::Keys,
@@ -45,7 +47,8 @@ impl Page {
 
     pub fn title(self) -> &'static str {
         match self {
-            Page::Battery => "电量",
+            Page::Home => "设备",
+    Page::Battery => "电量",
             Page::Perf => "性能",
             Page::Light => "灯光",
             Page::Keys => "按键",
@@ -56,7 +59,8 @@ impl Page {
     /// 侧栏图标用了 1.5px 线宽的几何图形，这里给一个代号。
     pub fn icon(self) -> Icon {
         match self {
-            Page::Battery => Icon::Battery,
+            Page::Home => Icon::Battery,
+    Page::Battery => Icon::Battery,
             Page::Perf => Icon::Perf,
             Page::Light => Icon::Light,
             Page::Keys => Icon::Keys,
@@ -391,7 +395,7 @@ pub struct Ui {
     /// 每个页面各自的滚动位置。切页时保留，切回来还是原位。
     scroll: [f32; 5],
     /// 每个页面的内容总高度（绘制时写入，滚轮要靠它夹住）。
-    content_h: [f32; 5],
+    content_h: [f32; 6],
     /// 当前打开的下拉弹层。
     open_drop: Option<Drop>,
     /// 下拉弹层展开后的矩形（绘制时写入，命中测试要用）。
@@ -486,7 +490,7 @@ pub struct Ui {
 impl Default for Ui {
     fn default() -> Self {
         Ui {
-            page: Page::Battery,
+            page: Page::Home,
             // 默认折叠，折叠开关在左栏最下方。
             rail: true,
             // 默认浅色主题。
@@ -497,7 +501,7 @@ impl Default for Ui {
             // 灯光页的默认展开（原型写了 `open`）。
             adv: [false, true],
             scroll: [0.0; 5],
-            content_h: [0.0; 5],
+            content_h: [0.0; 6],
             open_drop: None,
             drop_rect: None,
             drop_btn: None,
@@ -530,11 +534,12 @@ impl Default for Ui {
 impl Ui {
     fn page_index(p: Page) -> usize {
         match p {
-            Page::Battery => 0,
-            Page::Perf => 1,
-            Page::Light => 2,
-            Page::Keys => 3,
-            Page::Settings => 4,
+            Page::Home => 0,
+            Page::Battery => 1,
+            Page::Perf => 2,
+            Page::Light => 3,
+            Page::Keys => 4,
+            Page::Settings => 5,
         }
     }
 
@@ -1028,10 +1033,10 @@ mod tests {
     }
 
     #[test]
-    fn 默认收起侧栏_默认在电量页() {
+    fn 默认收起侧栏_默认在设备页() {
         let u = ui();
         assert!(u.rail, "用户要求默认收起");
-        assert_eq!(u.page, Page::Battery);
+        assert_eq!(u.page, Page::Home);
     }
 
     #[test]
@@ -1129,6 +1134,7 @@ mod tests {
     #[test]
     fn 滚动夹在内容范围内() {
         let mut u = ui();
+        u.page = Page::Battery;
         u.set_content_h(Page::Battery, 2000.0);
         // 视口 600，可滚 1400
         assert!(u.wheel(-100.0, 600.0)); // 向下滚到很大
@@ -1174,7 +1180,7 @@ mod tests {
 
     #[test]
     fn 页面枚举齐全且标题不为空() {
-        assert_eq!(Page::ALL.len(), 5);
+        assert_eq!(Page::ALL.len(), 6);
         for p in Page::ALL {
             assert!(!p.title().is_empty());
         }
@@ -1182,7 +1188,7 @@ mod tests {
         let mut titles: Vec<_> = Page::ALL.iter().map(|p| p.title()).collect();
         titles.sort_unstable();
         titles.dedup();
-        assert_eq!(titles.len(), 5);
+        assert_eq!(titles.len(), 6);
     }
 
     #[test]
@@ -1373,6 +1379,7 @@ mod tests {
     #[test]
     fn clamp_scroll_pulls_back_when_viewport_grows() {
         let mut u = ui();
+        u.page = Page::Battery;
         u.set_content_h(Page::Battery, 2000.0);
         u.wheel(-100.0, 600.0); // 滚到底
         let deep = u.scroll_y(Page::Battery);

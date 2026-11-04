@@ -34,6 +34,8 @@ pub struct Data<'a> {
     /// 帧耗时（侧栏底部「19 帧 · 588 ms」）。
     pub frames: usize,
     pub elapsed_ms: u128,
+    /// 多设备读数表（首页卡片墙用）。真机通常只有一条。
+    pub readings: &'a [crate::device::DeviceReading],
 }
 
 #[cfg(test)]

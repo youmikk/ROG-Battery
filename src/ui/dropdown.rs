@@ -262,6 +262,7 @@ mod tests {
         let st = crate::proto::State::default();
         let cfg = crate::settings::Settings::default();
         let d = super::super::pages::Data {
+            readings: &[],
             state: Some(&st),
             ident: None,
             link_mode: "",
