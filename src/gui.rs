@@ -398,12 +398,15 @@ struct Signal {
     cv: Condvar,
     interval_ms: AtomicU64,
     shutdown: AtomicBool,
+    /// 最近一次用户活动触发的补读时刻（节流用）。
+    last_activity: Mutex<Option<std::time::Instant>>,
 }
 
 impl Signal {
     fn new(interval_sec: u64) -> Signal {
         Signal {
             poke: Mutex::new(0),
+            last_activity: Mutex::new(None),
             cv: Condvar::new(),
             interval_ms: AtomicU64::new(interval_sec.saturating_mul(1000)),
             shutdown: AtomicBool::new(false),
@@ -415,6 +418,28 @@ impl Signal {
     fn request_quit(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
         self.cv.notify_all();
+    }
+
+    /// 用户刚动过界面 —— 提前补读一次，别等到下一个心跳。
+    ///
+    /// 节流 10 秒：连点几个设置不该把设备刷爆。返回 `true` 表示这次真的触发了。
+    fn note_activity(&self) -> bool {
+        let now = std::time::Instant::now();
+        let due = {
+            let mut last = self
+                .last_activity
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let due = activity_due(*last, now);
+            if due {
+                *last = Some(now);
+            }
+            due
+        };
+        if due {
+            self.request_refresh();
+        }
+        due
     }
 
     fn request_refresh(&self) {
@@ -1454,6 +1479,20 @@ fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
 
 // ==================== 结果处理 ====================
 
+/// 用户活动触发的补读要不要真的发一次。
+///
+/// 第一次活动总是触发；之后 `ACTIVITY_MIN_GAP` 内不再重复，免得连点几个
+/// 下拉就把设备刷爆。
+fn activity_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    match last {
+        None => true,
+        Some(t) => now.saturating_duration_since(t) >= ACTIVITY_MIN_GAP,
+    }
+}
+
+/// 两次活动补读的最小间隔。
+const ACTIVITY_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// 这次读取是不是「写命令之前」的旧结果。
 ///
 /// 单独抽出来是因为它只有两个数字，但判错方向会让界面永远显示旧值或永远不刷新。
@@ -2328,6 +2367,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     for a in acts {
                         handle_act(a, &env);
                     }
+                    // 用户在动界面：顺手补读一次，读数不该停在几分钟前。
+                    signal_e.note_activity();
                 }
 
                 // ② 后台回报的命令结果
@@ -2722,6 +2763,15 @@ mod tests {
         assert!(!outcome_is_stale(7, 7), "同一代次的结果应当采用");
         assert!(outcome_is_stale(7, 8), "读完之后用户写过设备，这轮要丢");
         assert!(outcome_is_stale(0, 1));
+    }
+
+
+    #[test]
+    fn activity_due_is_throttled() {
+        let now = std::time::Instant::now();
+        assert!(activity_due(None, now), "第一次活动总要触发");
+        assert!(!activity_due(Some(now), now), "紧接着的第二次要节流");
+        assert!(activity_due(Some(now - ACTIVITY_MIN_GAP), now));
     }
 
 }
