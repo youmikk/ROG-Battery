@@ -79,9 +79,7 @@ pub mod font {
     /// 说明文字。
     pub const HINT: f32 = 11.5;
     /// 字段名（「电压」「回报率」）。
-    pub const LABEL: f32 = 11.0;
     /// 大数字（电量百分比、KPI 值）。
-    pub const NUM_BIG: f32 = 19.0;
     /// 电量环中心那个数字。
     pub const NUM_RING: f32 = 34.0;
     /// 胶囊标签、单位。

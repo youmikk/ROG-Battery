@@ -1278,7 +1278,8 @@ fn hero_geometry(bp: crate::ui::layout::Breakpoint, content_w: f32, ring_d: f32)
     };
     let right_w = (main_w - 24.0 - kpi_x).max(80.0);
     let two_cols = bp.kv_two_cols() && right_w > 180.0;
-    let kv_rows = if two_cols { 2.0 } else { 4.0 };
+    // KPI 已经压成一行，hero 卡里只留一条读数行。
+    let kv_rows = 1.0;
     // 末行不需要下面那一档行距。
     let kv_h = kv_rows * KV_ROW_H - 12.0;
 
@@ -1461,64 +1462,39 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         );
     }
 
-    // KPI：电压 / 回报率 / 当前档位 / 变化速率
+    // KPI 压成一行：四个读数并排。它们只是「此刻的读数」，不需要 2×2 的版面。
     {
-        let two_cols = g.two_cols;
-        let items: [(&str, String); 4] = if let Some(s) = st {
-            [
-                ("电压", format!("{} mV", s.voltage_mv)),
-                ("回报率", crate::proto::poll_name(s.poll_code)),
-                (
-                    "当前档位",
-                    format!("{} · {} DPI", s.active_stage.max(1), s.dpi(cur_stage(s))),
+        let parts: Vec<String> = if let Some(s) = st {
+            vec![
+                format!("电压 {} mV", s.voltage_mv),
+                format!("回报率 {}", crate::proto::poll_name(s.poll_code)),
+                format!(
+                    "第 {} 档 {} DPI",
+                    s.active_stage.max(1),
+                    s.dpi(cur_stage(s))
                 ),
-                (
-                    "变化速率",
-                    if d.estimate.known {
-                        format!("{:+.2} %/h", d.estimate.percent_per_hour)
-                    } else {
-                        "样本不足".to_string()
-                    },
-                ),
+                if d.estimate.known {
+                    format!("{:+.2} %/h", d.estimate.percent_per_hour)
+                } else {
+                    "变化 —".to_string()
+                },
             ]
         } else {
-            [
-                ("电压", "—".into()),
-                ("回报率", "—".into()),
-                ("当前档位", "—".into()),
-                ("变化速率", "—".into()),
+            vec![
+                "电压 —".to_string(),
+                "回报率 —".to_string(),
+                "档位 —".to_string(),
+                "变化 —".to_string(),
             ]
         };
-        let col_w = if two_cols {
-            (right_w - 26.0) / 2.0
-        } else {
-            right_w
-        };
-        for (i, (k, v)) in items.iter().enumerate() {
-            let (col, row) = if two_cols {
-                (i % 2, i / 2)
-            } else {
-                (0, i)
-            };
-            let x = kpi_x + col as f32 * (col_w + 26.0);
-            let y = kv_y + row as f32 * KV_ROW_H;
-            p.text(
-                k,
-                R::new(x, y, col_w, 14.0),
-                font::LABEL,
-                false,
-                t.text3,
-                Align::Left,
-            );
-            p.text(
-                v,
-                R::new(x, y + 15.0, col_w, 26.0),
-                font::NUM_BIG,
-                true,
-                t.text,
-                Align::Left,
-            );
-        }
+        p.text(
+            &parts.join("  ·  "),
+            R::new(kpi_x, kv_y, right_w, 20.0),
+            font::HINT,
+            false,
+            t.text2,
+            Align::Left,
+        );
     }
 
     // 设备信息：**另起一张卡片**放在 hero 右边（在电量页清晰展示读取到的鼠标型号与状态）。
@@ -1635,71 +1611,6 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     // 漏了这一步，「电源管理」的标题会画在图表卡片上面。
     c.y = chart.bottom();
 
-    // ---- 电源管理 ----
-    c.h2(p, "电源管理", false);
-    // 只管「标题 · 说明」，控件宽度由各行自己按控件类型定（下拉 150、
-    // 输入框+按钮、开关 40）。曾经这里多一个宽度字段，三处调用全都无视它、
-    // 直接写字面量，于是那个字段从没被读过，第三行的 60 还和实际用的 40 对不上。
-    let rows: [(&str, Option<&str>); 3] = [
-        ("自动休眠", Some("设备静止多久后进入休眠以省电")),
-        ("低电量阈值", Some("低于该电量时设备指示灯会闪")),
-        ("充满效果", Some("充满电时播放一次灯效")),
-    ];
-    let total_h: f32 = rows.iter().map(|_| layout::ROW_H).sum();
-    let card = c.card(p, total_h);
-    let mut ry = card.y;
-    let mut i = 0;
-
-    // 自动休眠
-    {
-        let area = row_area(card, ry);
-        let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
-        drop_button(p, ui, R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0), Drop::Sleep, d);
-        if i + 1 < rows.len() {
-            row_rule(p, card, area);
-        }
-        ry += layout::ROW_H;
-        i += 1;
-    }
-
-    // 低电量阈值：输入框 + % + 应用
-    {
-        let area = row_area(card, ry);
-        let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
-        let edit = Edit::LowWarn;
-        let txt = ui
-            .edit_text(edit)
-            .map(|s| s.to_string())
-            .or_else(|| known_state(d).map(|s| s.low_warn.to_string()))
-            .unwrap_or_else(|| "—".to_string());
-        let box_r = R::new(ctl.x, ctl.cy() - 15.0, 62.0, 30.0);
-        num_box(p, box_r, &txt, ui.focus == Some(edit));
-        ui.hot(box_r, Act::Focus(edit));
-        p.text(
-            "%",
-            R::new(box_r.right() + 4.0, ctl.y, 14.0, ctl.h),
-            12.0,
-            false,
-            t.text2,
-            Align::Left,
-        );
-        let btn = R::new(ctl.right() - 56.0, ctl.cy() - 15.0, 56.0, 30.0);
-        button(p, ui, btn, "应用", false, Act::ApplyEdit(edit));
-        row_rule(p, card, area);
-        ry += layout::ROW_H;
-        i += 1;
-    }
-
-    // 充满效果
-    {
-        let area = row_area(card, ry);
-        let ctl = row_label(p, area, rows[i].0, rows[i].1, 40.0);
-        let on = st.map(|s| s.full_effect != 0).unwrap_or(true);
-        let sw = R::new(ctl.right() - 40.0, ctl.cy() - 10.0, 40.0, 20.0);
-        p.switch(sw, on, st.is_some());
-        ui.hot(sw, Act::Toggle(Pref::FullEffect));
-    }
-    c.y = card.bottom();
 
     // ---- 续航明细 ----
     //
@@ -2722,6 +2633,73 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     c.y = card.bottom();
 
     // ---- 关于 ----
+    // ---- 设备设置 ----
+    c.h2(p, "设备设置", false);
+    // 只管「标题 · 说明」，控件宽度由各行自己按控件类型定（下拉 150、
+    // 输入框+按钮、开关 40）。曾经这里多一个宽度字段，三处调用全都无视它、
+    // 直接写字面量，于是那个字段从没被读过，第三行的 60 还和实际用的 40 对不上。
+    let st = known_state(d);
+    let rows: [(&str, Option<&str>); 3] = [
+        ("自动休眠", Some("设备静止多久后进入休眠以省电")),
+        ("低电量阈值", Some("低于该电量时设备指示灯会闪")),
+        ("充满效果", Some("充满电时播放一次灯效")),
+    ];
+    let total_h: f32 = rows.iter().map(|_| layout::ROW_H).sum();
+    let card = c.card(p, total_h);
+    let mut ry = card.y;
+    let mut i = 0;
+
+    // 自动休眠
+    {
+        let area = row_area(card, ry);
+        let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
+        drop_button(p, ui, R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0), Drop::Sleep, d);
+        if i + 1 < rows.len() {
+            row_rule(p, card, area);
+        }
+        ry += layout::ROW_H;
+        i += 1;
+    }
+
+    // 低电量阈值：输入框 + % + 应用
+    {
+        let area = row_area(card, ry);
+        let ctl = row_label(p, area, rows[i].0, rows[i].1, 150.0);
+        let edit = Edit::LowWarn;
+        let txt = ui
+            .edit_text(edit)
+            .map(|s| s.to_string())
+            .or_else(|| known_state(d).map(|s| s.low_warn.to_string()))
+            .unwrap_or_else(|| "—".to_string());
+        let box_r = R::new(ctl.x, ctl.cy() - 15.0, 62.0, 30.0);
+        num_box(p, box_r, &txt, ui.focus == Some(edit));
+        ui.hot(box_r, Act::Focus(edit));
+        p.text(
+            "%",
+            R::new(box_r.right() + 4.0, ctl.y, 14.0, ctl.h),
+            12.0,
+            false,
+            t.text2,
+            Align::Left,
+        );
+        let btn = R::new(ctl.right() - 56.0, ctl.cy() - 15.0, 56.0, 30.0);
+        button(p, ui, btn, "应用", false, Act::ApplyEdit(edit));
+        row_rule(p, card, area);
+        ry += layout::ROW_H;
+        i += 1;
+    }
+
+    // 充满效果
+    {
+        let area = row_area(card, ry);
+        let ctl = row_label(p, area, rows[i].0, rows[i].1, 40.0);
+        let on = st.map(|s| s.full_effect != 0).unwrap_or(true);
+        let sw = R::new(ctl.right() - 40.0, ctl.cy() - 10.0, 40.0, 20.0);
+        p.switch(sw, on, st.is_some());
+        ui.hot(sw, Act::Toggle(Pref::FullEffect));
+    }
+    c.y = card.bottom();
+
     c.h2(p, "关于", false);
     let card = c.card(p, layout::ROW_H * 3.0);
     {
@@ -2786,6 +2764,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     let _ = Breakpoint::Wide;
     // ---- 诊断 ----
     // 放在页面最下面：平时不需要看，出问题时才知道要找它。
+
     c.h2(p, "诊断", false);
     let dcard = c.card(p, layout::ROW_H * 2.0);
     let mut dy = dcard.y;
@@ -3019,7 +2998,7 @@ mod tests {
                     "{bp:?} w={w}: KPI 底 {kpi_bottom} + 底边距 超出卡高 {}",
                     g.hero_h
                 );
-                assert!(g.kv_rows == 2.0 || g.kv_rows == 4.0);
+                assert_eq!(g.kv_rows, 1.0);
                 assert!(g.right_w >= 80.0);
             }
         }
@@ -3036,7 +3015,7 @@ mod tests {
             Breakpoint::Tiny,
         ] {
             let g = hero_geometry(bp, 1100.0, bp.ring_diameter());
-            assert_eq!(g.kv_rows, if g.two_cols { 2.0 } else { 4.0 });
+            assert_eq!(g.kv_rows, 1.0);
         }
     }
     use super::*;
