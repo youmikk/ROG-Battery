@@ -1517,11 +1517,15 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
             .next()
             .cloned()
             .unwrap_or_else(|| "没有任何帧有应答".to_string());
-        let is_asleep = reason.contains("无应答") || reason.contains("休眠");
-        s.status = if is_asleep {
-            Status::Asleep
-        } else {
-            Status::Error(reason)
+        // 三态：接收器在、设备不应答 = 休眠（动一下就能唤醒）；接收器都不在 =
+        // 真错误（要用户去查线和口）。两件事用一句话说会把人引向错误方向。
+        let link = crate::linkstate::classify(0, snap.identity.dongle_sn.as_str());
+        s.status = match link {
+            crate::linkstate::LinkState::ReceiverOnly => Status::Asleep,
+            _ => Status::Error(format!(
+                "{}（{reason}）",
+                crate::linkstate::describe(link)
+            )),
         };
         s.full = None;
         s.quick = None;

@@ -26,6 +26,7 @@ mod dynlight;
 mod gui;
 mod hid;
 mod history;
+mod linkstate;
 mod ops;
 mod paths;
 mod proto;
