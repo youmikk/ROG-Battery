@@ -2633,6 +2633,22 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     c.y = card.bottom();
 
+    // ---- 诊断 ----
+    c.h2(p, "诊断", false);
+    let dcard = c.card(p, layout::ROW_H * 3.0);
+    let mut dy = dcard.y;
+    for (title, value) in [
+        ("版本", d.version.to_string()),
+        ("历史样本", format!("{} 条", d.rows)),
+        ("本轮帧数", format!("{} 帧 · {} ms", d.frames, d.elapsed_ms)),
+    ] {
+        let area = row_area(dcard, dy);
+        let _ = row_label(p, area, title, Some(value.as_str()), 40.0);
+        row_rule(p, dcard, area);
+        dy += layout::ROW_H;
+    }
+    c.y = dcard.bottom();
+
     // ---- 数据 ----
     c.h2(p, "数据", false);
     let card = c.card(p, layout::ROW_H * 3.0);
