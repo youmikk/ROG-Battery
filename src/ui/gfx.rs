@@ -2768,4 +2768,30 @@ mod tests {
         assert!(got.1 < 40.0, "measure 返回了多行高度: {:?}", got);
     }
 
+
+    /// 多档 DPR 的回归：位图按物理像素建、逻辑尺寸不变。
+    ///
+    /// 以前只在 1.0 档测过，`ensure`/`covers` 的边界条件在 1.25/1.5/2.0 下
+    /// 从没被走过 —— 而这三档正是 Windows 最常见的设置。
+    #[test]
+    fn 多档dpr下位图与布局都成立() {
+        assert!(start());
+        let mut canvas = Canvas::new();
+        let screen = test_screen_dc();
+        let logical = (1100.0_f32, 740.0_f32);
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let w = (logical.0 * scale).round() as i32;
+            let h = (logical.1 * scale).round() as i32;
+            let mem = canvas.ensure(screen as Gdi, w, h);
+            assert_ne!(mem, 0, "scale={scale} 建不出位图");
+            assert!(canvas.covers(w, h), "scale={scale} 位图没覆盖住窗口");
+            // 同一块位图再要一次必须复用，不能每次重建。
+            assert_eq!(canvas.ensure(screen as Gdi, w, h), mem, "scale={scale} 重复建位图");
+            let (mw, mh) = crate::ui::layout::min_window_size(scale);
+            assert!(mw >= 720 && mh >= 520, "scale={scale} 最小窗口尺寸被压小了");
+        }
+        canvas.release();
+        release_screen_dc(screen);
+    }
+
 }
