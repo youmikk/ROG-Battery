@@ -41,6 +41,12 @@ use crate::win32::Handle;
 /// 所以运行时用 `icon_size()` 查系统值，这个常量只作为**上限和默认值**。
 pub const ICON_SIZE: i32 = 32;
 
+/// 绘制时的超采样倍数：先在 `ICON_SIZE * SUPERSAMPLE` 的画布上画，再一次性缩回
+/// `ICON_SIZE`。直接按 32px 画时，字形的斜边和光晕只有一两个像素可落，缩放后
+/// 边缘会发毛；放大 4 倍画、再按高质量插值缩小，等于让 GDI+ 帮我们做了一次
+/// 超采样抗锯齿。
+const SUPERSAMPLE: i32 = 4;
+
 /// 系统实际需要的小图标边长。
 ///
 /// 查 `SM_CXSMICON`（=49）。查询失败或返回离谱值时回落到 [`ICON_SIZE`]。
@@ -141,7 +147,8 @@ mod gdiplus {
     // 位图图标专用的 5 个入口也是 GDI+ 那一套，声明在 `ui::gfx`（唯一一份）。
     pub(crate) use crate::ui::gfx::{
         GdipCreateBitmapFromScan0, GdipCreateHICONFromBitmap, GdipDisposeImage,
-        GdipGetImageGraphicsContext, GdipGraphicsClear,
+        GdipDrawImageRectI, GdipFillRectangleI, GdipGetImageGraphicsContext, GdipGraphicsClear,
+        GdipSetCompositingMode, GdipSetInterpolationMode, GdipSetPixelOffsetMode,
     };
 }
 
@@ -198,7 +205,10 @@ fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) ->
     // 基础生成尺寸固定为 ICON_SIZE (32px)，生成高质量 32bpp ARGB 图标。
     // Windows Shell_NotifyIcon 接收 32x32 图标后，由 DWM 高保真缩放到任务栏托盘，
     // 无论是 100%、125%、150% 还是 200% 缩放，均能保持大字号饱满清晰、无毛刺。
-    let size = ICON_SIZE;
+    let size = ICON_SIZE * SUPERSAMPLE;
+    // 所有以像素为单位的偏移（字形槽外扩、光晕 8 方向偏移）都要跟着放大，
+    // 否则放大画布后这些"1 像素"细节会缩水成 1/4 像素、几乎看不见。
+    let unit = SUPERSAMPLE as f32;
     // GDI+ 必须已初始化（gfx::start 是进程级幂等的）。
     if !crate::ui::gfx::start() {
         return None;
@@ -230,7 +240,7 @@ fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) ->
         let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
         let mut family: *mut c_void = ptr::null_mut();
         let mut font: *mut c_void = ptr::null_mut();
-        let fh = font_height as f32;
+        let fh = font_height as f32 * unit;
         if GdipCreateFontFamilyFromName(face.as_ptr(), ptr::null_mut(), &mut family) == 0 {
             // style 1 = Bold，unit 2 = UnitPixel
             let _ = GdipCreateFont(family, fh, 1, 2, &mut font);
@@ -264,14 +274,14 @@ fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) ->
             let _ = GdipCreateSolidFill(argb, &mut fg);
 
             let offs: [(f32, f32); 8] = [
-                (-1.0, 0.0),
-                (1.0, 0.0),
-                (0.0, -1.0),
-                (0.0, 1.0),
-                (-1.0, -1.0),
-                (1.0, -1.0),
-                (-1.0, 1.0),
-                (1.0, 1.0),
+                (-unit, 0.0),
+                (unit, 0.0),
+                (0.0, -unit),
+                (0.0, unit),
+                (-unit, -unit),
+                (unit, -unit),
+                (-unit, unit),
+                (unit, unit),
             ];
 
             // 按字符分栏绘制：每个字符一个等宽槽，槽左右各外扩 1.2px 让字形
@@ -286,9 +296,9 @@ fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) ->
             }
             let rects: Vec<RectF> = (0..n)
                 .map(|i| RectF {
-                    x: i as f32 * slot_w - 1.2,
-                    y: -0.5,
-                    w: slot_w + 2.4,
+                    x: i as f32 * slot_w - 1.2 * unit,
+                    y: -0.5 * unit,
+                    w: slot_w + 2.4 * unit,
                     h: size as f32,
                 })
                 .collect();
@@ -332,9 +342,52 @@ fn render_glyph(text: &str, font_height: i32, color: [u8; 3], is_light: bool) ->
         }
         GdipDeleteGraphics(g);
 
+        // 缩回目标尺寸：高质量双三次 + 半像素偏移，避免整体偏一格。
+        let mut small: *mut c_void = ptr::null_mut();
+        let mut scaled = false;
+        if GdipCreateBitmapFromScan0(
+            ICON_SIZE,
+            ICON_SIZE,
+            0,
+            PIXEL_FORMAT_32BPP_ARGB,
+            ptr::null(),
+            &mut small,
+        ) == 0
+            && !small.is_null()
+        {
+            let mut sg: *mut c_void = ptr::null_mut();
+            if GdipGetImageGraphicsContext(small, &mut sg) == 0 && !sg.is_null() {
+                GdipSetInterpolationMode(sg, 7); // HighQualityBicubic
+                GdipSetPixelOffsetMode(sg, 2); // Half
+                GdipDrawImageRectI(sg, bmp, 0, 0, ICON_SIZE, ICON_SIZE);
+                // 最外圈强制透明：缩放会在四边留下半透明脏边，浅色和深色任务栏
+                // 上都会显出一圈灰影。
+                GdipSetCompositingMode(sg, 1); // SourceCopy
+                let mut clear: *mut c_void = ptr::null_mut();
+                if GdipCreateSolidFill(0x0000_0000, &mut clear) == 0 && !clear.is_null() {
+                    let n = ICON_SIZE;
+                    GdipFillRectangleI(sg, clear, 0, 0, n, 1);
+                    GdipFillRectangleI(sg, clear, 0, n - 1, n, 1);
+                    GdipFillRectangleI(sg, clear, 0, 0, 1, n);
+                    GdipFillRectangleI(sg, clear, n - 1, 0, 1, n);
+                    GdipDeleteBrush(clear);
+                }
+                GdipSetCompositingMode(sg, 0); // SourceOver
+                GdipDeleteGraphics(sg);
+                scaled = true;
+            }
+        }
+
         let mut hicon: Handle = ptr::null_mut();
-        let st = GdipCreateHICONFromBitmap(bmp, &mut hicon);
+        let st = if scaled {
+            GdipCreateHICONFromBitmap(small, &mut hicon)
+        } else {
+            GdipCreateHICONFromBitmap(bmp, &mut hicon)
+        };
         GdipDisposeImage(bmp);
+        if !small.is_null() {
+            GdipDisposeImage(small);
+        }
         if st == 0 && !hicon.is_null() {
             Some(hicon)
         } else {

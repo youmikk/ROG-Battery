@@ -166,8 +166,25 @@ extern "system" {
 
 /// 清掉裁剪面。共享 Graphics 时上一层装过的裁剪必须复位，否则下一层被误裁。
 fn GdipResetClip(g: *mut c_void) -> i32;
-    fn GdipSetPixelOffsetMode(g: *mut c_void, mode: i32) -> i32;
-    fn GdipSetInterpolationMode(g: *mut c_void, mode: i32) -> i32;
+    pub(crate) fn GdipSetPixelOffsetMode(g: *mut c_void, mode: i32) -> i32;
+    pub(crate) fn GdipDrawImageRectI(
+        g: *mut c_void,
+        img: *mut c_void,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    ) -> i32;
+    pub(crate) fn GdipFillRectangleI(
+        g: *mut c_void,
+        brush: *mut c_void,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    ) -> i32;
+    pub(crate) fn GdipSetCompositingMode(g: *mut c_void, mode: i32) -> i32;
+    pub(crate) fn GdipSetInterpolationMode(g: *mut c_void, mode: i32) -> i32;
 
     fn GdipCreateMatrix2(
         m11: f32,
