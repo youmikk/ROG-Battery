@@ -456,6 +456,16 @@ pub const TRAY_GUID: Guid = Guid {
     data4: [0x9B, 0x2A, 0x11, 0x7D, 0xC4, 0x35, 0x8F, 0x60],
 };
 
+/// 第 `slot` 个托盘图标的 GUID。
+///
+/// `slot == 0` 就是历史沿用的 [`TRAY_GUID`] —— 升级前的折叠状态挂在它上面，
+/// 不能改；其余槽位只动最后一个字节，保证互不相同。
+pub fn tray_guid_at(slot: u8) -> Guid {
+    let mut g = TRAY_GUID;
+    g.data4[7] = TRAY_GUID.data4[7].wrapping_add(slot);
+    g
+}
+
 /// `NOTIFYICONDATAW`（x64 上 976 字节）。
 ///
 /// `timeout_or_version` 对应 C 里的匿名 union（`uTimeout` / `uVersion`）。
@@ -546,14 +556,18 @@ fn tray_set_version(hwnd: Handle, id: TrayId) -> bool {
     unsafe { Shell_NotifyIconW(NIM_SETVERSION, &n) != 0 }
 }
 
-/// 添加托盘图标。返回实际用上的身份，`None` 表示两种模式都没加上。
+/// 添加第 `slot` 个托盘图标。返回实际用上的身份，`None` 表示两种模式都没加上。
+///
+/// 多设备时每台一个图标，靠 `slot` 区分：`0` 是主图标（沿用 [`TRAY_GUID`]），
+/// 其余按 [`tray_guid_at`] 派生，非 GUID 模式下用 `uID = TRAY_FALLBACK_UID + slot`。
 pub fn tray_add(
     hwnd: Handle,
     callback_message: u32,
     hicon: Handle,
     tip: &str,
-    guid: Guid,
+    slot: u8,
 ) -> Option<TrayId> {
+    let guid = tray_guid_at(slot);
     let mut n = notify_icon_data(hwnd, callback_message, guid);
     n.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_GUID;
     n.hicon = hicon;
@@ -576,7 +590,7 @@ pub fn tray_add(
         return Some(id);
     }
 
-    let id = TrayId { guid, uid: TRAY_FALLBACK_UID, uses_guid: false };
+    let id = TrayId { guid, uid: TRAY_FALLBACK_UID + slot as u32, uses_guid: false };
     let mut p = notify_icon_data(hwnd, callback_message, guid);
     p.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     p.uid = id.uid;
@@ -995,6 +1009,15 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     /// 两种身份各填各的字段：GUID 模式不能碰 `uID`，退回模式不能带 `NIF_GUID`。
+    /// 每个槽位的 GUID 必须互不相同，且 0 号就是历史沿用的那个。
+    #[test]
+    fn tray_guids_differ_per_slot() {
+        assert_eq!(tray_guid_at(0).data4, TRAY_GUID.data4);
+        assert_ne!(tray_guid_at(1).data4, tray_guid_at(0).data4);
+        assert_ne!(tray_guid_at(2).data4, tray_guid_at(1).data4);
+        assert_eq!(tray_guid_at(3).data1, TRAY_GUID.data1);
+    }
+
     #[test]
     fn tray_id_fills_guid_or_uid_only() {
         let guid = Guid { data1: 1, data2: 2, data3: 3, data4: [4; 8] };

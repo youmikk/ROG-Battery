@@ -579,7 +579,7 @@ impl TrayCtl {
             let Some(h) = crate::tray_icon::render_unknown() else {
                 return;
             };
-            match win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", win32::TRAY_GUID) {
+            match win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", 0) {
                 Some(id) => {
                     // 只有降级到编号模式才记一笔：正常路径不留日志。
                     if !id.uses_guid {
@@ -650,7 +650,7 @@ impl TrayCtl {
             cur
         };
         if let Some(id) =
-            win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, "R Battery", win32::TRAY_GUID)
+            win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, "R Battery", 0)
         {
             if !id.uses_guid {
                 tray_log("re-add guid=fail fallback=ok");
