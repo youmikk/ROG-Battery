@@ -25,6 +25,7 @@ mod dwm;
 mod dynlight;
 mod gui;
 mod hid;
+mod device;
 mod history;
 mod linkstate;
 mod ops;

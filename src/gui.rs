@@ -281,6 +281,8 @@ struct Shared {
     last_ok_at: Option<std::time::Instant>,
     /// 低电量提醒的闸门：`true` = 还没提醒过。
     low_alert_armed: bool,
+    /// 当前设备的族（鼠标/耳机/键盘），提示语按它说话。
+    device_family: crate::device::DeviceFamily,
     /// 写操作代次。每提交一条写命令自增。
     ///
     /// 后台读取是「先读设备、再回填」，中间可能隔着几百毫秒。这段时间里用户
@@ -327,6 +329,7 @@ impl Shared {
             quick: None,
             last_ok_at: None,
             low_alert_armed: true,
+            device_family: crate::device::DeviceFamily::Unknown,
             write_gen: 0,
             status: Status::Idle,
             frames: 0,
@@ -1574,6 +1577,7 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         && snap.frames.contains_key("12:05:00")
         && snap.frames.contains_key("12:03:00");
     if is_full {
+        s.device_family = crate::device::family_of(&snap.identity.model_name);
         s.full = Some(st.clone());
         s.ident = Some(snap.identity.clone());
     }
@@ -2424,7 +2428,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             low_battery_alert(level, charging, &mut s.low_alert_armed)
                         };
                         if fire {
-                            canvas.with_ui_mut(|u| u.set_status("电量低，建议充电".to_string()));
+                            let noun = {
+                                let s = lock_shared(&shared_e);
+                                s.device_family.noun()
+                            };
+                            canvas.with_ui_mut(|u| {
+                                u.set_status(format!("{noun}电量低，建议充电"))
+                            });
                             canvas.set_animating(true);
                             canvas.repaint_now();
                         }
