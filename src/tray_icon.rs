@@ -78,12 +78,16 @@ fn render_device_at(
                     let width = if text.len() == 1 { 10.0 } else { 18.0 };
                     R::new(22.5 - width / 2.0, 4.0, width, 24.0)
                 } else {
-                    let width = if text.len() == 1 { 18.0 } else { 30.0 };
-                    let top = if charging { 5.0 } else { 2.0 };
-                    R::new(16.0 - width / 2.0, top, width, 30.0 - top)
+                    R::new(1.0, 4.0, 30.0, 24.0)
                 };
                 if level.is_some() {
-                    p.icon_text(&text, rect, if combined { 23.0 } else { 28.0 }, ink);
+                    p.icon_text(
+                        &text,
+                        rect,
+                        if combined { 23.0 } else { 28.0 },
+                        ink,
+                        combined,
+                    );
                 } else {
                     p.line(
                         rect.cx() - 4.0,
@@ -772,7 +776,11 @@ mod tests {
                             let minimum = if *content == TrayContent::Combined {
                                 10
                             } else {
-                                12
+                                if *level == Some(100) {
+                                    7
+                                } else {
+                                    10
+                                }
                             };
                             assert!(rows_with_ink >= minimum, "16px {content:?} {level:?}: digits too small ({rows_with_ink} rows)");
                         }

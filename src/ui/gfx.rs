@@ -856,7 +856,7 @@ impl<'a> Painter<'a> {
         scale: f32,
         draw: F,
     ) -> Option<()> {
-        let mut fonts = Fonts::new("Segoe UI")?;
+        let mut fonts = Fonts::from_candidates(&["Segoe UI Semibold", "Segoe UI", "Arial"])?;
         let mut matrix = std::ptr::null_mut();
         if GdipCreateMatrix2(scale, 0.0, 0.0, scale, 0.0, 0.0, &mut matrix) != OK {
             return None;
@@ -1324,7 +1324,7 @@ impl<'a> Painter<'a> {
     }
 
     // ---- 文字 ----
-    pub(crate) fn icon_text(&mut self, text: &str, r: R, size: f32, color: u32) {
+    pub(crate) fn icon_text(&mut self, text: &str, r: R, size: f32, color: u32, compact: bool) {
         let brush = self.obj.brush(color);
         if text.is_empty() || brush.is_null() {
             return;
@@ -1347,7 +1347,7 @@ impl<'a> Painter<'a> {
                 digits.as_ptr(),
                 digits.len() as i32,
                 self.fonts.family,
-                1,
+                0,
                 size,
                 &layout,
                 std::ptr::null_mut(),
@@ -1361,11 +1361,40 @@ impl<'a> Painter<'a> {
                 && bounds.w > 0.0
                 && bounds.h > 0.0
             {
-                // 托盘使用窄体大数字，宽度受限时仍保留足够的字高。
-                let sx = r.w / bounds.w;
-                let sy = r.h / bounds.h;
-                let x = r.x - bounds.x * sx;
-                let y = r.y - bounds.y * sy;
+                // 纯数字保持字形比例；组合模式保留窄体，给设备图案留出空间。
+                let mut reference = std::ptr::null_mut();
+                let mut reference_bounds = bounds;
+                if !compact && GdipCreatePath(0, &mut reference) == OK {
+                    let zeros = [b'0' as u16; 3];
+                    if GdipAddPathString(
+                        reference,
+                        zeros.as_ptr(),
+                        digits.len().clamp(2, 3) as i32,
+                        self.fonts.family,
+                        0,
+                        size,
+                        &layout,
+                        std::ptr::null_mut(),
+                    ) == OK
+                    {
+                        GdipGetPathWorldBounds(
+                            reference,
+                            &mut reference_bounds,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    GdipDeletePath(reference);
+                }
+                let cap_height = reference_bounds.h.max(bounds.h);
+                let scale = (r.w / bounds.w.max(reference_bounds.w)).min(r.h / cap_height);
+                let (sx, sy) = if compact {
+                    (r.w / bounds.w, r.h / bounds.h)
+                } else {
+                    (scale, scale)
+                };
+                let x = r.cx() - (bounds.x + bounds.w / 2.0) * sx;
+                let y = r.cy() - (bounds.y + bounds.h / 2.0) * sy;
                 let mut matrix = std::ptr::null_mut();
                 if GdipCreateMatrix2(sx, 0.0, 0.0, sy, x, y, &mut matrix) == OK {
                     GdipTransformPath(path, matrix);
