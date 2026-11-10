@@ -112,7 +112,7 @@ pub fn logo_rect() -> R {
 }
 
 pub fn settings_rect(win_w: f32) -> R {
-    R::new(win_w - BTN_W * 3.0 - 42.0, 4.0, 32.0, 28.0)
+    R::new(win_w - BTN_W * 4.0, 0.0, BTN_W, TITLE_H)
 }
 
 pub fn draw_settings(p: &mut Painter, ui: &mut crate::ui::widget::Ui, win_w: f32) {
@@ -122,34 +122,33 @@ pub fn draw_settings(p: &mut Painter, ui: &mut crate::ui::widget::Ui, win_w: f32
     let act = Act::Nav(Page::Settings);
     let active = ui.page == Page::Settings;
     if active || ui.hover == Some(act) {
-        p.round(
+        p.rect(
             r,
-            6.0,
             if active {
                 p.t.accent_soft
             } else {
-                p.t.card_hover
+                crate::ui::gfx::with_alpha(p.t.text, 0x14)
             },
         );
     }
-    let color = if active { p.t.accent } else { p.t.text2 };
+    let color = if active { p.t.accent } else { p.t.text };
     let mut teeth = Vec::with_capacity(49);
     for tooth in 0..8 {
         for (offset, radius) in [
-            (0.0, 6.0),
-            (0.16, 6.0),
-            (0.24, 8.0),
-            (0.68, 8.0),
-            (0.76, 6.0),
-            (1.0, 6.0),
+            (0.0, GLYPH_HALF * 0.75),
+            (0.16, GLYPH_HALF * 0.75),
+            (0.24, GLYPH_HALF),
+            (0.68, GLYPH_HALF),
+            (0.76, GLYPH_HALF * 0.75),
+            (1.0, GLYPH_HALF * 0.75),
         ] {
             let angle = (tooth as f32 + offset) * std::f32::consts::TAU / 8.0;
             teeth.push((r.cx() + angle.cos() * radius, r.cy() + angle.sin() * radius));
         }
     }
     teeth.push(teeth[0]);
-    p.polyline(&teeth, color, 1.2);
-    p.dot_ring(r.cx(), r.cy(), 2.6, color, 1.3);
+    p.polyline(&teeth, color, STROKE_THIN);
+    p.dot_ring(r.cx(), r.cy(), 1.7, color, STROKE_THIN);
     ui.chrome_hot(r, act);
 }
 

@@ -345,9 +345,9 @@ mod tests {
                 HTCLIENT
             );
             assert_eq!(logical_hit(r.cx(), r.cy(), w, 740.0, TITLE, true), HTCLIENT);
-            assert!(
-                r.right() < crate::ui::titlebar::btn_rect(crate::ui::titlebar::Btn::Minimize, w).x
-            );
+            let minimize = crate::ui::titlebar::btn_rect(crate::ui::titlebar::Btn::Minimize, w);
+            assert_eq!(r.right(), minimize.x);
+            assert_eq!((r.w, r.h, r.cy()), (minimize.w, minimize.h, minimize.cy()));
         }
     }
     use super::*;
