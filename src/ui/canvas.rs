@@ -314,7 +314,7 @@ pub struct PaintArgs {
 /// 整个界面卡住（`WM_PAINT` 在 GUI 线程上）。
 pub type PaintFn = Box<dyn Fn(&mut GfxCanvas, &mut Fonts, &mut Ui, &PaintArgs) -> crate::ui::gfx::Gdi>;
 
-/// 画一整帧：背景 + 当前页（可滚动）+ 左侧导航（不滚动）。
+/// 画一整帧：背景、可滚动页面、固定导航、标题栏和弹窗。
 ///
 /// 返回已经画好的**内存位图 DC**，调用方负责 `BitBlt` 到窗口 DC 上。
 /// 返回 0 表示位图建不出来（GDI 句柄耗尽），此时什么都不该画。
@@ -360,22 +360,9 @@ pub fn draw_frame(
     // 内容区抹掉，表现是「点了有反应但点哪儿都不准」。
     ui.begin_frame();
 
-    let nav_w = ui.nav_width();
     let page = ui.page;
     let scroll = ui.scroll_y(page);
-
-    // 自绘标题栏占了顶部一条，页面和导航整体下移 —— 用 `oy` 交给世界变换，
-    // 页面代码里的坐标仍然「从内容区顶部算起」。
-    let oy = crate::ui::titlebar::TITLE_H;
-
-    // `Frame::new` 算的是「相对页面区域」的边距（它会先把导航栏宽度从
-    // 可用宽度里刨掉），所以把导航栏宽度补回 `content.x`，让页面和导航
-    // 共用同一个坐标系 —— 世界变换只需要一个。
-    let mut frame = Frame::new(a.view_w, a.view_h, nav_w);
-    frame.content.x += nav_w;
-    // 内容区顶部也要让出标题栏：页面从 `oy` 开始排
-    frame.content.y += oy;
-    frame.content.h -= oy;
+    let frame = Frame::new(a.view_w, a.view_h);
 
     // 最大化状态要问**父窗口**：canvas 是 `WS_CHILD`，它自己没有
     // `WS_MAXIMIZE` 位，查它恒为 false，标题栏上的按钮图标就永远画成「最大化」。
@@ -411,21 +398,10 @@ pub fn draw_frame(
         },
     );
 
-    // ②b 锁定遮罩：盖住内容区并说明原因。画在页面之后、导航之前，
-    // 所以导航和标题栏照常可点（切页、缩放、关闭都不受影响）。
-
-    // ③ 导航侧栏（不滚动，固定在左侧）
-    inner.paint(
-        fonts,
-        theme,
-        a.scale,
-        0.0,
-        nav_w,
-        a.view_h,
-        |p: &mut Painter| {
-            pages::nav(p, ui, data, nav_w, a.view_h);
-        },
-    );
+    // 固定导航盖住滚出视口的页面内容。
+    inner.paint(fonts, theme, a.scale, 0.0, a.view_w, a.view_h, |p| {
+        pages::toolbar(p, ui, &frame, a.view_w);
+    });
 
     // ④ 标题栏（不滚动，固定在顶层）
     inner.paint(
@@ -436,7 +412,7 @@ pub fn draw_frame(
         a.view_w,
         a.view_h,
         |p: &mut Painter| {
-            crate::ui::titlebar::draw(p, a.view_w, nav_w, theme);
+            crate::ui::titlebar::draw(p, a.view_w, theme);
             crate::ui::titlebar::draw_buttons(p, a.view_w, theme, is_max, hover_btn);
         },
     );

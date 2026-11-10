@@ -77,7 +77,7 @@ static TRAY_ICON: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/a
 /// `main.rs` 的单实例检查靠这个标题找已有窗口，两处必须一致。
 pub const WINDOW_TITLE: &str = "R Battery";
 
-/// 侧栏左下角显示的版本号。
+/// 应用版本号。
 ///
 /// 来源是 `build.rs` 烧进来的 `ROG_APP_VERSION`：平时等于 `Cargo.toml` 的
 /// `version`，CI 发版时被 `ROG_BUILD_VERSION` 覆盖成 tag 的版本号。
@@ -1039,7 +1039,7 @@ impl<'a> UiEnv<'a> {
 
 /// 把一个 `Act` 执行掉。
 ///
-/// 界面本地的动作（切页、折叠侧栏、开弹层）在这里改 `Ui` 并重画；
+/// 界面本地的动作（切页、开弹层）在这里改 `Ui` 并重画；
 /// 要写设备的交给后台线程。**这里没有一行写设备的代码** —— 全部转 [`Cmd`]。
 fn handle_act(a: Act, env: &UiEnv) {
     // 任何新动作都先把上一条提示清掉：否则写完设备的「✔ 已生效」会一直挂着，
@@ -1139,12 +1139,6 @@ fn handle_act(a: Act, env: &UiEnv) {
                 env.signal.request_quit();
                 nwg::stop_thread_dispatch();
             }
-        }
-
-
-        Act::ToggleRail => {
-            env.canvas.with_ui_mut(|u| u.rail = !u.rail);
-            env.canvas.repaint_now();
         }
 
 

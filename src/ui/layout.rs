@@ -1,4 +1,4 @@
-//! 布局常量；响应式断点按窗口扣除侧栏后的可用宽度计算。
+//! 布局常量；内容居中，导航固定在标题栏下方。
 
 /// 窗口能缩到的最小逻辑尺寸。
 pub const MIN_WIN_W: f32 = 720.0;
@@ -13,10 +13,8 @@ pub fn min_window_size(scale: f32) -> (i32, i32) {
     )
 }
 
-/// 侧栏展开宽度。
-pub const NAV_W_EXPANDED: f32 = 196.0;
-/// 侧栏收成图标轨道时的宽度（CSS `--sb-w: 56px`）。
-pub const NAV_W_RAIL: f32 = 56.0;
+pub const TOOLBAR_H: f32 = 52.0;
+pub const CONTENT_TOP: f32 = super::titlebar::TITLE_H + TOOLBAR_H;
 
 /// 内容区左右内边距（CSS `.page-body { padding: 6px 40px }`）。
 pub const PAGE_PAD_X: f32 = 40.0;
@@ -45,8 +43,6 @@ pub const R_CTL: f32 = 4.0;
 
 /// 设置行的最小高度（CSS `.row { min-height: 62px }`）。
 pub const ROW_H: f32 = 62.0;
-/// 导航项高度。
-pub const NAV_ITEM_H: f32 = 42.0;
 
 /// 字号表。集中在一处，「说明文字」到底 11 还是 11.5 不用每个页面猜。
 pub mod font {
@@ -76,7 +72,7 @@ pub enum Breakpoint {
 }
 
 impl Breakpoint {
-    /// 按**内容区**（已扣掉侧栏）的宽度判断。
+    /// 按窗口宽度判断。
     pub fn of(content_w: f32) -> Breakpoint {
         if content_w >= 900.0 {
             Breakpoint::Wide
@@ -129,8 +125,9 @@ impl Breakpoint {
 /// 五页共用同一套垂直节奏，滚动的位置才对得上。
 #[derive(Clone, Copy, Debug)]
 pub struct Frame {
-    /// 内容区（已扣掉侧栏和内边距），从页面顶部 y=0 开始（不是客户区坐标）。
+    /// 内容区，使用窗口坐标。
     pub content: super::gfx::R,
+    pub viewport: super::gfx::R,
     /// 内容区实际可用宽度（≤ `PAGE_MAX_W`）。
     pub width: f32,
     #[cfg(test)]
@@ -138,18 +135,15 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// 按客户区尺寸和侧栏宽度算布局。
-    ///
-    /// `w`/`h` 是画布的客户区尺寸，`nav_w` 是侧栏占的宽度。
-    pub fn new(w: f32, h: f32, nav_w: f32) -> Frame {
-        let avail = (w - nav_w).max(120.0);
+    pub fn new(w: f32, h: f32) -> Frame {
+        let avail = w.max(120.0);
         let bp = Breakpoint::of(avail);
         let pad = bp.pad_x();
         let width = (avail - pad * 2.0).min(PAGE_MAX_W).max(60.0);
-        // 内容靠左排（不居中）：Windows 11 设置页就是左对齐的，
-        // 而且居中后窗口一宽，左边缘就飘，和侧栏脱节。
+        let top = CONTENT_TOP + PAGE_PAD_TOP;
         Frame {
-            content: super::gfx::R::new(pad, PAGE_PAD_TOP, width, h),
+            content: super::gfx::R::new((avail - width) / 2.0, top, width, (h - top).max(0.0)),
+            viewport: super::gfx::R::new(0.0, CONTENT_TOP, avail, (h - CONTENT_TOP).max(0.0)),
             width,
             #[cfg(test)]
             bp,
@@ -200,29 +194,21 @@ mod tests {
     }
 
     #[test]
-    fn frame_在1100窗口展开侧栏下的宽度() {
-        // 1100 宽窗口，侧栏展开 196
-        let f = Frame::new(1100.0, 740.0, NAV_W_EXPANDED);
-        // 可用宽度 904，内边距 40。
-        assert_eq!(f.bp, Breakpoint::Wide);
-        assert_eq!(f.content.x, 40.0);
-        assert_eq!(f.width, 904.0 - 80.0);
-    }
-
-    #[test]
-    fn frame_在1100窗口收成轨道下的宽度() {
-        // 侧栏收成 56：可用 1044，仍受 PAGE_MAX_W 限制
-        let f = Frame::new(1100.0, 740.0, NAV_W_RAIL);
-        assert_eq!(f.bp, Breakpoint::Wide);
-        assert_eq!(f.width, PAGE_MAX_W, "宽屏时内容不该超过 940");
-        assert_eq!(f.content.x, 40.0);
+    fn frame_content_stays_centered_at_all_window_sizes() {
+        for (w, h) in [(720.0, 520.0), (1100.0, 740.0), (1920.0, 1080.0)] {
+            let f = Frame::new(w, h);
+            assert_eq!(f.content.x, w - f.content.right());
+            assert!(f.width <= PAGE_MAX_W);
+            assert!(f.content.y > CONTENT_TOP);
+            assert_eq!(f.viewport.bottom(), h);
+        }
     }
 
     #[test]
     fn frame_极窄窗口不会算出负宽度() {
-        // 窗口被拖到 200px：扣掉侧栏和内边距后必须还有正的宽度，
+        // 极窄尺寸下扣除内边距仍保持正宽度，
         // 否则后面所有布局都变成负尺寸（GDI+ 画反向矩形会静默不画）。
-        let f = Frame::new(200.0, 400.0, NAV_W_RAIL);
+        let f = Frame::new(200.0, 400.0);
         assert!(f.width > 0.0, "宽度算成了 {}", f.width);
         assert!(f.width >= 60.0);
     }

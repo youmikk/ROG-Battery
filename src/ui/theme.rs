@@ -7,8 +7,6 @@
 pub struct Theme {
     /// 内容区底色。
     pub bg: u32,
-    /// 左侧导航栏底色（比 `bg` 略深或略浅，靠一层区分）。
-    pub bg_nav: u32,
     /// 输入框这类「凹陷」控件的底色。
     pub bg_sunken: u32,
     /// 卡片底色。
@@ -50,7 +48,6 @@ pub struct Theme {
 /// 深色。
 pub const DARK: Theme = Theme {
     bg: 0xFF1B201D,
-    bg_nav: 0xFF181D1A,
     bg_sunken: 0xFF1B201D,
     card: 0xFF232A25,
     card_hover: 0xFF29322A,
@@ -75,7 +72,6 @@ pub const DARK: Theme = Theme {
 /// 浅色。
 pub const LIGHT: Theme = Theme {
     bg: 0xFFF7F8F7,
-    bg_nav: 0xFFF0F2EF,
     bg_sunken: 0xFFF7F8F7,
     card: 0xFFFFFFFF,
     card_hover: 0xFFF8FAF5,

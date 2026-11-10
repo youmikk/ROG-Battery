@@ -2506,12 +2506,7 @@ mod tests {
 
         let render_full_view = |canvas: &mut Canvas, fonts: &mut Fonts, ui: &mut super::super::widget::Ui, data_ref: &super::super::pages::Data, theme: &super::super::theme::Theme, out_name: &str, draw_extra: Option<&dyn Fn(&mut Painter, &super::super::layout::Frame)>, scroll: f32, dim: (f32, f32)| {
             let (w, h) = (dim.0 as i32, dim.1 as i32);
-            let oy = super::super::titlebar::TITLE_H;
-            let nav_w = ui.nav_width();
-            let mut frame = super::super::layout::Frame::new(w as f32, h as f32, nav_w);
-            frame.content.x += nav_w;
-            frame.content.y += oy;
-            frame.content.h -= oy;
+            let frame = super::super::layout::Frame::new(w as f32, h as f32);
 
             // ① 整窗铺底
             canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
@@ -2525,12 +2520,12 @@ mod tests {
                 }
             });
             // ③ 导航栏
-            canvas.paint(fonts, theme, 1.0, 0.0, nav_w, h as f32, |p| {
-                super::super::pages::nav(p, ui, data_ref, nav_w, h as f32);
+            canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
+                super::super::pages::toolbar(p, ui, &frame, w as f32);
             });
             // ④ 标题栏
             canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
-                super::super::titlebar::draw(p, w as f32, nav_w, theme);
+                super::super::titlebar::draw(p, w as f32, theme);
                 super::super::titlebar::draw_buttons(p, w as f32, theme, false, ui.hover_btn);
             });
             // ⑤ 模态弹窗（若有）
@@ -2548,7 +2543,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-light.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2556,7 +2550,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-battery-dark.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2564,7 +2557,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.palette_tab = 0;
             let extra = |p: &mut Painter, f: &super::super::layout::Frame| {
                 super::super::pages::draw_palette(
@@ -2583,7 +2575,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.palette_tab = 1;
             ui.custom_hue = 330.0;
             let extra = |p: &mut Painter, f: &super::super::layout::Frame| {
@@ -2606,7 +2597,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
             let state_charging = crate::proto::State {
                 charging: 1,
                 power: 58,
@@ -2634,18 +2624,16 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
             ui.show_close_dialog = true;
             ui.close_choice = super::super::widget::CloseChoice::Minimize;
             ui.close_remember = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-close-dialog.bmp", None, 0.0, (1100.0, 740.0));
         }
 
-        // 7. 电量页 展开导航（rail=false，验证设备卡不再被标题栏裁切，#1）
+        // 7. 电量页顶部导航
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
-            ui.rail = false;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-expanded.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2653,7 +2641,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.adv = [false, false];
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-closed.bmp", None, 560.0, (1100.0, 740.0));
         }
@@ -2662,7 +2649,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.adv = [true, false];
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-open.bmp", None, 560.0, (1100.0, 740.0));
         }
@@ -2671,7 +2657,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Keys;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-keys.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2679,7 +2664,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Keys;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-keys-dark.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2687,7 +2671,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.set_status("✔ 回报率已生效");
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-ok.bmp", None, 0.0, (1100.0, 740.0));
         }
@@ -2696,7 +2679,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.set_status("✘ 开机自启失败：权限不足 (错误 5)");
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-err.bmp", None, 0.0, (1100.0, 740.0));
         }
@@ -2705,7 +2687,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.set_status("✔ 灯光颜色已生效");
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-toast-dark.bmp", None, 0.0, (1100.0, 740.0));
         }
@@ -2714,7 +2695,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-lod.bmp", None, 620.0, (1100.0, 740.0));
         }
 
@@ -2722,7 +2702,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.set_open_drop(Some(super::super::widget::Drop::Debounce));
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-drop-up.bmp", None, 0.0, (1100.0, 740.0));
         }
@@ -2731,7 +2710,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             ui.begin_edit(super::super::widget::Edit::Dpi(0), "42000".into());
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-dpi-edit.bmp", None, 0.0, (1100.0, 740.0));
         }
@@ -2740,7 +2718,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Light;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-light-dyn.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2748,7 +2725,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Settings;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings.bmp", None, 620.0, (1100.0, 740.0));
         }
 
@@ -2756,7 +2732,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-top.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2764,7 +2739,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Settings;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-top.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2772,7 +2746,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Settings;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-about.bmp", None, 700.0, (1100.0, 740.0));
         }
 
@@ -2780,7 +2753,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
             ui.hover_btn = Some(super::super::titlebar::Btn::Close);
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-titlebar-hover.bmp", None, 0.0, (1100.0, 740.0));
         }
@@ -2789,7 +2761,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-perf-dark.bmp", None, 0.0, (1100.0, 740.0));
         }
 
@@ -2798,7 +2769,6 @@ mod tests {
         {
             let mut ui = super::super::widget::Ui::default();
             ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
             render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-narrow.bmp", None, 0.0, (700.0, 1040.0));
         }
 

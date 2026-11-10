@@ -91,56 +91,24 @@ pub fn in_bar(y: f32) -> bool {
     (0.0..=TITLE_H).contains(&y)
 }
 
-/// 画标题栏底色。标题栏去掉了原有的文字和图标，保持极简沉浸式背景。
-/// 三条窗口控制按钮见 [`draw_buttons`]。
-///
-/// `nav_w` 是左侧导航栏宽度：导航栏是整列 `bg_nav`（比内容略深的灰），
-/// 标题栏这一条也必须把左栏那一段单独铺成 `bg_nav`，否则左栏顶部 36px
-/// 会是一块 `bg` 色 —— 与下方整列 `bg_nav` 形成一道横向色差缝（用户反馈
-/// 「折叠区和上方颜色不一样，很丑」）。内容区那一段仍是 `bg`，与内容连成一片。
-pub fn draw(p: &mut Painter, win_w: f32, nav_w: f32, theme: &Theme) {
-    let t = theme;
-    let nw = nav_w.clamp(0.0, win_w);
-    if nw > 0.0 {
-        // 左栏那一段：与导航栏同色
-        p.rect(R::new(0.0, 0.0, nw, TITLE_H), t.bg_nav);
-        // 栏与内容之间的 1px 分隔线，也贯穿标题栏这一条
-        p.line(nw - 0.5, 0.0, nw - 0.5, TITLE_H, t.border, 1.0);
-    }
-    // 内容那一段：和页面背景同一个色，连成一片
-    p.rect(R::new(nw, 0.0, win_w - nw, TITLE_H), t.bg);
-
-    // 左上角品牌图标：就放在标题栏那一条里，和右边的窗口按钮同一水平线。
-    if nw >= 40.0 {
-        let r = logo_rect(nw);
-        p.image_rounded(crate::ui::gfx::app_icon_bitmap(), r, 6.0);
-        // 展开侧栏时右边还有空位，补上产品名；轨道模式只有 56px，放不下就省了。
-        if nw > 64.0 {
-            p.text(
-                "R Battery",
-                R::new(r.right() + 10.0, r.y, nw - r.right() - 22.0, r.h),
-                13.0,
-                true,
-                t.text,
-                crate::ui::gfx::Align::Left,
-            );
-        }
-    }
+/// 品牌位置固定，与页面宽度和滚动无关。
+pub fn draw(p: &mut Painter, win_w: f32, theme: &Theme) {
+    p.rect(R::new(0.0, 0.0, win_w, TITLE_H), theme.bg);
+    let r = logo_rect();
+    p.image_rounded(crate::ui::gfx::app_icon_bitmap(), r, 5.0);
+    p.text(
+        "R Battery",
+        R::new(r.right() + 9.0, 0.0, 100.0, TITLE_H),
+        12.5,
+        true,
+        theme.text,
+        crate::ui::gfx::Align::Left,
+    );
 }
 
-/// 左上角 logo 的矩形（窗口坐标）。
-///
-/// 轨道模式居中在 56px 的侧栏里；展开模式靠左留 14px。两种宽度都压在标题栏
-/// 那一条内（36px 高、图标 26px，上下各留 5px），不会越界到导航区。
-pub fn logo_rect(nav_w: f32) -> R {
-    let d = 26.0;
-    let x = if nav_w <= 64.0 {
-        ((nav_w - d) / 2.0).max(4.0)
-    } else {
-        14.0
-    };
-    let d = d.min(TITLE_H - 12.0);
-    R::new(x, (TITLE_H - d) / 2.0, d, d)
+pub fn logo_rect() -> R {
+    let d = 22.0;
+    R::new(14.0, (TITLE_H - d) / 2.0, d, d)
 }
 
 /// 三条按钮图标的笔宽与几何（逻辑像素）。

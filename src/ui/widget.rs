@@ -59,7 +59,7 @@ impl Page {
     }
 }
 
-/// 侧栏图标。
+/// 固定导航图标。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     Battery,
@@ -211,8 +211,7 @@ pub enum Act {
     ToggleDeviceTray,
     /// 切页。
     Nav(Page),
-    /// 侧栏展开 / 收成图标轨道。
-    ToggleRail,
+    /// 打开下拉菜单。
     OpenDrop(Drop),
     /// 在下拉弹层里选第 `index` 项。
     PickDrop(Drop, usize),
@@ -284,7 +283,7 @@ impl Act {
     /// 这个动作要读写设备吗？
     ///
     /// 读不到设备时点这些动作只会失败，`gui` 那边统一换成一句提示；
-    /// 本地动作（切页、折叠侧栏、改本地设置）照常执行。
+    /// 本地动作（切页、改本地设置）照常执行。
     pub fn needs_device(self) -> bool {
         match self {
             Act::ApplyEdit(Edit::Dpi(_)) | Act::CommitSlide(_) => true,
@@ -378,8 +377,6 @@ pub struct Ui {
     pub selected_device: Option<String>,
     pub device_keys: Vec<String>,
     pub initial_route_done: bool,
-    /// 侧栏是否收成图标轨道。
-    pub rail: bool,
     /// 当前配色。`settings.ini` 的 `theme` 键存它的字符串形式。
     pub mode: super::theme::Mode,
     /// 配色偏好：0 = 跟随系统，1 = 浅色，2 = 深色。设置页分段控件用。
@@ -424,9 +421,9 @@ pub struct Ui {
     pub edit_fresh: Option<Edit>,
     /// 本帧登记的内容区可交互区域（**内容坐标**）。
     pub hots: Vec<Hot>,
-    /// 本帧登记的侧栏可交互区域（**窗口坐标**，不随滚动移动）。
+    /// 本帧登记的固定导航可交互区域（**窗口坐标**，不随滚动移动）。
     ///
-    /// 两套坐标不能混在一个列表里：侧栏钉在窗口上，内容区跟着 `scroll` 走。
+    /// 两套坐标不能混在一个列表里：固定导航钉在窗口上，内容区跟着 `scroll` 走。
     pub chrome: Vec<Hot>,
     pub dialog_hots: Vec<Hot>,
     /// 鼠标位置 / 按下状态。
@@ -491,8 +488,6 @@ impl Default for Ui {
             selected_device: None,
             device_keys: Vec::new(),
             initial_route_done: false,
-            // 折叠开关在左栏最下方。
-            rail: false,
             // 默认浅色主题。
             mode: super::theme::Mode::Light,
             // 默认「跟随系统」
@@ -644,7 +639,7 @@ impl Ui {
         self.hots.push(Hot { rect, act });
     }
 
-    /// 登记一个侧栏可交互区域（**窗口坐标**，不随滚动移动）。
+    /// 登记一个固定导航可交互区域（**窗口坐标**，不随滚动移动）。
     pub fn chrome_hot(&mut self, rect: R, act: Act) {
         self.chrome.push(Hot { rect, act });
     }
@@ -766,7 +761,7 @@ impl Ui {
     ///（`hots` 和 `drop_rect` 都一样），所以比较时统一先 `y + scroll`
     /// 换成客户区坐标，再和鼠标位置比。
     ///
-    /// 命中优先级：**弹层自己的选项 → 弹层的空白 → 内容区 → 侧栏**。
+    /// 命中优先级：模态弹窗 → 固定导航 → 下拉弹层 → 页面内容。
     ///
     /// 「弹层的空白」这一档不能省：弹层盖在页面上，如果它下面某一行的矩形
     /// 也包含这个点，少了这一档就会穿透去点到那行 —— 用户看到的是
@@ -780,6 +775,12 @@ impl Ui {
                 }
             }
             return Some(Act::None);
+        }
+
+        for h in self.chrome.iter().rev() {
+            if h.rect.contains(x, y) {
+                return Some(h.act);
+            }
         }
 
         let cy = y + scroll;
@@ -805,16 +806,6 @@ impl Ui {
             return Some(Act::CloseDrop);
         }
 
-        // 侧栏先于内容区：侧栏钉在窗口上、且永远画在内容之上，内容区的
-        // 登记区（尤其是铺满整页的背景/卡片「吃掉点击」项）不该盖住它。
-        // 之前顺序反了，任何一次「整页登记 Act::None」都会把导航项吞掉，
-        // 表现就是「点左侧页面名不跳转」。
-        for h in self.chrome.iter().rev() {
-            // 侧栏不随滚动移动 —— 这里用原始 `y`
-            if h.rect.contains(x, y) {
-                return Some(h.act);
-            }
-        }
         for h in self.hots.iter().rev() {
             if h.rect.contains(x, cy) {
                 return Some(h.act);
@@ -839,15 +830,6 @@ impl Ui {
 
     // ---- 事件处理（canvas 的 WNDPROC 调这里） ----
 
-    /// 侧栏当前宽度（逻辑像素）。
-    pub fn nav_width(&self) -> f32 {
-        if self.rail {
-            super::layout::NAV_W_RAIL
-        } else {
-            super::layout::NAV_W_EXPANDED
-        }
-    }
-
     /// 鼠标左键按下。
     ///
     /// `(x, y)` 是客户区逻辑坐标，`scroll` 是当前页滚动量。命中到的东西写进
@@ -862,6 +844,12 @@ impl Ui {
         // 只关弹层、吞掉这次点击。去抖的选项顺序是「关闭 / 8ms / … / 32ms」，
         // 上半截正好全是低值，表现就是「高的能选，选了高的之后低的不响应」。
         if self.open_drop.is_some() {
+            if let Some(h) = self.chrome.iter().rev().find(|h| h.rect.contains(x, y)) {
+                self.pressed = Some(h.act);
+                self.pressed_slide = None;
+                self.open_drop = None;
+                return;
+            }
             let cy = y + scroll;
             let in_drop = self.drop_rect.map(|r| r.contains(x, cy)).unwrap_or(false);
             if !in_drop {
@@ -1109,9 +1097,8 @@ mod tests {
     }
 
     #[test]
-    fn 默认展开侧栏_默认在设备页() {
+    fn 默认在设备页() {
         let u = ui();
-        assert!(!u.rail);
         assert_eq!(u.page, Page::Home);
     }
 
@@ -1121,11 +1108,11 @@ mod tests {
         u.begin_frame();
         // 两个重叠区域，后登记的在上面
         u.hot(R::new(0.0, 0.0, 100.0, 100.0), Act::RefreshLighting);
-        u.hot(R::new(50.0, 50.0, 100.0, 100.0), Act::ToggleRail);
+        u.hot(R::new(50.0, 50.0, 100.0, 100.0), Act::Nav(Page::Settings));
 
         assert_eq!(u.hit(10.0, 10.0, 0.0), Some(Act::RefreshLighting));
         // 重叠区取上层
-        assert_eq!(u.hit(60.0, 60.0, 0.0), Some(Act::ToggleRail));
+        assert_eq!(u.hit(60.0, 60.0, 0.0), Some(Act::Nav(Page::Settings)));
         assert_eq!(u.hit(200.0, 10.0, 0.0), None);
     }
 
@@ -1144,14 +1131,14 @@ mod tests {
     }
 
     #[test]
-    fn 侧栏命中不随滚动移动() {
+    fn 固定导航命中不随滚动移动() {
         let mut u = ui();
         u.begin_frame();
-        // 侧栏的「收起 / 展开」按钮钉在窗口左下
-        u.chrome_hot(R::new(8.0, 700.0, 40.0, 32.0), Act::ToggleRail);
+        // 固定导航按钮不随页面滚动
+        u.chrome_hot(R::new(900.0, 44.0, 108.0, 34.0), Act::Nav(Page::Settings));
         // 无论滚到哪都在同一个窗口位置命中
-        assert_eq!(u.hit(20.0, 710.0, 0.0), Some(Act::ToggleRail));
-        assert_eq!(u.hit(20.0, 710.0, 1200.0), Some(Act::ToggleRail));
+        assert_eq!(u.hit(950.0, 60.0, 0.0), Some(Act::Nav(Page::Settings)));
+        assert_eq!(u.hit(950.0, 60.0, 1200.0), Some(Act::Nav(Page::Settings)));
     }
 
     #[test]
@@ -1260,7 +1247,7 @@ mod tests {
         for p in Page::ALL {
             assert!(!p.title().is_empty());
         }
-        // 标题不能重复（侧栏会看起来有两个同名项）
+        // 标题不能重复（固定导航会看起来有两个同名项）
         let mut titles: Vec<_> = Page::ALL.iter().map(|p| p.title()).collect();
         titles.sort_unstable();
         titles.dedup();
@@ -1341,7 +1328,7 @@ mod tests {
     }
     #[test]
     fn sidebar_wins_over_full_page_hot_zone() {
-        // 回归：内容区的「整页吃掉点击」登记区不能盖住侧栏，否则点页面名不跳转。
+        // 回归：内容区的「整页吃掉点击」登记区不能盖住固定导航，否则点页面名不跳转。
         let mut u = Ui::default();
         u.begin_frame();
         u.hot(R::new(0.0, 0.0, 1200.0, 800.0), Act::None);
@@ -1372,7 +1359,7 @@ mod tests {
         assert!(Act::Backup.needs_device() && Act::Restore.needs_device());
         // 本地动作
         assert!(!Act::Nav(Page::Battery).needs_device());
-        assert!(!Act::ToggleRail.needs_device());
+        assert!(!Act::Nav(Page::Settings).needs_device());
         assert!(!Act::SetTheme(2).needs_device());
     }
 
@@ -1386,7 +1373,7 @@ mod tests {
             Page::Keys,
             Page::Settings,
         ];
-        let item_h = crate::ui::layout::NAV_ITEM_H;
+        let item_h = 34.0;
         let mut u = Ui::default();
         u.begin_frame();
         u.hot(R::new(0.0, 0.0, 1200.0, 800.0), Act::None);
@@ -1441,7 +1428,7 @@ mod tests {
     fn double_click_activates_the_button_twice() {
         let mut u = Ui::default();
         u.begin_frame();
-        u.hot(R::new(10.0, 10.0, 80.0, 24.0), Act::ToggleRail);
+        u.hot(R::new(10.0, 10.0, 80.0, 24.0), Act::Nav(Page::Settings));
         let mut got: Vec<Act> = Vec::new();
         for _ in 0..2 {
             u.on_press(20.0, 20.0, 0.0);
@@ -1449,7 +1436,7 @@ mod tests {
                 got.push(a);
             }
         }
-        assert_eq!(got, vec![Act::ToggleRail, Act::ToggleRail]);
+        assert_eq!(got, vec![Act::Nav(Page::Settings), Act::Nav(Page::Settings)]);
     }
 
     #[test]

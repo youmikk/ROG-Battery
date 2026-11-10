@@ -9,7 +9,7 @@
 //!
 //! `x` 有两个体系：
 //! - [`Frame::content`] 的 `x` 已经含左侧内边距，页面元素从它开始排；
-//! - 侧栏（[`nav`]）用的是**窗口坐标**，因为它不随滚动移动。
+//! - 顶部导航（[`toolbar`]）用窗口坐标，不随滚动移动。
 //!
 //! # 为什么绘制和命中共用一个函数
 //!
@@ -354,15 +354,25 @@ fn palette_size(tab: u8) -> (f32, f32) {
 }
 
 /// 画色盘本体，支持「常用预设」网格与「自定义色环+深浅色阶」双模式。
-pub(crate) fn draw_palette(p: &mut Painter, ui: &mut Ui, slot: u8, anchor: R, cur: Option<[u8; 3]>, f: &Frame) {
+pub(crate) fn draw_palette(
+    p: &mut Painter,
+    ui: &mut Ui,
+    slot: u8,
+    anchor: R,
+    cur: Option<[u8; 3]>,
+    f: &Frame,
+) {
     let (w, h) = palette_size(ui.palette_tab);
     let scroll = ui.scroll_y(ui.page);
-    let view_h = f.content.h;
-    let x = anchor.x.min((f.content.right() - w).max(f.content.x)).max(f.content.x);
+    let view_h = f.viewport.bottom();
+    let x = anchor
+        .x
+        .min((f.content.right() - w).max(f.content.x))
+        .max(f.content.x);
     let y = anchor
         .y
-        .min((scroll + view_h - h - 8.0).max(scroll + 8.0))
-        .max(scroll + 8.0);
+        .min((scroll + view_h - h - 8.0).max(scroll + f.viewport.y + 8.0))
+        .max(scroll + f.viewport.y + 8.0);
     let r = R::new(x, y, w, h);
 
     // 阴影 + 卡片，和文字弹层同一套观感
@@ -619,9 +629,9 @@ fn note(p: &mut Painter, r: R, text: &str, warn: bool) -> f32 {
     h
 }
 
-// ───────────────────────── 侧栏 ─────────────────────────
+// ───────────────────────── 导航 ─────────────────────────
 
-/// 侧栏用的图标。用线段画，不加载图片 —— 一个 16×16 的图标走 GDI+
+/// 导航用的图标。用线段画，不加载图片 —— 一个 16×16 的图标走 GDI+
 /// 只要 5 条线，比解一个 PNG 再缓存的成本低得多。
 fn draw_icon(p: &mut Painter, icon: Icon, r: R, color: u32, width: f32) {
     let x = r.x;
@@ -706,86 +716,60 @@ fn draw_icon(p: &mut Painter, icon: Icon, r: R, color: u32, width: f32) {
     }
 }
 
-/// 画左侧导航（**窗口坐标**，不随滚动移动）。
-pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
-    let t = p.t;
+/// 固定在标题栏下方的导航，图标与点击区域共用按钮中心。
+pub fn toolbar(p: &mut Painter, ui: &mut Ui, f: &Frame, win_w: f32) {
     let top = crate::ui::titlebar::TITLE_H;
-    p.rect(R::new(0.0, top, nav_w, win_h - top), t.bg_nav);
-    p.line(nav_w - 0.5, top, nav_w - 0.5, win_h, t.border, 1.0);
-    for (page, label, y) in [
-        (Page::Home, "我的设备", top + 48.0),
-        (Page::Settings, "偏好设置", win_h - 108.0),
+    let t = p.t;
+    let bar = R::new(0.0, top, win_w, layout::TOOLBAR_H);
+    p.rect(bar, t.bg);
+    ui.chrome_hot(R::new(0.0, 0.0, win_w, layout::CONTENT_TOP), Act::None);
+    for (page, label, x) in [
+        (Page::Home, "我的设备", f.content.x),
+        (Page::Settings, "偏好设置", f.content.right() - 108.0),
     ] {
-        let r = R::new(12.0, y, nav_w - 24.0, layout::NAV_ITEM_H);
-        let on = if page == Page::Home {
-            ui.page != Page::Settings
-        } else {
-            ui.page == page
-        };
+        let r = R::new(x, top + 8.0, 108.0, 34.0);
         let act = Act::Nav(page);
+        let on = ui.page == page;
         if on {
-            p.round(r, 9.0, t.accent_soft);
+            p.round(r, 8.0, t.accent_soft);
         } else if ui.hover == Some(act) {
-            p.round(r, 9.0, t.card_hover);
+            p.round(r, 8.0, t.card_hover);
         }
         let fg = if on { t.accent } else { t.text2 };
+        let icon = R::new(r.x + 12.0, r.cy() - 8.0, 16.0, 16.0);
         if page == Page::Home {
-            for (dx, dy) in [(0.0, 0.0), (9.0, 0.0), (0.0, 9.0), (9.0, 9.0)] {
-                p.round_stroke(
-                    R::new(r.x + 13.0 + dx, r.cy() - 8.0 + dy, 6.0, 6.0),
-                    1.2,
+            if matches!(ui.page, Page::Home | Page::Settings) {
+                for (dx, dy) in [(0.0, 0.0), (9.0, 0.0), (0.0, 9.0), (9.0, 9.0)] {
+                    p.round_stroke(R::new(icon.x + dx, icon.y + dy, 6.0, 6.0), 1.2, fg, 1.2);
+                }
+            } else {
+                p.polyline(
+                    &[
+                        (icon.x + 9.0, icon.y + 3.0),
+                        (icon.x + 4.0, icon.cy()),
+                        (icon.x + 9.0, icon.bottom() - 3.0),
+                    ],
                     fg,
-                    1.3,
+                    1.5,
                 );
             }
         } else {
-            draw_icon(
-                p,
-                Icon::Settings,
-                R::new(r.x + 12.0, r.cy() - 9.0, 18.0, 18.0),
-                fg,
-                1.5,
-            );
+            draw_icon(p, Icon::Settings, icon, fg, 1.4);
         }
-        if !ui.rail {
-            p.text(
-                label,
-                R::new(r.x + 42.0, r.y, r.w - 52.0, r.h),
-                13.0,
-                on,
-                fg,
-                Align::Left,
-            );
-        }
-        ui.chrome_hot(r, act);
-    }
-    let toggle = R::new(12.0, win_h - 53.0, nav_w - 24.0, 28.0);
-    p.text(
-        if ui.rail { "›" } else { "‹" },
-        R::new(toggle.x + 9.0, toggle.y, 20.0, toggle.h),
-        20.0,
-        false,
-        t.text3,
-        Align::Center,
-    );
-    if !ui.rail {
         p.text(
-            &format!("R Battery · {}", d.version),
-            R::new(toggle.x + 35.0, toggle.y, toggle.w - 35.0, toggle.h),
-            10.0,
-            false,
-            t.text3,
+            label,
+            R::new(r.x + 36.0, r.y, r.w - 44.0, r.h),
+            12.5,
+            on,
+            fg,
             Align::Left,
         );
+        ui.chrome_hot(r, act);
     }
-    ui.chrome_hot(toggle, Act::ToggleRail);
 }
 
 fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let t = p.t;
-    let back = R::new(c.x, c.y + 6.0, 92.0, 26.0);
-    button(p, ui, back, "‹ 所有设备", false, Act::Nav(Page::Home));
-    c.y += 40.0;
     let name = d.selected.map(|r| r.name.as_str()).unwrap_or("设备详情");
     c.h1(p, name);
     let tabs = [
@@ -924,7 +908,7 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
                     draw_palette(p, ui, slot, anchor, cur, f);
                 }
             }
-            _ => draw_drop(p, ui, d, drop, f.content.h),
+            _ => draw_drop(p, ui, d, drop, f.viewport.bottom()),
         }
     }
 
@@ -990,7 +974,7 @@ fn draw_toast(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
 
     let t = p.t;
     let scroll = ui.scroll_y(ui.page);
-    let view_h = f.content.h;
+    let view_h = f.viewport.bottom();
 
     let (fg_icon, bg_icon) = match kind {
         0 => (t.red, t.red_soft),
@@ -1086,7 +1070,7 @@ fn drop_button(p: &mut Painter, ui: &mut Ui, r: R, drop: Drop, d: &Data) {
 /// - 这样在页面滚到任何位置、任何窗口高度下，弹层的全部选项都一定在可视区内。
 fn place_drop(ui: &Ui, anchor: R, h: f32, view_h: f32) -> R {
     let scroll = ui.scroll_y(ui.page);
-    let view_top = scroll;
+    let view_top = scroll + layout::CONTENT_TOP;
     let view_bottom = scroll + view_h;
     let btn = ui.drop_btn().unwrap_or(anchor);
 
@@ -2688,6 +2672,115 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn toolbar_and_dropdown_remain_aligned_after_resize_and_scroll() {
+        use crate::ui::canvas::{draw_frame, PaintArgs};
+        use crate::ui::gfx::{save_bmp, Canvas, Fonts};
+        let mut canvas = Canvas::new();
+        let mut fonts = Fonts::new("Microsoft YaHei UI").unwrap();
+        let device = crate::mock::parse("mouse|ROG 龙鳞 ACE|78|0").remove(0);
+        let estimate = crate::history::Estimate::default();
+        let cfg = crate::settings::Settings::default();
+        let data = Data {
+            selected: Some(&device),
+            state: None,
+            ident: None,
+            link_mode: "",
+            status: String::new(),
+            plot: None,
+            estimate: &estimate,
+            rows: 0,
+            cfg: &cfg,
+            autostart_text: "",
+            autostart_on: false,
+            version: "test",
+            readings: std::slice::from_ref(&device),
+        };
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch");
+        std::fs::create_dir_all(&out).unwrap();
+        let mut ui = Ui::default();
+        ui.select_device(&device.key);
+        for (w, h, scale, dark) in [
+            (1100.0, 760.0, 1.0, false),
+            (720.0, 520.0, 1.0, false),
+            (1100.0, 760.0, 1.25, false),
+            (720.0, 520.0, 1.5, true),
+            (1920.0, 1080.0, 1.0, false),
+        ] {
+            let theme = if dark {
+                &crate::ui::theme::DARK
+            } else {
+                &crate::ui::theme::LIGHT
+            };
+            let args = PaintArgs {
+                pixel_w: (w * scale) as i32,
+                pixel_h: (h * scale) as i32,
+                view_w: w,
+                view_h: h,
+                scale,
+                hwnd: std::ptr::null_mut(),
+            };
+            *ui.scroll_mut(Page::Battery) = 0.0;
+            ui.set_open_drop(None);
+            let mem = draw_frame(&mut canvas, &mut fonts, &mut ui, &args, theme, &data);
+            assert_ne!(mem, 0);
+            let file = out.join(format!("topnav-{w}-{scale}.bmp"));
+            save_bmp(file.to_str().unwrap(), mem, args.pixel_w, args.pixel_h);
+            let frame = Frame::new(w, h);
+            let settings = ui
+                .chrome
+                .iter()
+                .find(|h| h.act == Act::Nav(Page::Settings))
+                .unwrap()
+                .rect;
+            assert_eq!(settings.right(), frame.content.right());
+            assert_eq!(
+                ui.hit(settings.cx(), settings.cy(), 0.0),
+                Some(Act::Nav(Page::Settings))
+            );
+            let toggle = ui
+                .hots
+                .iter()
+                .find(|h| h.act == Act::ToggleDeviceTray)
+                .unwrap()
+                .rect;
+            assert!(toggle.right() < frame.content.right());
+            let dropdown = ui
+                .hots
+                .iter()
+                .find(|h| h.act == Act::OpenDrop(Drop::TrayKind))
+                .unwrap()
+                .rect;
+            *ui.scroll_mut(Page::Battery) = (dropdown.bottom() - h + 50.0).max(0.0);
+            ui.set_open_drop(Some(Drop::TrayKind));
+            let mem = draw_frame(&mut canvas, &mut fonts, &mut ui, &args, theme, &data);
+            let scroll = ui.scroll_y(Page::Battery);
+            let drop = ui.drop_rect().unwrap();
+            assert!(drop.y - scroll >= layout::CONTENT_TOP);
+            assert!(drop.bottom() - scroll <= h);
+            assert!(drop.x >= frame.content.x && drop.right() <= frame.content.right());
+            let option = ui
+                .hots
+                .iter()
+                .find(|h| h.act == Act::PickDrop(Drop::TrayKind, 4))
+                .unwrap()
+                .rect;
+            assert_eq!(
+                ui.hit(option.cx(), option.cy() - scroll, scroll),
+                Some(Act::PickDrop(Drop::TrayKind, 4))
+            );
+            assert_eq!(ui.hit(w / 2.0, 60.0, scroll), Some(Act::None));
+            ui.on_press(settings.cx(), settings.cy(), scroll);
+            assert_eq!(
+                ui.on_release(settings.cx(), settings.cy(), scroll),
+                Some(Act::Nav(Page::Settings))
+            );
+            assert_eq!(ui.open_drop(), None);
+            let file = out.join(format!("topnav-dropdown-{w}-{scale}.bmp"));
+            save_bmp(file.to_str().unwrap(), mem, args.pixel_w, args.pixel_h);
+        }
+    }
+
+    #[test]
     fn tray_controls_only_exist_when_enabled_even_offline() {
         use crate::ui::gfx::{Canvas, Fonts};
         let screen = unsafe { crate::win32::GetDC(std::ptr::null_mut()) };
@@ -2700,7 +2793,7 @@ mod tests {
         let mut cfg = crate::settings::Settings::default();
         let mut ui = Ui::default();
         ui.select_device(&device.key);
-        let frame = Frame::new(1100.0, 760.0, 196.0);
+        let frame = Frame::new(1100.0, 760.0);
         for enabled in [true, false, true] {
             cfg.device_tray
                 .entry(device.key.clone())
