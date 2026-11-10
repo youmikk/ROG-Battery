@@ -541,6 +541,7 @@ impl TrayId {
         if self.uses_guid {
             n.flags |= NIF_GUID;
             n.guid_item = self.guid;
+            n.uid = self.uid;
         } else {
             n.uid = self.uid;
         }
@@ -570,6 +571,7 @@ pub fn tray_add(
     let guid = tray_guid_at(slot);
     let mut n = notify_icon_data(hwnd, callback_message, guid);
     n.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_GUID;
+    n.uid = TRAY_FALLBACK_UID + slot as u32;
     n.hicon = hicon;
     copy_tip(&mut n.sz_tip, tip);
     // SAFETY: 同上。
@@ -585,7 +587,11 @@ pub fn tray_add(
         ok = unsafe { Shell_NotifyIconW(NIM_ADD, &n) != 0 };
     }
     if ok {
-        let id = TrayId { guid, uid: 0, uses_guid: true };
+        let id = TrayId {
+            guid,
+            uid: TRAY_FALLBACK_UID + slot as u32,
+            uses_guid: true,
+        };
         tray_set_version(hwnd, id);
         return Some(id);
     }

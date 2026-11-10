@@ -832,9 +832,34 @@ pub struct Painter<'a> {
 }
 
 impl<'a> Painter<'a> {
+    pub(crate) unsafe fn on_graphics<F: FnOnce(&mut Painter<'_>)>(
+        g: *mut c_void,
+        theme: &Theme,
+        size: f32,
+        draw: F,
+    ) -> Option<()> {
+        let mut fonts = Fonts::new("Segoe UI")?;
+        let mut obj = ObjCache::default();
+        {
+            let mut p = Painter {
+                g,
+                obj: &mut obj,
+                fonts: &mut fonts,
+                t: theme,
+                clip: R::new(0.0, 0.0, size, size),
+                scale: 1.0,
+            };
+            draw(&mut p);
+        }
+        obj.clear();
+        Some(())
+    }
     /// 整块是否在可见区内。
     fn visible(&self, r: R) -> bool {
-        r.y < self.clip.bottom() && r.bottom() > self.clip.y && r.x < self.clip.right() && r.right() > self.clip.x
+        r.y < self.clip.bottom()
+            && r.bottom() > self.clip.y
+            && r.x < self.clip.right()
+            && r.right() > self.clip.x
     }
 
     // ---- 基本图元 ----
@@ -1157,6 +1182,7 @@ impl<'a> Painter<'a> {
     /// 跨睡眠也能继续（醒来只是跳一段，视觉上是「彗尾往前窜了一下」）。
     ///
     /// 画充电动效：在电量进度弧上叠加呼吸光晕与流光能量波。
+    #[cfg(test)]
     pub fn arc_comet(
         &mut self,
         cx: f32,
@@ -1271,6 +1297,36 @@ impl<'a> Painter<'a> {
     }
 
     // ---- 文字 ----
+    pub(crate) fn icon_text(&mut self, text: &str, r: R, size: f32, color: u32) {
+        let font = self.fonts.get(size, true);
+        let brush = self.obj.brush(color);
+        if font.is_null() || brush.is_null() {
+            return;
+        }
+        unsafe {
+            let mut fmt = std::ptr::null_mut();
+            if GdipCreateStringFormat(0, 0, &mut fmt) != OK {
+                return;
+            }
+            GdipSetStringFormatFlags(fmt, 0x1000 | 0x4000);
+            GdipSetStringFormatTrimming(fmt, 0);
+            GdipSetStringFormatAlign(fmt, 1);
+            GdipSetStringFormatLineAlign(fmt, 1);
+            let digits: Vec<u16> = text.encode_utf16().collect();
+            let advance = r.w / digits.len().max(1) as f32;
+            for (index, digit) in digits.iter().enumerate() {
+                let layout = RectF {
+                    x: r.x + index as f32 * advance - advance * 0.5,
+                    y: r.y,
+                    w: advance * 2.0,
+                    h: r.h,
+                };
+                GdipDrawString(self.g, digit, 1, font, &layout, fmt, brush);
+            }
+            GdipDeleteStringFormat(fmt);
+        }
+    }
+
     /// 画一行字。矩形决定对齐范围，垂直居中。
     pub fn text(&mut self, s: &str, r: R, size: f32, bold: bool, color: u32, align: Align) {
         if !self.visible(r) || s.is_empty() {
@@ -1364,6 +1420,7 @@ impl<'a> Painter<'a> {
     // ---- 复合控件 ----
 
     /// 胶囊标签（`2.4G` / `1000 Hz` / `19 帧`）。
+    #[cfg(test)]
     pub fn pill(&mut self, r: R, label: &str, fg: u32, bg: u32, size: f32) {
         self.round(r, r.h / 2.0, bg);
         self.text(label, r, size, false, fg, Align::Center);
@@ -2429,6 +2486,7 @@ mod tests {
         let plot = crate::chart::build(&demo);
         let demo_len = demo.len();
         let data = crate::ui::pages::Data {
+            selected: None,
             readings: &[],
             autostart_on: false,
             state: Some(&state),
@@ -2441,8 +2499,6 @@ mod tests {
             cfg: &cfg,
             autostart_text: "已开机自启",
             version: crate::gui::APP_VERSION,
-            frames: 19,
-            elapsed_ms: 588,
         };
 
         let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch");

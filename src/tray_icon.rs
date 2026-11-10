@@ -41,6 +41,146 @@ use crate::win32::Handle;
 /// 所以运行时用 `icon_size()` 查系统值，这个常量只作为**上限和默认值**。
 pub const ICON_SIZE: i32 = 32;
 
+pub fn render_device(
+    level: Option<u8>,
+    charging: bool,
+    kind: crate::tray_prefs::TrayKind,
+    content: crate::tray_prefs::TrayContent,
+) -> Option<Handle> {
+    use crate::tray_prefs::{TrayContent, TrayKind};
+    use crate::ui::gfx::{Painter, R};
+    use gdiplus::*;
+    if !crate::ui::gfx::start() {
+        return None;
+    }
+    unsafe {
+        let mut bitmap = ptr::null_mut();
+        let mut graphics = ptr::null_mut();
+        if GdipCreateBitmapFromScan0(
+            ICON_SIZE,
+            ICON_SIZE,
+            0,
+            PIXEL_FORMAT_32BPP_ARGB,
+            ptr::null(),
+            &mut bitmap,
+        ) != 0
+        {
+            return None;
+        }
+        if GdipGetImageGraphicsContext(bitmap, &mut graphics) != 0 {
+            GdipDisposeImage(bitmap);
+            return None;
+        }
+        GdipGraphicsClear(graphics, 0);
+        GdipSetSmoothingMode(graphics, 4);
+        GdipSetTextRenderingHint(graphics, 4);
+        let theme = if crate::autostart::system_uses_light_theme() {
+            &crate::ui::theme::LIGHT
+        } else {
+            &crate::ui::theme::DARK
+        };
+        let ink = match level {
+            None => theme.text3,
+            Some(0..=20) => theme.red,
+            _ => theme.text,
+        };
+        let painted = Painter::on_graphics(graphics, theme, 32.0, |p| {
+            let combined = content == TrayContent::Combined;
+            if content != TrayContent::Number {
+                let w = 1.8;
+                match kind {
+                    TrayKind::Mouse => {
+                        p.round_stroke(R::new(5.0, 2.0, 22.0, 28.0), 6.0, ink, w);
+                        p.line(16.0, 3.0, 16.0, 10.0, ink, w);
+                        p.line(6.0, 12.0, 26.0, 12.0, ink, w);
+                    }
+                    TrayKind::Keyboard => {
+                        p.round_stroke(R::new(1.5, 4.0, 29.0, 26.0), 3.0, ink, w);
+                        for x in [6.0, 13.0, 20.0, 26.0] {
+                            p.line(x, 9.0, x + 1.0, 9.0, ink, 2.0);
+                        }
+                        if !combined {
+                            for y in [15.0, 21.0] {
+                                for x in [6.0, 13.0, 20.0, 26.0] {
+                                    p.line(x, y, x + 1.0, y, ink, 2.0);
+                                }
+                            }
+                        }
+                    }
+                    TrayKind::Headset => {
+                        p.arc(16.0, 15.0, 12.0, w, 180.0, 180.0, ink);
+                        p.line(4.0, 15.0, 4.0, 28.0, ink, w);
+                        p.line(28.0, 15.0, 28.0, 28.0, ink, w);
+                        p.round(R::new(1.0, 17.0, 4.0, 11.0), 1.5, ink);
+                        p.round(R::new(27.0, 17.0, 4.0, 11.0), 1.5, ink);
+                    }
+                    TrayKind::Gamepad => {
+                        p.polyline(
+                            &[
+                                (2.0, 29.0),
+                                (1.0, 26.0),
+                                (5.0, 6.0),
+                                (10.0, 4.0),
+                                (13.0, 7.0),
+                                (19.0, 7.0),
+                                (22.0, 4.0),
+                                (27.0, 6.0),
+                                (31.0, 26.0),
+                                (30.0, 29.0),
+                                (24.0, 25.0),
+                                (8.0, 25.0),
+                                (2.0, 29.0),
+                            ],
+                            ink,
+                            w,
+                        );
+                        p.line(8.0, 8.0, 8.0, 13.0, ink, w);
+                        p.line(5.5, 10.5, 10.5, 10.5, ink, w);
+                        p.dot(24.0, 9.0, 1.0, ink);
+                        p.dot(27.0, 12.0, 1.0, ink);
+                    }
+                    _ => {
+                        p.round_stroke(R::new(2.0, 6.0, 27.0, 23.0), 3.0, ink, w);
+                        p.rect(R::new(30.0, 12.0, 2.0, 10.0), ink);
+                    }
+                }
+            }
+            if content != TrayContent::Icon {
+                let text = level.map(label).unwrap_or_else(|| "–".to_string());
+                let font = if content == TrayContent::Number {
+                    if text.len() > 2 {
+                        19.0
+                    } else {
+                        26.0
+                    }
+                } else if text.len() > 2 {
+                    12.0
+                } else {
+                    16.0
+                };
+                let rect = if combined {
+                    R::new(4.0, 12.0, 24.0, 18.0)
+                } else {
+                    R::new(0.0, 0.0, 32.0, 32.0)
+                };
+                p.icon_text(&text, rect, font, ink);
+            }
+            if charging && level.is_some() {
+                p.dot(29.0, 3.0, 2.5, theme.green);
+            }
+        });
+        GdipDeleteGraphics(graphics);
+        let mut icon = ptr::null_mut();
+        let result = painted.is_some() && GdipCreateHICONFromBitmap(bitmap, &mut icon) == 0;
+        GdipDisposeImage(bitmap);
+        if result && !icon.is_null() {
+            Some(icon)
+        } else {
+            None
+        }
+    }
+}
+
 /// 绘制时的超采样倍数：先在 `ICON_SIZE * SUPERSAMPLE` 的画布上画，再一次性缩回
 /// `ICON_SIZE`。直接按 32px 画时，字形的斜边和光晕只有一两个像素可落，缩放后
 /// 边缘会发毛；放大 4 倍画、再按高质量插值缩小，等于让 GDI+ 帮我们做了一次
@@ -64,14 +204,16 @@ pub fn icon_size() -> i32 {
 
 /// 背景色 —— 深色圆角块，白字。和曲线不同，托盘图标必须**不透明**
 /// 才能在浅色/深色任务栏上都看得清（透明图标配白字在浅色栏上会消失）。
+#[cfg(test)]
 const BG: [u8; 3] = [0x20, 0x24, 0x2B];
 
 /// 电量对应的图标底色。三档，够用户一眼分辨「还早 / 该充了 / 快没电」。
+#[cfg(test)]
 fn level_color(level: u8) -> [u8; 3] {
     match level {
-        0..=20 => [0xD1, 0x3A, 0x2E],   // 红：快没电
-        21..=50 => [0xD8, 0x8B, 0x1E],  // 橙：该充了
-        _ => BG,                        // 常态深灰
+        0..=20 => [0xD1, 0x3A, 0x2E],  // 红：快没电
+        21..=50 => [0xD8, 0x8B, 0x1E], // 橙：该充了
+        _ => BG,                       // 常态深灰
     }
 }
 
@@ -91,6 +233,7 @@ pub fn label(level: u8) -> String {
 /// 这是纯函数，测试直接断言数字，不需要真的画。
 ///
 /// 实际绘制时按 `icon_size()` 等比缩放 —— 见 [`scaled_font_height`]。
+#[cfg(test)]
 pub fn font_height(level: u8) -> i32 {
     match label(level).len() {
         1 => 28,
@@ -103,6 +246,7 @@ pub fn font_height(level: u8) -> i32 {
 ///
 /// 单独抽出来是为了能测：16px 图标上两位数必须落在 8..=12 之间，
 /// 否则要么糊成一团、要么顶出图标边界。
+#[cfg(test)]
 pub fn scaled_font_height(level: u8, size: i32) -> i32 {
     let h = font_height(level) * size.max(1) / ICON_SIZE;
     h.max(6) // 再小就完全看不清了，宁可爱出界一点
@@ -157,6 +301,7 @@ mod gdiplus {
 ///
 /// 失败返回 `None`，调用方回落到静态图标 —— **不能让托盘空白**。
 /// 成功返回的 `HICON` 由调用方负责 `DestroyIcon`。
+#[cfg(test)]
 pub fn render(level: u8) -> Option<Handle> {
     render_badge(level, false)
 }
@@ -164,6 +309,7 @@ pub fn render(level: u8) -> Option<Handle> {
 /// 缓存读数（设备暂时读不到、沿用的是上一次的值）：灰底 + 近白数字。
 ///
 /// 灰底本身就表示「这不是现在的数」，所以不再叠加充电角标。
+#[cfg(test)]
 pub fn render_stale(level: u8) -> Option<Handle> {
     render_glyph(
         &label(level),
@@ -176,6 +322,7 @@ pub fn render_stale(level: u8) -> Option<Handle> {
 }
 
 /// 充电中的托盘图标：在徽章右上角加一个深色圆 + 白色闪电，数字左移让位。
+#[cfg(test)]
 pub fn render_charging(level: u8) -> Option<Handle> {
     render_badge(level, true)
 }
@@ -198,6 +345,7 @@ pub fn render_unknown() -> Option<Handle> {
 ///
 /// 与数字样式并存，由调用方挑选；圆底要盖住任务栏的底色，所以数字不能再用
 /// 光晕——光晕是给「直接压在任务栏上」的字形用的。
+#[cfg(test)]
 pub fn render_badge(level: u8, charging: bool) -> Option<Handle> {
     let is_light = crate::autostart::system_uses_light_theme();
     let ink = if is_light {
@@ -465,6 +613,71 @@ fn render_glyph(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_glyphs_render_all_modes_and_states() {
+        use crate::tray_prefs::{TrayContent, TrayKind};
+        use crate::ui::gfx::{Canvas, Fonts, R};
+        #[link(name = "user32")]
+        extern "system" {
+            fn DrawIconEx(
+                dc: Handle,
+                x: i32,
+                y: i32,
+                icon: Handle,
+                w: i32,
+                h: i32,
+                step: u32,
+                brush: Handle,
+                flags: u32,
+            ) -> i32;
+        }
+        let screen = unsafe { crate::win32::GetDC(ptr::null_mut()) };
+        assert!(!screen.is_null());
+        let mut canvas = Canvas::new();
+        let dc = canvas.ensure(screen as isize, 720, 220);
+        let mut fonts = Fonts::new("Segoe UI").unwrap();
+        canvas.paint(
+            &mut fonts,
+            &crate::ui::theme::LIGHT,
+            1.0,
+            0.0,
+            720.0,
+            220.0,
+            |p| p.rect(R::new(0.0, 0.0, 720.0, 220.0), 0xfff7f8f7),
+        );
+        for (column, kind) in TrayKind::ALL.iter().skip(1).enumerate() {
+            for (row, content) in TrayContent::ALL.iter().enumerate() {
+                for (variant, level) in [Some(78), Some(100), None].iter().enumerate() {
+                    let icon =
+                        render_device(*level, variant == 1, *kind, *content).expect("图标生成失败");
+                    let x = 10 + (column as i32) * 140 + variant as i32 * 42;
+                    let y = 12 + row as i32 * 68;
+                    assert_ne!(
+                        unsafe {
+                            DrawIconEx(dc as Handle, x, y, icon, 32, 32, 0, ptr::null_mut(), 3)
+                        },
+                        0
+                    );
+                    unsafe {
+                        crate::win32::DestroyIcon(icon);
+                    }
+                }
+            }
+        }
+        crate::ui::gfx::save_bmp(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/scratch/native-tray-glyphs.bmp"
+            ),
+            dc,
+            720,
+            220,
+        );
+        canvas.release();
+        unsafe {
+            crate::win32::ReleaseDC(ptr::null_mut(), screen);
+        }
+    }
     use super::*;
 
     #[test]

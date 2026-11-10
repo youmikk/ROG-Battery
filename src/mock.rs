@@ -16,7 +16,7 @@ pub fn parse(text: &str) -> Vec<DeviceReading> {
             continue;
         }
         let mut it = line.split('|').map(str::trim);
-        let (Some(fam), Some(_name), Some(level), Some(charging)) =
+        let (Some(fam), Some(name), Some(level), Some(charging)) =
             (it.next(), it.next(), it.next(), it.next())
         else {
             continue;
@@ -31,10 +31,18 @@ pub fn parse(text: &str) -> Vec<DeviceReading> {
         let Ok(level) = level.parse::<u8>() else {
             continue;
         };
+        let occurrence = out
+            .iter()
+            .filter(|d: &&DeviceReading| d.name == name)
+            .count();
         out.push(DeviceReading {
+            key: crate::device::stable_key(&format!("mock:{name}:{occurrence}")),
+            name: name.to_string(),
             family,
             level: level.min(100),
             charging: charging == "1" || charging.eq_ignore_ascii_case("true"),
+            connected: it.next() != Some("offline"),
+            simulated: true,
         });
     }
     out

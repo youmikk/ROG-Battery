@@ -39,10 +39,12 @@ fn slot_of(drop: Drop) -> usize {
         Drop::ButtonTarget(_) => 8,
         Drop::Palette(_) => 9,
         Drop::CloseMode => 10,
+        Drop::TrayKind => 11,
+        Drop::TrayContent => 12,
     }
 }
 
-const DROP_SLOTS: usize = 11;
+const DROP_SLOTS: usize = 13;
 
 /// 每种下拉的候选表一辈子都不变，却原来每帧重建一次（`format!` 逐个分配
 /// `String`）。设置页四五个下拉打开时，一帧就是几十次堆分配。
@@ -56,6 +58,16 @@ fn build_options(drop: Drop) -> Vec<(String, usize)> {
     // 每个分支写全 `Vec<(String, usize)>`：不加这个标注，
     // arms 各自是不同的 iterator 类型，`collect()` 推不出目标类型。
     let items: Vec<(String, usize)> = match drop {
+        Drop::TrayKind => crate::tray_prefs::TrayKind::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.label().to_string(), i))
+            .collect(),
+        Drop::TrayContent => crate::tray_prefs::TrayContent::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.label().to_string(), i))
+            .collect(),
         Drop::Sleep => (0u8..=4)
             .map(|c| (crate::proto::sleep_mode_name(c), c as usize))
             .chain(std::iter::once((
@@ -140,6 +152,16 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
     }
     let st = d.state;
     match drop {
+        Drop::TrayKind => d
+            .selected
+            .map(|r| d.cfg.tray_for(&r.key).kind.label())
+            .unwrap_or("自动识别")
+            .to_string(),
+        Drop::TrayContent => d
+            .selected
+            .map(|r| d.cfg.tray_for(&r.key).content.label())
+            .unwrap_or("图标＋电量")
+            .to_string(),
         Drop::Sleep => st
             .map(|s| crate::proto::sleep_mode_name(s.sleep_mode))
             .unwrap_or_else(|| "—".to_string()),
@@ -190,6 +212,14 @@ pub fn drop_selected(drop: Drop, d: &Data) -> usize {
     let opts = options(drop, d);
     let st = d.state;
     let cur: usize = match drop {
+        Drop::TrayKind => d
+            .selected
+            .map(|r| d.cfg.tray_for(&r.key).kind as usize)
+            .unwrap_or(0),
+        Drop::TrayContent => d
+            .selected
+            .map(|r| d.cfg.tray_for(&r.key).content as usize)
+            .unwrap_or(0),
         Drop::Sleep => st.map(|s| s.sleep_mode as usize).unwrap_or(0),
         Drop::Poll => st.map(|s| s.poll_code as usize).unwrap_or(0),
         // `active_stage` 是 1 基的（0 表示设备没报），候选值也是 1..=4
@@ -262,6 +292,7 @@ mod tests {
         let st = crate::proto::State::default();
         let cfg = crate::settings::Settings::default();
         let d = super::super::pages::Data {
+            selected: None,
             readings: &[],
             state: Some(&st),
             ident: None,
@@ -274,8 +305,6 @@ mod tests {
             autostart_text: "",
             autostart_on: false,
             version: "test",
-            frames: 0,
-            elapsed_ms: 0,
         };
         assert_ne!(drop_current(Drop::CloseMode, &d), "—");
         assert_ne!(drop_current(Drop::Refresh, &d), "—");

@@ -41,7 +41,7 @@ pub(crate) const SAVE: bool = SAVE_TO_FLASH;
 /// 用户拖完亮度，滑块弹回原位、灯效不变，而底部浮层还诚实地报
 /// 「已还原=是」。这个 bug 在 CLI 上永远看不出来（CLI 本来就要 `--keep`），
 /// 只有真机点一遍才会暴露。
-pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
+pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
     let label = cmd.label();
 
     // 自启这条路**完全不碰 HID**，所以必须在 `open_link` 之前分叉 ——
@@ -54,8 +54,8 @@ pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
     let mut log = |_line: &str| {};
 
     let result = (|| -> Result<crate::ops::ApplyReport, crate::ops::OpsError> {
-        let api = crate::win32::HidApi::load().map_err(crate::ops::OpsError::other)?;
-        let link = hid::open_link(&api).map_err(crate::ops::OpsError::other)?;
+        let link = target
+            .ok_or_else(|| crate::ops::OpsError::other("所选设备已断开，请重新连接".to_string()))?;
         let mut dev = HidDevice::open(&link.iface).map_err(crate::ops::OpsError::other)?;
         let rid = link.report_id;
         let mut reader = crate::ops::DirectReader;
@@ -190,7 +190,7 @@ pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
 }
 
 /// 备份 / 还原。需要文件系统，也需要设备。
-pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
+pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
     let label = cmd.label();
     let (path, save) = match cmd {
         Cmd::Backup(p) => (p, true),
@@ -205,13 +205,8 @@ pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
         hint,
     };
 
-    let api = match crate::win32::HidApi::load() {
-        Ok(a) => a,
-        Err(e) => return fail(e, "请确认接收器已插好"),
-    };
-    let link = match hid::open_link(&api) {
-        Ok(l) => l,
-        Err(e) => return fail(e, "请确认接收器已插好"),
+    let Some(link) = target else {
+        return fail("所选设备已断开".to_string(), "请重新连接设备");
     };
     let mut dev = match HidDevice::open(&link.iface) {
         Ok(d) => d,

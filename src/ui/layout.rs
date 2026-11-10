@@ -1,27 +1,6 @@
-//! 布局常量与响应式断点。
-//!
-//! # 为什么要单独一个文件
-//!
-//! 网页原型里这些数字散在 CSS 里，靠浏览器排版引擎解释。到了 GDI+，
-//! **没有任何自动排版** —— 每一行的 x/y/w/h 都要自己算。把这些数字集中在一处，
-//! 五个页面的绘制代码才不至于各写一套「卡片间距是 18 还是 20」。
-//!
-//! # 数字来源
-//!
-//! 全部照搬 `docs\mockups\ui-prototype.html` 的 CSS，标注了对应规则名。
-//! 改这里的数字 = 改设计稿，**不要凭手感调**。
-//!
-//! # 响应式
-//!
-//! 原型的断点是 1000 / 880 / 760 / 700（`@media (max-width: …)`）。
-//! 这里改成按**可用宽度**（窗口宽 − 侧栏宽）判断，因为自绘时我知道侧栏
-//! 到底是展开（240）还是收成轨道（56），比 CSS 的相对判断更直接。
+//! 布局常量；响应式断点按窗口扣除侧栏后的可用宽度计算。
 
-/// 侧栏展开时的宽度（CSS `.sidebar { width: 240px }`）。
 /// 窗口能缩到的最小逻辑尺寸。
-///
-/// 再小的话内容区放不下电量卡的 4 行 KPI（窄屏单列需要约 270 逻辑像素），
-/// 用户只能靠滚动看半截内容 —— 与其让人滚，不如不让缩。
 pub const MIN_WIN_W: f32 = 720.0;
 pub const MIN_WIN_H: f32 = 520.0;
 
@@ -34,7 +13,8 @@ pub fn min_window_size(scale: f32) -> (i32, i32) {
     )
 }
 
-pub const NAV_W_EXPANDED: f32 = 240.0;
+/// 侧栏展开宽度。
+pub const NAV_W_EXPANDED: f32 = 196.0;
 /// 侧栏收成图标轨道时的宽度（CSS `--sb-w: 56px`）。
 pub const NAV_W_RAIL: f32 = 56.0;
 
@@ -58,15 +38,15 @@ pub const H1_H: f32 = 40.0;
 /// 区块标题 `h2` 的占位高度（字号见 [`font::H2`]）。
 pub const H2_H: f32 = 32.0;
 
-/// 卡片圆角（CSS `--radius-card: 8px`）。
-pub const R_CARD: f32 = 8.0;
+/// 卡片圆角。
+pub const R_CARD: f32 = 13.0;
 /// 控件圆角（CSS `--radius-ctl: 4px`）。
 pub const R_CTL: f32 = 4.0;
 
 /// 设置行的最小高度（CSS `.row { min-height: 62px }`）。
 pub const ROW_H: f32 = 62.0;
-/// 导航项高度（CSS `.nav-item { height: 38px }`）。
-pub const NAV_ITEM_H: f32 = 38.0;
+/// 导航项高度。
+pub const NAV_ITEM_H: f32 = 42.0;
 
 /// 字号表。集中在一处，「说明文字」到底 11 还是 11.5 不用每个页面猜。
 pub mod font {
@@ -78,14 +58,8 @@ pub mod font {
     pub const BODY: f32 = 13.5;
     /// 说明文字。
     pub const HINT: f32 = 11.5;
-    /// 字段名（「电压」「回报率」）。
-    /// 大数字（电量百分比、KPI 值）。
-    /// 电量环中心那个数字。
-    pub const NUM_RING: f32 = 34.0;
     /// 胶囊标签、单位。
     pub const TINY: f32 = 11.0;
-    /// 导航项。
-    pub const NAV: f32 = 13.5;
 }
 
 /// 当前窗口的响应式档位。
@@ -126,11 +100,13 @@ impl Breakpoint {
     }
 
     /// 电量页 KPI 是两列还是一列。
+    #[cfg(test)]
     pub fn kv_two_cols(self) -> bool {
         !matches!(self, Breakpoint::Narrow | Breakpoint::Tiny)
     }
 
     /// 电量环直径（CSS `.ring { width: 118px }`，窄屏 92）。
+    #[cfg(test)]
     pub fn ring_diameter(self) -> f32 {
         match self {
             Breakpoint::Wide | Breakpoint::Mid => 118.0,
@@ -141,6 +117,7 @@ impl Breakpoint {
     /// 设备信息卡是放在电量卡右边（`hero` 横排）还是下面（竖排）。
     ///
     /// CSS 在 880px 时改成 `flex-direction: column`。
+    #[cfg(test)]
     pub fn hero_side_by_side(self) -> bool {
         matches!(self, Breakpoint::Wide | Breakpoint::Mid)
     }
@@ -156,6 +133,7 @@ pub struct Frame {
     pub content: super::gfx::R,
     /// 内容区实际可用宽度（≤ `PAGE_MAX_W`）。
     pub width: f32,
+    #[cfg(test)]
     pub bp: Breakpoint,
 }
 
@@ -173,6 +151,7 @@ impl Frame {
         Frame {
             content: super::gfx::R::new(pad, PAGE_PAD_TOP, width, h),
             width,
+            #[cfg(test)]
             bp,
         }
     }
@@ -222,12 +201,12 @@ mod tests {
 
     #[test]
     fn frame_在1100窗口展开侧栏下的宽度() {
-        // 默认形态：1100 宽窗口，侧栏展开 240
+        // 1100 宽窗口，侧栏展开 196
         let f = Frame::new(1100.0, 740.0, NAV_W_EXPANDED);
-        // 可用 = 1100-240 = 860 → Mid 档，内边距 26
-        assert_eq!(f.bp, Breakpoint::Mid);
-        assert_eq!(f.content.x, 26.0);
-        assert_eq!(f.width, 860.0 - 52.0);
+        // 可用宽度 904，内边距 40。
+        assert_eq!(f.bp, Breakpoint::Wide);
+        assert_eq!(f.content.x, 40.0);
+        assert_eq!(f.width, 904.0 - 80.0);
     }
 
     #[test]

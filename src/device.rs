@@ -5,13 +5,14 @@
 //! 关键字 —— 这是唯一在所有设备上都拿得到的稳定信息（PID 每个型号都不同）。
 
 /// 设备族。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DeviceFamily {
     Mouse,
     Headset,
     Keyboard,
     Gamepad,
     /// 没认出来，或者根本没读到身份。
+    #[default]
     Unknown,
 }
 
@@ -20,10 +21,21 @@ pub enum DeviceFamily {
 /// 大小写不敏感：设备回报的型号既有全大写（`ROG HARPE ACE MINI`）也有混合。
 pub fn family_of(model_name: &str) -> DeviceFamily {
     let m = model_name.to_ascii_uppercase();
-    const HEADSET: [&str; 5] = ["HEADSET", "HATSU", "FALCHION", "耳机", "降临"];
-    const KEYBOARD: [&str; 6] = ["KEYBOARD", "AZOTH", "FLARE", "STRIX SCOPE", "键盘", "龙骑士"];
+    const HEADSET: [&str; 6] = ["HEADSET", "DELTA", "HATSU", "耳机", "降临", "棱镜"];
+    const KEYBOARD: [&str; 8] = [
+        "KEYBOARD",
+        "AZOTH",
+        "FLARE",
+        "STRIX SCOPE",
+        "FALCHION",
+        "键盘",
+        "龙骑士",
+        "夜魔",
+    ];
     const GAMEPAD: [&str; 4] = ["GAMEPAD", "RAIKIRI", "手柄", "雷切"];
-    const MOUSE: [&str; 8] = ["MOUSE", "HARPE", "GLADIUS", "KERIS", "鼠标", "龙鳞", "战刃", "月刃"];
+    const MOUSE: [&str; 8] = [
+        "MOUSE", "HARPE", "GLADIUS", "KERIS", "鼠标", "龙鳞", "战刃", "月刃",
+    ];
     if HEADSET.iter().any(|k| m.contains(k)) {
         return DeviceFamily::Headset;
     }
@@ -40,6 +52,15 @@ pub fn family_of(model_name: &str) -> DeviceFamily {
 }
 
 impl DeviceFamily {
+    pub fn order(self) -> u8 {
+        match self {
+            Self::Mouse => 0,
+            Self::Keyboard => 1,
+            Self::Headset => 2,
+            Self::Gamepad => 3,
+            Self::Unknown => 4,
+        }
+    }
     /// 提示语里的名词。
     pub fn noun(self) -> &'static str {
         match self {
@@ -52,19 +73,32 @@ impl DeviceFamily {
     }
 }
 
-
 /// 一台设备的读数。字段只描述「看到的事实」，不含怎么显示。
 ///
-/// 现在链路层只返回一条，`Vec<DeviceReading>` 里通常只有一个元素；但工具提示
-/// 与托盘图标都按列表写，将来枚举出第二条链路时不用再改这两处。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 首页、详情和托盘共享设备标识。
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct DeviceReading {
+    pub key: String,
+    pub name: String,
     pub family: DeviceFamily,
     pub level: u8,
     pub charging: bool,
+    pub connected: bool,
+    pub simulated: bool,
+}
+
+/// 设置只保存不透明标识，避免把设备序列号或接口路径写入配置。
+pub fn stable_key(source: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in source.bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// 一行读数文案，例如「鼠标 84%（充电中）」。
+#[cfg(test)]
 pub fn reading_line(r: &DeviceReading) -> String {
     let mut s = format!("{} {}%", r.family.noun(), r.level);
     if r.charging {
@@ -95,7 +129,12 @@ mod tests {
     }
 
     fn reading(family: DeviceFamily, level: u8, charging: bool) -> DeviceReading {
-        DeviceReading { family, level, charging }
+        DeviceReading {
+            family,
+            level,
+            charging,
+            ..Default::default()
+        }
     }
 
     #[test]

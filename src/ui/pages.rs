@@ -23,20 +23,15 @@
 //! 全部是**逻辑像素**（96 DPI 下的 px），和设计稿 `ui-prototype.html` 的
 //! CSS px 一一对应。这样对着原型调间距时不用换算。
 
-
+use crate::ui::dropdown::{drop_current, drop_selected, options};
 use crate::ui::gfx::{with_alpha, Align, Painter, R};
 use crate::ui::layout::{self, font, Breakpoint, Frame};
-use crate::ui::theme::Theme;
-use crate::ui::dropdown::{
-    drop_current, drop_selected, options,
-};
 use crate::ui::palette::{
-    hsv_to_rgb, pack_custom_rgb, palette_colors, palette_index, rgb_to_hsv, PAL_CELL,
-    PAL_COLS, PAL_GAP,
+    hsv_to_rgb, pack_custom_rgb, palette_colors, palette_index, rgb_to_hsv, PAL_CELL, PAL_COLS,
+    PAL_GAP,
 };
-use crate::ui::widget::{
-    Act, Drop, Edit, Icon, Page, Pref, Slide, Ui,
-};
+use crate::ui::theme::Theme;
+use crate::ui::widget::{Act, Drop, Edit, Icon, Page, Pref, Slide, Ui};
 
 /// 设置页「关于」里的开源仓库地址。
 const REPO_URL: &str = "https://github.com/youmikk/ROG-Battery";
@@ -100,38 +95,6 @@ impl Cursor {
             p.t.text,
             Align::Left,
         );
-        self.y = top + layout::H1_H + 20.0;
-    }
-
-    /// 包含设备型号徽章的页标题（用户需求：标题栏不显示名字，在电量页展示鼠标名称）。
-    fn h1_with_model(&mut self, p: &mut Painter, s: &str, model: &str) {
-        let top = self.y + 10.0;
-        let (tw, _) = p.measure(s, font::H1, true);
-        p.text(
-            s,
-            R::new(self.x, top, tw + 8.0, layout::H1_H),
-            font::H1,
-            true,
-            p.t.text,
-            Align::Left,
-        );
-        if !model.is_empty() {
-            let (mw, _) = p.measure(model, 12.0, true);
-            let badge_w = mw + 26.0;
-            let badge_r = R::new(self.x + tw + 16.0, top + 4.0, badge_w, layout::H1_H - 8.0);
-            p.round(badge_r, 6.0, p.t.bg_sunken);
-            p.round_stroke(badge_r, 6.0, p.t.border, 1.0);
-            // 绿色状态圆点
-            p.round(R::new(badge_r.x + 8.0, badge_r.cy() - 3.0, 6.0, 6.0), 3.0, p.t.green);
-            p.text(
-                model,
-                R::new(badge_r.x + 18.0, badge_r.y + (badge_r.h - 16.0) / 2.0, mw + 4.0, 16.0),
-                12.0,
-                true,
-                p.t.text2,
-                Align::Left,
-            );
-        }
         self.y = top + layout::H1_H + 20.0;
     }
 
@@ -375,19 +338,7 @@ fn swatch(p: &mut Painter, r: R, rgb: Option<[u8; 3]>) {
     }
 }
 
-/// 胶囊标签（`.badge`）。
-fn badge(p: &mut Painter, r: R, label: &str, fg: u32, bg: u32) {
-    p.pill(r, label, fg, bg, 11.0);
-}
-
 // ───────────────────────── 色盘 ─────────────────────────
-
-
-
-
-
-
-
 
 /// 色盘弹层的逻辑尺寸（含内边距）。
 fn palette_size(tab: u8) -> (f32, f32) {
@@ -607,7 +558,7 @@ fn color_button(p: &mut Painter, ui: &mut Ui, r: R, slot: u8, rgb: Option<[u8; 3
 /// 2. 充电中 → `green`。**必须先于低电量判断**：充电时电量往往正好很低，
 ///    顺序反了会把「正在充」显示成红色。
 /// 3. ≤20% → `red`。
-/// 4. 其余 → `accent`（蓝）。
+/// 4. 其余 → `accent`。
 fn ring_color(t: &Theme, has_state: bool, charging: bool, level: u8) -> u32 {
     if !has_state {
         t.track
@@ -758,184 +709,179 @@ fn draw_icon(p: &mut Painter, icon: Icon, r: R, color: u32, width: f32) {
 /// 画左侧导航（**窗口坐标**，不随滚动移动）。
 pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
     let t = p.t;
-    // 顶部 36px 是标题栏带，导航**不能**画进去 —— 否则最后一趟标题栏会用底色
-    // 把导航顶部（设备卡）盖掉一半，看起来"顶部被切了一刀"。
     let top = crate::ui::titlebar::TITLE_H;
-    // 底色 + 右边一条 1px 分隔线（都只从标题栏之下开始铺）
     p.rect(R::new(0.0, top, nav_w, win_h - top), t.bg_nav);
     p.line(nav_w - 0.5, top, nav_w - 0.5, win_h, t.border, 1.0);
-
-    let rail = ui.rail;
-    let pad = if rail { 8.0 } else { 8.0 };
-    let item_h = layout::NAV_ITEM_H;
-
-    // ---- 设备卡（仅展开时）----
-    let mut y = top + 12.0;
-    if !rail {
-        let dc = R::new(4.0, y, nav_w - 12.0, 66.0);
-        p.card(dc, 8.0, t.card, t.border);
-        let model = d
-            .ident
-            .map(|i| i.display_name())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "未找到设备".to_string());
-        p.text(
-            &model,
-            R::new(dc.x + 12.0, dc.y + 10.0, dc.w - 24.0, 18.0),
-            13.0,
-            true,
-            t.text,
-            Align::Left,
-        );
-        p.text(
-            link_text(d),
-            R::new(dc.x + 12.0, dc.y + 28.0, dc.w - 24.0, 14.0),
-            font::TINY,
-            false,
-            t.text3,
-            Align::Left,
-        );
-        // 「使用中」+ 电量。绿点用 dot，文字靠右。
-        let line_y = dc.y + 46.0;
-        let connected = d.state.is_some();
-        p.dot(
-            dc.x + 15.0,
-            line_y + 6.0,
-            3.0,
-            if connected { t.green } else { t.text3 },
-        );
-        p.text(
-            if connected { "已连接" } else { "未找到设备" },
-            R::new(dc.x + 23.0, line_y - 2.0, 60.0, 16.0),
-            12.0,
-            false,
-            t.text2,
-            Align::Left,
-        );
-        if let Some(st) = d.state {
-            let pct = format!("{}%", st.power);
-            p.text(
-                &pct,
-                R::new(dc.right() - 50.0, line_y - 2.0, 42.0, 16.0),
-                12.0,
-                true,
-                t.text,
-                Align::Right,
-            );
-        }
-        y = dc.bottom() + 12.0;
-    }
-
-    // ---- 五个导航项 ----
-    for page in Page::ALL {
-        let r = if rail {
-            R::new((nav_w - 38.0) / 2.0, y, 38.0, item_h)
+    for (page, label, y) in [
+        (Page::Home, "我的设备", top + 48.0),
+        (Page::Settings, "偏好设置", win_h - 108.0),
+    ] {
+        let r = R::new(12.0, y, nav_w - 24.0, layout::NAV_ITEM_H);
+        let on = if page == Page::Home {
+            ui.page != Page::Settings
         } else {
-            R::new(pad, y, nav_w - pad * 2.0, item_h)
+            ui.page == page
         };
         let act = Act::Nav(page);
-        let on = ui.page == page;
         if on {
-            p.round(r, layout::R_CTL, t.card);
-            // 左侧 3×15 圆角 2 的强调竖条，贴边
-            if rail {
-                p.round(
-                    R::new(r.x + 2.0, r.cy() - 7.5, 3.0, 15.0),
-                    1.5,
-                    t.accent,
-                );
-            } else {
-                p.round(R::new(0.0, r.cy() - 7.5, 3.0, 15.0), 1.5, t.accent);
-            }
+            p.round(r, 9.0, t.accent_soft);
         } else if ui.hover == Some(act) {
-            p.round(r, layout::R_CTL, with_alpha(t.text, 0x0C));
+            p.round(r, 9.0, t.card_hover);
         }
-        let fg = if on { t.accent } else { t.text };
-        if rail {
-            let ir = R::new(r.cx() - 8.0, r.cy() - 8.0, 16.0, 16.0);
-            draw_icon(p, page.icon(), ir, fg, 1.5);
+        let fg = if on { t.accent } else { t.text2 };
+        if page == Page::Home {
+            for (dx, dy) in [(0.0, 0.0), (9.0, 0.0), (0.0, 9.0), (9.0, 9.0)] {
+                p.round_stroke(
+                    R::new(r.x + 13.0 + dx, r.cy() - 8.0 + dy, 6.0, 6.0),
+                    1.2,
+                    fg,
+                    1.3,
+                );
+            }
         } else {
-            let ir = R::new(r.x + 12.0, r.cy() - 8.0, 16.0, 16.0);
-            draw_icon(p, page.icon(), ir, fg, 1.5);
+            draw_icon(
+                p,
+                Icon::Settings,
+                R::new(r.x + 12.0, r.cy() - 9.0, 18.0, 18.0),
+                fg,
+                1.5,
+            );
+        }
+        if !ui.rail {
             p.text(
-                page.title(),
-                R::new(ir.right() + 11.0, r.y, r.w - 45.0, r.h),
-                font::NAV,
+                label,
+                R::new(r.x + 42.0, r.y, r.w - 52.0, r.h),
+                13.0,
                 on,
                 fg,
                 Align::Left,
             );
         }
         ui.chrome_hot(r, act);
-        y += item_h + 1.0;
     }
-
-    // ---- 底部：折叠按钮 + 版本 ----
-    // 折叠开关放在左栏最下方。
-    let foot_y = (win_h - 30.0 - 10.0).max(y + 12.0);
-    let toggle = if rail {
-        R::new((nav_w - 38.0) / 2.0, foot_y, 38.0, 30.0)
-    } else {
-        R::new(pad, foot_y, nav_w - pad * 2.0, 30.0)
-    };
-    let tact = Act::ToggleRail;
-    if ui.hover == Some(tact) {
-        p.round(toggle, layout::R_CTL, with_alpha(t.text, 0x0C));
-    }
-    // 折叠箭头：展开时指左（「收起来」），收起时指右（「展开」）
-    {
-        let cx = if rail { toggle.cx() } else { toggle.x + 14.0 };
-        let cy = toggle.cy();
-        let dir = if rail { 1.0 } else { -1.0 };
-        p.polyline(
-            &[
-                (cx + 2.5 * dir, cy - 4.0),
-                (cx - 2.5 * dir, cy),
-                (cx + 2.5 * dir, cy + 4.0),
-            ],
-            t.text2,
-            1.6,
-        );
-    }
-    if !rail {
+    let toggle = R::new(12.0, win_h - 53.0, nav_w - 24.0, 28.0);
+    p.text(
+        if ui.rail { "›" } else { "‹" },
+        R::new(toggle.x + 9.0, toggle.y, 20.0, toggle.h),
+        20.0,
+        false,
+        t.text3,
+        Align::Center,
+    );
+    if !ui.rail {
         p.text(
-            "收起侧栏",
-            R::new(toggle.x + 30.0, toggle.y, toggle.w - 40.0, toggle.h),
-            font::HINT,
+            &format!("R Battery · {}", d.version),
+            R::new(toggle.x + 35.0, toggle.y, toggle.w - 35.0, toggle.h),
+            10.0,
             false,
-            t.text2,
+            t.text3,
             Align::Left,
         );
     }
-    ui.chrome_hot(toggle, tact);
+    ui.chrome_hot(toggle, Act::ToggleRail);
+}
 
-    // 版本 + 帧统计（只在展开时显示，收起时没有空间）
-    if !rail {
-        let stat_y = foot_y + 34.0;
-        if stat_y + 14.0 < win_h - 4.0 {
-            let s = if d.frames > 0 {
-                format!("{} 帧 · {} ms", d.frames, d.elapsed_ms)
-            } else {
-                String::new()
-            };
-            p.text(
-                &s,
-                R::new(pad + 4.0, stat_y, nav_w - 80.0, 14.0),
-                font::TINY,
-                false,
-                t.text3,
-                Align::Left,
-            );
-            p.text(
-                &format!("v{}", d.version),
-                R::new(pad, stat_y, nav_w - pad * 2.0 - 4.0, 14.0),
-                font::TINY,
-                false,
-                t.text3,
-                Align::Right,
+fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
+    let t = p.t;
+    let back = R::new(c.x, c.y + 6.0, 92.0, 26.0);
+    button(p, ui, back, "‹ 所有设备", false, Act::Nav(Page::Home));
+    c.y += 40.0;
+    let name = d.selected.map(|r| r.name.as_str()).unwrap_or("设备详情");
+    c.h1(p, name);
+    let tabs = [
+        (Page::Battery, "电量与设置"),
+        (Page::Perf, "性能"),
+        (Page::Light, "灯光"),
+        (Page::Keys, "按键"),
+    ];
+    let is_mouse = d
+        .selected
+        .is_some_and(|r| r.family == crate::device::DeviceFamily::Mouse);
+    let mut x = c.x;
+    for (page, label) in tabs {
+        if page != Page::Battery && !is_mouse {
+            continue;
+        }
+        let r = R::new(
+            x,
+            c.y,
+            if page == Page::Battery { 112.0 } else { 72.0 },
+            33.0,
+        );
+        let on = ui.page == page;
+        let glyph = match page {
+            Page::Battery => Icon::Battery,
+            Page::Perf => Icon::Perf,
+            Page::Light => Icon::Light,
+            _ => Icon::Keys,
+        };
+        draw_icon(
+            p,
+            glyph,
+            R::new(r.x + 5.0, r.cy() - 7.0, 14.0, 14.0),
+            if on { t.accent } else { t.text2 },
+            1.3,
+        );
+        p.text(
+            label,
+            R::new(r.x + 21.0, r.y, r.w - 21.0, r.h),
+            12.5,
+            on,
+            if on { t.accent } else { t.text2 },
+            Align::Center,
+        );
+        if on {
+            p.round(
+                R::new(r.x + 8.0, r.bottom() - 2.0, r.w - 16.0, 2.0),
+                1.0,
+                t.accent,
             );
         }
+        ui.hot(r, Act::Nav(page));
+        x += r.w + 8.0;
     }
+    p.hline(c.x, c.x + c.w, c.y + 34.0, t.border);
+    c.y += 55.0;
+}
+
+fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
+    let Some(device) = d.selected else { return };
+    let pref = d.cfg.tray_for(&device.key);
+    c.h2(p, "托盘显示", false);
+    let card = c.card(p, layout::ROW_H * if pref.enabled { 3.0 } else { 1.0 });
+    let area = row_area(card, card.y);
+    let ctl = row_label(p, area, "在托盘显示电量", Some("仅控制这台设备"), 40.0);
+    let sw = R::new(ctl.x, ctl.cy() - 10.0, 40.0, 20.0);
+    p.switch(sw, pref.enabled, true);
+    ui.hot(sw, Act::ToggleDeviceTray);
+    if pref.enabled {
+        row_rule(p, card, area);
+        let area = row_area(card, card.y + layout::ROW_H);
+        let help = if pref.kind == crate::tray_prefs::TrayKind::Auto {
+            format!("自动识别为{}，可手动纠正", device.family.noun())
+        } else {
+            "手动选择优先于自动识别".to_string()
+        };
+        let ctl = row_label(p, area, "托盘图标", Some(&help), 150.0);
+        drop_button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+            Drop::TrayKind,
+            d,
+        );
+        row_rule(p, card, area);
+        let area = row_area(card, card.y + layout::ROW_H * 2.0);
+        let ctl = row_label(p, area, "显示内容", None, 150.0);
+        drop_button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+            Drop::TrayContent,
+            d,
+        );
+    }
+    c.y = card.bottom();
 }
 
 // ───────────────────────── 入口 ─────────────────────────
@@ -949,6 +895,9 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     ui.locked = !d.state.is_some_and(|s| !placeholder_state(s));
 
     let mut c = Cursor::new(f);
+    if !matches!(ui.page, Page::Home | Page::Settings) {
+        device_header(p, ui, d, &mut c);
+    }
     match ui.page {
         Page::Home => home(p, ui, d, f, &mut c),
         Page::Battery => battery(p, ui, d, f, &mut c),
@@ -1227,471 +1176,224 @@ fn draw_drop(p: &mut Painter, ui: &mut Ui, d: &Data, drop: Drop, view_h: f32) {
 
 // ───────────────────────── 电量页 ─────────────────────────
 
-/// hero 卡（电量环 + KPI）的内部几何。
-///
-/// 高度必须由 KPI **实际行数**推导：窄屏（Narrow/Tiny）KPI 是单列 4 行，
-/// 早先写死 `ring_d + 156`，而 4 行要 `62 + 4*52`，卡片装不下，
-/// 第 3、4 行直接画到卡片外面，压住下面的「电量历史」标题。
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct HeroGeom {
-    /// 卡片高度。
-    hero_h: f32,
-    /// 设备信息卡宽度。
-    info_w: f32,
-    /// 主卡与信息卡之间的间距。
-    gap: f32,
-    /// 主卡宽度。
-    main_w: f32,
-    /// KPI 列起点，相对主卡左边。
-    kpi_x: f32,
-    /// KPI 单列可用宽度。
-    right_w: f32,
-    /// KPI 是否摆成两列。
-    two_cols: bool,
-    /// KPI 行数。
-    kv_rows: f32,
-    /// KPI 首行顶部，相对主卡上边。
-    kv_y: f32,
-}
-
-/// KPI 每行的纵向步进：label 14 + 值 26 + 行距 12 = 52。
-const KV_ROW_H: f32 = 52.0;
-/// 卡片底部留白。
-const HERO_PAD_B: f32 = 16.0;
-
-fn hero_geometry(bp: crate::ui::layout::Breakpoint, content_w: f32, ring_d: f32) -> HeroGeom {
-    let side_by_side = bp.hero_side_by_side();
-    let show_info = side_by_side && content_w > 760.0;
-    let info_w = 268.0;
-    let gap = 16.0;
-    let main_w = if show_info {
-        content_w - info_w - gap
-    } else {
-        content_w
-    };
-
-    // KPI 的横向布局只依赖内容宽度（不依赖卡片高度），先定列数，
-    // 再由行数反推卡片高度 —— 一处算一遍，不让两处各算一份。
-    let kpi_x = if side_by_side {
-        24.0 + ring_d + 26.0
-    } else {
-        24.0
-    };
-    let right_w = (main_w - 24.0 - kpi_x).max(80.0);
-    let two_cols = bp.kv_two_cols() && right_w > 180.0;
-    // KPI 已经压成一行，hero 卡里只留一条读数行。
-    let kv_rows = 1.0;
-    // 末行不需要下面那一档行距。
-    let kv_h = kv_rows * KV_ROW_H - 12.0;
-
-    let (hero_h, kv_y) = if side_by_side {
-        // 环在左、KPI 在右：环高 + 上下边距，但要保证不比 KPI 需要的矮。
-        ((ring_d + 68.0).max(38.0 + kv_h + HERO_PAD_B), 38.0)
-    } else {
-        // 环在上、KPI 在下：环(22 + ring_d) + 结论行 + KPI 整块 + 底边距。
-        let y = ring_d + 62.0;
-        (y + kv_h + HERO_PAD_B, y)
-    };
-
-    HeroGeom {
-        hero_h,
-        info_w,
-        gap,
-        main_w,
-        kpi_x,
-        right_w,
-        two_cols,
-        kv_rows,
-        kv_y,
-    }
-}
-
-/// 设备卡片墙：每台设备一张卡，卡上只有电量环和设备名，点卡片进它的详情页。
+/// 首页仅展示设备读数，点击进入该设备的详情。
 fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    c.h2(p, "设备", false);
-    // 读数表由刷新线程填，界面可能先画一帧；这时用状态里的电量兜一张卡，
-    // 免得首页闪一下「还没有读到设备」。
-    let mut list: Vec<crate::device::DeviceReading> = d.readings.to_vec();
-    if list.is_empty() {
-        if let Some(st) = d.state {
-            list.push(crate::device::DeviceReading {
-                family: crate::device::DeviceFamily::Unknown,
-                level: st.power,
-                charging: st.charging != 0,
-            });
-        }
-    }
-    let readings: &[crate::device::DeviceReading] = &list;
-    if readings.is_empty() {
+    c.h1(p, "我的设备");
+    p.text(
+        "所有设备的电量，一眼就好。",
+        R::new(c.x, c.y - 14.0, c.w, 20.0),
+        12.0,
+        false,
+        t.text2,
+        Align::Left,
+    );
+    c.y += 25.0;
+    if d.readings.is_empty() {
         p.text(
-            "还没有读到设备。插好接收器，或动一下设备再试。",
-            R::new(c.x + 6.0, c.y, c.w - 12.0, 18.0),
-            font::HINT,
+            "连接设备后会自动显示。",
+            R::new(c.x, c.y + 32.0, c.w, 30.0),
+            14.0,
             false,
             t.text3,
-            Align::Left,
+            Align::Center,
         );
-        c.y += 24.0;
+        c.y += 100.0;
         return;
     }
+    let columns = if c.w < 420.0 { 1 } else { 2 };
     let gap = 18.0;
-    let per_row = if c.w >= 900.0 { 3 } else { 2 };
-    let card_w = (c.w - gap * (per_row as f32 - 1.0)) / per_row as f32;
-    let card_h = 152.0;
-    for (i, dev) in readings.iter().enumerate() {
-        let col = i % per_row;
-        let row = i / per_row;
+    let width = (c.w - gap * (columns - 1) as f32) / columns as f32;
+    let height = 220.0;
+    for (index, dev) in d.readings.iter().enumerate() {
         let r = R::new(
-            c.x + col as f32 * (card_w + gap),
-            c.y + row as f32 * (card_h + gap),
-            card_w,
-            card_h,
+            c.x + (index % columns) as f32 * (width + gap),
+            c.y + (index / columns) as f32 * (height + gap),
+            width,
+            height,
         );
-        p.card(r, layout::R_CARD, t.card, t.border);
-        ui.hot(r, Act::Nav(Page::Battery));
-
-        let ring_r = 36.0;
-        let cx = r.cx();
-        let cy = r.y + 18.0 + ring_r + 7.0;
-        let color = ring_color(t, true, dev.charging, dev.level);
-        p.ring(cx, cy, ring_r, 8.0, dev.level as f32 / 100.0, color, color, t.border);
-        p.text(
-            &format!("{}", dev.level),
-            R::new(cx - ring_r, cy - 13.0, ring_r * 2.0, 26.0),
-            19.0,
-            true,
-            t.text,
-            Align::Center,
+        let act = Act::SelectDevice(index);
+        p.card(
+            r,
+            14.0,
+            t.card,
+            if ui.hover == Some(act) {
+                t.accent
+            } else {
+                t.border
+            },
         );
-
-        let name = if i == 0 {
-            d.ident
-                .map(|id| id.model_name.clone())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| dev.family.noun().to_string())
-        } else {
-            dev.family.noun().to_string()
-        };
+        ui.hot(r, act);
         p.text(
-            &name,
-            R::new(r.x + 10.0, r.bottom() - 44.0, r.w - 20.0, 20.0),
-            13.5,
-            true,
-            t.text,
-            Align::Center,
-        );
-        let sub = if dev.charging {
-            "充电中".to_string()
-        } else {
-            format!("{}%", dev.level)
-        };
-        p.text(
-            &sub,
-            R::new(r.x + 10.0, r.bottom() - 24.0, r.w - 20.0, 16.0),
-            font::HINT,
+            dev.family.noun(),
+            R::new(r.x + 18.0, r.y + 12.0, 80.0, 18.0),
+            10.5,
             false,
             t.text3,
+            Align::Left,
+        );
+        let color = ring_color(t, dev.connected, dev.charging, dev.level);
+        let cy = r.y + 83.0;
+        p.ring(
+            r.cx(),
+            cy,
+            48.0,
+            5.0,
+            dev.level as f32 / 100.0,
+            color,
+            color,
+            t.track,
+        );
+        p.text(
+            &format!("{}%", dev.level),
+            R::new(r.cx() - 46.0, cy - 21.0, 92.0, 35.0),
+            29.0,
+            false,
+            if dev.connected { t.text } else { t.text3 },
             Align::Center,
         );
-    }
-    let rows = (readings.len() + per_row - 1) / per_row;
-    c.y += rows as f32 * (card_h + gap);
-}
-
-fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
-    let t = p.t;
-    let model = d
-        .ident
-        .map(|i| i.display_name())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "未检测到设备".to_string());
-    c.h1_with_model(p, "电量", &model);
-
-    let st = d.state;
-    let level = st.map(|s| s.power).unwrap_or(0);
-    let charging = st.map(|s| s.charging != 0).unwrap_or(false);
-
-    // ---- hero：电量环 + KPI ----
-    //
-    // 原型里 hero 是**两张并排的卡片**：左边 `.hero-main`（环 + KPI），
-    // 右边 `.hero-side`（设备信息，扩展为 268px 以免型号或序列号截断）。
-    let side_by_side = f.bp.hero_side_by_side();
-    let show_info = side_by_side && c.w > 760.0;
-    let ring_d = f.bp.ring_diameter();
-    let g = hero_geometry(f.bp, c.w, ring_d);
-    let (hero_h, info_w, gap, main_w) = (g.hero_h, g.info_w, g.gap, g.main_w);
-    let hero = c.card_w(p, main_w, hero_h);
-
-    // 左卡片里环之后剩下的宽度
-    let kpi_x = hero.x + g.kpi_x;
-    let right_w = g.right_w;
-    let kv_y = hero.y + g.kv_y;
-
-    // 电量环。
-    //
-    // 读不到设备时（鼠标休眠）**不能画 0% 加红环** —— 0 是「电量耗尽」的意思，
-    // 用户会以为鼠标没电了。实测休眠时界面显示「0% + 电量偏低」红色徽章，
-    // 而真实电量其实是 77%。读不到就画一条灰色空环 + 「—」。
-    {
-        let cx = hero.x + 24.0 + ring_d * 0.5;
-        let cy = if side_by_side {
-            // 不再整卡垂直居中：上面要留 20px 边，下面要留一行结论的位置。
-            hero.y + 20.0 + ring_d * 0.5
-        } else {
-            hero.y + 22.0 + ring_d * 0.5
-        };
-        let frac = if st.is_some() {
-            level as f32 / 100.0
-        } else {
-            0.0
-        };
-
-        // 环色三态，规则见 [`ring_color`]（那边有单测锁优先级）。
-        let ring_color = ring_color(t, st.is_some(), charging, level);
-
-        if charging && st.is_some() {
-            // 这一帧真的画了动效 —— 让 canvas 的定时器据此决定要不要继续跑。
-            // 定时器自己不知道「还需不需要重绘」，只能靠每帧画出来的事实。
-            ui.anim_hint = true;
-            // 充电动效：一段固定长度的亮色弧沿整圈匀速跑动。
-            //
-            // 为什么不用「整圈呼吸」：呼吸动画在不满一圈的进度弧上会让人分不清
-            // 「电量在涨」还是「环在自己闪」。跑动的彗尾更明确 —— 它只有一个方向，
-            // 而且不影响静态读数（进度弧本身照常画，另叠一条尾巴）。
-            p.arc_comet(
-                cx,
-                cy,
-                ring_d * 0.5 - 5.0,
-                7.0,
-                frac,
-                t.green,
-                ring_color,
-                t.track,
-            );
-        } else {
-            p.ring(
-                cx,
-                cy,
-                ring_d * 0.5 - 5.0,
-                7.0,
-                frac,
-                ring_color,
-                ring_color,
-                t.track,
-            );
-        }
-        let txt = if st.is_some() {
-            format!("{level}")
-        } else {
-            "—".to_string()
-        };
-        // 把「数字 + 单位/徽章」当作**一组**在环心竖直居中，而不是各自摆放 ——
-        // 之前数字框中心在 cy-2、充电徽章中心在 cy+27，整组重心明显偏下，
-        // 徽章底边还压到环的下侧笔画，用户反馈「字不居中」。
-        if st.is_some() && charging {
-            // 数字 + 闪电胶囊：整组高 ≈ 40 + 4 + 16 = 60，从 cy-30 起排。
-            p.text(
-                &txt,
-                R::new(cx - 50.0, cy - 30.0, 100.0, 40.0),
-                font::NUM_RING,
-                true,
-                t.text,
-                Align::Center,
-            );
-            let bw = 56.0;
-            let bh = 16.0;
-            let br = R::new(cx - bw / 2.0, cy + 10.0, bw, bh);
-            p.round(br, 8.0, with_alpha(t.green, 0x2A));
-            p.text("⚡充电中", br, 9.5, true, t.green, Align::Center);
-        } else if st.is_some() {
-            // 数字 + 「%」：数字中心落在 cy-4，「%」贴在其下方，整组居中。
-            p.text(
-                &txt,
-                R::new(cx - 50.0, cy - 24.0, 100.0, 40.0),
-                font::NUM_RING,
-                true,
-                t.text,
-                Align::Center,
-            );
-            p.text(
-                "%",
-                R::new(cx - 50.0, cy + 12.0, 100.0, 14.0),
-                font::TINY,
-                false,
-                t.text3,
-                Align::Center,
-            );
-        } else {
-            // 读不到电量：只画「—」，居中。
-            p.text(
-                &txt,
-                R::new(cx - 50.0, cy - 22.0, 100.0, 40.0),
-                font::NUM_RING,
-                true,
-                t.text,
-                Align::Center,
-            );
-        }
-    }
-
-    // ---- 环下方的结论：预计可用 / 预计充满 ----
-    //
-    // 这是整页最想知道的一句话，所以放在环正下方、用正文色加粗，而不是塞进
-    // 下面 2×2 的 KPI 里跟「电压」「回报率」平起平坐。充电 / 放电 / 样本不足
-    // 三种说法由 `Estimate::short_text` 统一给出，这里不判断。
-    {
-        let cx = hero.x + 24.0 + ring_d * 0.5;
-        let w = (ring_d + 40.0).max(120.0);
-        let y = hero.y + 22.0 + ring_d + 4.0;
-        let txt = d.estimate.short_text();
-        let known = d.estimate.known;
         p.text(
-            &txt,
-            R::new(cx - w * 0.5, y, w, 18.0),
-            if known { 13.0 } else { 12.0 },
-            known,
-            if known { t.text } else { t.text3 },
-            Align::Center,
-        );
-    }
-
-    // KPI 压成一行：四个读数并排。它们只是「此刻的读数」，不需要 2×2 的版面。
-    {
-        let parts: Vec<String> = if let Some(s) = st {
-            vec![
-                format!("电压 {} mV", s.voltage_mv),
-                format!("回报率 {}", crate::proto::poll_name(s.poll_code)),
-                format!(
-                    "第 {} 档 {} DPI",
-                    s.active_stage.max(1),
-                    s.dpi(cur_stage(s))
-                ),
-                if d.estimate.known {
-                    format!("{:+.2} %/h", d.estimate.percent_per_hour)
-                } else {
-                    "变化 —".to_string()
-                },
-            ]
-        } else {
-            vec![
-                "电压 —".to_string(),
-                "回报率 —".to_string(),
-                "档位 —".to_string(),
-                "变化 —".to_string(),
-            ]
-        };
-        p.text(
-            &parts.join("  ·  "),
-            R::new(kpi_x, kv_y, right_w, 20.0),
-            font::HINT,
+            if !dev.connected {
+                "上次电量"
+            } else if dev.charging {
+                "正在充电"
+            } else if dev.level <= 20 {
+                "电量偏低"
+            } else {
+                "使用中"
+            },
+            R::new(r.cx() - 45.0, cy + 16.0, 90.0, 16.0),
+            10.0,
             false,
             t.text2,
-            Align::Left,
-        );
-    }
-
-    // 设备信息：**另起一张卡片**放在 hero 右边（在电量页清晰展示读取到的鼠标型号与状态）。
-    if show_info {
-        let side = R::new(hero.right() + gap, hero.y, info_w, hero_h);
-        p.card(side, layout::R_CARD, t.card, t.border);
-        let sx = side.x + 18.0;
-        let inner_w = info_w - 36.0;
-        let sy = side.y + 16.0;
-
-        // 顶部醒目展示读取到的设备型号名字
-        p.text(
-            "当前设备",
-            R::new(sx, sy, inner_w, 13.0),
-            font::TINY,
-            false,
-            t.text3,
-            Align::Left,
+            Align::Center,
         );
         p.text(
-            &model,
-            R::new(sx, sy + 15.0, inner_w, 18.0),
-            13.5,
+            &dev.name,
+            R::new(r.x + 16.0, r.y + 151.0, r.w - 32.0, 25.0),
+            14.0,
             true,
             t.text,
-            Align::Left,
+            Align::Center,
         );
+        p.text(
+            if !dev.connected {
+                "未连接"
+            } else if dev.simulated {
+                "模拟设备"
+            } else {
+                "已连接"
+            },
+            R::new(r.x + 16.0, r.y + 181.0, r.w - 32.0, 18.0),
+            11.0,
+            false,
+            t.text3,
+            Align::Center,
+        );
+    }
+    c.y += d.readings.len().div_ceil(columns) as f32 * (height + gap);
+}
 
-        let mut ly = sy + 38.0;
-        let ident = d.ident;
-        // 设备大类：PID 在对照表里就能说出是鼠标 / 键盘 / 手柄。
-        let kind_text = {
-            let pid = ident
-                .map(|i| if i.wired_pid != 0 { i.wired_pid } else { i.wireless_pid })
-                .unwrap_or(0);
-            crate::devices::find(pid)
-                .map(|dv| dv.kind.as_str().to_string())
-                .unwrap_or_else(|| "—".to_string())
-        };
-        let lines: [(&str, String); 4] = [
-            (
-                "序列号",
-                ident.map(|i| i.mouse_sn.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "—".to_string()),
-            ),
-            (
-                "接收器固件",
-                ident
-                    .map(|i| i.dongle_firmware.clone())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "—".to_string()),
-            ),
-            (
-                "连接方式",
-                if d.state.is_some() {
-                    link_text(d).to_string()
-                } else {
-                    "离线 / 休眠".to_string()
-                },
-            ),
-            ("设备类型", kind_text),
-        ];
-        for (k, v) in lines.iter() {
-            p.text(k, R::new(sx, ly, 74.0, 16.0), 12.0, false, t.text3, Align::Left);
+fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
+    let t = p.t;
+    let selected = d.selected;
+    let level = selected
+        .map(|r| r.level)
+        .or_else(|| d.state.map(|s| s.power))
+        .unwrap_or(0);
+    let connected = selected.map(|r| r.connected).unwrap_or(d.state.is_some());
+    let charging = selected.map(|r| r.charging).unwrap_or(false);
+    let hero = c.card(p, 175.0);
+    let color = ring_color(t, connected, charging, level);
+    let cx = hero.x + 84.0;
+    let cy = hero.y + 87.0;
+    p.ring(
+        cx,
+        cy,
+        54.0,
+        5.5,
+        level as f32 / 100.0,
+        color,
+        color,
+        t.track,
+    );
+    p.text(
+        &format!("{level}%"),
+        R::new(cx - 50.0, cy - 23.0, 100.0, 37.0),
+        30.0,
+        false,
+        t.text,
+        Align::Center,
+    );
+    let status = if !connected {
+        "未连接"
+    } else if charging {
+        "正在充电"
+    } else {
+        "使用中"
+    };
+    p.text(
+        status,
+        R::new(cx - 45.0, cy + 19.0, 90.0, 17.0),
+        11.0,
+        false,
+        t.text2,
+        Align::Center,
+    );
+    let x = hero.x + 166.0;
+    let remaining = if !connected {
+        "等待设备连接".to_string()
+    } else if charging {
+        "正在为设备充电".to_string()
+    } else if d.estimate.known {
+        format!("预计还能使用 {}", d.estimate.short_text())
+    } else {
+        "电量状态".to_string()
+    };
+    p.text(
+        &remaining,
+        R::new(x, hero.y + 42.0, hero.right() - x - 20.0, 28.0),
+        18.0,
+        false,
+        t.text,
+        Align::Left,
+    );
+    let link = if selected.is_some_and(|r| r.simulated) {
+        "模拟设备"
+    } else if connected {
+        link_text(d)
+    } else {
+        "连接后更新读数"
+    };
+    p.text(
+        link,
+        R::new(x, hero.y + 84.0, hero.right() - x - 20.0, 22.0),
+        12.0,
+        false,
+        t.text2,
+        Align::Left,
+    );
+    if let Some(st) = d.state {
+        if selected.is_some_and(|r| r.family == crate::device::DeviceFamily::Mouse) {
             p.text(
-                v,
-                R::new(sx + 76.0, ly, inner_w - 76.0, 16.0),
+                &format!(
+                    "{} DPI  ·  {}",
+                    st.dpi(cur_stage(st)),
+                    crate::proto::poll_name(st.poll_code)
+                ),
+                R::new(x, hero.y + 116.0, hero.right() - x - 20.0, 20.0),
                 12.0,
                 false,
                 t.text2,
-                Align::Right,
+                Align::Left,
             );
-            ly += 19.0;
-        }
-
-        // 状态胶囊。
-        //
-        // 读不到设备（休眠）时显示「休眠中」灰胶囊 —— **不能**因为 `level`
-        // 默认成 0 就落到「电量偏低」分支，那是在没有任何数据的情况下报警。
-        let mut bx = sx;
-        let by = ly + 4.0;
-        let pill_h = 21.0;
-        let (label, fg, bg) = if st.is_none() {
-            ("未连接", t.text3, t.bg_sunken)
-        } else if charging {
-            ("充电中", t.warn, t.warn_soft)
-        } else if level <= 15 {
-            ("电量偏低", t.red, t.red_soft)
-        } else {
-            ("使用中", t.green, t.green_soft)
-        };
-        let w = label.chars().count() as f32 * 11.0 + 16.0;
-        badge(p, R::new(bx, by, w, pill_h), label, fg, bg);
-        bx += w + 6.0;
-        if let Some(s) = st {
-            let l = format!("{} 档休眠", crate::proto::sleep_mode_name(s.sleep_mode));
-            let w2 = l.chars().count() as f32 * 11.0 + 16.0;
-            if bx + w2 <= side.right() - 16.0 {
-                badge(p, R::new(bx, by, w2, pill_h), &l, t.text3, t.bg_sunken);
-            }
         }
     }
-
     c.y = hero.bottom();
+    device_tray_settings(p, ui, d, c);
+    if selected.is_some_and(|r| r.family != crate::device::DeviceFamily::Mouse || r.simulated) {
+        return;
+    }
 
     // ---- 电量历史 ----
     // ---- 设备设置 ----
@@ -2985,6 +2687,69 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tray_controls_only_exist_when_enabled_even_offline() {
+        use crate::ui::gfx::{Canvas, Fonts};
+        let screen = unsafe { crate::win32::GetDC(std::ptr::null_mut()) };
+        assert!(!screen.is_null());
+        let mut canvas = Canvas::new();
+        canvas.ensure(screen as isize, 1100, 760);
+        let mut fonts = Fonts::new("Segoe UI").unwrap();
+        let device = crate::mock::parse("mouse|Test device|78|0|offline").remove(0);
+        let estimate = crate::history::Estimate::default();
+        let mut cfg = crate::settings::Settings::default();
+        let mut ui = Ui::default();
+        ui.select_device(&device.key);
+        let frame = Frame::new(1100.0, 760.0, 196.0);
+        for enabled in [true, false, true] {
+            cfg.device_tray
+                .entry(device.key.clone())
+                .or_default()
+                .enabled = enabled;
+            let data = Data {
+                selected: Some(&device),
+                state: None,
+                ident: None,
+                link_mode: "",
+                status: String::new(),
+                plot: None,
+                estimate: &estimate,
+                rows: 0,
+                cfg: &cfg,
+                autostart_text: "",
+                autostart_on: false,
+                version: "test",
+                readings: std::slice::from_ref(&device),
+            };
+            ui.begin_frame();
+            canvas.paint(
+                &mut fonts,
+                &crate::ui::theme::LIGHT,
+                1.0,
+                0.0,
+                1100.0,
+                760.0,
+                |p| page(p, &mut ui, &data, &frame),
+            );
+            assert!(ui.hots.iter().any(|h| h.act == Act::ToggleDeviceTray));
+            assert_eq!(
+                ui.hots
+                    .iter()
+                    .any(|h| h.act == Act::OpenDrop(Drop::TrayKind)),
+                enabled
+            );
+            assert_eq!(
+                ui.hots
+                    .iter()
+                    .any(|h| h.act == Act::OpenDrop(Drop::TrayContent)),
+                enabled
+            );
+        }
+        canvas.release();
+        unsafe {
+            crate::win32::ReleaseDC(std::ptr::null_mut(), screen);
+        }
+    }
 
     #[test]
     fn placeholder_state_is_told_from_a_real_one() {
@@ -3074,46 +2839,6 @@ mod tests {
         assert_eq!(ka, chart_geom(&a, r, 50, 40.0).key);
     }
 
-    /// hero 卡必须装得下它自己画的 KPI：`kv_y + 行数*行距 - 行距 + 底边距`
-    /// 不能超过 `hero_h`。窄屏（单列 4 行）是曾经画到卡外、压住下一个标题的那档。
-    #[test]
-    fn hero_card_always_fits_its_kpi_rows() {
-        use crate::ui::layout::Breakpoint;
-        for bp in [
-            Breakpoint::Wide,
-            Breakpoint::Mid,
-            Breakpoint::Narrow,
-            Breakpoint::Tiny,
-        ] {
-            for w in [520.0f32, 560.0, 700.0, 760.0, 900.0, 1100.0, 1440.0] {
-                let ring_d = bp.ring_diameter();
-                let g = hero_geometry(bp, w, ring_d);
-                let kpi_bottom = g.kv_y + (g.kv_rows - 1.0) * KV_ROW_H + 14.0 + 26.0;
-                assert!(
-                    kpi_bottom + HERO_PAD_B <= g.hero_h + 0.01,
-                    "{bp:?} w={w}: KPI 底 {kpi_bottom} + 底边距 超出卡高 {}",
-                    g.hero_h
-                );
-                assert_eq!(g.kv_rows, 1.0);
-                assert!(g.right_w >= 80.0);
-            }
-        }
-    }
-
-    /// 两列时必须真的两行，单列时必须四行 —— 行数错了卡片高度就跟着错。
-    #[test]
-    fn hero_kpi_row_count_matches_columns() {
-        use crate::ui::layout::Breakpoint;
-        for bp in [
-            Breakpoint::Wide,
-            Breakpoint::Mid,
-            Breakpoint::Narrow,
-            Breakpoint::Tiny,
-        ] {
-            let g = hero_geometry(bp, 1100.0, bp.ring_diameter());
-            assert_eq!(g.kv_rows, 1.0);
-        }
-    }
     use super::*;
 
     #[test]
@@ -3124,6 +2849,7 @@ mod tests {
         cfg.refresh_interval_sec = 60;
         let est = crate::history::Estimate::default();
         let d = Data {
+            selected: None,
             state: None,
             ident: None,
             link_mode: "",
@@ -3133,13 +2859,14 @@ mod tests {
             rows: 0,
             cfg: &cfg,
             autostart_text: "",
-        autostart_on: false,
+            autostart_on: false,
             version: "test",
-            frames: 0,
-            elapsed_ms: 0,
             readings: &[],
         };
-        let modes: Vec<usize> = options(Drop::LightMode, &d).iter().map(|(_, v)| *v).collect();
+        let modes: Vec<usize> = options(Drop::LightMode, &d)
+            .iter()
+            .map(|(_, v)| *v)
+            .collect();
         assert!(!modes.contains(&3), "3 = Rainbow 不该出现在候选里");
         assert!(!modes.contains(&5), "5 = Comet 不该出现在候选里");
         assert!(modes.contains(&0));
@@ -3185,6 +2912,7 @@ mod tests {
         let cfg = crate::settings::Settings::default();
         let est = crate::history::Estimate::default();
         let d = Data {
+            selected: None,
             state: None,
             ident: None,
             link_mode: "",
@@ -3194,10 +2922,8 @@ mod tests {
             rows: 0,
             cfg: &cfg,
             autostart_text: "",
-        autostart_on: false,
+            autostart_on: false,
             version: "test",
-            frames: 0,
-            elapsed_ms: 0,
             readings: &[],
         };
         let opts = options(Drop::Sleep, &d);

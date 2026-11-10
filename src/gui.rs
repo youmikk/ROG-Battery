@@ -53,8 +53,8 @@ use std::time::Duration;
 
 use native_windows_gui as nwg;
 
-use crate::hid::{self, HidDevice};
 use crate::commands::{run_cmd, run_file_cmd};
+use crate::hid::{self, HidDevice};
 use crate::proto;
 use crate::settings::{self, Settings};
 use crate::snapshot::{self, FetchOutcome};
@@ -179,7 +179,13 @@ impl Cmd {
             Cmd::Sleep(c) => format!("自动休眠 {}", proto::sleep_mode_name(*c)),
             Cmd::LowBatt(p) => format!("低电量阈值 {p}%"),
             Cmd::FullEffect(v) => format!("充满效果 {}", if *v != 0 { "开" } else { "关" }),
-            Cmd::AutoStart(on) => if *on { "开机自启开启".to_string() } else { "开机自启关闭".to_string() },
+            Cmd::AutoStart(on) => {
+                if *on {
+                    "开机自启开启".to_string()
+                } else {
+                    "开机自启关闭".to_string()
+                }
+            }
             Cmd::Backup(_) => "导出配置".to_string(),
             Cmd::Restore(_) => "还原配置".to_string(),
         }
@@ -231,12 +237,6 @@ impl CmdResult {
     }
 }
 
-/// 后台线程与 GUI 线程共享的全部状态。
-/// 超过这个时长没读到设备，托盘就把读数标成「历史读数」并转灰。
-///
-/// 取 90 秒：后台刷新间隔是 60 秒，留一次失败重试的余量。
-const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
-
 /// 低于这个电量提醒一次。
 const LOW_ALERT_PCT: u8 = 20;
 /// 回充到这个电量以上才重新允许提醒 —— 否则在 20% 附近上下抖动会反复弹。
@@ -258,7 +258,224 @@ fn low_battery_alert(level: u8, charging: bool, armed: &mut bool) -> bool {
     true
 }
 
+#[derive(Clone)]
+struct DeviceSnapshot {
+    reading: crate::device::DeviceReading,
+    state: Option<proto::State>,
+    ident: proto::Identity,
+    link: Option<hid::Link>,
+    full_at: std::time::Instant,
+}
+
+fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
+    if let Some(mut readings) = crate::mock::readings() {
+        readings.sort_by_key(|d| d.family.order());
+        let mut s = lock_shared(shared);
+        s.devices = readings
+            .iter()
+            .map(|r| {
+                (
+                    r.key.clone(),
+                    DeviceSnapshot {
+                        reading: r.clone(),
+                        state: None,
+                        ident: proto::Identity {
+                            model_name: r.name.clone(),
+                            ..Default::default()
+                        },
+                        link: None,
+                        full_at: std::time::Instant::now(),
+                    },
+                )
+            })
+            .collect();
+        s.readings = readings;
+        s.status = Status::Ok;
+        return None;
+    }
+    let links = crate::win32::HidApi::load().and_then(|api| hid::open_links(&api));
+    let links = match links {
+        Ok(links) => links,
+        Err(e) => {
+            let mut s = lock_shared(shared);
+            for device in s.devices.values_mut() {
+                device.reading.connected = false;
+                device.state = None;
+            }
+            for reading in &mut s.readings {
+                reading.connected = false;
+            }
+            s.quick = None;
+            s.full = None;
+            s.status = Status::Error(e);
+            return None;
+        }
+    };
+    let (mut records, active, mut primary, ttl) = {
+        let s = lock_shared(shared);
+        (
+            s.devices.clone(),
+            s.active_key.clone(),
+            s.primary_key.clone(),
+            Duration::from_secs(s.cfg.cache_ttl_sec),
+        )
+    };
+    for record in records.values_mut() {
+        record.reading.connected = false;
+    }
+    let mut sample = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for link in links {
+        let link_key = link.device_key();
+        let previous = records
+            .values()
+            .find(|d| d.link.as_ref().is_some_and(|l| l.device_key() == link_key))
+            .cloned();
+        let needs_full = previous.as_ref().is_none_or(|d| d.state.is_none())
+            || (full
+                && previous
+                    .as_ref()
+                    .is_some_and(|d| d.full_at.elapsed() >= ttl)
+                && active
+                    .as_ref()
+                    .is_none_or(|k| previous.as_ref().is_some_and(|d| &d.reading.key == k)));
+        let out = match HidDevice::open(&link.iface) {
+            Ok(mut dev) => {
+                if needs_full {
+                    snapshot::fetch(&mut dev, &link.all_interfaces, link.report_id, &link.mode)
+                } else {
+                    snapshot::fetch_light(&mut dev, link.report_id, &link.mode)
+                }
+            }
+            Err(_) => continue,
+        };
+        let is_connected = out.snapshot.frames.contains_key("12:07:00");
+        let mut ident = if needs_full {
+            out.snapshot.identity.clone()
+        } else {
+            previous
+                .as_ref()
+                .map(|d| d.ident.clone())
+                .unwrap_or_default()
+        };
+        if ident.model_name.is_empty() {
+            ident.model_name = link.iface.product.clone();
+        }
+        let key = if !ident.mouse_sn.trim().is_empty() {
+            crate::device::stable_key(&format!("device:{}", ident.mouse_sn.trim()))
+        } else if !ident.mouse_mac.trim().is_empty() {
+            crate::device::stable_key(&format!("device:{}", ident.mouse_mac.trim()))
+        } else {
+            previous
+                .as_ref()
+                .map(|d| d.reading.key.clone())
+                .unwrap_or(link_key)
+        };
+        if let Some(old) = previous.as_ref().filter(|old| {
+            old.reading.key != key
+                && old.ident.mouse_sn.trim().is_empty()
+                && old.ident.mouse_mac.trim().is_empty()
+        }) {
+            let mut s = lock_shared(shared);
+            if outcome_is_stale(generation, s.write_gen) {
+                return None;
+            }
+            records.remove(&old.reading.key);
+            if s.promote_device_key(&old.reading.key, &key) {
+                if settings::save(&s.cfg).is_err() {
+                    tray_log("device identity preferences save failed");
+                }
+            }
+            primary = s.primary_key.clone();
+        }
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let name = ident.display_name();
+        let family = crate::device::family_of(&name);
+        let complete = out.snapshot.frames.contains_key("12:04:02")
+            && out.snapshot.frames.contains_key("12:05:00")
+            && out.snapshot.frames.contains_key("12:03:00");
+        let mut state = if needs_full && complete {
+            Some(out.snapshot.state.clone())
+        } else {
+            previous.as_ref().and_then(|d| d.state.clone())
+        };
+        if let Some(st) = &mut state {
+            st.power = out.snapshot.state.power;
+            st.charging = out.snapshot.state.charging;
+            st.voltage_mv = out.snapshot.state.voltage_mv;
+            st.poll_code = out.snapshot.state.poll_code;
+            st.active_stage = out.snapshot.state.active_stage;
+        }
+        let level = if is_connected {
+            out.snapshot.state.power
+        } else {
+            previous.as_ref().map(|d| d.reading.level).unwrap_or(0)
+        };
+        let record = DeviceSnapshot {
+            reading: crate::device::DeviceReading {
+                key: key.clone(),
+                name: if name.is_empty() {
+                    family.noun().to_string()
+                } else {
+                    name
+                },
+                family,
+                level,
+                charging: is_connected && out.snapshot.state.charging != 0,
+                connected: is_connected,
+                simulated: false,
+            },
+            state: if is_connected { state } else { None },
+            ident,
+            link: Some(link),
+            full_at: if needs_full && complete {
+                std::time::Instant::now()
+            } else {
+                previous
+                    .as_ref()
+                    .map(|d| d.full_at)
+                    .unwrap_or_else(std::time::Instant::now)
+            },
+        };
+        {
+            let mut s = lock_shared(shared);
+            if outcome_is_stale(generation, s.write_gen) {
+                return None;
+            }
+            if primary.as_ref().is_none_or(|k| k == &key)
+                && (s.primary_key.is_none() || s.primary_key.as_ref() == Some(&key))
+            {
+                s.primary_key = Some(key.clone());
+                sample = apply_outcome(&out, &mut s, generation);
+                s.ident = Some(record.ident.clone());
+                s.device_family = family;
+            }
+        }
+        records.insert(key, record);
+    }
+    let mut s = lock_shared(shared);
+    if !outcome_is_stale(generation, s.write_gen) {
+        for d in records.values_mut() {
+            if !d.reading.connected {
+                d.state = None;
+            }
+        }
+        s.readings = records.values().map(|d| d.reading.clone()).collect();
+        s.readings.sort_by(|a, b| {
+            (a.family.order(), &a.name, &a.key).cmp(&(b.family.order(), &b.name, &b.key))
+        });
+        s.devices = records;
+    }
+    sample
+}
+
 struct Shared {
+    devices: std::collections::BTreeMap<String, DeviceSnapshot>,
+    key_aliases: std::collections::BTreeMap<String, String>,
+    active_key: Option<String>,
+    primary_key: Option<String>,
     /// 最近一次**全量**快照里解析出的状态。`None` = 还没读全过。
     ///
     /// 性能/灯光/按键三页只能用它 —— 3 帧轻量读取里 DPI 编码、颜色、按键表
@@ -283,7 +500,7 @@ struct Shared {
     low_alert_armed: bool,
     /// 当前设备的族（鼠标/耳机/键盘），提示语按它说话。
     device_family: crate::device::DeviceFamily,
-    /// 所有看得到的设备读数。真机只有一条；模拟模式下是夹具里的整张表。
+    /// 设备列表与当前详情独立更新。
     pub readings: Vec<crate::device::DeviceReading>,
     /// 写操作代次。每提交一条写命令自增。
     ///
@@ -315,7 +532,7 @@ struct Shared {
     ///
     /// 改成队列后连点几下都会依次执行。上限 [`MAX_PENDING`] 防止用户
     /// 疯狂拖滑块时堆几百条命令、松手后设备还在慢慢追。
-    pending: VecDeque<Cmd>,
+    pending: VecDeque<(Cmd, Option<hid::Link>)>,
     /// 最近一条命令的结果，GUI 线程取走一次就清空。
     last: Option<CmdResult>,
     /// 下一轮要不要读全量。
@@ -325,6 +542,10 @@ struct Shared {
 impl Shared {
     fn new(cfg: Settings) -> Shared {
         Shared {
+            devices: Default::default(),
+            key_aliases: Default::default(),
+            active_key: None,
+            primary_key: None,
             full: None,
             ident: None,
             link_mode: String::new(),
@@ -346,6 +567,29 @@ impl Shared {
             last: None,
             want_full: false,
         }
+    }
+
+    // 完整身份晚于首次电量返回时，保留选择和托盘偏好。
+    fn promote_device_key(&mut self, old: &str, new: &str) -> bool {
+        for key in self.key_aliases.values_mut() {
+            if key == old {
+                *key = new.to_string();
+            }
+        }
+        self.key_aliases.insert(old.to_string(), new.to_string());
+        for selected in [&mut self.active_key, &mut self.primary_key] {
+            if selected.as_deref() == Some(old) {
+                *selected = Some(new.to_string());
+            }
+        }
+        if self.cfg.device_tray.contains_key(new) {
+            return false;
+        }
+        if let Some(pref) = self.cfg.device_tray.get(old).copied() {
+            self.cfg.device_tray.insert(new.to_string(), pref);
+            return true;
+        }
+        false
     }
 
     /// 界面要显示的状态：全量快照 + 活电量。
@@ -543,32 +787,18 @@ fn tray_log(line: &str) {
 }
 
 struct TrayCtl {
-    /// 回调消息的接收窗口（`msg_window`，托盘必须挂在 MessageWindow 上）。
     hwnd: win32::Handle,
-    /// 当前托盘图标的身份（固定 GUID，或加不上时退回的编号）。
-    /// `None` = 现在没有图标。
-    id: std::cell::Cell<Option<win32::TrayId>>,
-    /// 当前显示的图标句柄。**必须一直有效** —— `Shell_NotifyIconW` 不拷贝图标，
-    /// 句柄销毁了任务栏上就是一片空白。
-    cur: std::cell::Cell<win32::Handle>,
-    /// 上一次写进托盘的悬停提示。
-    ///
-    /// 提示只在电量/连接/DPI 变化时才该变，但 `OnNotice` 每条消息都来一次，
-    /// 拖滑块时是 100+ 次/秒。每次 `NIM_MODIFY` 都是跨进程调用，加上重建
-    /// 四行文本的字符串分配 —— 缓存一下，内容没变就不发。
-    last_tip: std::cell::RefCell<String>,
-    /// 第 2 个及以后的图标（多设备时每台一个）。
-    ///
-    /// 0 号槽位沿用 `id`/`cur` 那一套（升级前的折叠状态挂在它的 GUID 上），
-    /// 这里只放额外槽位，避免动到主图标的既有逻辑。
-    extra: std::cell::RefCell<Vec<ExtraTray>>,
+    enabled: Cell<bool>,
+    entries: std::cell::RefCell<Vec<TrayEntry>>,
+    slots: std::cell::RefCell<std::collections::BTreeMap<String, u8>>,
 }
 
-/// 一个额外槽位的托盘图标。
-struct ExtraTray {
+struct TrayEntry {
+    key: String,
     slot: u8,
     id: win32::TrayId,
     icon: win32::Handle,
+    signature: String,
     tip: String,
 }
 
@@ -576,157 +806,174 @@ impl TrayCtl {
     fn new(hwnd: win32::Handle) -> Self {
         Self {
             hwnd,
-            id: std::cell::Cell::new(None),
-            cur: std::cell::Cell::new(std::ptr::null_mut()),
-            last_tip: std::cell::RefCell::new(String::new()),
-            extra: std::cell::RefCell::new(Vec::new()),
+            enabled: Cell::new(false),
+            entries: Default::default(),
+            slots: Default::default(),
         }
     }
 
-    /// 添加/移除托盘图标。退出时必须调，否则任务栏上留一个点不动的幽灵图标。
-    fn set_visibility(&self, on: bool) {
-        if on == self.id.get().is_some() {
+    fn set_visibility(&self, enabled: bool) {
+        self.enabled.set(enabled);
+        if !enabled {
+            for entry in self.entries.borrow_mut().drain(..) {
+                win32::tray_remove(self.hwnd, entry.id);
+                unsafe {
+                    win32::DestroyIcon(entry.icon);
+                }
+            }
+        }
+    }
+
+    fn sync(&self, readings: &[crate::device::DeviceReading], cfg: &Settings) {
+        self.set_visibility(cfg.tray_enabled);
+        if !self.enabled.get() {
             return;
         }
-        if on {
-            // 先用占位图标加进去；真实电量图标由通知循环在下一拍换上。
-            let Some(h) = crate::tray_icon::render_unknown() else {
-                return;
-            };
-            match win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", 0) {
-                Some(id) => {
-                    // 只有降级到编号模式才记一笔：正常路径不留日志。
-                    if !id.uses_guid {
-                        tray_log("add guid=fail fallback=ok");
-                    }
-                    self.id.set(Some(id));
-                    self.cur.set(h);
-                    // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
-                    // 「内容没变」的判断会把真实提示吞掉。
-                    self.last_tip.borrow_mut().clear();
-                }
-                None => {
-                    tray_log("add guid=fail fallback=fail");
-                    unsafe { win32::DestroyIcon(h) };
-                }
-            }
+        let visible: Vec<_> = readings
+            .iter()
+            .filter(|r| cfg.tray_for(&r.key).enabled)
+            .collect();
+        let wanted: Vec<String> = if visible.is_empty() {
+            vec![String::new()]
         } else {
-            if let Some(id) = self.id.take() {
-                win32::tray_remove(self.hwnd, id);
+            visible.iter().map(|r| r.key.clone()).collect()
+        };
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|entry| {
+            if wanted.contains(&entry.key) {
+                return true;
             }
-            let old = self.cur.replace(std::ptr::null_mut());
-            if !old.is_null() {
-                unsafe { win32::DestroyIcon(old) };
+            win32::tray_remove(self.hwnd, entry.id);
+            unsafe {
+                win32::DestroyIcon(entry.icon);
             }
-            for e in self.extra.borrow_mut().drain(..) {
-                win32::tray_remove(self.hwnd, e.id);
-                if !e.icon.is_null() {
-                    unsafe { win32::DestroyIcon(e.icon) };
-                }
-            }
-        }
-    }
-
-    /// 一次同步全部图标：`items[0]` 走主图标，其余走额外槽位。
-    ///
-    /// 只在「图标集合真的变了」时调用（调用方按签名去重），所以这里不做缓存。
-    fn set_slots(&self, items: &[(win32::Handle, String)]) {
-        if let Some((h, tip)) = items.first() {
-            self.set_icon(*h);
-            self.set_tip(tip);
-        }
-        let mut extra = self.extra.borrow_mut();
-        for (i, (h, tip)) in items.iter().enumerate().skip(1) {
-            let slot = i as u8;
-            if let Some(e) = extra.iter_mut().find(|e| e.slot == slot) {
-                win32::tray_update(self.hwnd, e.id, Some(*h), Some(tip));
-                let old = std::mem::replace(&mut e.icon, *h);
-                if !old.is_null() && old != *h {
-                    unsafe { win32::DestroyIcon(old) };
-                }
-                e.tip.clear();
-                e.tip.push_str(tip);
-            } else if let Some(id) = win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, *h, tip, slot) {
-                extra.push(ExtraTray { slot, id, icon: *h, tip: tip.clone() });
-            } else {
-                unsafe { win32::DestroyIcon(*h) };
-            }
-        }
-        // 设备变少：把多余的槽位撤掉（否则任务栏上留着点不动的旧图标）。
-        let keep = items.len().max(1);
-        let mut gone = Vec::new();
-        extra.retain(|e| {
-            let keep_this = (e.slot as usize) < keep;
-            if !keep_this {
-                gone.push((e.id, e.icon));
-            }
-            keep_this
+            false
         });
-        drop(extra);
-        for (id, icon) in gone {
-            win32::tray_remove(self.hwnd, id);
-            if !icon.is_null() {
-                unsafe { win32::DestroyIcon(icon) };
+        for key in wanted {
+            let reading = visible.iter().find(|r| r.key == key);
+            let pref = cfg.tray_for(&key);
+            let tip = reading
+                .map(|r| {
+                    format!(
+                        "{} · {}%{}",
+                        r.name,
+                        r.level,
+                        if !r.connected {
+                            "（上次电量，未连接）"
+                        } else if r.charging {
+                            "（充电中）"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .unwrap_or_else(|| "R Battery · 打开设备页面".to_string());
+            let signature = format!(
+                "{:?}:{pref:?}:{}:{tip}",
+                reading,
+                crate::autostart::system_uses_light_theme()
+            );
+            if entries
+                .iter()
+                .any(|entry| entry.key == key && entry.signature == signature)
+            {
+                continue;
+            }
+            let icon = if let Some(r) = reading {
+                crate::tray_icon::render_device(
+                    if r.connected { Some(r.level) } else { None },
+                    r.charging,
+                    pref.kind.resolve(r.family),
+                    pref.content,
+                )
+            } else {
+                let h = win32::load_app_icon(32);
+                if h.is_null() {
+                    crate::tray_icon::render_unknown()
+                } else {
+                    Some(h)
+                }
+            };
+            let Some(icon) = icon else { continue };
+            if let Some(entry) = entries.iter_mut().find(|e| e.key == key) {
+                if win32::tray_update(self.hwnd, entry.id, Some(icon), Some(&tip)) {
+                    unsafe {
+                        win32::DestroyIcon(entry.icon);
+                    }
+                    entry.icon = icon;
+                    entry.signature = signature;
+                    entry.tip = tip;
+                } else {
+                    unsafe {
+                        win32::DestroyIcon(icon);
+                    }
+                }
+            } else {
+                let slot = if key.is_empty() {
+                    0
+                } else {
+                    let mut slots = self.slots.borrow_mut();
+                    if let Some(slot) = slots.get(&key) {
+                        *slot
+                    } else {
+                        let slot = (1..=255).find(|slot| !slots.values().any(|s| s == slot));
+                        let Some(slot) = slot else {
+                            unsafe {
+                                win32::DestroyIcon(icon);
+                            }
+                            continue;
+                        };
+                        slots.insert(key.clone(), slot);
+                        slot
+                    }
+                };
+                if let Some(id) = win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, &tip, slot) {
+                    entries.push(TrayEntry {
+                        key,
+                        slot,
+                        id,
+                        icon,
+                        signature,
+                        tip,
+                    });
+                } else {
+                    unsafe {
+                        win32::DestroyIcon(icon);
+                    }
+                    tray_log("add failed");
+                }
             }
         }
     }
 
-    fn set_icon(&self, hicon: win32::Handle) {
-        let Some(id) = self.id.get() else {
-            unsafe { win32::DestroyIcon(hicon) };
-            return;
-        };
-        win32::tray_update(self.hwnd, id, Some(hicon), None);
-        let old = self.cur.replace(hicon);
-        if !old.is_null() && old != hicon {
-            unsafe { win32::DestroyIcon(old) };
-        }
+    fn device_for_callback(&self, wp: usize, lp: isize) -> Option<String> {
+        let v4 = ((lp as u32) >> 16) as u32;
+        let uid = if v4 != 0 { v4 } else { wp as u32 };
+        self.entries
+            .borrow()
+            .iter()
+            .find(|e| e.id.uid == uid)
+            .map(|e| e.key.clone())
     }
 
-    fn set_tip(&self, tip: &str) {
-        let Some(id) = self.id.get() else {
-            return;
-        };
-        // 内容没变就不发：拖滑块时每条鼠标消息都会走到这里。
-        if self.last_tip.borrow().as_str() == tip {
-            return;
-        }
-        win32::tray_update(self.hwnd, id, None, Some(tip));
-        let mut last = self.last_tip.borrow_mut();
-        last.clear();
-        last.push_str(tip);
-    }
-
-    /// 资源管理器重启后托盘图标会整片消失：系统会广播 `TaskbarCreated`
-    /// 给所有顶层窗口，收到就重新 `NIM_ADD` 一次，把图标（和稍后的提示）
-    /// 放回任务栏。不处理的话用户会以为程序被关掉了。
     fn re_add(&self) {
-        if self.id.get().is_none() {
-            return;
-        }
-        let cur = self.cur.get();
-        let icon = if cur.is_null() {
-            match crate::tray_icon::render_unknown() {
-                Some(h) => h,
-                None => return,
+        for entry in self.entries.borrow_mut().iter_mut() {
+            if let Some(id) = win32::tray_add(
+                self.hwnd,
+                TRAY_CALLBACK_MSG,
+                entry.icon,
+                &entry.tip,
+                entry.slot,
+            ) {
+                entry.id = id;
             }
-        } else {
-            cur
-        };
-        if let Some(id) =
-            win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, "R Battery", 0)
-        {
-            if !id.uses_guid {
-                tray_log("re-add guid=fail fallback=ok");
-            }
-            self.id.set(Some(id));
-            self.cur.set(icon);
-            // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
-            // 「内容没变」的判断会把真实提示吞掉。
-            self.last_tip.borrow_mut().clear();
-        } else if icon != cur {
-            unsafe { win32::DestroyIcon(icon) };
         }
+    }
+}
+
+impl std::ops::Drop for TrayCtl {
+    fn drop(&mut self) {
+        self.set_visibility(false);
     }
 }
 
@@ -752,7 +999,13 @@ impl<'a> UiEnv<'a> {
     }
 
     fn state(&self) -> Option<proto::State> {
-        lock_shared(self.shared).ui_state()
+        let s = lock_shared(self.shared);
+        let key = self.canvas.with_ui(|u| u.selected_device.clone());
+        match key.as_ref().and_then(|k| s.devices.get(k)) {
+            Some(d) => d.state.clone(),
+            None if key.is_none() => s.ui_state(),
+            None => None,
+        }
     }
 
     fn cfg(&self) -> Settings {
@@ -761,17 +1014,19 @@ impl<'a> UiEnv<'a> {
 
     /// 改一项本地设置并立刻落盘，同时让界面用上新值。
     fn set_cfg(&self, f: impl FnOnce(&mut Settings)) {
-        let snapshot = {
-            let mut s = lock_shared(self.shared);
-            f(&mut s.cfg);
-            s.cfg.clone()
-        };
+        let mut shared = lock_shared(self.shared);
+        let mut snapshot = shared.cfg.clone();
+        f(&mut snapshot);
         if let Err(e) = settings::save(&snapshot) {
+            drop(shared);
             self.say(format!("✘ 保存设置失败：{e}"));
+        } else {
+            shared.cfg = snapshot;
         }
     }
 
     fn submit(&self, cmd: Cmd) -> bool {
+        lock_shared(self.shared).active_key = self.canvas.with_ui(|u| u.selected_device.clone());
         let ok = submit(self.shared, self.signal, cmd);
         if !ok {
             // 以前这里是什么都不说就返回 false —— 用户点了一下，
@@ -802,10 +1057,39 @@ fn handle_act(a: Act, env: &UiEnv) {
     }
 
     match a {
+        Act::SelectDevice(index) => {
+            let key = env.canvas.with_ui(|u| u.device_keys.get(index).cloned());
+            if let Some(key) = key {
+                env.canvas.with_ui_mut(|u| u.select_device(&key));
+                let mut s = lock_shared(env.shared);
+                s.active_key = Some(key);
+                s.want_full = true;
+            }
+            env.signal.request_refresh();
+            env.canvas.repaint_now();
+        }
+        Act::ToggleDeviceTray => {
+            if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
+                env.set_cfg(|c| {
+                    let pref = c.device_tray.entry(key).or_default();
+                    pref.enabled = !pref.enabled;
+                    if pref.enabled {
+                        c.tray_enabled = true;
+                    }
+                });
+                env.tray.set_visibility(env.cfg().tray_enabled);
+                env.canvas.with_ui_mut(|u| u.set_open_drop(None));
+                env.canvas.repaint_now();
+            }
+        }
         Act::None => {}
 
         Act::Nav(p) => {
-            env.canvas.with_ui_mut(|u| u.page = p);
+            env.canvas.with_ui_mut(|u| {
+                u.page = p;
+                u.initial_route_done = true;
+                u.set_open_drop(None);
+            });
             // 切到需要全量数据的页 → 立刻补一次全量读取。
             // 否则第一次进性能页看到的是「还没读到」或者几分钟前的旧值。
             if matches!(p, Page::Perf | Page::Light | Page::Keys) {
@@ -1117,6 +1401,21 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
     };
 
     match d {
+        Drop::TrayKind | Drop::TrayContent => {
+            if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
+                env.set_cfg(|c| {
+                    let pref = c.device_tray.entry(key).or_default();
+                    if d == Drop::TrayKind {
+                        if let Some(kind) = crate::tray_prefs::TrayKind::ALL.get(code) {
+                            pref.kind = *kind;
+                        }
+                    } else if let Some(content) = crate::tray_prefs::TrayContent::ALL.get(code) {
+                        pref.content = *content;
+                    }
+                });
+                env.canvas.repaint_now();
+            }
+        }
         Drop::Sleep => {
             env.submit(Cmd::Sleep(code as u8));
         }
@@ -1577,26 +1876,6 @@ fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
     gen_at_read != current
 }
 
-/// 把一次读取的结果搬进 [`Shared`]。返回本轮的电量快照（供记历史）。
-/// 组装设备读数表：模拟模式用夹具，否则只有当前这一台。
-///
-/// 抽成纯函数是为了能单测「夹具优先」和「单设备兜底」两条路径。
-fn readings_for(
-    mock: Option<Vec<crate::device::DeviceReading>>,
-    family: crate::device::DeviceFamily,
-    level: u8,
-    charging: bool,
-) -> Vec<crate::device::DeviceReading> {
-    match mock {
-        Some(rows) if !rows.is_empty() => rows,
-        _ => vec![crate::device::DeviceReading {
-            family,
-            level,
-            charging,
-        }],
-    }
-}
-
 /// 出错时追加一段诊断日志（`<设置目录>/diagnostics.log`）。
 ///
 /// 只在「接收器都不在」时写：休眠是正常状态，不该反复覆盖文件。
@@ -1691,12 +1970,6 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         active_stage: st.active_stage,
     };
     s.quick = Some(q);
-    s.readings = readings_for(
-        crate::mock::readings(),
-        s.device_family,
-        q.level,
-        q.charging,
-    );
     s.last_ok_at = Some(std::time::Instant::now());
 
     // 全量快照才填 `full`：3 帧轻量读取里 DPI 颜色、按键表都是默认值，
@@ -1738,7 +2011,12 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
         if s.pending.len() >= MAX_PENDING {
             return false;
         }
-        s.pending.push_back(cmd);
+        let target = s
+            .active_key
+            .as_ref()
+            .and_then(|k| s.devices.get(k))
+            .and_then(|d| d.link.clone());
+        s.pending.push_back((cmd, target));
         s.status = Status::Busy;
         s.write_gen = s.write_gen.wrapping_add(1);
     }
@@ -1753,25 +2031,6 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
 ///
 /// 每次重新 `open_link` 而不长期持有句柄：鼠标休眠/唤醒、接收器重连都会让
 /// 旧句柄失效，长期持有反而要处理一堆失效重开逻辑。
-fn read_once(
-    cache: &mut snapshot::SnapshotCache,
-    full: bool,
-) -> Result<Option<FetchOutcome>, String> {
-    let api = crate::win32::HidApi::load()?;
-    let link = hid::open_link(&api)?;
-    let mut dev = HidDevice::open(&link.iface)?;
-    Ok(if full {
-        Some(cache.get(
-            &mut dev,
-            &link.all_interfaces,
-            link.report_id,
-            &link.mode,
-        ))
-    } else {
-        cache.get_light(&mut dev, link.report_id, &link.mode)
-    })
-}
-
 // ==================== 后台线程执行命令 ====================
 
 /// 写设备时 `ops` 的 `keep` / `save` 两个开关。
@@ -1839,6 +2098,7 @@ pub(crate) fn autostart_hint(
 /// 优先用 `hid::open_link` 实测出来的 [`Shared::link_mode`]；只有在还没读到
 /// 实测值时才退回「接收器 SN 是否为空」的旧判据 —— 那个判据在 2.4G 下会
 /// 误判成有线，是用户报过的 bug。
+#[cfg(test)]
 fn conn_text(s: &Shared) -> &'static str {
     match s.link_mode.as_str() {
         "Wired" => "有线",
@@ -1867,46 +2127,6 @@ fn link_code(s: &Shared) -> i32 {
 }
 
 /// 托盘悬停提示（多行）：鼠标名称 / 连接方式 / 电量 / 当前 DPI 与档位。
-fn tray_tip_full(s: &Shared) -> String {
-    let name = s
-        .ident
-        .as_ref()
-        .map(|i| i.display_name())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "未找到设备".to_string());
-
-    let conn = conn_text(s);
-
-    // 多设备：有多条读数就把它们全列出来（真机通常只有一条，等于没变化）。
-    if s.readings.len() > 1 {
-        let lines: Vec<String> = s.readings.iter().map(crate::device::reading_line).collect();
-        return format!("{name}\n{}", lines.join("\n"));
-    }
-
-    let battery = match s.quick {
-        Some(q) => crate::device::reading_line(&crate::device::DeviceReading {
-            family: s.device_family,
-            level: q.level,
-            charging: q.charging,
-        }),
-        None => match &s.status {
-            Status::Asleep => "电量 —（设备未响应）".to_string(),
-            Status::Error(_) => "电量 —（读取出错）".to_string(),
-            _ => "电量 —".to_string(),
-        },
-    };
-
-    let dpi = match (s.quick, s.full.as_ref()) {
-        (Some(q), Some(st)) => {
-            let idx = (q.active_stage as usize).saturating_sub(1).min(3);
-            format!("{} DPI · 第 {} 档", st.dpi(idx), q.active_stage.max(1))
-        }
-        (Some(q), None) => format!("第 {} 档", q.active_stage.max(1)),
-        _ => "DPI —".to_string(),
-    };
-
-    format!("{name}\n{conn}\n{battery}\n{dpi}")
-}
 
 /// 早期的单行悬停提示（只有电量）。
 ///
@@ -2196,16 +2416,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             // 只在锁里拷一份数据，**不在锁里画** —— 画一帧要几毫秒，
             // 握着锁会让后台线程写结果时多等这段。
             let (
-                state,
-                ident,
-                link_mode,
+                mut state,
+                mut ident,
+                mut link_mode,
                 plot,
                 estimate,
                 cfg,
                 autostart_text,
                 autostart_on,
-                frames,
-                elapsed,
                 rows_n,
                 err_text,
             ) = {
@@ -2219,31 +2437,65 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     s.cfg.clone(),
                     s.autostart_text(),
                     s.autostart_on(),
-                    s.frames,
-                    s.elapsed_ms,
                     s.rows.len(),
                     s.error_text(),
                 )
             };
             let theme = *ui.mode.theme();
-            let readings: Vec<crate::device::DeviceReading> =
-                lock_shared(&shared_p).readings.clone();
+            let readings = {
+                let s = lock_shared(&shared_p);
+                if let Some(key) = ui.selected_device.as_ref().and_then(|k| s.key_aliases.get(k)) {
+                    if s.devices.contains_key(key) {
+                        ui.selected_device = Some(key.clone());
+                    }
+                }
+                s.readings.clone()
+            };
+            ui.sync_devices(&readings);
+            let selected = ui
+                .selected_device
+                .as_ref()
+                .and_then(|key| readings.iter().find(|r| &r.key == key));
+            let (record, is_primary) = {
+                let mut s = lock_shared(&shared_p);
+                s.active_key = ui.selected_device.clone();
+                (
+                    ui.selected_device
+                        .as_ref()
+                        .and_then(|k| s.devices.get(k))
+                        .cloned(),
+                    s.primary_key.as_ref() == ui.selected_device.as_ref(),
+                )
+            };
+            if let Some(record) = &record {
+                state = record.state.clone();
+                ident = Some(record.ident.clone());
+                link_mode = record
+                    .link
+                    .as_ref()
+                    .map(|l| l.mode.clone())
+                    .unwrap_or_default();
+            }
+            let empty_estimate = crate::history::Estimate::default();
             let data = crate::ui::viewdata::Data {
+                selected,
                 state: state.as_ref(),
                 ident: ident.as_ref(),
                 link_mode: &link_mode,
                 // 常驻错误文字（读不到设备的原因 / 正在写设备）。
                 // 瞬时提示走 `ui.status`，由 `pages::draw_toast` 优先显示。
                 status: err_text,
-                plot: plot.as_deref(),
-                estimate: &estimate,
-                rows: rows_n,
+                plot: if is_primary { plot.as_deref() } else { None },
+                estimate: if is_primary {
+                    &estimate
+                } else {
+                    &empty_estimate
+                },
+                rows: if is_primary { rows_n } else { 0 },
                 cfg: &cfg,
                 autostart_text: &autostart_text,
                 autostart_on,
                 version: APP_VERSION,
-                frames,
-                elapsed_ms: elapsed,
                 readings: &readings,
             };
             canvas::draw_frame(inner, fonts, ui, args, &theme, &data)
@@ -2286,9 +2538,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         let signal_t = Arc::clone(&signal);
         let sender_t = sender;
         std::thread::spawn(move || {
-            let mut cache = snapshot::SnapshotCache::new(
-                lock_shared(&shared_t).cfg.cache_ttl_sec,
-            );
             let mut seen = 0u64;
             loop {
                 if !signal_t.wait_for_work(&mut seen) {
@@ -2308,13 +2557,23 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 let mut ran = 0usize;
                 loop {
                     let cmd = { lock_shared(&shared_t).pending.pop_front() };
-                    let Some(cmd) = cmd else { break };
+                    let Some((cmd, target)) = cmd else { break };
                     let res = match &cmd {
-                        Cmd::Backup(_) | Cmd::Restore(_) => run_file_cmd(&cmd),
-                        _ => run_cmd(&cmd),
+                        Cmd::Backup(_) | Cmd::Restore(_) => run_file_cmd(&cmd, target.as_ref()),
+                        _ => run_cmd(&cmd, target.as_ref()),
                     };
-                    cache.invalidate();
                     let mut s = lock_shared(&shared_t);
+                    if let Some(target) = &target {
+                        for device in s.devices.values_mut() {
+                            if device
+                                .link
+                                .as_ref()
+                                .is_some_and(|link| link.device_key() == target.device_key())
+                            {
+                                device.state = None;
+                            }
+                        }
+                    }
                     // 自启命令改的就是「系统里那个开关」，改完必须把新状态
                     // 抄回 `Shared`，否则设置页那一行还停在旧文案上。
                     // 放在这里而不是 `run_autostart` 里：那个函数不持锁、也不该持。
@@ -2341,35 +2600,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     }
                 }
 
-                // ② TTL 改了要重建缓存（`SnapshotCache::new` 只在建时记 ttl）。
-                let ttl_now = lock_shared(&shared_t).cfg.cache_ttl_sec;
-                if cache.ttl != Duration::from_secs(ttl_now) {
-                    cache = snapshot::SnapshotCache::new(ttl_now);
-                }
-
-                // ③ 一轮读取。
                 let (full, gen_at_read) = {
                     let mut s = lock_shared(&shared_t);
-                    let f = s.want_full;
+                    let full = s.want_full;
                     s.want_full = false;
-                    (f, s.write_gen)
+                    (full, s.write_gen)
                 };
-                let res = read_once(&mut cache, full);
-                let sample = {
-                    let mut s = lock_shared(&shared_t);
-                    match res {
-                        Ok(Some(out)) => apply_outcome(&out, &mut s, gen_at_read),
-                        Ok(None) => {
-                            // 轻量读取走了缓存之外的分支（不该发生），保守当休眠。
-                            s.status = Status::Asleep;
-                            None
-                        }
-                        Err(e) => {
-                            s.status = Status::Error(e);
-                            None
-                        }
-                    }
-                };
+                let sample = refresh_devices(&shared_t, full, gen_at_read);
 
                 // ④ 记一条历史采样 + 重算续航估算。
                 //
@@ -2401,15 +2638,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // ── 事件处理 ────────────────────────────────────────────
     //
     // 闭包是 `Fn`，所以所有可变状态都要放进 `Cell` / `RefCell`。
-    let tray_level: Cell<Option<u8>> = Cell::new(None);
     // 多图标集合的签名：变了才重建，否则每拍都要重画 N 张图标。
-    let tray_sig = std::cell::RefCell::new(String::new());
 
     let h_mi_quit = mi_quit.handle.clone();
 
     let shared_e = Arc::clone(&shared);
     let signal_e = Arc::clone(&signal);
     let canvas_e = canvas.clone();
+    let canvas_tray = canvas.clone();
 
     // explorer 重启后系统广播这条消息，收到要把托盘图标重新加回去。
     // 消息号要在主处理器 move 走 `tray` 之前先备好一份 Arc。
@@ -2492,9 +2728,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 // 但动效从「该出现」到「真出现」晚 60 秒用户是感觉不到的。
                 let want_anim = {
                     let s = lock_shared(&shared_e);
-                    let on_battery = canvas.with_ui(|u| {
-                        u.page == crate::ui::widget::Page::Battery
-                    });
+                    let on_battery = canvas.with_ui(|u| u.page == crate::ui::widget::Page::Battery);
                     let charging = on_battery && s.quick.map(|q| q.charging).unwrap_or(false);
                     let toast_active = canvas.with_ui(|u| !u.status.is_empty());
                     charging || toast_active
@@ -2527,97 +2761,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     canvas.repaint_now();
                 }
 
-                // ③ 托盘图标 + 悬停提示
-                let (q, asleep) = {
-                    let s = lock_shared(&shared_e);
-                    (s.quick, matches!(s.status, Status::Asleep))
-                };
-                // `set_tip` 只收 `&str`，所以每次都要造一个新 String。
-                let stale = {
-                    let s = lock_shared(&shared_e);
-                    s.last_ok_at
-                        .map(|t| t.elapsed() > STALE_AFTER)
-                        .unwrap_or(false)
-                };
-                let tip = {
-                    let s = lock_shared(&shared_e);
-                    let mut t = tray_tip_full(&s);
-                    if stale {
-                        t.push_str("（历史读数）");
-                    }
-                    t
-                };
-                tray.set_tip(&tip);
-                // 多设备：每台一个图标。0 号仍是主图标，其余进额外槽位。
-                let multi: Vec<(u8, bool, String)> = {
-                    let s = lock_shared(&shared_e);
-                    if s.readings.len() > 1 {
-                        s.readings
-                            .iter()
-                            .map(|r| (r.level, r.charging, crate::device::reading_line(r)))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    }
-                };
-                if !multi.is_empty() {
-                    let sig = multi
-                        .iter()
-                        .map(|(l, c, line)| format!("{l}{c}{line}"))
-                        .collect::<Vec<_>>()
-                        .join("|");
-                    if tray_sig.borrow().as_str() != sig {
-                        let items: Vec<(win32::Handle, String)> = multi
-                            .iter()
-                            .filter_map(|(level, charging, line)| {
-                                let h = if *charging {
-                                    crate::tray_icon::render_charging(*level)
-                                } else {
-                                    crate::tray_icon::render(*level)
-                                };
-                                h.map(|h| (h, line.clone()))
-                            })
-                            .collect();
-                        if !items.is_empty() {
-                            tray.set_slots(&items);
-                            *tray_sig.borrow_mut() = sig;
+                {
+                    let mut s = lock_shared(&shared_e);
+                    tray.sync(&s.readings, &s.cfg);
+                    if let Some(q) = s.quick {
+                        if low_battery_alert(q.level, q.charging, &mut s.low_alert_armed) {
+                            canvas
+                                .with_ui_mut(|u| u.set_status("设备电量低，建议充电".to_string()));
                         }
-                    }
-                }
-                // 休眠时不要显示上一次的电量数字，那会误导（用户以为还是 84%）。
-                // 但也不能退回应用图标 —— 那样任务栏上只剩一个图标，看不出是电量，
-                // 用户报过「托盘短暂出现只显示图标而不是数字」。所以读不到就画一条
-                // 短横线占位。
-                let want: Option<u8> = if asleep { None } else { q.map(|v| v.level) };
-                if want != tray_level.get() {
-                    let charging = q.map(|v| v.charging).unwrap_or(false);
-                    let hicon = match want {
-                        Some(level) if stale => crate::tray_icon::render_stale(level),
-                        Some(level) if charging => crate::tray_icon::render_charging(level),
-                        Some(level) => crate::tray_icon::render(level),
-                        None => crate::tray_icon::render_unknown(),
-                    };
-                    if let Some(level) = want {
-                        let fire = {
-                            let mut s = lock_shared(&shared_e);
-                            low_battery_alert(level, charging, &mut s.low_alert_armed)
-                        };
-                        if fire {
-                            let noun = {
-                                let s = lock_shared(&shared_e);
-                                s.device_family.noun()
-                            };
-                            canvas.with_ui_mut(|u| {
-                                u.set_status(format!("{noun}电量低，建议充电"))
-                            });
-                            canvas.set_animating(true);
-                            canvas.repaint_now();
-                        }
-                    }
-                    if let Some(hicon) = hicon {
-                        // `TrayCtl::set_icon` 负责换图并销毁旧句柄。
-                        tray.set_icon(hicon);
-                        tray_level.set(want);
                     }
                 }
 
@@ -2633,8 +2784,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 图标是我们自己用 `Shell_NotifyIconW` 加的（见 `TrayCtl`），鼠标事件会
     // 发到 `TRAY_CALLBACK_MSG`，由 `msg_window` 接收。nwg 那条「托盘事件」
     // 通道已经不参与，所以这里用裸处理器。
+    let shared_tray = Arc::clone(&shared);
+    let signal_tray = Arc::clone(&signal);
     let tray_handler = unsafe {
-        nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |_h, msg, _wp, lp| {
+        nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |_h, msg, wp, lp| {
             // 资源管理器重启：所有托盘图标都没了，重新加一次。
             if taskbar_created != 0 && msg == taskbar_created {
                 tray_tb.re_add();
@@ -2653,7 +2806,19 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 // WM_LBUTTONUP：直接回主窗口。
                 // SW_RESTORE = 9：既显示窗口、又取消最小化。
                 // 用裸句柄，不用 `window`（它已被主处理器 move 走）。
-                0x0202 => {
+                0x0202 | 0x0400 | 0x0401 => {
+                    if let Some(key) = tray_tb.device_for_callback(wp, lp) {
+                        if key.is_empty() {
+                            canvas_tray.with_ui_mut(|u| u.page = Page::Home);
+                        } else {
+                            canvas_tray.with_ui_mut(|u| u.select_device(&key));
+                            let mut s = lock_shared(&shared_tray);
+                            s.active_key = Some(key);
+                            s.want_full = true;
+                            signal_tray.request_refresh();
+                        }
+                        canvas_tray.repaint_now();
+                    }
                     let _ = crate::win32::ShowWindow(hwnd, 9);
                     let _ = crate::win32::SetForegroundWindow(hwnd);
                 }
@@ -2723,8 +2888,136 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[test]
+    fn complete_identity_keeps_selection_and_independent_preferences() {
+        use crate::tray_prefs::{DeviceTray, TrayKind};
+        let mut s = Shared::new(Settings::default());
+        let fallback = crate::device::stable_key("test-interface");
+        let complete = crate::device::stable_key("test-identity");
+        let other = crate::device::stable_key("another-identity");
+        let pref = DeviceTray { enabled: false, kind: TrayKind::Keyboard, ..Default::default() };
+        s.active_key = Some(fallback.clone());
+        s.primary_key = Some(fallback.clone());
+        s.cfg.device_tray.insert(fallback.clone(), pref);
+        assert!(s.promote_device_key(&fallback, &complete));
+        assert_eq!(s.active_key.as_ref(), Some(&complete));
+        assert_eq!(s.primary_key.as_ref(), Some(&complete));
+        assert_eq!(s.key_aliases.get(&fallback), Some(&complete));
+        assert_eq!(s.cfg.tray_for(&complete), pref);
+        assert_eq!(s.cfg.tray_for(&other), DeviceTray::default());
+        assert!(s.cfg.to_text().contains(&format!("device_tray.{complete}={}", pref.text())));
+        s.cfg.device_tray.insert(complete.clone(), DeviceTray::default());
+        assert!(!s.promote_device_key(&fallback, &complete));
+        assert_eq!(s.cfg.tray_for(&complete), DeviceTray::default());
+    }
 
+    #[test]
+    fn tray_entries_stay_bound_to_devices_when_hidden_or_reordered() {
+        nwg::init().unwrap();
+        let mut window = nwg::MessageWindow::default();
+        nwg::MessageWindow::builder().build(&mut window).unwrap();
+        let tray = TrayCtl::new(window.handle.hwnd().unwrap() as win32::Handle);
+        let readings = crate::mock::parse("mouse|Mouse A|78|0\nkeyboard|Keyboard B|96|1");
+        let mut cfg = Settings::default();
+        tray.sync(&readings, &cfg);
+        let ids: Vec<_> = tray
+            .entries
+            .borrow()
+            .iter()
+            .map(|entry| (entry.key.clone(), entry.id.uid))
+            .collect();
+        assert_eq!(ids.len(), 2, "系统托盘注册失败");
+        for (key, uid) in &ids {
+            assert_eq!(
+                tray.device_for_callback(0, ((*uid << 16) | 0x400) as isize)
+                    .as_deref(),
+                Some(key.as_str())
+            );
+        }
+        cfg.device_tray
+            .entry(readings[0].key.clone())
+            .or_default()
+            .enabled = false;
+        tray.sync(&readings, &cfg);
+        assert_eq!(tray.entries.borrow().len(), 1);
+        assert_eq!(tray.entries.borrow()[0].id.uid, ids[1].1);
+        cfg.device_tray
+            .entry(readings[0].key.clone())
+            .or_default()
+            .enabled = true;
+        let reversed = vec![readings[1].clone(), readings[0].clone()];
+        tray.sync(&reversed, &cfg);
+        for (key, uid) in &ids {
+            assert_eq!(
+                tray.entries
+                    .borrow()
+                    .iter()
+                    .find(|entry| &entry.key == key)
+                    .unwrap()
+                    .id
+                    .uid,
+                *uid
+            );
+        }
+        tray.re_add();
+        for reading in &readings {
+            cfg.device_tray
+                .entry(reading.key.clone())
+                .or_default()
+                .enabled = false;
+        }
+        tray.sync(&readings, &cfg);
+        assert_eq!(tray.entries.borrow().len(), 1);
+        assert!(tray.entries.borrow()[0].key.is_empty());
+        cfg.tray_enabled = false;
+        tray.sync(&readings, &cfg);
+        assert!(tray.entries.borrow().is_empty());
+    }
+
+    #[test]
+    fn queued_device_write_keeps_original_target() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let reading = crate::mock::parse("mouse|Test mouse|70|0").remove(0);
+        let link = hid::Link {
+            mode: "Wired".into(),
+            report_id: 1,
+            iface: hid::HidInterface {
+                path: "test-interface-a".into(),
+                vendor_id: 1,
+                product_id: 2,
+                usage_page: 0xff01,
+                usage: 1,
+                input_len: 64,
+                output_len: 64,
+                product: "test".into(),
+                serial: String::new(),
+            },
+            all_interfaces: vec![],
+        };
+        {
+            let mut s = lock_shared(&shared);
+            s.active_key = Some(reading.key.clone());
+            s.devices.insert(
+                reading.key.clone(),
+                DeviceSnapshot {
+                    reading,
+                    state: None,
+                    ident: Default::default(),
+                    link: Some(link),
+                    full_at: std::time::Instant::now(),
+                },
+            );
+        }
+        assert!(submit(&shared, &signal, Cmd::Sleep(1)));
+        let mut s = lock_shared(&shared);
+        s.active_key = Some("another-device".into());
+        assert_eq!(
+            s.pending.pop_front().unwrap().1.unwrap().iface.path,
+            "test-interface-a"
+        );
+    }
+    use super::*;
 
     #[test]
     fn toast_appends_hint_only_on_failure() {

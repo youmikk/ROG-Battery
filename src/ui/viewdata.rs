@@ -6,6 +6,7 @@
 
 #[derive(Clone)]
 pub struct Data<'a> {
+    pub selected: Option<&'a crate::device::DeviceReading>,
     /// 设备状态。`None` = 还没读到（首帧 / 后台线程正在读）。
     pub state: Option<&'a crate::proto::State>,
     /// 设备身份（型号、SN、固件）。
@@ -31,10 +32,7 @@ pub struct Data<'a> {
     pub autostart_on: bool,
     /// 版本号（侧栏底部）。
     pub version: &'a str,
-    /// 帧耗时（侧栏底部「19 帧 · 588 ms」）。
-    pub frames: usize,
-    pub elapsed_ms: u128,
-    /// 多设备读数表（首页卡片墙用）。真机通常只有一条。
+    /// 首页设备卡片墙使用的读数列表。
     pub readings: &'a [crate::device::DeviceReading],
 }
 

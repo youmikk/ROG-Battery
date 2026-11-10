@@ -1,4 +1,4 @@
-﻿//! 控件模型：命中区域、交互状态、动作。
+//! 控件模型：命中区域、交互状态、动作。
 //!
 //! # 为什么用「即时模式」而不是控件树
 //!
@@ -36,15 +36,17 @@ pub enum Page {
 }
 
 impl Page {
+    #[cfg(test)]
     pub const ALL: [Page; 6] = [
         Page::Home,
-    Page::Battery,
+        Page::Battery,
         Page::Perf,
         Page::Light,
         Page::Keys,
         Page::Settings,
     ];
 
+    #[cfg(test)]
     pub fn title(self) -> &'static str {
         match self {
             Page::Home => "设备",
@@ -53,18 +55,6 @@ impl Page {
             Page::Light => "灯光",
             Page::Keys => "按键",
             Page::Settings => "设置",
-        }
-    }
-
-    /// 侧栏图标用了 1.5px 线宽的几何图形，这里给一个代号。
-    pub fn icon(self) -> Icon {
-        match self {
-            Page::Home => Icon::Battery,
-    Page::Battery => Icon::Battery,
-            Page::Perf => Icon::Perf,
-            Page::Light => Icon::Light,
-            Page::Keys => Icon::Keys,
-            Page::Settings => Icon::Settings,
         }
     }
 }
@@ -119,6 +109,8 @@ pub enum Drop {
     Palette(u8),
     /// 设置页：窗口关闭行为（每次询问 / 最小化到托盘 / 直接退出）。
     CloseMode,
+    TrayKind,
+    TrayContent,
 }
 
 /// [`Drop::Palette`] 里代表「灯光颜色」的槽位值。
@@ -215,6 +207,8 @@ pub enum Pref {
 /// 一个可以点的东西要做的事。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Act {
+    SelectDevice(usize),
+    ToggleDeviceTray,
     /// 切页。
     Nav(Page),
     /// 侧栏展开 / 收成图标轨道。
@@ -381,7 +375,10 @@ pub enum Cursor {
 /// 界面的瞬时状态（不进 `settings.ini`，程序关了就没）。
 pub struct Ui {
     pub page: Page,
-    /// 侧栏是否收成 56px 图标轨道。用户定的是**默认收起**。
+    pub selected_device: Option<String>,
+    pub device_keys: Vec<String>,
+    pub initial_route_done: bool,
+    /// 侧栏是否收成图标轨道。
     pub rail: bool,
     /// 当前配色。`settings.ini` 的 `theme` 键存它的字符串形式。
     pub mode: super::theme::Mode,
@@ -393,7 +390,7 @@ pub struct Ui {
     /// 这正是想要的效果。
     pub adv: [bool; 2],
     /// 每个页面各自的滚动位置。切页时保留，切回来还是原位。
-    scroll: [f32; 5],
+    scroll: [f32; 6],
     /// 每个页面的内容总高度（绘制时写入，滚轮要靠它夹住）。
     content_h: [f32; 6],
     /// 当前打开的下拉弹层。
@@ -491,8 +488,11 @@ impl Default for Ui {
     fn default() -> Self {
         Ui {
             page: Page::Home,
-            // 默认折叠，折叠开关在左栏最下方。
-            rail: true,
+            selected_device: None,
+            device_keys: Vec::new(),
+            initial_route_done: false,
+            // 折叠开关在左栏最下方。
+            rail: false,
             // 默认浅色主题。
             mode: super::theme::Mode::Light,
             // 默认「跟随系统」
@@ -500,7 +500,7 @@ impl Default for Ui {
             // 性能页的「高级」默认收起（原型 `<details>` 没写 open）；
             // 灯光页的默认展开（原型写了 `open`）。
             adv: [false, true],
-            scroll: [0.0; 5],
+            scroll: [0.0; 6],
             content_h: [0.0; 6],
             open_drop: None,
             drop_rect: None,
@@ -532,6 +532,37 @@ impl Default for Ui {
 }
 
 impl Ui {
+    pub fn sync_devices(&mut self, devices: &[crate::device::DeviceReading]) {
+        self.device_keys = devices.iter().map(|d| d.key.clone()).collect();
+        if devices.is_empty() {
+            return;
+        }
+        if !self.initial_route_done {
+            self.initial_route_done = true;
+            if self.page == Page::Home && devices.len() == 1 {
+                self.select_device(&devices[0].key);
+            }
+        }
+        if let Some(key) = &self.selected_device {
+            if !devices.iter().any(|d| &d.key == key) {
+                self.selected_device = None;
+                if !matches!(self.page, Page::Home | Page::Settings) {
+                    self.page = Page::Home;
+                }
+            }
+        }
+    }
+
+    pub fn select_device(&mut self, key: &str) {
+        self.selected_device = Some(key.to_string());
+        self.page = Page::Battery;
+        self.scroll[1..5].fill(0.0);
+        self.open_drop = None;
+        self.focus = None;
+        self.edits.clear();
+        self.chart = None;
+        self.live.fill(None);
+    }
     fn page_index(p: Page) -> usize {
         match p {
             Page::Home => 0,
@@ -973,6 +1004,51 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn single_device_opens_detail_once_without_interrupting_navigation() {
+        let device = crate::device::DeviceReading {
+            key: "a".into(),
+            ..Default::default()
+        };
+        let mut u = super::Ui::default();
+        u.sync_devices(&[]);
+        u.sync_devices(&[device.clone()]);
+        assert_eq!(u.page, super::Page::Battery);
+        assert_eq!(u.selected_device.as_deref(), Some("a"));
+        u.page = super::Page::Home;
+        u.sync_devices(&[device]);
+        assert_eq!(u.page, super::Page::Home);
+    }
+
+    #[test]
+    fn multiple_devices_keep_overview_and_selection_follows_key() {
+        let a = crate::device::DeviceReading {
+            key: "a".into(),
+            ..Default::default()
+        };
+        let b = crate::device::DeviceReading {
+            key: "b".into(),
+            ..Default::default()
+        };
+        let mut u = super::Ui::default();
+        u.sync_devices(&[a.clone(), b.clone()]);
+        assert_eq!(u.page, super::Page::Home);
+        u.select_device("b");
+        u.sync_devices(&[b, a.clone()]);
+        assert_eq!(u.selected_device.as_deref(), Some("b"));
+        u.sync_devices(&[a]);
+        assert_eq!(u.page, super::Page::Home);
+    }
+
+    #[test]
+    fn local_tray_preferences_do_not_require_hardware() {
+        assert!(!super::Act::ToggleDeviceTray.needs_device());
+        assert!(!super::Drop::TrayKind.needs_device());
+        assert!(!super::Drop::TrayContent.needs_device());
+        let mut u = super::Ui::default();
+        *u.scroll_mut(super::Page::Settings) = 10.0;
+        assert_eq!(u.scroll_y(super::Page::Settings), 10.0);
+    }
 
     #[test]
     fn palette_actions_need_the_device() {
@@ -1033,9 +1109,9 @@ mod tests {
     }
 
     #[test]
-    fn 默认收起侧栏_默认在设备页() {
+    fn 默认展开侧栏_默认在设备页() {
         let u = ui();
-        assert!(u.rail, "用户要求默认收起");
+        assert!(!u.rail);
         assert_eq!(u.page, Page::Home);
     }
 

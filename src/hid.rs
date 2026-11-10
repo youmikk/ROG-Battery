@@ -682,6 +682,7 @@ impl Drop for HidDevice {
 
 // ---------------- 链路 ----------------
 /// 已建立的命令通道连接。
+#[derive(Clone)]
 pub struct Link {
     /// 人类可读的模式：Wired / Wireless24G
     pub mode: String,
@@ -689,6 +690,17 @@ pub struct Link {
     pub iface: HidInterface,
     /// 枚举到的全部 ASUS 接口，供 `info` 顺带读接收器侧信息
     pub all_interfaces: Vec<HidInterface>,
+}
+
+impl Link {
+    pub fn device_key(&self) -> String {
+        let identity = if self.iface.serial.trim().is_empty() {
+            self.iface.path.to_ascii_lowercase()
+        } else {
+            format!("{:04x}:{}", self.iface.vendor_id, self.iface.serial.trim())
+        };
+        crate::device::stable_key(&format!("{identity}:{}", self.report_id))
+    }
 }
 
 /// 解析接收器配对表（`A0 00` 的应答），找出 `wanted` 里第一个命中的 PID 的 report id。
@@ -774,11 +786,6 @@ pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
         }
     }
 
-    // 有线可能有不止一条（同时插着鼠标和键盘），全部带回去。
-    if !wired.is_empty() {
-        return Ok(wired);
-    }
-
     // 2) 无线：先找接收器控制通道（0xFF02），读配对表拿 report id
     let dongle_ctrl = all.iter().find(|x| {
         x.product_id == PID_DONGLE
@@ -792,6 +799,9 @@ pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
     });
 
     if dongle_ctrl.is_none() {
+        if !wired.is_empty() {
+            return Ok(wired);
+        }
         return Err("没有找到接收器控制通道（usage page 0xFF02）".to_string());
     }
 
@@ -812,12 +822,13 @@ pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
     let iface = dongle_mouse
         .or(dongle_ctrl)
         .ok_or("接收器上没有可用的命令通道")?;
-    Ok(vec![Link {
+    wired.push(Link {
         mode: "Wireless24G".to_string(),
         report_id,
         iface: iface.clone(),
         all_interfaces: all.clone(),
-    }])
+    });
+    Ok(wired)
 }
 
 /// 只取第一条链路。命令行走的是这条 —— 一次只操作一台设备。
