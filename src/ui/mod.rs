@@ -28,6 +28,7 @@
 
 pub mod canvas;
 pub mod dropdown;
+pub mod device_name;
 pub mod palette;
 pub mod frame;
 pub mod gfx;

@@ -167,12 +167,12 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
             .tray_device
             .as_ref()
             .and_then(|key| d.readings.iter().find(|r| &r.key == key))
-            .map(|r| r.name.clone())
+            .map(|r| d.cfg.device_name(r).to_string())
             .unwrap_or_else(|| {
-                if d.cfg.tray_device_name.is_empty() {
+                if d.cfg.tray_name().is_empty() {
                     crate::tr!("等待设备连接").to_string()
                 } else {
-                    d.cfg.tray_device_name.clone()
+                    d.cfg.tray_name().to_string()
                 }
             }),
         Drop::Sleep => st
@@ -299,7 +299,7 @@ pub fn options(drop: Drop, d: &Data) -> std::borrow::Cow<'static, [(String, usiz
             d.readings
                 .iter()
                 .enumerate()
-                .map(|(i, r)| (r.name.clone(), i))
+                .map(|(i, r)| (d.cfg.device_name(r).to_string(), i))
                 .collect(),
         );
     }
@@ -308,6 +308,45 @@ pub fn options(drop: Drop, d: &Data) -> std::borrow::Cow<'static, [(String, usiz
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tray_device_names_follow_aliases_without_changing_selection() {
+        let devices = crate::mock::parse("mouse|Original A|78|0\nkeyboard|Original B|90|0");
+        let estimate = crate::history::Estimate::default();
+        let mut cfg = crate::settings::Settings::default();
+        cfg.ensure_tray_device(&devices);
+        cfg.set_device_name(&devices[0].key, "办公鼠标").unwrap();
+        let data = super::Data {
+            selected: Some(&devices[0]),
+            state: None,
+            ident: None,
+            link_mode: "",
+            status: String::new(),
+            plot: None,
+            estimate: &estimate,
+            rows: 0,
+            cfg: &cfg,
+            autostart_text: "",
+            autostart_on: false,
+            version: "test",
+            readings: &devices,
+        };
+        assert_eq!(
+            super::drop_current(super::Drop::TrayDevice, &data),
+            "办公鼠标"
+        );
+        let options = super::options(super::Drop::TrayDevice, &data);
+        assert_eq!(options[0], ("办公鼠标".into(), 0));
+        assert_eq!(options[1], ("Original B".into(), 1));
+        let offline = super::Data {
+            readings: &[],
+            ..data
+        };
+        assert_eq!(
+            super::drop_current(super::Drop::TrayDevice, &offline),
+            "办公鼠标"
+        );
+    }
+
     #[test]
     fn language_switch_rebuilds_labels_without_changing_option_values() {
         use crate::i18n::{with_language, Language};

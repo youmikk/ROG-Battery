@@ -208,6 +208,7 @@ pub enum Pref {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Act {
     SelectDevice(usize),
+    RenameDevice,
     ToggleDeviceTray,
     /// 切页。
     Nav(Page),

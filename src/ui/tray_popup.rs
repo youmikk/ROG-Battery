@@ -573,7 +573,7 @@ fn draw(
             0.0,
         );
         p.text(
-            &d.name,
+            cfg.device_name(d),
             R::new(65.0, r.y + 10.0, w - 180.0, 21.0),
             13.0,
             true,
@@ -783,6 +783,11 @@ mod tests {
                 .entry(readings[0].key.clone())
                 .or_default()
                 .kind = kind;
+            cfg.set_device_name(
+                &readings[0].key,
+                if name == "other" { "办公设备" } else { "" },
+            )
+            .unwrap();
             let mut hits = Vec::new();
             canvas.paint(&mut fonts, t, 2.0, 0.0, 410.0, 367.0, |p| {
                 draw(

@@ -2,6 +2,13 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("设备偏好") => { if $crate::i18n::english() { "Device preferences" } else { "设备偏好" } };
+    ("设备名称") => { if $crate::i18n::english() { "Device name" } else { "设备名称" } };
+    ("编辑名称") => { if $crate::i18n::english() { "Edit name" } else { "编辑名称" } };
+    ("保存名称") => { if $crate::i18n::english() { "Save name" } else { "保存名称" } };
+    ("恢复原名") => { if $crate::i18n::english() { "Reset name" } else { "恢复原名" } };
+    ("留空恢复原始名称，最多 64 个字符") => { if $crate::i18n::english() { "Up to 64 characters. Leave blank to use the original name." } else { "留空恢复原始名称，最多 64 个字符" } };
+    ("名称最多 64 个字符，不能包含换行或控制字符") => { if $crate::i18n::english() { "Use up to 64 characters, without line breaks or control characters." } else { "名称最多 64 个字符，不能包含换行或控制字符" } };
     ("托盘显示设备") => { if $crate::i18n::english() { "Device shown in tray" } else { "托盘显示设备" } };
     ("固定显示这台设备的电量") => { if $crate::i18n::english() { "Keep this device’s battery in the tray" } else { "固定显示这台设备的电量" } };
     ("已在托盘显示") => { if $crate::i18n::english() { "Shown in tray" } else { "已在托盘显示" } };

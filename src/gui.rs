@@ -553,9 +553,9 @@ impl Shared {
     fn sort_readings(&mut self) {
         let cfg = &self.cfg;
         self.readings.sort_by(|a, b| {
-            (cfg.device_kind(a).order(), &a.name, &a.key).cmp(&(
+            (cfg.device_kind(a).order(), cfg.device_name(a), &a.key).cmp(&(
                 cfg.device_kind(b).order(),
-                &b.name,
+                cfg.device_name(b),
                 &b.key,
             ))
         });
@@ -608,14 +608,21 @@ impl Shared {
         if tray_changed {
             self.cfg.tray_device = Some(new.to_string());
         }
+        let mut changed = tray_changed;
+        if !self.cfg.device_names.contains_key(new) {
+            if let Some(name) = self.cfg.device_names.remove(old) {
+                self.cfg.device_names.insert(new.to_string(), name);
+                changed = true;
+            }
+        }
         if self.cfg.device_tray.contains_key(new) {
-            return tray_changed;
+            return changed;
         }
         if let Some(pref) = self.cfg.device_tray.get(old).copied() {
             self.cfg.device_tray.insert(new.to_string(), pref);
             return true;
         }
-        tray_changed
+        changed
     }
 
     /// 界面要显示的状态：全量快照 + 活电量。
@@ -865,7 +872,7 @@ impl TrayCtl {
                 .map(|r| {
                     format!(
                         "{} · {}%{}",
-                        r.name,
+                        cfg.device_name(r),
                         r.level,
                         if !r.connected {
                             crate::tr!("（上次电量，未连接）")
@@ -878,7 +885,7 @@ impl TrayCtl {
                 })
                 .unwrap_or_else(|| {
                     if cfg.tray_device.is_some() && !readings.is_empty() {
-                        format!("{} · {}", cfg.tray_device_name, crate::tr!("未连接"))
+                        format!("{} · {}", cfg.tray_name(), crate::tr!("未连接"))
                     } else {
                         crate::tr!("R Battery · 打开设备页面").to_string()
                     }
@@ -989,6 +996,7 @@ struct UiEnv<'a> {
     signal: &'a Signal,
     window: &'a nwg::Window,
     tray: &'a TrayCtl,
+    name_dialog: &'a crate::ui::device_name::Dialog,
 }
 
 impl<'a> UiEnv<'a> {
@@ -1063,6 +1071,20 @@ fn handle_act(a: Act, env: &UiEnv) {
     }
 
     match a {
+        Act::RenameDevice => {
+            let key = env.canvas.with_ui(|u| u.selected_device.clone());
+            let s = lock_shared(env.shared);
+            if let Some(device) = key
+                .as_ref()
+                .and_then(|key| s.readings.iter().find(|r| &r.key == key))
+            {
+                let name = s.cfg.device_name(device).to_string();
+                let key = device.key.clone();
+                let dark = crate::ui::theme::resolve(&s.cfg.theme) == crate::ui::theme::Mode::Dark;
+                drop(s);
+                env.name_dialog.show(env.window, &key, &name, dark);
+            }
+        }
         Act::SelectDevice(index) => {
             let key = env.canvas.with_ui(|u| u.device_keys.get(index).cloned());
             if let Some(key) = key {
@@ -2420,6 +2442,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let signal = Arc::new(Signal::new(cfg.refresh_interval_sec));
     let sender = notice.sender();
     let popup = Rc::new(crate::ui::tray_popup::Popup::new(&window, sender)?);
+    let name_dialog = crate::ui::device_name::Dialog::new(&window, sender)?;
 
     // 自启状态开机时读一次 —— **放到后台线程**。
     //
@@ -2784,6 +2807,26 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             }
 
             E::OnNotice => {
+                for request in name_dialog.take_requests() {
+                    let mut s = lock_shared(&shared_e);
+                    let key = s
+                        .key_aliases
+                        .get(&request.key)
+                        .cloned()
+                        .unwrap_or(request.key);
+                    let mut cfg = s.cfg.clone();
+                    let result = cfg
+                        .set_device_name(&key, &request.name)
+                        .map_err(str::to_string)
+                        .and_then(|()| settings::save(&cfg));
+                    if result.is_ok() {
+                        s.cfg = cfg;
+                        s.sort_readings();
+                    }
+                    drop(s);
+                    name_dialog.finish(result.as_ref().err().map(String::as_str));
+                    canvas.repaint_now();
+                }
                 for action in popup_events.take_actions() {
                     use crate::ui::tray_popup::Action;
                     match action {
@@ -2851,6 +2894,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         signal: &signal_e,
                         window: &window,
                         tray: &tray,
+                        name_dialog: &name_dialog,
                     };
                     for a in acts {
                         handle_act(a, &env);
@@ -3109,7 +3153,13 @@ mod tests {
         s.active_key = Some(fallback.clone());
         s.primary_key = Some(fallback.clone());
         s.cfg.device_tray.insert(fallback.clone(), pref);
+        s.cfg.set_device_name(&fallback, "办公鼠标").unwrap();
         assert!(s.promote_device_key(&fallback, &complete));
+        assert_eq!(
+            s.cfg.device_names.get(&complete).map(String::as_str),
+            Some("办公鼠标")
+        );
+        assert!(!s.cfg.device_names.contains_key(&fallback));
         assert_eq!(s.active_key.as_ref(), Some(&complete));
         assert_eq!(s.primary_key.as_ref(), Some(&complete));
         assert_eq!(s.key_aliases.get(&fallback), Some(&complete));
@@ -3136,10 +3186,13 @@ mod tests {
         assert_eq!(tray.entries.borrow()[0].key, readings[0].key);
         cfg.tray_device = Some(readings[1].key.clone());
         cfg.tray_device_name = readings[1].name.clone();
+        cfg.set_device_name(&readings[1].key, "办公键盘").unwrap();
         tray.sync(&readings, &cfg);
+        assert!(tray.entries.borrow()[0].tip.starts_with("办公键盘"));
         assert_eq!(tray.entries.borrow()[0].id.uid, uid);
         assert_eq!(tray.entries.borrow()[0].key, readings[1].key);
         tray.sync(&readings[..1], &cfg);
+        assert!(tray.entries.borrow()[0].tip.starts_with("办公键盘"));
         assert_eq!(tray.entries.borrow().len(), 1);
         assert!(tray.entries.borrow()[0].tip.contains(crate::tr!("未连接")));
         assert_eq!(

@@ -744,7 +744,7 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let t = p.t;
     let name = d
         .selected
-        .map(|r| r.name.as_str())
+        .map(|r| d.cfg.device_name(r))
         .unwrap_or(crate::tr!("设备详情"));
     let back = (d.readings.len() > 1).then_some(Act::Nav(Page::Home));
     page_heading(p, ui, c, name, back);
@@ -808,9 +808,26 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
     let Some(device) = d.selected else { return };
     let pref = d.cfg.tray_for(&device.key);
     let selected = d.cfg.tray_device.as_ref() == Some(&device.key);
-    c.h2(p, crate::tr!("托盘显示"), false);
-    let card = c.card(p, layout::ROW_H * 2.0);
+    c.h2(p, crate::tr!("设备偏好"), false);
+    let card = c.card(p, layout::ROW_H * 3.0);
     let area = row_area(card, card.y);
+    let ctl = row_label(
+        p,
+        area,
+        crate::tr!("设备名称"),
+        Some(d.cfg.device_name(device)),
+        150.0,
+    );
+    button(
+        p,
+        ui,
+        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+        crate::tr!("编辑名称"),
+        false,
+        Act::RenameDevice,
+    );
+    row_rule(p, card, area);
+    let area = row_area(card, card.y + layout::ROW_H);
     let ctl = row_label(
         p,
         area,
@@ -835,7 +852,7 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
         },
     );
     row_rule(p, card, area);
-    let area = row_area(card, card.y + layout::ROW_H);
+    let area = row_area(card, card.y + layout::ROW_H * 2.0);
     let help = if pref.kind == crate::tray_prefs::TrayKind::Auto {
         crate::trf!(
             "自动识别为{}，可手动纠正",
@@ -1267,7 +1284,7 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
             Align::Center,
         );
         p.text(
-            &dev.name,
+            d.cfg.device_name(dev),
             R::new(r.x + 16.0, r.y + 151.0, r.w - 32.0, 25.0),
             14.0,
             true,
@@ -2887,6 +2904,7 @@ mod tests {
         let mut cfg = crate::settings::Settings::default();
         let mut ui = Ui::default();
         ui.select_device(&readings[0].key);
+        cfg.set_device_name(&readings[0].key, "办公设备").unwrap();
         let mut canvas = Canvas::new();
         let mut fonts = Fonts::new("Microsoft YaHei UI").unwrap();
         let args = PaintArgs {
@@ -2945,6 +2963,7 @@ mod tests {
                 .hots
                 .iter()
                 .any(|h| h.act == Act::OpenDrop(Drop::TrayKind)));
+            assert!(ui.hots.iter().any(|h| h.act == Act::RenameDevice));
             if kind == TrayKind::Generic {
                 save_bmp(
                     out.join("device-type-other-detail.bmp").to_str().unwrap(),
@@ -3328,6 +3347,7 @@ mod tests {
                 |p| page(p, &mut ui, &data, &frame),
             );
             assert!(ui.hots.iter().any(|h| h.act == Act::ToggleDeviceTray));
+            assert!(ui.hots.iter().any(|h| h.act == Act::RenameDevice));
             assert_eq!(
                 ui.hots
                     .iter()

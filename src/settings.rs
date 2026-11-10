@@ -17,6 +17,7 @@ use crate::paths;
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub device_tray: std::collections::BTreeMap<String, crate::tray_prefs::DeviceTray>,
+    pub device_names: std::collections::BTreeMap<String, String>,
     pub tray_device: Option<String>,
     pub tray_device_name: String,
     /// 快照缓存有效期（秒）。0 表示每次都重读设备。
@@ -44,6 +45,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             device_tray: Default::default(),
+            device_names: Default::default(),
             tray_device: None,
             tray_device_name: String::new(),
             cache_ttl_sec: crate::snapshot::DEFAULT_TTL_SEC,
@@ -129,6 +131,14 @@ impl Settings {
                         warnings.push(format!("theme={v} 只认 system/light/dark，已忽略"));
                     }
                 }
+                key if key.starts_with("device_name.") => {
+                    let id = &key[12..];
+                    if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        if s.set_device_name(&id.to_ascii_lowercase(), v).is_err() {
+                            warnings.push("设备名称无效，已忽略".to_string());
+                        }
+                    }
+                }
                 key if key.starts_with("device_tray.") => {
                     let id = &key[12..];
                     if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -189,7 +199,38 @@ impl Settings {
         for (key, pref) in &self.device_tray {
             s.push_str(&format!("device_tray.{key}={}\n", pref.text()));
         }
+        for (key, name) in &self.device_names {
+            s.push_str(&format!("device_name.{key}={name}\n"));
+        }
         s
+    }
+
+    pub fn device_name<'a>(&'a self, device: &'a crate::device::DeviceReading) -> &'a str {
+        self.device_names
+            .get(&device.key)
+            .map(String::as_str)
+            .unwrap_or(&device.name)
+    }
+
+    pub fn tray_name(&self) -> &str {
+        self.tray_device
+            .as_ref()
+            .and_then(|key| self.device_names.get(key))
+            .map(String::as_str)
+            .unwrap_or(&self.tray_device_name)
+    }
+
+    pub fn set_device_name(&mut self, key: &str, name: &str) -> Result<(), &'static str> {
+        if name.chars().any(char::is_control) || name.trim().chars().count() > 64 {
+            return Err(crate::tr!("名称最多 64 个字符，不能包含换行或控制字符"));
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            self.device_names.remove(key);
+        } else {
+            self.device_names.insert(key.to_string(), name.to_string());
+        }
+        Ok(())
     }
 
     pub fn tray_for(&self, key: &str) -> crate::tray_prefs::DeviceTray {
@@ -357,6 +398,40 @@ pub fn format_unix_local(unix: i64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_names_roundtrip_by_identity_and_reset_to_reported_name() {
+        let mut devices = crate::mock::parse("mouse|Device A|78|0\nmouse|Device A|60|0");
+        let mut cfg = Settings::default();
+        cfg.ensure_tray_device(&devices[..1]);
+        let name = "  办公鼠标 🖱 = A;#  ";
+        cfg.set_device_name(&devices[0].key, name).unwrap();
+        let mut loaded = Settings::parse(&cfg.to_text());
+        assert_eq!(loaded.device_name(&devices[0]), name.trim());
+        assert_eq!(loaded.device_name(&devices[1]), "Device A");
+        assert_eq!(loaded.tray_name(), name.trim());
+        devices[0].name = "Updated model".into();
+        devices[0].connected = false;
+        loaded.ensure_tray_device(&devices);
+        assert_eq!(loaded.device_name(&devices[0]), name.trim());
+        assert_eq!(loaded.tray_name(), name.trim());
+        for bad in [
+            "a\ntray_enabled=0".to_string(),
+            "bad\0name".into(),
+            "界".repeat(65),
+        ] {
+            assert!(loaded.set_device_name(&devices[0].key, &bad).is_err());
+            assert_eq!(loaded.device_name(&devices[0]), name.trim());
+        }
+        loaded
+            .set_device_name(&devices[0].key, &"界".repeat(64))
+            .unwrap();
+        loaded.set_device_name(&devices[0].key, "   ").unwrap();
+        let reset = Settings::parse(&loaded.to_text());
+        assert_eq!(reset.device_name(&devices[0]), "Updated model");
+        assert_eq!(reset.tray_name(), "Updated model");
+        assert!(reset.device_names.is_empty());
+    }
+
     #[test]
     fn manual_device_type_survives_reload_and_detection_changes() {
         use crate::device::DeviceFamily;
@@ -532,6 +607,7 @@ mod tests {
     fn roundtrip_through_text() {
         let s = Settings {
             device_tray: Default::default(),
+            device_names: Default::default(),
             tray_device: None,
             tray_device_name: String::new(),
             cache_ttl_sec: 45,
