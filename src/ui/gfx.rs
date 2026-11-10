@@ -219,6 +219,23 @@ fn GdipResetClip(g: *mut c_void) -> i32;
 
     fn GdipCreatePath(mode: i32, path: *mut *mut c_void) -> i32;
     fn GdipDeletePath(path: *mut c_void) -> i32;
+    fn GdipAddPathString(
+        path: *mut c_void,
+        text: *const u16,
+        len: i32,
+        family: *mut c_void,
+        style: i32,
+        size: f32,
+        layout: *const RectF,
+        format: *mut c_void,
+    ) -> i32;
+    fn GdipGetPathWorldBounds(
+        path: *mut c_void,
+        bounds: *mut RectF,
+        matrix: *mut c_void,
+        pen: *mut c_void,
+    ) -> i32;
+    fn GdipTransformPath(path: *mut c_void, matrix: *mut c_void) -> i32;
     fn GdipAddPathArc(
         path: *mut c_void,
         x: f32,
@@ -1298,32 +1315,54 @@ impl<'a> Painter<'a> {
 
     // ---- 文字 ----
     pub(crate) fn icon_text(&mut self, text: &str, r: R, size: f32, color: u32) {
-        let font = self.fonts.get(size, true);
         let brush = self.obj.brush(color);
-        if font.is_null() || brush.is_null() {
+        if text.is_empty() || brush.is_null() {
             return;
         }
         unsafe {
-            let mut fmt = std::ptr::null_mut();
-            if GdipCreateStringFormat(0, 0, &mut fmt) != OK {
+            let mut path = std::ptr::null_mut();
+            if GdipCreatePath(0, &mut path) != OK {
                 return;
             }
-            GdipSetStringFormatFlags(fmt, 0x1000 | 0x4000);
-            GdipSetStringFormatTrimming(fmt, 0);
-            GdipSetStringFormatAlign(fmt, 1);
-            GdipSetStringFormatLineAlign(fmt, 1);
             let digits: Vec<u16> = text.encode_utf16().collect();
-            let advance = r.w / digits.len().max(1) as f32;
-            for (index, digit) in digits.iter().enumerate() {
-                let layout = RectF {
-                    x: r.x + index as f32 * advance - advance * 0.5,
-                    y: r.y,
-                    w: advance * 2.0,
-                    h: r.h,
-                };
-                GdipDrawString(self.g, digit, 1, font, &layout, fmt, brush);
+            let layout = RectF {
+                x: 0.0,
+                y: 0.0,
+                w: 512.0,
+                h: 512.0,
+            };
+            let mut bounds = RectF::default();
+            if GdipAddPathString(
+                path,
+                digits.as_ptr(),
+                digits.len() as i32,
+                self.fonts.family,
+                1,
+                size,
+                &layout,
+                std::ptr::null_mut(),
+            ) == OK
+                && GdipGetPathWorldBounds(
+                    path,
+                    &mut bounds,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ) == OK
+                && bounds.w > 0.0
+                && bounds.h > 0.0
+            {
+                // 按整串字形的实际边界缩放，保留自然字距。
+                let scale = (r.w / bounds.w).min(r.h / bounds.h);
+                let x = r.cx() - (bounds.x + bounds.w / 2.0) * scale;
+                let y = r.cy() - (bounds.y + bounds.h / 2.0) * scale;
+                let mut matrix = std::ptr::null_mut();
+                if GdipCreateMatrix2(scale, 0.0, 0.0, scale, x, y, &mut matrix) == OK {
+                    GdipTransformPath(path, matrix);
+                    GdipFillPath(self.g, brush, path);
+                    GdipDeleteMatrix(matrix);
+                }
             }
-            GdipDeleteStringFormat(fmt);
+            GdipDeletePath(path);
         }
     }
 

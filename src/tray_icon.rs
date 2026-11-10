@@ -1,44 +1,11 @@
-//! 托盘图标上的电量数字。
-//!
-//! 静态的 `assets\tray.ico` 只能表达「程序在跑」。C# 版在图标上直接画电量
-//! （`D:\codex\rog-battery\tray.cs` 的 `FallbackIcon`），这里做同一件事：
-//! 用 GDI 往内存位图上画一个数字，包成 `HICON`，喂给
-//! `TrayNotification::set_icon`。
-//!
-//! # 为什么走裸 GDI 而不是 nwg 的 `Icon::builder()`
-//!
-//! nwg 的 `IconBuilder` 只有三个来源：文件路径、字节、系统 OEM 图标。
-//! 没有「给我一个已经画好的 HDC」这条路。而 `.size()` 那条又走 WIC
-//! （见 `docs\nwg-gotchas.md` 第 14 节：`.ico` 里的 PNG 条目会让它失败）。
-//!
-//! 所以：`CreateDIBSection`（32bpp，带 alpha）→ `DrawTextW` → `CreateIconIndirect`。
-//!
-//! # 句柄生命周期（这块最容易漏，漏了就漏句柄）
-//!
-//! 一次绘制会产生 **5 个 GDI/User 对象**：
-//! `memDC`、`dib`、`oldBitmap`（SelectObject 的返回，不是新对象）、
-//! `mask`、`font`，以及最终的 `HICON`。
-//!
-//! - `memDC` → `DeleteDC`
-//! - `dib` / `mask` / `font` → `DeleteObject`
-//! - `HICON` → **调用方**负责 `DestroyIcon`（不能在这里销毁，
-//!   因为 `Shell_NotifyIconW` 可能还要用它）
-//!
-//! 位图必须 `SelectObject` 回 `oldBitmap` 之后才能删，否则位图仍被 DC 选中，
-//! `DeleteObject` 会失败并静默漏掉。
+//! 透明托盘图标：设备图案与紧凑电量数字。HICON 由调用方销毁。
 
 use core::ffi::c_void;
 use core::ptr;
 
 use crate::win32::Handle;
 
-/// 图标边长。
-///
-/// 托盘图标在 100% 缩放下系统只用 **16x16**（`SM_CXSMICON` 实测 = 16），
-/// 任务栏/DPI 缩放不同会有别的值。硬画 32x32 也能work —— 系统会缩，
-/// 但双线性缩放会把笔画糊掉（实测「82」边缘发虚）。
-///
-/// 所以运行时用 `icon_size()` 查系统值，这个常量只作为**上限和默认值**。
+/// 图标绘制尺寸，Windows 按系统缩放显示。
 pub const ICON_SIZE: i32 = 32;
 
 pub fn render_device(
@@ -47,7 +14,7 @@ pub fn render_device(
     kind: crate::tray_prefs::TrayKind,
     content: crate::tray_prefs::TrayContent,
 ) -> Option<Handle> {
-    use crate::tray_prefs::{TrayContent, TrayKind};
+    use crate::tray_prefs::TrayContent;
     use crate::ui::gfx::{Painter, R};
     use gdiplus::*;
     if !crate::ui::gfx::start() {
@@ -87,86 +54,35 @@ pub fn render_device(
         let painted = Painter::on_graphics(graphics, theme, 32.0, |p| {
             let combined = content == TrayContent::Combined;
             if content != TrayContent::Number {
-                let w = 1.8;
-                match kind {
-                    TrayKind::Mouse => {
-                        p.round_stroke(R::new(5.0, 2.0, 22.0, 28.0), 6.0, ink, w);
-                        p.line(16.0, 3.0, 16.0, 10.0, ink, w);
-                        p.line(6.0, 12.0, 26.0, 12.0, ink, w);
-                    }
-                    TrayKind::Keyboard => {
-                        p.round_stroke(R::new(1.5, 4.0, 29.0, 26.0), 3.0, ink, w);
-                        for x in [6.0, 13.0, 20.0, 26.0] {
-                            p.line(x, 9.0, x + 1.0, 9.0, ink, 2.0);
-                        }
-                        if !combined {
-                            for y in [15.0, 21.0] {
-                                for x in [6.0, 13.0, 20.0, 26.0] {
-                                    p.line(x, y, x + 1.0, y, ink, 2.0);
-                                }
-                            }
-                        }
-                    }
-                    TrayKind::Headset => {
-                        p.arc(16.0, 15.0, 12.0, w, 180.0, 180.0, ink);
-                        p.line(4.0, 15.0, 4.0, 28.0, ink, w);
-                        p.line(28.0, 15.0, 28.0, 28.0, ink, w);
-                        p.round(R::new(1.0, 17.0, 4.0, 11.0), 1.5, ink);
-                        p.round(R::new(27.0, 17.0, 4.0, 11.0), 1.5, ink);
-                    }
-                    TrayKind::Gamepad => {
-                        p.polyline(
-                            &[
-                                (2.0, 29.0),
-                                (1.0, 26.0),
-                                (5.0, 6.0),
-                                (10.0, 4.0),
-                                (13.0, 7.0),
-                                (19.0, 7.0),
-                                (22.0, 4.0),
-                                (27.0, 6.0),
-                                (31.0, 26.0),
-                                (30.0, 29.0),
-                                (24.0, 25.0),
-                                (8.0, 25.0),
-                                (2.0, 29.0),
-                            ],
-                            ink,
-                            w,
-                        );
-                        p.line(8.0, 8.0, 8.0, 13.0, ink, w);
-                        p.line(5.5, 10.5, 10.5, 10.5, ink, w);
-                        p.dot(24.0, 9.0, 1.0, ink);
-                        p.dot(27.0, 12.0, 1.0, ink);
-                    }
-                    _ => {
-                        p.round_stroke(R::new(2.0, 6.0, 27.0, 23.0), 3.0, ink, w);
-                        p.rect(R::new(30.0, 12.0, 2.0, 10.0), ink);
-                    }
-                }
+                let area = if combined {
+                    R::new(1.0, 8.0, 9.0, 16.0)
+                } else {
+                    R::new(3.0, 3.0, 26.0, 26.0)
+                };
+                device_glyph(p, area, kind, ink);
             }
             if content != TrayContent::Icon {
                 let text = level.map(label).unwrap_or_else(|| "–".to_string());
-                let font = if content == TrayContent::Number {
-                    if text.len() > 2 {
-                        19.0
-                    } else {
-                        26.0
-                    }
-                } else if text.len() > 2 {
-                    12.0
-                } else {
-                    16.0
-                };
                 let rect = if combined {
-                    R::new(4.0, 12.0, 24.0, 18.0)
+                    R::new(12.0, 6.0, 19.0, 20.0)
                 } else {
-                    R::new(0.0, 0.0, 32.0, 32.0)
+                    R::new(1.0, 3.0, 30.0, 26.0)
                 };
-                p.icon_text(&text, rect, font, ink);
+                if level.is_some() {
+                    p.icon_text(&text, rect, if combined { 23.0 } else { 28.0 }, ink);
+                } else {
+                    p.line(
+                        rect.cx() - 4.0,
+                        rect.cy(),
+                        rect.cx() + 4.0,
+                        rect.cy(),
+                        ink,
+                        1.8,
+                    );
+                }
             }
             if charging && level.is_some() {
-                p.dot(29.0, 3.0, 2.5, theme.green);
+                p.dot(if combined { 5.5 } else { 29.0 }, 3.0, 2.0, theme.green);
             }
         });
         GdipDeleteGraphics(graphics);
@@ -177,6 +93,90 @@ pub fn render_device(
             Some(icon)
         } else {
             None
+        }
+    }
+}
+
+fn device_glyph(
+    p: &mut crate::ui::gfx::Painter,
+    r: crate::ui::gfx::R,
+    kind: crate::tray_prefs::TrayKind,
+    ink: u32,
+) {
+    use crate::tray_prefs::TrayKind;
+    use crate::ui::gfx::R;
+    let stroke = 1.6;
+    let cx = r.cx();
+    let cy = r.cy();
+    match kind {
+        TrayKind::Mouse => {
+            let w = r.w.min(r.h * 0.65);
+            let body = R::new(cx - w / 2.0, r.y, w, r.h);
+            p.round_stroke(body, w * 0.45, ink, stroke);
+            p.line(cx, r.y + 3.0, cx, r.y + r.h * 0.35, ink, stroke);
+        }
+        TrayKind::Keyboard => {
+            let h = r.w * 0.7;
+            p.round_stroke(R::new(r.x, cy - h / 2.0, r.w, h), 1.5, ink, stroke);
+            for col in [0.25, 0.5, 0.75] {
+                p.dot(r.x + r.w * col, cy - h * 0.15, 0.65, ink);
+            }
+            p.line(
+                r.x + r.w * 0.25,
+                cy + h * 0.2,
+                r.right() - r.w * 0.25,
+                cy + h * 0.2,
+                ink,
+                1.2,
+            );
+        }
+        TrayKind::Headset => {
+            let radius = r.w * 0.43;
+            p.arc(cx, cy, radius, stroke, 180.0, 180.0, ink);
+            p.round(R::new(r.x, cy - 1.0, r.w * 0.22, radius), 1.0, ink);
+            p.round(
+                R::new(r.right() - r.w * 0.22, cy - 1.0, r.w * 0.22, radius),
+                1.0,
+                ink,
+            );
+        }
+        TrayKind::Gamepad => {
+            let h = r.w * 0.75;
+            let points: Vec<_> = [
+                (0.0, 1.0),
+                (0.12, 0.12),
+                (0.32, 0.0),
+                (0.42, 0.2),
+                (0.58, 0.2),
+                (0.68, 0.0),
+                (0.88, 0.12),
+                (1.0, 1.0),
+                (0.7, 0.76),
+                (0.3, 0.76),
+                (0.0, 1.0),
+            ]
+            .iter()
+            .map(|(x, y)| (r.x + x * r.w, cy - h / 2.0 + y * h))
+            .collect();
+            p.polyline(&points, ink, stroke);
+            p.dot(r.x + r.w * 0.27, cy - h * 0.05, 0.8, ink);
+            p.dot(r.x + r.w * 0.75, cy - h * 0.05, 0.8, ink);
+        }
+        _ => {
+            p.round_stroke(
+                R::new(r.x, cy - r.h * 0.35, r.w - 1.0, r.h * 0.7),
+                1.5,
+                ink,
+                stroke,
+            );
+            p.line(
+                cx - 1.0,
+                cy - r.h * 0.35 - 2.0,
+                cx + 1.0,
+                cy - r.h * 0.35 - 2.0,
+                ink,
+                stroke,
+            );
         }
     }
 }
@@ -634,7 +634,7 @@ mod tests {
         let screen = unsafe { crate::win32::GetDC(ptr::null_mut()) };
         assert!(!screen.is_null());
         let mut canvas = Canvas::new();
-        let dc = canvas.ensure(screen as isize, 720, 220);
+        let dc = canvas.ensure(screen as isize, 720, 520);
         let mut fonts = Fonts::new("Segoe UI").unwrap();
         canvas.paint(
             &mut fonts,
@@ -642,8 +642,8 @@ mod tests {
             1.0,
             0.0,
             720.0,
-            220.0,
-            |p| p.rect(R::new(0.0, 0.0, 720.0, 220.0), 0xfff7f8f7),
+            520.0,
+            |p| p.rect(R::new(0.0, 0.0, 720.0, 520.0), 0xfff7f8f7),
         );
         for (column, kind) in TrayKind::ALL.iter().skip(1).enumerate() {
             for (row, content) in TrayContent::ALL.iter().enumerate() {
@@ -664,6 +664,42 @@ mod tests {
                 }
             }
         }
+        for (row, size) in [16, 20, 24, 32].iter().enumerate() {
+            for (column, level) in [
+                Some(0),
+                Some(7),
+                Some(11),
+                Some(78),
+                Some(99),
+                Some(100),
+                None,
+            ]
+            .iter()
+            .enumerate()
+            {
+                let icon =
+                    render_device(*level, false, TrayKind::Mouse, TrayContent::Combined).unwrap();
+                assert_ne!(
+                    unsafe {
+                        DrawIconEx(
+                            dc as Handle,
+                            10 + column as i32 * 90,
+                            230 + row as i32 * 60,
+                            icon,
+                            *size,
+                            *size,
+                            0,
+                            ptr::null_mut(),
+                            3,
+                        )
+                    },
+                    0
+                );
+                unsafe {
+                    crate::win32::DestroyIcon(icon);
+                }
+            }
+        }
         crate::ui::gfx::save_bmp(
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -671,7 +707,7 @@ mod tests {
             ),
             dc,
             720,
-            220,
+            520,
         );
         canvas.release();
         unsafe {
