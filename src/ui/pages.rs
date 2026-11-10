@@ -814,23 +814,6 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
     let ctl = row_label(
         p,
         area,
-        crate::tr!("设备名称"),
-        Some(d.cfg.device_name(device)),
-        150.0,
-    );
-    button(
-        p,
-        ui,
-        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
-        crate::tr!("编辑名称"),
-        false,
-        Act::RenameDevice,
-    );
-    row_rule(p, card, area);
-    let area = row_area(card, card.y + layout::ROW_H);
-    let ctl = row_label(
-        p,
-        area,
         crate::tr!("托盘显示设备"),
         Some(crate::tr!("固定显示这台设备的电量")),
         150.0,
@@ -850,6 +833,23 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
         } else {
             Act::ToggleDeviceTray
         },
+    );
+    row_rule(p, card, area);
+    let area = row_area(card, card.y + layout::ROW_H);
+    let ctl = row_label(
+        p,
+        area,
+        crate::tr!("设备名称"),
+        Some(d.cfg.device_name(device)),
+        150.0,
+    );
+    button(
+        p,
+        ui,
+        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+        crate::tr!("编辑名称"),
+        false,
+        Act::RenameDevice,
     );
     row_rule(p, card, area);
     let area = row_area(card, card.y + layout::ROW_H * 2.0);
@@ -3223,6 +3223,18 @@ mod tests {
                 .find(|h| h.act == Act::OpenDrop(Drop::TrayKind))
                 .unwrap()
                 .rect;
+            let rename = ui
+                .hots
+                .iter()
+                .find(|h| h.act == Act::RenameDevice)
+                .unwrap()
+                .rect;
+            assert_eq!(rename.y - toggle.y, layout::ROW_H);
+            assert_eq!(dropdown.y - rename.y, layout::ROW_H);
+            assert_eq!(
+                (rename.x, rename.w, rename.h),
+                (toggle.x, toggle.w, toggle.h)
+            );
             assert_eq!(
                 (toggle.x, toggle.w, toggle.h),
                 (dropdown.x, dropdown.w, dropdown.h)
