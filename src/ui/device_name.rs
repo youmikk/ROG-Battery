@@ -1,4 +1,4 @@
-//! 使用原生编辑框，保留中文输入法、选择和剪贴板操作。
+//! 自绘改名弹窗；仅文字编辑交给系统处理输入法和剪贴板。
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -12,11 +12,11 @@ pub struct Request {
 struct Controls {
     window: nwg::Window,
     input: nwg::TextInput,
-    hint: nwg::Label,
-    error: nwg::Label,
+    error: RefCell<String>,
     save: nwg::Button,
     reset: nwg::Button,
     cancel: nwg::Button,
+    close: nwg::Button,
     _font: nwg::Font,
     key: RefCell<Option<String>>,
     requests: RefCell<Vec<Request>>,
@@ -51,7 +51,7 @@ impl Colors {
             super::theme::LIGHT
         };
         let bg_color = colorref(theme.bg);
-        let input_color = colorref(theme.card);
+        let input_color = colorref(theme.bg_sunken);
         Self {
             bg: unsafe { crate::win32::CreateSolidBrush(bg_color) },
             input: unsafe { crate::win32::CreateSolidBrush(input_color) },
@@ -72,6 +72,44 @@ impl Drop for Colors {
     }
 }
 
+fn draw_background(p: &mut super::gfx::Painter, focused: bool, error: &str) {
+    use super::gfx::{Align, R};
+    let t = p.t;
+    p.rect(R::new(0.0, 0.0, 480.0, 266.0), t.bg);
+    p.round_stroke(R::new(0.5, 0.5, 479.0, 265.0), 13.0, t.border, 1.0);
+    p.text(
+        crate::tr!("编辑名称"),
+        R::new(24.0, 18.0, 390.0, 29.0),
+        20.0,
+        true,
+        t.text,
+        Align::Left,
+    );
+    p.text(
+        crate::tr!("设备名称"),
+        R::new(24.0, 60.0, 432.0, 22.0),
+        12.5,
+        false,
+        t.text2,
+        Align::Left,
+    );
+    let input = R::new(24.0, 88.0, 432.0, 46.0);
+    p.round(input, 8.0, t.bg_sunken);
+    p.round_stroke(
+        input,
+        8.0,
+        if focused { t.accent } else { t.border_strong },
+        1.0,
+    );
+    p.text_wrap(
+        crate::tr!("留空恢复原始名称，最多 64 个字符"),
+        R::new(24.0, 144.0, 432.0, 34.0),
+        11.5,
+        t.text2,
+    );
+    p.text_wrap(error, R::new(24.0, 181.0, 432.0, 28.0), 11.5, t.red);
+}
+
 #[link(name = "gdi32")]
 extern "system" {
     fn SetTextColor(dc: crate::win32::Handle, color: u32) -> u32;
@@ -80,6 +118,16 @@ extern "system" {
 #[link(name = "user32")]
 extern "system" {
     fn GetClientRect(hwnd: crate::win32::Handle, rect: *mut crate::win32::Rect) -> i32;
+    fn BeginPaint(
+        hwnd: crate::win32::Handle,
+        paint: *mut crate::win32::PaintStruct,
+    ) -> crate::win32::Handle;
+    fn EndPaint(hwnd: crate::win32::Handle, paint: *const crate::win32::PaintStruct) -> i32;
+    fn InvalidateRect(
+        hwnd: crate::win32::Handle,
+        rect: *const crate::win32::Rect,
+        erase: i32,
+    ) -> i32;
 }
 
 #[repr(C)]
@@ -106,13 +154,13 @@ impl Dialog {
         let mut window = nwg::Window::default();
         nwg::Window::builder()
             .title(crate::tr!("编辑名称"))
-            .flags(nwg::WindowFlags::WINDOW)
+            .flags(nwg::WindowFlags::POPUP)
             .ex_flags(0x80)
             .parent(Some(owner))
-            .size((px(470.0), px(185.0)))
+            .size((px(480.0), px(266.0)))
             .build(&mut window)
             .map_err(|e| e.to_string())?;
-        super::frame::keep_client_size(window.handle.hwnd().unwrap() as _, 470.0, 185.0, scale);
+        super::frame::keep_client_size(window.handle.hwnd().unwrap() as _, 480.0, 266.0, scale);
         let mut font = nwg::Font::default();
         nwg::Font::builder()
             .family("Microsoft YaHei UI")
@@ -120,74 +168,68 @@ impl Dialog {
             .build(&mut font)
             .map_err(|e| e.to_string())?;
         let mut input = nwg::TextInput::default();
-        nwg::TextInput::builder()
-            .parent(&window)
-            .position((px(20.0), px(20.0)))
-            .size((px(430.0), px(32.0)))
-            .font(Some(&font))
-            .limit(128)
-            .build(&mut input)
+        // 创建时即无边框，避免系统缓存旧的非客户区样式。
+        input.handle = nwg::ControlBase::build_hwnd()
+            .class_name("EDIT")
+            .parent(Some(window.handle))
+            .flags(0x5001_0080)
+            .position((px(37.0), px(99.0)))
+            .size((px(406.0), px(24.0)))
+            .build()
             .map_err(|e| e.to_string())?;
-        let mut hint = nwg::Label::default();
-        nwg::Label::builder()
-            .parent(&window)
-            .position((px(20.0), px(62.0)))
-            .size((px(430.0), px(24.0)))
-            .font(Some(&font))
-            .build(&mut hint)
-            .map_err(|e| e.to_string())?;
-        let mut error = nwg::Label::default();
-        nwg::Label::builder()
-            .parent(&window)
-            .position((px(20.0), px(88.0)))
-            .size((px(430.0), px(40.0)))
-            .font(Some(&font))
-            .build(&mut error)
-            .map_err(|e| e.to_string())?;
+        input.set_font(Some(&font));
+        input.set_limit(128);
+        let input_hwnd = input.handle.hwnd().unwrap() as _;
         let mut save = nwg::Button::default();
         let mut reset = nwg::Button::default();
         let mut cancel = nwg::Button::default();
+        let mut close = nwg::Button::default();
         for (button, x, width) in [
-            (&mut reset, 20.0, 115.0),
-            (&mut cancel, 240.0, 90.0),
-            (&mut save, 340.0, 110.0),
+            (&mut reset, 24.0, 116.0),
+            (&mut cancel, 244.0, 90.0),
+            (&mut save, 344.0, 112.0),
         ] {
-            nwg::Button::builder()
-                .parent(&window)
-                .position((px(x), px(137.0)))
-                .size((px(width), px(30.0)))
-                .font(Some(&font))
-                .build(button)
+            button.handle = nwg::ControlBase::build_hwnd()
+                .class_name("BUTTON")
+                .parent(Some(window.handle))
+                .flags(0x5001_000b)
+                .position((px(x), px(212.0)))
+                .size((px(width), px(32.0)))
+                .build()
                 .map_err(|e| e.to_string())?;
+            button.set_font(Some(&font));
         }
+        close.handle = nwg::ControlBase::build_hwnd()
+            .class_name("BUTTON")
+            .parent(Some(window.handle))
+            .flags(0x5001_000b)
+            .position((px(428.0), px(18.0)))
+            .size((px(28.0), px(28.0)))
+            .build()
+            .map_err(|e| e.to_string())?;
+        close.set_font(Some(&font));
         let controls = Rc::new(Controls {
             window,
             input,
-            hint,
-            error,
+            error: RefCell::new(String::new()),
             save,
             reset,
             cancel,
+            close,
             _font: font,
             key: RefCell::new(None),
             requests: RefCell::new(Vec::new()),
         });
-        for handle in [&controls.hint.handle, &controls.error.handle] {
-            let hwnd = handle.hwnd().unwrap() as _;
-            let style = super::canvas::get_window_long(hwnd, -16);
-            super::canvas::set_window_long(hwnd, -16, (style & !0x1f) | 0x0d);
-        }
-        for handle in [
-            &controls.save.handle,
-            &controls.reset.handle,
-            &controls.cancel.handle,
-        ] {
-            let hwnd = handle.hwnd().unwrap() as _;
-            let style = super::canvas::get_window_long(hwnd, -16);
-            super::canvas::set_window_long(hwnd, -16, (style & !0x0f) | 0x0b);
-        }
-        let input_handler =
-            nwg::bind_raw_event_handler(&controls.input.handle, 0x10131, |hwnd, msg, wp, _lp| {
+        let parent = controls.window.handle.hwnd().unwrap() as crate::win32::Handle;
+        let input_handler = nwg::bind_raw_event_handler(
+            &controls.input.handle,
+            0x10131,
+            move |hwnd, msg, wp, _lp| {
+                if msg == 0x0007 || msg == 0x0008 {
+                    unsafe {
+                        InvalidateRect(parent, std::ptr::null(), 0);
+                    }
+                }
                 if msg == 0x0102 && wp == 1 {
                     unsafe {
                         crate::win32::SendMessageW(hwnd as _, 0x00b1, 0, -1);
@@ -196,8 +238,10 @@ impl Dialog {
                 } else {
                     None
                 }
-            })
-            .map_err(|e| e.to_string())?;
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        super::canvas::set_window_pos(input_hwnd, 0, 0, 0, 0, 0x37);
         let c = Rc::clone(&controls);
         let handler =
             nwg::full_bind_event_handler(&controls.window.handle, move |event, data, handle| {
@@ -210,7 +254,7 @@ impl Dialog {
                         c.window.set_visible(false);
                         *c.key.borrow_mut() = None;
                     }
-                    E::OnButtonClick if handle == c.cancel.handle => {
+                    E::OnButtonClick if handle == c.cancel.handle || handle == c.close.handle => {
                         c.window.set_visible(false);
                         *c.key.borrow_mut() = None;
                     }
@@ -246,26 +290,58 @@ impl Dialog {
             move |hwnd, msg, wp, lp| {
                 let colors = paint_colors.borrow();
                 match msg {
+                    0x000f | 0x0318 => unsafe {
+                        let mut paint = std::mem::zeroed();
+                        let dc = if msg == 0x000f {
+                            BeginPaint(hwnd as _, &mut paint)
+                        } else {
+                            wp as _
+                        };
+                        let mut rect = crate::win32::Rect::default();
+                        GetClientRect(hwnd as _, &mut rect);
+                        let mut buffer = buffer.borrow_mut();
+                        let mut fonts = fonts.borrow_mut();
+                        let mem = buffer.ensure(dc as isize, rect.right, rect.bottom);
+                        crate::win32::FillRect(mem as _, &rect, colors.bg);
+                        buffer.paint(
+                            &mut fonts,
+                            &colors.theme,
+                            scale,
+                            0.0,
+                            rect.right as f32 / scale,
+                            rect.bottom as f32 / scale,
+                            |p| {
+                                draw_background(p, c.input.focus(), &c.error.borrow());
+                            },
+                        );
+                        super::gfx::blit(dc as isize, mem, rect.right, rect.bottom);
+                        if msg == 0x000f {
+                            EndPaint(hwnd as _, &paint);
+                        }
+                        Some(0)
+                    },
                     0x002b => unsafe {
                         let mut buffer = buffer.borrow_mut();
                         let mut fonts = fonts.borrow_mut();
                         let item = &*(lp as *const DrawItem);
-                        let button = item.kind == 4;
-                        let (text, primary, error) =
-                            if item.hwnd == c.save.handle.hwnd().unwrap() as _ {
-                                (c.save.text(), true, false)
-                            } else if item.hwnd == c.reset.handle.hwnd().unwrap() as _ {
-                                (c.reset.text(), false, false)
-                            } else if item.hwnd == c.cancel.handle.hwnd().unwrap() as _ {
-                                (c.cancel.text(), false, false)
-                            } else if item.hwnd == c.error.handle.hwnd().unwrap() as _ {
-                                (c.error.text(), false, true)
-                            } else {
-                                (c.hint.text(), false, false)
-                            };
+                        let close = item.hwnd == c.close.handle.hwnd().unwrap() as _;
+                        let (text, primary) = if item.hwnd == c.save.handle.hwnd().unwrap() as _ {
+                            (c.save.text(), true)
+                        } else if item.hwnd == c.reset.handle.hwnd().unwrap() as _ {
+                            (c.reset.text(), false)
+                        } else {
+                            (c.cancel.text(), false)
+                        };
                         let w = item.rect.right - item.rect.left;
                         let h = item.rect.bottom - item.rect.top;
                         let mem = buffer.ensure(item.dc as isize, w, h);
+                        let clear = crate::win32::Rect {
+                            left: 0,
+                            top: 0,
+                            right: w,
+                            bottom: h,
+                        };
+                        crate::win32::FillRect(mem as _, &clear, colors.bg);
                         buffer.paint(
                             &mut fonts,
                             &colors.theme,
@@ -277,11 +353,26 @@ impl Dialog {
                                 use super::gfx::{Align, R};
                                 let r = R::new(0.0, 0.0, w as f32 / scale, h as f32 / scale);
                                 p.rect(r, p.t.bg);
-                                if button {
+                                if close {
+                                    if item.state & 0x11 != 0 {
+                                        p.round(r.inset(1.0), 6.0, p.t.card_hover);
+                                    }
+                                    let (x, y) = (r.cx(), r.cy());
+                                    p.polyline(
+                                        &[(x - 4.0, y - 4.0), (x + 4.0, y + 4.0)],
+                                        p.t.text2,
+                                        1.3,
+                                    );
+                                    p.polyline(
+                                        &[(x + 4.0, y - 4.0), (x - 4.0, y + 4.0)],
+                                        p.t.text2,
+                                        1.3,
+                                    );
+                                } else {
                                     let r = r.inset(1.0);
                                     p.round(
                                         r,
-                                        6.0,
+                                        8.0,
                                         if primary {
                                             p.t.accent
                                         } else if item.state & 1 != 0 {
@@ -292,7 +383,7 @@ impl Dialog {
                                     );
                                     p.round_stroke(
                                         r,
-                                        6.0,
+                                        8.0,
                                         if primary || item.state & 0x10 != 0 {
                                             p.t.accent
                                         } else {
@@ -308,25 +399,13 @@ impl Dialog {
                                         if primary { p.t.accent_fg } else { p.t.text },
                                         Align::Center,
                                     );
-                                } else {
-                                    p.text_wrap(
-                                        &text,
-                                        r,
-                                        11.5,
-                                        if error { p.t.red } else { p.t.text2 },
-                                    );
                                 }
                             },
                         );
                         super::gfx::blit(item.dc as isize, mem, w, h);
                         Some(1)
                     },
-                    0x0014 => unsafe {
-                        let mut rect = crate::win32::Rect::default();
-                        GetClientRect(hwnd as _, &mut rect);
-                        crate::win32::FillRect(wp as _, &rect, colors.bg);
-                        Some(1)
-                    },
+                    0x0014 => Some(1),
                     0x0133 | 0x0138 => unsafe {
                         let input = msg == 0x0133;
                         SetTextColor(wp as _, colors.text);
@@ -360,12 +439,11 @@ impl Dialog {
         *c.key.borrow_mut() = Some(key.to_string());
         c.requests.borrow_mut().clear();
         c.window.set_text(crate::tr!("编辑名称"));
-        c.hint
-            .set_text(crate::tr!("留空恢复原始名称，最多 64 个字符"));
-        c.error.set_text("");
+        c.error.borrow_mut().clear();
         c.save.set_text(crate::tr!("保存名称"));
         c.reset.set_text(crate::tr!("恢复原名"));
         c.cancel.set_text(crate::tr!("取消"));
+        c.close.set_text(crate::tr!("取消"));
         c.input.set_text(name);
         let (x, y) = owner.position();
         let (w, h) = owner.size();
@@ -377,29 +455,24 @@ impl Dialog {
         let hwnd = c.window.handle.hwnd().unwrap() as crate::win32::Handle;
         crate::dwm::set_dark_titlebar(hwnd, dark);
         crate::dwm::set_round_corners(hwnd);
-        let theme = crate::win32::to_wide(if dark {
-            "DarkMode_Explorer"
-        } else {
-            "Explorer"
-        });
+        let theme = crate::win32::to_wide("");
         for handle in [
             &c.input.handle,
             &c.save.handle,
             &c.reset.handle,
             &c.cancel.handle,
+            &c.close.handle,
         ] {
             unsafe {
-                SetWindowTheme(
-                    handle.hwnd().unwrap() as _,
-                    theme.as_ptr(),
-                    std::ptr::null(),
-                );
+                SetWindowTheme(handle.hwnd().unwrap() as _, theme.as_ptr(), theme.as_ptr());
             }
+            super::canvas::set_window_pos(handle.hwnd().unwrap() as _, 0, 0, 0, 0, 0x37);
         }
         c.window.set_visible(true);
         c.window.set_focus();
         c.input.set_focus();
         c.input.set_selection(0..u32::MAX);
+        c.window.invalidate();
     }
 
     pub fn take_requests(&self) -> Vec<Request> {
@@ -408,7 +481,8 @@ impl Dialog {
 
     pub fn finish(&self, error: Option<&str>) {
         if let Some(error) = error {
-            self.controls.error.set_text(error);
+            *self.controls.error.borrow_mut() = error.to_string();
+            self.controls.window.invalidate();
             self.controls.input.set_focus();
         } else {
             self.controls.window.set_visible(false);
@@ -474,7 +548,7 @@ mod tests {
         dialog.finish(Some("保存失败"));
         assert!(c.window.visible());
         assert_eq!(c.input.text(), "办公鼠标 🖱");
-        assert_eq!(c.error.text(), "保存失败");
+        assert_eq!(*c.error.borrow(), "保存失败");
         dialog.finish(None);
         assert!(!c.window.visible());
         dialog.show(&owner, "device-b", "键盘", false);
@@ -501,11 +575,24 @@ mod tests {
             crate::win32::SendMessageW(c.window.handle.hwnd().unwrap() as _, 0x0111, 2, 0);
         }
         assert!(!c.window.visible());
+        dialog.show(&owner, "device-a", "办公鼠标", false);
+        c.close.click();
+        assert!(dialog.take_requests().is_empty());
+        assert!(!c.window.visible());
         let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch");
         std::fs::create_dir_all(&out).unwrap();
         for dark in [false, true] {
-            dialog.show(&owner, "device-a", "办公鼠标 🖱", dark);
+            dialog.show(&owner, "device-a", "办公鼠标", dark);
             let hwnd = c.window.handle.hwnd().unwrap() as crate::win32::Handle;
+            assert_eq!(
+                super::super::canvas::get_window_long(hwnd, -16) & 0x00c0_0000,
+                0
+            );
+            assert_eq!(
+                super::super::canvas::get_window_long(c.input.handle.hwnd().unwrap() as _, -16)
+                    & 0x0080_0000,
+                0
+            );
             let mut rect = crate::win32::Rect::default();
             unsafe {
                 GetClientRect(hwnd, &mut rect);
@@ -516,6 +603,9 @@ mod tests {
             let dc = unsafe { crate::win32::GetDC(hwnd) };
             let mut canvas = super::super::gfx::Canvas::new();
             let target = canvas.ensure(dc as isize, rect.right, rect.bottom);
+            unsafe {
+                crate::win32::SendMessageW(hwnd, 0x000f, 0, 0);
+            }
             assert_ne!(unsafe { PrintWindow(hwnd, target as _, 3) }, 0);
             super::super::gfx::save_bmp(
                 out.join(format!(
