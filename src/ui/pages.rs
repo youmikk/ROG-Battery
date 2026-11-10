@@ -816,12 +816,12 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
         area,
         crate::tr!("托盘显示设备"),
         Some(crate::tr!("固定显示这台设备的电量")),
-        180.0,
+        150.0,
     );
     button(
         p,
         ui,
-        R::new(ctl.x, ctl.cy() - 15.0, 180.0, 30.0),
+        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
         if selected {
             crate::tr!("已在托盘显示")
         } else {
@@ -1041,13 +1041,24 @@ fn drop_button(p: &mut Painter, ui: &mut Ui, r: R, drop: Drop, d: &Data) {
         .map(|(label, _)| p.measure(label, 12.5, true).0 + 32.0)
         .fold(r.w, f32::max)
         .min(240.0);
-    let r = R::new(r.right() - widest, r.y, widest, r.h);
+    let width = if drop == Drop::TrayDevice {
+        r.w
+    } else {
+        widest
+    };
+    let r = R::new(r.right() - width, r.y, width, r.h);
     let open = ui.open_drop() == Some(drop);
     select_box(p, r, &drop_current(drop, d), open);
     ui.hot(r, Act::OpenDrop(drop));
     // 记下这个下拉框的位置，弹层要贴着它开
     if open {
-        ui.set_drop_rect(R::new(r.x, r.bottom() + 4.0, r.w.max(160.0), 0.0));
+        let menu_w = widest.max(160.0);
+        let menu_x = if drop == Drop::TrayDevice {
+            r.right() - menu_w
+        } else {
+            r.x
+        };
+        ui.set_drop_rect(R::new(menu_x, r.bottom() + 4.0, menu_w, 0.0));
         ui.set_drop_btn(r);
     }
 }
@@ -2431,12 +2442,12 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             area,
             crate::tr!("托盘显示设备"),
             Some(crate::tr!("单击数字查看全部设备")),
-            220.0,
+            180.0,
         );
         drop_button(
             p,
             ui,
-            R::new(ctl.x, ctl.cy() - 15.0, 220.0, 30.0),
+            R::new(ctl.x, ctl.cy() - 15.0, 180.0, 30.0),
             Drop::TrayDevice,
             d,
         );
@@ -2926,6 +2937,16 @@ mod tests {
                             .unwrap()
                             .rect;
                         assert!(language.bottom() < height as f32);
+                        let tray = ui
+                            .hots
+                            .iter()
+                            .find(|h| h.act == Act::OpenDrop(Drop::TrayDevice))
+                            .unwrap()
+                            .rect;
+                        assert_eq!(
+                            (tray.x, tray.w, tray.h),
+                            (language.x, language.w, language.h)
+                        );
                         ui.set_open_drop(Some(Drop::Language));
                         draw_frame(
                             &mut canvas,
@@ -2949,6 +2970,19 @@ mod tests {
                         }
                     }
                     if page == Page::Battery {
+                        let tray = ui
+                            .hots
+                            .iter()
+                            .find(|h| h.act == Act::ToggleDeviceTray)
+                            .unwrap()
+                            .rect;
+                        let kind = ui
+                            .hots
+                            .iter()
+                            .find(|h| h.act == Act::OpenDrop(Drop::TrayKind))
+                            .unwrap()
+                            .rect;
+                        assert_eq!((tray.x, tray.w, tray.h), (kind.x, kind.w, kind.h));
                         let tabs: Vec<_> = ui
                             .hots
                             .iter()
@@ -3049,6 +3083,10 @@ mod tests {
                 .find(|h| h.act == Act::OpenDrop(Drop::TrayKind))
                 .unwrap()
                 .rect;
+            assert_eq!(
+                (toggle.x, toggle.w, toggle.h),
+                (dropdown.x, dropdown.w, dropdown.h)
+            );
             *ui.scroll_mut(Page::Battery) = (dropdown.bottom() - h + 50.0).max(0.0);
             ui.set_open_drop(Some(Drop::TrayKind));
             let mem = draw_frame(&mut canvas, &mut fonts, &mut ui, &args, theme, &data);
