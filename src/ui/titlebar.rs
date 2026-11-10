@@ -121,34 +121,28 @@ pub fn draw_settings(p: &mut Painter, ui: &mut crate::ui::widget::Ui, win_w: f32
     let r = settings_rect(win_w);
     let act = Act::Nav(Page::Settings);
     let active = ui.page == Page::Settings;
-    if active || ui.hover == Some(act) {
-        p.rect(
-            r,
-            if active {
-                p.t.accent_soft
-            } else {
-                crate::ui::gfx::with_alpha(p.t.text, 0x14)
-            },
-        );
+    if ui.hover == Some(act) {
+        p.rect(r, crate::ui::gfx::with_alpha(p.t.text, 0x14));
     }
-    let color = if active { p.t.accent } else { p.t.text };
-    let mut teeth = Vec::with_capacity(49);
-    for tooth in 0..8 {
+    let color = if active { p.t.accent } else { p.t.text2 };
+    let mut teeth = Vec::with_capacity(37);
+    for tooth in 0..6 {
         for (offset, radius) in [
-            (0.0, GLYPH_HALF * 0.75),
-            (0.16, GLYPH_HALF * 0.75),
-            (0.24, GLYPH_HALF),
-            (0.68, GLYPH_HALF),
-            (0.76, GLYPH_HALF * 0.75),
-            (1.0, GLYPH_HALF * 0.75),
+            (-0.5, GLYPH_HALF * 0.76),
+            (-0.28, GLYPH_HALF * 0.76),
+            (-0.16, GLYPH_HALF),
+            (0.16, GLYPH_HALF),
+            (0.28, GLYPH_HALF * 0.76),
+            (0.5, GLYPH_HALF * 0.76),
         ] {
-            let angle = (tooth as f32 + offset) * std::f32::consts::TAU / 8.0;
+            let angle = (tooth as f32 + offset) * std::f32::consts::TAU / 6.0
+                - std::f32::consts::FRAC_PI_2;
             teeth.push((r.cx() + angle.cos() * radius, r.cy() + angle.sin() * radius));
         }
     }
     teeth.push(teeth[0]);
-    p.polyline(&teeth, color, STROKE_THIN);
-    p.dot_ring(r.cx(), r.cy(), 1.7, color, STROKE_THIN);
+    p.stroke_path(&teeth, color, 1.0);
+    p.dot_ring(r.cx(), r.cy(), 1.8, color, 1.0);
     ui.chrome_hot(r, act);
 }
 

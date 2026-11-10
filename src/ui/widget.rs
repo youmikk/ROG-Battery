@@ -458,14 +458,7 @@ pub struct Ui {
     pub palette_tab: u8,
     /// 自定义色环当前选中的色相（0.0 .. 360.0）。
     pub custom_hue: f32,
-    /// 自绘标题栏上正悬停的按钮。`None` = 没悬停在任何按钮上。
-    ///
-    /// 由 `canvas.rs` 的 `WM_MOUSEMOVE` 写（那里鼠标进 canvas 子窗口之后
-    /// 就收不到「标题栏区域」的移动了 —— 标题栏在 canvas 之上），
-    /// 由 `draw_frame` 读。
-    ///
-    /// 命中测试和按钮点击走的是主窗口的 `WM_NCHITTEST`（`frame.rs`），
-    /// 这里只管「画哪一条高亮」。
+    /// 窗口按钮的悬停态，与客户区悬停态一起更新。
     pub hover_btn: Option<crate::ui::titlebar::Btn>,
     /// 是否弹出「关闭窗口」确认对话框。
     pub show_close_dialog: bool,
@@ -893,17 +886,19 @@ impl Ui {
         self.pointer.dragging = None;
     }
 
-    /// 鼠标移动后刷新悬停态。返回是否变了（变了才要重画）。
-    pub fn refresh_hover(&mut self) -> bool {
+    /// 客户区与非客户区共用悬停更新，避免跨区后留下旧高亮。
+    pub fn refresh_hover_at(&mut self, x: f32, y: f32, win_w: f32) -> bool {
+        let want_btn = crate::ui::titlebar::hit(x, y, win_w);
         let scroll = self.scroll_y(self.page);
-        let want = self.hit(self.pointer.x, self.pointer.y, scroll);
-        // §下拉弹层开着时，命中优先级变了：鼠标在弹层里应该高亮弹层项
-        if !hover_same(want, self.hover) {
-            self.hover = want;
-            true
+        let want = if want_btn.is_some() {
+            None
         } else {
-            false
-        }
+            self.hit(x, y, scroll)
+        };
+        let changed = self.hover_btn != want_btn || !hover_same(want, self.hover);
+        self.hover_btn = want_btn;
+        self.hover = want;
+        changed
     }
 
     /// 滑块某一点对应的比例（0–1）。
@@ -1059,6 +1054,36 @@ mod tests {
 
     fn ui() -> Ui {
         Ui::default()
+    }
+
+    #[test]
+    fn settings_and_window_buttons_never_keep_hover_together() {
+        use crate::ui::titlebar::{self, Btn};
+        for width in [720.0, 1100.0, 1920.0] {
+            for page in [Page::Battery, Page::Settings] {
+                let mut u = ui();
+                u.page = page;
+                u.chrome_hot(R::new(0.0, 0.0, width, titlebar::TITLE_H), Act::None);
+                let settings = titlebar::settings_rect(width);
+                u.chrome_hot(settings, Act::Nav(Page::Settings));
+                for button in Btn::ALL {
+                    assert!(u.refresh_hover_at(settings.cx(), settings.cy(), width));
+                    assert_eq!(u.hover, Some(Act::Nav(Page::Settings)));
+                    assert_eq!(u.hover_btn, None);
+                    let r = titlebar::btn_rect(button, width);
+                    assert!(u.refresh_hover_at(r.cx(), r.cy(), width));
+                    assert_eq!(u.hover, None);
+                    assert_eq!(u.hover_btn, Some(button));
+                    assert!(!u.refresh_hover_at(r.cx(), r.cy(), width));
+                }
+                assert!(u.refresh_hover_at(100.0, 18.0, width));
+                assert_eq!(u.hover, Some(Act::None));
+                assert_eq!(u.hover_btn, None);
+                u.refresh_hover_at(-1.0, -1.0, width);
+                assert_eq!(u.hover, None);
+                assert_eq!(u.hover_btn, None);
+            }
+        }
     }
 
     #[test]

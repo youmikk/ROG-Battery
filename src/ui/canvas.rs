@@ -85,12 +85,15 @@ const WM_CAPTURECHANGED: u32 = 0x0215;
 /// 系统要求放弃当前模态状态（拖拽中按 Esc、菜单弹出等）。
 const WM_CANCELMODE: u32 = 0x001F;
 const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_NCMOUSELEAVE: u32 = 0x02A2;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEWHEEL: u32 = 0x020A;
 const WM_LBUTTONDBLCLK: u32 = 0x0203;
 /// 非客户区命中测试。内容区铺满整个客户区，所以这个也发到我们这里。
 const WM_NCHITTEST: u32 = 0x0084;
+const WM_NCMOUSEMOVE: u32 = 0x00A0;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
 const WM_NCLBUTTONDBLCLK: u32 = 0x00A3;
 
@@ -136,6 +139,24 @@ struct WndClassExW {
     h_icon_sm: Handle,
 }
 
+#[repr(C)]
+struct TrackMouse {
+    size: u32,
+    flags: u32,
+    hwnd: Handle,
+    hover_time: u32,
+}
+
+fn track_mouse_leave(hwnd: Handle, non_client: bool) {
+    let mut event = TrackMouse {
+        size: std::mem::size_of::<TrackMouse>() as u32,
+        flags: 0x0002 | if non_client { 0x0010 } else { 0 },
+        hwnd,
+        hover_time: 0,
+    };
+    unsafe { TrackMouseEvent(&mut event) };
+}
+
 // `PAINTSTRUCT` 用 [`crate::win32::PaintStruct`]（那里已有单测钉死大小和偏移）。
 // 本文件不重复声明 —— 同一个 Win32 函数在两个模块里各声明一次、
 // 签名还不一致时，Rust 会报 `clashing_extern_declarations`，
@@ -143,6 +164,7 @@ struct WndClassExW {
 
 #[link(name = "user32")]
 extern "system" {
+    fn TrackMouseEvent(event: *mut TrackMouse) -> i32;
     fn RegisterClassExW(wc: *const WndClassExW) -> u16;
     fn CreateWindowExW(
         ex_style: u32,
@@ -1033,6 +1055,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
 
         WM_MOUSEMOVE => {
             if let Some(c) = ctx_of(hwnd) {
+                track_mouse_leave(hwnd, false);
                 let x = lo_word(lp) as f32 / c.scale;
                 let y = hi_word(lp) as f32 / c.scale;
                 let mut ui = c.ui.borrow_mut();
@@ -1040,21 +1063,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 ui.pointer.x = x;
                 ui.pointer.y = y;
                 if moved {
-                    // 标题栏按钮的悬停也在这里刷一遍：
-                    // `hover_btn` 原本只在 `WM_NCHITTEST` 里更新，而命中测试
-                    // 消息在某些输入路径（远程桌面、触控、合成消息）下不一定
-                    // 每次都来，表现就是「鼠标移上去按钮不高亮」。这里补一次。
-                    let hb = if y <= crate::ui::titlebar::TITLE_H && y >= 0.0 {
-                        let (pw, _) = client_pixel_size(hwnd);
-                        crate::ui::titlebar::hit(x, y, pw as f32 / c.scale)
-                    } else {
-                        None
-                    };
-                    let mut hb_changed = false;
-                    if ui.hover_btn != hb {
-                        ui.hover_btn = hb;
-                        hb_changed = true;
-                    }
+                    let (pw, _) = client_pixel_size(hwnd);
+                    let hover_changed = ui.refresh_hover_at(x, y, pw as f32 / c.scale);
                     // 正在拖滑块时，先把「这一帧该显示的值」写进 `live`，
                     // 页面下一帧就按它画 —— 这是滑块跟手的**唯一**来源。
                     //
@@ -1070,13 +1080,30 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                         (c.damage)();
                     } else {
                         // 悬停态变了才重画（悬停高亮），否则每次移动都重绘整页
-                        let hover_changed = ui.refresh_hover();
-                        if hover_changed || hb_changed {
+                        if hover_changed {
                             drop(ui);
                             unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
                             (c.damage)();
                         }
                     }
+                }
+            }
+            0
+        }
+
+        WM_MOUSELEAVE | WM_NCMOUSELEAVE => {
+            if let Some(c) = ctx_of(hwnd) {
+                let mut ui = c.ui.borrow_mut();
+                // 只清除离开的区域，避免迟到的 leave 擦掉相邻按钮的新高亮。
+                let changed = if msg == WM_MOUSELEAVE {
+                    ui.hover.take().is_some()
+                } else {
+                    ui.hover_btn.take().is_some()
+                };
+                drop(ui);
+                if changed {
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    (c.damage)();
                 }
             }
             0
@@ -1197,7 +1224,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
 
         // 子窗口吃下客户区全部鼠标消息：主窗口那边只负责非客户区，命中判定
         // 只能在这里做，否则点击会被吞进消息循环、按钮全哑。
-        WM_NCHITTEST => {
+        WM_NCHITTEST | WM_NCMOUSEMOVE => {
             let c = match ctx_of(hwnd) {
                 Some(c) => c,
                 None => return crate::ui::frame::HTCLIENT,
@@ -1220,15 +1247,19 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 crate::ui::titlebar::TITLE_H,
                 crate::ui::frame::owner_is_maximized(hwnd),
             );
-            // 悬停高亮：命中变化时重画一帧
-            let want_btn = crate::ui::titlebar::hit(x, y, cw);
             let mut ui = c.ui.borrow_mut();
-            if ui.hover_btn != want_btn {
-                ui.hover_btn = want_btn;
-                drop(ui);
+            let changed = ui.refresh_hover_at(x, y, cw);
+            drop(ui);
+            if changed {
+                InvalidateRect(hwnd, std::ptr::null(), 0);
                 (c.damage)();
             }
-            hit
+            if msg == WM_NCMOUSEMOVE {
+                track_mouse_leave(hwnd, true);
+                DefWindowProcW(hwnd, msg, wp, lp)
+            } else {
+                hit
+            }
         }
 
         // 拖动 / 边缘缩放：把意图交回系统。
