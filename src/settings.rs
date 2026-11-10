@@ -16,6 +16,7 @@ use crate::paths;
 /// 全部可配置项。加新项时记得同时改 [`Settings::default`] 和 [`Settings::parse`]。
 #[derive(Clone, Debug)]
 pub struct Settings {
+    pub device_tray: std::collections::BTreeMap<String, crate::tray_prefs::DeviceTray>,
     /// 快照缓存有效期（秒）。0 表示每次都重读设备。
     pub cache_ttl_sec: u64,
     /// 界面后台主动刷新的间隔（秒）。
@@ -39,6 +40,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            device_tray: Default::default(),
             cache_ttl_sec: crate::snapshot::DEFAULT_TTL_SEC,
             // 全量 19 帧约 591ms，只读 3 帧约 150ms；60 秒一次的额外耗电是
             // 0.07 %/天量级，可忽略。取 15 秒唯一的代价是鼠标休眠时更频繁地
@@ -78,11 +80,15 @@ impl Settings {
                 "refresh_interval_sec" => match v.parse::<u64>() {
                     // 0 会让后台线程空转，钳一个下限出来
                     Ok(n) => s.refresh_interval_sec = n.max(5),
-                    Err(_) => warnings.push(format!("refresh_interval_sec={v} 不是非负整数，已忽略")),
+                    Err(_) => {
+                        warnings.push(format!("refresh_interval_sec={v} 不是非负整数，已忽略"))
+                    }
                 },
                 "tray_enabled" => match parse_bool(v) {
                     Some(b) => s.tray_enabled = b,
-                    None => warnings.push(format!("tray_enabled={v} 不是布尔值（true/false），已忽略")),
+                    None => {
+                        warnings.push(format!("tray_enabled={v} 不是布尔值（true/false），已忽略"))
+                    }
                 },
                 "close_to_tray" => match parse_bool(v) {
                     Some(b) => legacy_close = Some(b),
@@ -107,7 +113,17 @@ impl Settings {
                         warnings.push(format!("theme={v} 只认 system/light/dark，已忽略"));
                     }
                 }
-                _ => {} // 未知键忽略，向后兼容（旧文件只有 cache_ttl_sec 一行也能读）
+                key if key.starts_with("device_tray.") => {
+                    let id = &key[12..];
+                    if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        if let Some(pref) = crate::tray_prefs::DeviceTray::parse(v) {
+                            s.device_tray.insert(id.to_ascii_lowercase(), pref);
+                        } else {
+                            warnings.push("设备托盘配置无效，已忽略".to_string());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         if !saw_close_mode {
@@ -145,7 +161,14 @@ impl Settings {
         s.push_str("# 界面配色：system（默认，跟随系统深浅色）/ light（浅色）/ dark（深色）。\n");
         s.push_str("# 程序里也能切换，切换后这里会被回写。\n");
         s.push_str(&format!("theme={}\n", self.theme));
+        for (key, pref) in &self.device_tray {
+            s.push_str(&format!("device_tray.{key}={}\n", pref.text()));
+        }
         s
+    }
+
+    pub fn tray_for(&self, key: &str) -> crate::tray_prefs::DeviceTray {
+        self.device_tray.get(key).copied().unwrap_or_default()
     }
 
     /// 把设置渲染成 ini 文本（供「更改设置文件位置」时把当前配置写到新位置）。
@@ -279,6 +302,29 @@ pub fn format_unix_local(unix: i64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_tray_settings_roundtrip_independently() {
+        use crate::tray_prefs::{DeviceTray, TrayContent, TrayKind};
+        let a = "0123456789abcdef".to_string();
+        let b = "fedcba9876543210".to_string();
+        let mut cfg = Settings::default();
+        let pref = DeviceTray {
+            enabled: false,
+            kind: TrayKind::Headset,
+            content: TrayContent::Number,
+        };
+        cfg.device_tray.insert(a.clone(), pref);
+        let text = cfg.to_text();
+        let loaded = Settings::parse(&text);
+        assert_eq!(loaded.tray_for(&a), pref);
+        assert_eq!(loaded.tray_for(&b), DeviceTray::default());
+        assert_eq!(
+            Settings::parse("device_tray.invalid=1,0,0")
+                .device_tray
+                .len(),
+            0
+        );
+    }
     use super::*;
 
     #[test]
@@ -360,6 +406,7 @@ mod tests {
     #[test]
     fn roundtrip_through_text() {
         let s = Settings {
+            device_tray: Default::default(),
             cache_ttl_sec: 45,
             refresh_interval_sec: 20,
             tray_enabled: false,
