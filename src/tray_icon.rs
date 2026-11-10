@@ -5,7 +5,7 @@ use core::ptr;
 
 use crate::win32::Handle;
 
-/// 图标绘制尺寸，Windows 按系统缩放显示。
+/// 图标布局基准尺寸。
 pub const ICON_SIZE: i32 = 32;
 
 pub fn render_device(
@@ -13,6 +13,22 @@ pub fn render_device(
     charging: bool,
     kind: crate::tray_prefs::TrayKind,
     content: crate::tray_prefs::TrayContent,
+) -> Option<Handle> {
+    let theme = if crate::autostart::system_uses_light_theme() {
+        &crate::ui::theme::LIGHT
+    } else {
+        &crate::ui::theme::DARK
+    };
+    render_device_at(level, charging, kind, content, theme, icon_size())
+}
+
+fn render_device_at(
+    level: Option<u8>,
+    charging: bool,
+    kind: crate::tray_prefs::TrayKind,
+    content: crate::tray_prefs::TrayContent,
+    theme: &crate::ui::theme::Theme,
+    size: i32,
 ) -> Option<Handle> {
     use crate::tray_prefs::TrayContent;
     use crate::ui::gfx::{Painter, R};
@@ -24,8 +40,8 @@ pub fn render_device(
         let mut bitmap = ptr::null_mut();
         let mut graphics = ptr::null_mut();
         if GdipCreateBitmapFromScan0(
-            ICON_SIZE,
-            ICON_SIZE,
+            size,
+            size,
             0,
             PIXEL_FORMAT_32BPP_ARGB,
             ptr::null(),
@@ -41,32 +57,30 @@ pub fn render_device(
         GdipGraphicsClear(graphics, 0);
         GdipSetSmoothingMode(graphics, 4);
         GdipSetTextRenderingHint(graphics, 4);
-        let theme = if crate::autostart::system_uses_light_theme() {
-            &crate::ui::theme::LIGHT
-        } else {
-            &crate::ui::theme::DARK
-        };
         let ink = match level {
             None => theme.text3,
             Some(0..=20) => theme.red,
             _ => theme.text,
         };
-        let painted = Painter::on_graphics(graphics, theme, 32.0, |p| {
+        let painted = Painter::on_graphics(graphics, theme, 32.0, size as f32 / 32.0, |p| {
             let combined = content == TrayContent::Combined;
             if content != TrayContent::Number {
                 let area = if combined {
-                    R::new(1.0, 8.0, 9.0, 16.0)
+                    R::new(1.5, 6.0, 10.0, 20.0)
                 } else {
-                    R::new(3.0, 3.0, 26.0, 26.0)
+                    R::new(2.0, 2.0, 28.0, 28.0)
                 };
                 device_glyph(p, area, kind, ink);
             }
             if content != TrayContent::Icon {
                 let text = level.map(label).unwrap_or_else(|| "–".to_string());
                 let rect = if combined {
-                    R::new(12.0, 6.0, 19.0, 20.0)
+                    let width = if text.len() == 1 { 10.0 } else { 18.0 };
+                    R::new(22.5 - width / 2.0, 4.0, width, 24.0)
                 } else {
-                    R::new(1.0, 3.0, 30.0, 26.0)
+                    let width = if text.len() == 1 { 18.0 } else { 30.0 };
+                    let top = if charging { 5.0 } else { 2.0 };
+                    R::new(16.0 - width / 2.0, top, width, 30.0 - top)
                 };
                 if level.is_some() {
                     p.icon_text(&text, rect, if combined { 23.0 } else { 28.0 }, ink);
@@ -82,7 +96,7 @@ pub fn render_device(
                 }
             }
             if charging && level.is_some() {
-                p.dot(if combined { 5.5 } else { 29.0 }, 3.0, 2.0, theme.green);
+                p.dot(if combined { 6.5 } else { 29.0 }, 2.0, 1.8, theme.green);
             }
         });
         GdipDeleteGraphics(graphics);
@@ -105,7 +119,7 @@ fn device_glyph(
 ) {
     use crate::tray_prefs::TrayKind;
     use crate::ui::gfx::R;
-    let stroke = 1.6;
+    let stroke = 2.4;
     let cx = r.cx();
     let cy = r.cy();
     match kind {
@@ -113,13 +127,13 @@ fn device_glyph(
             let w = r.w.min(r.h * 0.65);
             let body = R::new(cx - w / 2.0, r.y, w, r.h);
             p.round_stroke(body, w * 0.45, ink, stroke);
-            p.line(cx, r.y + 3.0, cx, r.y + r.h * 0.35, ink, stroke);
+            p.line(cx, r.y + r.h * 0.2, cx, r.y + r.h * 0.4, ink, stroke);
         }
         TrayKind::Keyboard => {
-            let h = r.w * 0.7;
+            let h = (r.w * 0.8).max(r.h * 0.55);
             p.round_stroke(R::new(r.x, cy - h / 2.0, r.w, h), 1.5, ink, stroke);
-            for col in [0.25, 0.5, 0.75] {
-                p.dot(r.x + r.w * col, cy - h * 0.15, 0.65, ink);
+            for col in [0.3, 0.7] {
+                p.dot(r.x + r.w * col, cy - h * 0.15, 0.85, ink);
             }
             p.line(
                 r.x + r.w * 0.25,
@@ -127,21 +141,32 @@ fn device_glyph(
                 r.right() - r.w * 0.25,
                 cy + h * 0.2,
                 ink,
-                1.2,
+                1.8,
             );
         }
         TrayKind::Headset => {
-            let radius = r.w * 0.43;
-            p.arc(cx, cy, radius, stroke, 180.0, 180.0, ink);
-            p.round(R::new(r.x, cy - 1.0, r.w * 0.22, radius), 1.0, ink);
+            let radius = r.w * 0.5;
+            let top = cy - r.h * 0.35;
+            p.arc(cx, top + radius, radius, stroke, 180.0, 180.0, ink);
+            p.line(r.x, top + radius, r.x, cy + r.h * 0.22, ink, stroke);
+            p.line(
+                r.right(),
+                top + radius,
+                r.right(),
+                cy + r.h * 0.22,
+                ink,
+                stroke,
+            );
+            let ear_h = r.h * 0.35;
+            p.round(R::new(r.x, cy, r.w * 0.28, ear_h), 1.0, ink);
             p.round(
-                R::new(r.right() - r.w * 0.22, cy - 1.0, r.w * 0.22, radius),
+                R::new(r.right() - r.w * 0.28, cy, r.w * 0.28, ear_h),
                 1.0,
                 ink,
             );
         }
         TrayKind::Gamepad => {
-            let h = r.w * 0.75;
+            let h = (r.w * 0.75).max(r.h * 0.6);
             let points: Vec<_> = [
                 (0.0, 1.0),
                 (0.12, 0.12),
@@ -158,7 +183,7 @@ fn device_glyph(
             .iter()
             .map(|(x, y)| (r.x + x * r.w, cy - h / 2.0 + y * h))
             .collect();
-            p.polyline(&points, ink, stroke);
+            p.stroke_path(&points, ink, stroke);
             p.dot(r.x + r.w * 0.27, cy - h * 0.05, 0.8, ink);
             p.dot(r.x + r.w * 0.75, cy - h * 0.05, 0.8, ink);
         }
@@ -192,7 +217,6 @@ const SUPERSAMPLE: i32 = 4;
 /// 查 `SM_CXSMICON`（=49）。查询失败或返回离谱值时回落到 [`ICON_SIZE`]。
 ///
 /// 夹在 16..=32：小于 16 画不下两位数字，大于 32 没意义（托盘不显示那么大）。
-#[cfg(test)]
 pub fn icon_size() -> i32 {
     let n = unsafe { crate::win32::GetSystemMetrics(49) };
     if n < 16 {
@@ -634,7 +658,7 @@ mod tests {
         let screen = unsafe { crate::win32::GetDC(ptr::null_mut()) };
         assert!(!screen.is_null());
         let mut canvas = Canvas::new();
-        let dc = canvas.ensure(screen as isize, 720, 520);
+        let dc = canvas.ensure(screen as isize, 720, 900);
         let mut fonts = Fonts::new("Segoe UI").unwrap();
         canvas.paint(
             &mut fonts,
@@ -642,14 +666,24 @@ mod tests {
             1.0,
             0.0,
             720.0,
-            520.0,
-            |p| p.rect(R::new(0.0, 0.0, 720.0, 520.0), 0xfff7f8f7),
+            900.0,
+            |p| {
+                p.rect(R::new(0.0, 0.0, 720.0, 900.0), crate::ui::theme::LIGHT.bg);
+                p.rect(R::new(0.0, 550.0, 720.0, 350.0), crate::ui::theme::DARK.bg);
+            },
         );
         for (column, kind) in TrayKind::ALL.iter().skip(1).enumerate() {
             for (row, content) in TrayContent::ALL.iter().enumerate() {
                 for (variant, level) in [Some(78), Some(100), None].iter().enumerate() {
-                    let icon =
-                        render_device(*level, variant == 1, *kind, *content).expect("图标生成失败");
+                    let icon = render_device_at(
+                        *level,
+                        variant == 1,
+                        *kind,
+                        *content,
+                        &crate::ui::theme::LIGHT,
+                        32,
+                    )
+                    .expect("图标生成失败");
                     let x = 10 + (column as i32) * 140 + variant as i32 * 42;
                     let y = 12 + row as i32 * 68;
                     assert_ne!(
@@ -664,39 +698,88 @@ mod tests {
                 }
             }
         }
-        for (row, size) in [16, 20, 24, 32].iter().enumerate() {
-            for (column, level) in [
-                Some(0),
-                Some(7),
-                Some(11),
-                Some(78),
-                Some(99),
-                Some(100),
-                None,
-            ]
+        for (mode, content) in [TrayContent::Combined, TrayContent::Number]
             .iter()
             .enumerate()
-            {
-                let icon =
-                    render_device(*level, false, TrayKind::Mouse, TrayContent::Combined).unwrap();
-                assert_ne!(
-                    unsafe {
-                        DrawIconEx(
-                            dc as Handle,
-                            10 + column as i32 * 90,
-                            230 + row as i32 * 60,
-                            icon,
+        {
+            for (row, size) in [16, 20, 24, 32].iter().enumerate() {
+                for (column, level) in [
+                    Some(0),
+                    Some(7),
+                    Some(11),
+                    Some(78),
+                    Some(99),
+                    Some(100),
+                    None,
+                ]
+                .iter()
+                .enumerate()
+                {
+                    for (theme_index, theme) in [&crate::ui::theme::LIGHT, &crate::ui::theme::DARK]
+                        .iter()
+                        .enumerate()
+                    {
+                        let icon = render_device_at(
+                            *level,
+                            false,
+                            TrayKind::Mouse,
+                            *content,
+                            theme,
                             *size,
-                            *size,
-                            0,
-                            ptr::null_mut(),
-                            3,
                         )
-                    },
-                    0
-                );
-                unsafe {
-                    crate::win32::DestroyIcon(icon);
+                        .unwrap();
+                        assert_ne!(
+                            unsafe {
+                                DrawIconEx(
+                                    dc as Handle,
+                                    10 + column as i32 * 90,
+                                    230 + mode as i32 * 160
+                                        + row as i32 * 40
+                                        + theme_index as i32 * 320,
+                                    icon,
+                                    *size,
+                                    *size,
+                                    0,
+                                    ptr::null_mut(),
+                                    3,
+                                )
+                            },
+                            0
+                        );
+                        if *size == 16 && level.is_some() {
+                            let x = 10 + column as i32 * 90;
+                            let y = 230 + mode as i32 * 160 + theme_index as i32 * 320;
+                            let bg = crate::ui::gfx::gdi_get_pixel(dc, 700, y).unwrap();
+                            let start_x = if *content == TrayContent::Combined {
+                                7
+                            } else {
+                                0
+                            };
+                            let rows_with_ink = (0..16)
+                                .filter(|dy| {
+                                    (start_x..16).any(|dx| {
+                                        let pixel =
+                                            crate::ui::gfx::gdi_get_pixel(dc, x + dx, y + dy)
+                                                .unwrap();
+                                        [0, 8, 16].iter().any(|shift| {
+                                            let a = ((pixel >> shift) & 255) as i32;
+                                            let b = ((bg >> shift) & 255) as i32;
+                                            (a - b).abs() > 40
+                                        })
+                                    })
+                                })
+                                .count();
+                            let minimum = if *content == TrayContent::Combined {
+                                10
+                            } else {
+                                12
+                            };
+                            assert!(rows_with_ink >= minimum, "16px {content:?} {level:?}: digits too small ({rows_with_ink} rows)");
+                        }
+                        unsafe {
+                            crate::win32::DestroyIcon(icon);
+                        }
+                    }
                 }
             }
         }
@@ -707,7 +790,7 @@ mod tests {
             ),
             dc,
             720,
-            520,
+            900,
         );
         canvas.release();
         unsafe {
@@ -814,34 +897,37 @@ mod tests {
     /// 之后的对象数不允许比预热结束时多 10 个以上。
     #[test]
     fn repeated_renders_do_not_leak_gdi_objects() {
+        use crate::tray_prefs::{TrayContent, TrayKind};
         use crate::win32::GetCurrentProcess;
 
-        unsafe fn gdi_count() -> i32 {
-            // GR_GDIOBJECTS = 0
-            crate::win32::GetGuiResources(GetCurrentProcess(), 0) as i32
+        unsafe fn resource_counts() -> [i32; 2] {
+            [
+                crate::win32::GetGuiResources(GetCurrentProcess(), 0) as i32,
+                crate::win32::GetGuiResources(GetCurrentProcess(), 1) as i32,
+            ]
         }
 
         // 预热
         for _ in 0..20 {
-            if let Some(h) = render(82) {
+            if let Some(h) = render_device(Some(82), false, TrayKind::Mouse, TrayContent::Combined) {
                 unsafe { crate::win32::DestroyIcon(h) };
             }
         }
-        let before = unsafe { gdi_count() };
+        let before = unsafe { resource_counts() };
 
         for i in 0..200 {
             let lv = (i % 101) as u8;
-            match render(lv) {
+            match render_device(Some(lv), i % 2 == 0, TrayKind::Mouse, TrayContent::ALL[i % 3]) {
                 Some(h) => unsafe { crate::win32::DestroyIcon(h) },
                 None => panic!("level={lv} 画不出来"),
             };
         }
 
-        let after = unsafe { gdi_count() };
-        assert!(
-            after - before <= 10,
-            "画 200 次后 GDI 对象从 {before} 涨到 {after}，疑似泄漏"
-        );
+        let after = unsafe { resource_counts() };
+        for (index, name) in ["GDI", "USER"].iter().enumerate() {
+            assert!(after[index] - before[index] <= 10,
+                "画 200 次后 {name} 对象从 {} 涨到 {}，疑似泄漏", before[index], after[index]);
+        }
     }
 
     /// 充电角标这条分支必须能画出来（GDI+ 调用链和普通徽章不同）。

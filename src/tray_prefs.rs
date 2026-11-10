@@ -70,6 +70,7 @@ pub struct DeviceTray {
     pub enabled: bool,
     pub kind: TrayKind,
     pub content: TrayContent,
+    pub content_auto: bool,
 }
 
 impl Default for DeviceTray {
@@ -78,11 +79,22 @@ impl Default for DeviceTray {
             enabled: true,
             kind: TrayKind::Auto,
             content: TrayContent::Combined,
+            content_auto: true,
         }
     }
 }
 
 impl DeviceTray {
+    pub fn effective_content(self, device_count: usize) -> TrayContent {
+        if !self.content_auto {
+            self.content
+        } else if device_count == 1 {
+            TrayContent::Number
+        } else {
+            TrayContent::Combined
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         let mut parts = value.split(',');
         let enabled = match parts.next()? {
@@ -92,6 +104,12 @@ impl DeviceTray {
         };
         let kind = *TrayKind::ALL.get(parts.next()?.parse::<usize>().ok()?)?;
         let content = *TrayContent::ALL.get(parts.next()?.parse::<usize>().ok()?)?;
+        // 旧配置的三段值视为手动选择，保留已有显示方式。
+        let content_auto = match parts.next() {
+            None | Some("0") => false,
+            Some("1") => true,
+            _ => return None,
+        };
         if parts.next().is_some() {
             return None;
         }
@@ -99,15 +117,17 @@ impl DeviceTray {
             enabled,
             kind,
             content,
+            content_auto,
         })
     }
 
     pub fn text(self) -> String {
         format!(
-            "{},{},{}",
+            "{},{},{}{}",
             u8::from(self.enabled),
             self.kind as u8,
-            self.content as u8
+            self.content as u8,
+            if self.content_auto { ",1" } else { "" }
         )
     }
 }
@@ -128,8 +148,42 @@ mod tests {
     }
     #[test]
     fn invalid_preferences_are_rejected() {
-        for value in ["1,9,0", "1,0,9", "yes,0,0", "1,0", "1,0,0,1"] {
+        for value in ["1,9,0", "1,0,9", "yes,0,0", "1,0", "1,0,0,9", "1,0,0,1,0"] {
             assert!(DeviceTray::parse(value).is_none());
         }
+    }
+
+    #[test]
+    fn automatic_content_follows_device_count_and_survives_other_preferences() {
+        let pref = DeviceTray {
+            enabled: false,
+            kind: TrayKind::Mouse,
+            ..Default::default()
+        };
+        let loaded = DeviceTray::parse(&pref.text()).unwrap();
+        assert_eq!(loaded, pref);
+        assert_eq!(loaded.effective_content(1), TrayContent::Number);
+        assert_eq!(loaded.effective_content(2), TrayContent::Combined);
+        assert_eq!(loaded.effective_content(1), TrayContent::Number);
+    }
+
+    #[test]
+    fn explicit_and_legacy_content_never_changes_with_device_count() {
+        for content in TrayContent::ALL {
+            let pref = DeviceTray {
+                content,
+                content_auto: false,
+                ..Default::default()
+            };
+            let loaded = DeviceTray::parse(&pref.text()).unwrap();
+            assert_eq!(loaded, pref);
+            for count in [1, 2, 4] {
+                assert_eq!(loaded.effective_content(count), content);
+            }
+        }
+        assert_eq!(
+            DeviceTray::parse("1,0,0").unwrap().effective_content(1),
+            TrayContent::Combined
+        );
     }
 }

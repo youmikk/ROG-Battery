@@ -331,7 +331,7 @@ extern "system" {
 /// 只在测试里用 —— 生产路径不需要回读自己刚画的像素。加它是因为
 /// `ring()` 曾因 `wrap=4` 整段静默不画，而当时唯一的断言是「不崩」。
 #[cfg(test)]
-fn gdi_get_pixel(hdc: Gdi, x: i32, y: i32) -> Option<u32> {
+pub(crate) fn gdi_get_pixel(hdc: Gdi, x: i32, y: i32) -> Option<u32> {
     #[link(name = "gdi32")]
     extern "system" {
         fn GetPixel(hdc: Gdi, x: i32, y: i32) -> u32;
@@ -853,9 +853,19 @@ impl<'a> Painter<'a> {
         g: *mut c_void,
         theme: &Theme,
         size: f32,
+        scale: f32,
         draw: F,
     ) -> Option<()> {
         let mut fonts = Fonts::new("Segoe UI")?;
+        let mut matrix = std::ptr::null_mut();
+        if GdipCreateMatrix2(scale, 0.0, 0.0, scale, 0.0, 0.0, &mut matrix) != OK {
+            return None;
+        }
+        let status = GdipSetWorldTransform(g, matrix);
+        GdipDeleteMatrix(matrix);
+        if status != OK {
+            return None;
+        }
         let mut obj = ObjCache::default();
         {
             let mut p = Painter {
@@ -864,7 +874,7 @@ impl<'a> Painter<'a> {
                 fonts: &mut fonts,
                 t: theme,
                 clip: R::new(0.0, 0.0, size, size),
-                scale: 1.0,
+                scale,
             };
             draw(&mut p);
         }
@@ -1351,12 +1361,13 @@ impl<'a> Painter<'a> {
                 && bounds.w > 0.0
                 && bounds.h > 0.0
             {
-                // 按整串字形的实际边界缩放，保留自然字距。
-                let scale = (r.w / bounds.w).min(r.h / bounds.h);
-                let x = r.cx() - (bounds.x + bounds.w / 2.0) * scale;
-                let y = r.cy() - (bounds.y + bounds.h / 2.0) * scale;
+                // 托盘使用窄体大数字，宽度受限时仍保留足够的字高。
+                let sx = r.w / bounds.w;
+                let sy = r.h / bounds.h;
+                let x = r.x - bounds.x * sx;
+                let y = r.y - bounds.y * sy;
                 let mut matrix = std::ptr::null_mut();
-                if GdipCreateMatrix2(scale, 0.0, 0.0, scale, x, y, &mut matrix) == OK {
+                if GdipCreateMatrix2(sx, 0.0, 0.0, sy, x, y, &mut matrix) == OK {
                     GdipTransformPath(path, matrix);
                     GdipFillPath(self.g, brush, path);
                     GdipDeleteMatrix(matrix);

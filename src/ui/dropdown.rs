@@ -159,7 +159,12 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
             .to_string(),
         Drop::TrayContent => d
             .selected
-            .map(|r| d.cfg.tray_for(&r.key).content.label())
+            .map(|r| {
+                d.cfg
+                    .tray_for(&r.key)
+                    .effective_content(d.readings.len())
+                    .label()
+            })
             .unwrap_or("图标＋电量")
             .to_string(),
         Drop::Sleep => st
@@ -218,7 +223,7 @@ pub fn drop_selected(drop: Drop, d: &Data) -> usize {
             .unwrap_or(0),
         Drop::TrayContent => d
             .selected
-            .map(|r| d.cfg.tray_for(&r.key).content as usize)
+            .map(|r| d.cfg.tray_for(&r.key).effective_content(d.readings.len()) as usize)
             .unwrap_or(0),
         Drop::Sleep => st.map(|s| s.sleep_mode as usize).unwrap_or(0),
         Drop::Poll => st.map(|s| s.poll_code as usize).unwrap_or(0),
@@ -285,6 +290,60 @@ pub fn options(drop: Drop, d: &Data) -> &'static [(String, usize)] {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tray_dropdown_matches_automatic_and_explicit_content() {
+        use crate::tray_prefs::TrayContent;
+        let readings = crate::mock::parse("mouse|Mouse|78|0\nkeyboard|Keyboard|96|1");
+        let cfg = crate::settings::Settings::default();
+        let estimate = crate::history::Estimate::default();
+        let mut d = super::super::pages::Data {
+            selected: Some(&readings[0]),
+            readings: &readings[..1],
+            state: None,
+            ident: None,
+            link_mode: "",
+            status: String::new(),
+            plot: None,
+            estimate: &estimate,
+            rows: 0,
+            cfg: &cfg,
+            autostart_text: "",
+            autostart_on: false,
+            version: "test",
+        };
+        assert_eq!(
+            drop_current(Drop::TrayContent, &d),
+            TrayContent::Number.label()
+        );
+        assert_eq!(
+            drop_selected(Drop::TrayContent, &d),
+            TrayContent::Number as usize
+        );
+        d.readings = &readings;
+        assert_eq!(
+            drop_current(Drop::TrayContent, &d),
+            TrayContent::Combined.label()
+        );
+        assert_eq!(
+            drop_selected(Drop::TrayContent, &d),
+            TrayContent::Combined as usize
+        );
+        let mut explicit_cfg = cfg.clone();
+        let pref = explicit_cfg.device_tray.entry(readings[0].key.clone()).or_default();
+        pref.content = TrayContent::Icon;
+        pref.content_auto = false;
+        d.cfg = &explicit_cfg;
+        d.readings = &readings[..1];
+        assert_eq!(
+            drop_current(Drop::TrayContent, &d),
+            TrayContent::Icon.label()
+        );
+        assert_eq!(
+            drop_selected(Drop::TrayContent, &d),
+            TrayContent::Icon as usize
+        );
+    }
 
     #[test]
     fn local_drops_keep_their_value_without_a_device() {

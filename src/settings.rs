@@ -312,6 +312,7 @@ mod tests {
             enabled: false,
             kind: TrayKind::Headset,
             content: TrayContent::Number,
+            content_auto: false,
         };
         cfg.device_tray.insert(a.clone(), pref);
         let text = cfg.to_text();

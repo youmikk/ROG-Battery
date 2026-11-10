@@ -854,6 +854,7 @@ impl TrayCtl {
         for key in wanted {
             let reading = visible.iter().find(|r| r.key == key);
             let pref = cfg.tray_for(&key);
+            let content = pref.effective_content(readings.len());
             let tip = reading
                 .map(|r| {
                     format!(
@@ -871,8 +872,9 @@ impl TrayCtl {
                 })
                 .unwrap_or_else(|| "R Battery · 打开设备页面".to_string());
             let signature = format!(
-                "{:?}:{pref:?}:{}:{tip}",
+                "{:?}:{pref:?}:{content:?}:{}:{}:{tip}",
                 reading,
+                crate::tray_icon::icon_size(),
                 crate::autostart::system_uses_light_theme()
             );
             if entries
@@ -886,7 +888,7 @@ impl TrayCtl {
                     if r.connected { Some(r.level) } else { None },
                     r.charging,
                     pref.kind.resolve(r.family),
-                    pref.content,
+                    content,
                 )
             } else {
                 let h = win32::load_app_icon(32);
@@ -1407,6 +1409,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
                         }
                     } else if let Some(content) = crate::tray_prefs::TrayContent::ALL.get(code) {
                         pref.content = *content;
+                        pref.content_auto = false;
                     }
                 });
                 env.canvas.repaint_now();
@@ -2915,7 +2918,12 @@ mod tests {
         let tray = TrayCtl::new(window.handle.hwnd().unwrap() as win32::Handle);
         let readings = crate::mock::parse("mouse|Mouse A|78|0\nkeyboard|Keyboard B|96|1");
         let mut cfg = Settings::default();
+        tray.sync(&readings[..1], &cfg);
+        let single_signature = tray.entries.borrow()[0].signature.clone();
+        let first_id = tray.entries.borrow()[0].id.uid;
         tray.sync(&readings, &cfg);
+        assert_ne!(tray.entries.borrow()[0].signature, single_signature);
+        assert_eq!(tray.entries.borrow()[0].id.uid, first_id);
         let ids: Vec<_> = tray
             .entries
             .borrow()
