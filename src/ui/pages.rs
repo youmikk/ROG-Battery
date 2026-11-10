@@ -756,7 +756,7 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     ];
     let is_mouse = d
         .selected
-        .is_some_and(|r| r.family == crate::device::DeviceFamily::Mouse);
+        .is_some_and(|r| d.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Mouse);
     let mut x = c.x;
     for (page, label) in tabs {
         if page != Page::Battery && !is_mouse {
@@ -839,7 +839,7 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
     let help = if pref.kind == crate::tray_prefs::TrayKind::Auto {
         crate::trf!(
             "自动识别为{}，可手动纠正",
-            crate::i18n::translate(device.family.noun())
+            d.cfg.device_kind(device).label()
         )
     } else {
         crate::tr!("手动选择优先于自动识别").to_string()
@@ -857,9 +857,16 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
 
 // ───────────────────────── 入口 ─────────────────────────
 
-
 /// 画当前页正文（内容坐标，滚动由 canvas 施加）。
 pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
+    if matches!(ui.page, Page::Perf | Page::Light | Page::Keys)
+        && d.selected
+            .is_some_and(|r| d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse)
+    {
+        ui.page = Page::Battery;
+        ui.set_open_drop(None);
+        ui.cancel_edit();
+    }
     // 读不到设备时，只有**依赖设备状态**的页面才锁定：设置页、灯光页、电量页
     // 的内容要么是本地设置、要么是只读展示，锁了反而没法用。
     // 占位状态（`State::default()`）也算读不到 —— 否则开关/下拉照常可点。
@@ -1216,7 +1223,7 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         );
         ui.hot(r, act);
         p.text(
-            dev.family.noun(),
+            d.cfg.device_kind(dev).label(),
             R::new(r.x + 18.0, r.y + 12.0, 80.0, 18.0),
             10.5,
             false,
@@ -1365,7 +1372,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         Align::Left,
     );
     if let Some(st) = d.state {
-        if selected.is_some_and(|r| r.family == crate::device::DeviceFamily::Mouse) {
+        if selected.is_some_and(|r| d.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Mouse) {
             p.text(
                 &format!(
                     "{} DPI  ·  {}",
@@ -1382,7 +1389,9 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     }
     c.y = hero.bottom();
     device_tray_settings(p, ui, d, c);
-    if selected.is_some_and(|r| r.family != crate::device::DeviceFamily::Mouse || r.simulated) {
+    if selected
+        .is_some_and(|r| d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse || r.simulated)
+    {
         return;
     }
 
@@ -2862,6 +2871,118 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_device_type_updates_pages_and_restores_automatic_controls() {
+        use crate::tray_prefs::TrayKind;
+        use crate::ui::canvas::{draw_frame, PaintArgs};
+        use crate::ui::gfx::{save_bmp, Canvas, Fonts};
+        let mut readings = crate::mock::parse("mouse|Device A|78|0\nkeyboard|Device B|96|1");
+        readings[0].simulated = false;
+        let estimate = crate::history::Estimate::default();
+        let state = crate::proto::State {
+            power: 78,
+            enc: [7, 15, 31, 63],
+            ..Default::default()
+        };
+        let mut cfg = crate::settings::Settings::default();
+        let mut ui = Ui::default();
+        ui.select_device(&readings[0].key);
+        let mut canvas = Canvas::new();
+        let mut fonts = Fonts::new("Microsoft YaHei UI").unwrap();
+        let args = PaintArgs {
+            pixel_w: 1100,
+            pixel_h: 760,
+            view_w: 1100.0,
+            view_h: 760.0,
+            scale: 1.0,
+            hwnd: std::ptr::null_mut(),
+        };
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch");
+        std::fs::create_dir_all(&out).unwrap();
+        for kind in [
+            TrayKind::Auto,
+            TrayKind::Generic,
+            TrayKind::Headset,
+            TrayKind::Auto,
+        ] {
+            cfg.device_tray
+                .entry(readings[0].key.clone())
+                .or_default()
+                .kind = kind;
+            let data = Data {
+                selected: Some(&readings[0]),
+                state: Some(&state),
+                ident: None,
+                link_mode: "Wireless24G",
+                status: String::new(),
+                plot: None,
+                estimate: &estimate,
+                rows: 0,
+                cfg: &cfg,
+                autostart_text: "",
+                autostart_on: false,
+                version: "test",
+                readings: &readings,
+            };
+            ui.page = Page::Battery;
+            let mem = draw_frame(
+                &mut canvas,
+                &mut fonts,
+                &mut ui,
+                &args,
+                &crate::ui::theme::LIGHT,
+                &data,
+            );
+            let mouse = kind == TrayKind::Auto;
+            for page in [Page::Perf, Page::Light, Page::Keys] {
+                assert_eq!(ui.hots.iter().any(|h| h.act == Act::Nav(page)), mouse);
+            }
+            assert_eq!(
+                ui.hots.iter().any(|h| h.act == Act::OpenDrop(Drop::Sleep)),
+                mouse
+            );
+            assert!(ui
+                .hots
+                .iter()
+                .any(|h| h.act == Act::OpenDrop(Drop::TrayKind)));
+            if kind == TrayKind::Generic {
+                save_bmp(
+                    out.join("device-type-other-detail.bmp").to_str().unwrap(),
+                    mem,
+                    1100,
+                    760,
+                );
+                ui.page = Page::Home;
+                let mem = draw_frame(
+                    &mut canvas,
+                    &mut fonts,
+                    &mut ui,
+                    &args,
+                    &crate::ui::theme::LIGHT,
+                    &data,
+                );
+                save_bmp(
+                    out.join("device-type-other-home.bmp").to_str().unwrap(),
+                    mem,
+                    1100,
+                    760,
+                );
+            }
+            for page in [Page::Perf, Page::Light, Page::Keys] {
+                ui.page = page;
+                draw_frame(
+                    &mut canvas,
+                    &mut fonts,
+                    &mut ui,
+                    &args,
+                    &crate::ui::theme::LIGHT,
+                    &data,
+                );
+                assert_eq!(ui.page, if mouse { page } else { Page::Battery });
+            }
+        }
+    }
+
     #[test]
     fn english_pages_keep_language_controls_and_navigation_usable() {
         use crate::i18n::{with_language, Language};

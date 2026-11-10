@@ -44,6 +44,16 @@ impl TrayKind {
             DeviceFamily::Unknown => Self::Generic,
         }
     }
+
+    pub fn order(self) -> u8 {
+        match self {
+            Self::Mouse => 0,
+            Self::Keyboard => 1,
+            Self::Headset => 2,
+            Self::Gamepad => 3,
+            Self::Generic | Self::Auto => 4,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

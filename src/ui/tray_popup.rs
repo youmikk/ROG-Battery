@@ -564,9 +564,10 @@ fn draw(
             p.hline(list.x + 1.0, list.right() - 1.0, r.y - 1.0, t.border);
         }
         let ink = if d.connected { t.text } else { t.text3 };
+        let kind = cfg.device_kind(d);
         panel_icons::draw(
             p,
-            Icon::Device(cfg.tray_for(&d.key).kind.resolve(d.family)),
+            Icon::Device(kind),
             R::new(27.0, r.cy() - 12.5, 25.0, 25.0),
             if d.connected { t.text2 } else { t.text3 },
             0.0,
@@ -588,7 +589,7 @@ fn draw(
         } else {
             crate::tr!("已连接")
         };
-        let mut meta = format!("{} · {status}", crate::i18n::translate(d.family.noun()));
+        let mut meta = format!("{} · {status}", kind.label());
         if cfg.tray_device.as_ref() == Some(&d.key) {
             meta.push_str(" · ");
             meta.push_str(crate::tr!("托盘显示"));
@@ -773,7 +774,15 @@ mod tests {
         let mut canvas = Canvas::new();
         let mut fonts = Fonts::new("Microsoft YaHei UI").unwrap();
         let target = canvas.ensure(dc as isize, 820, 740);
-        for (name, t) in [("light", &theme::LIGHT), ("dark", &theme::DARK)] {
+        for (name, t, kind) in [
+            ("light", &theme::LIGHT, crate::tray_prefs::TrayKind::Auto),
+            ("dark", &theme::DARK, crate::tray_prefs::TrayKind::Auto),
+            ("other", &theme::LIGHT, crate::tray_prefs::TrayKind::Generic),
+        ] {
+            cfg.device_tray
+                .entry(readings[0].key.clone())
+                .or_default()
+                .kind = kind;
             let mut hits = Vec::new();
             canvas.paint(&mut fonts, t, 2.0, 0.0, 410.0, 367.0, |p| {
                 draw(

@@ -279,8 +279,7 @@ struct DeviceSnapshot {
 }
 
 fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
-    if let Some(mut readings) = crate::mock::readings() {
-        readings.sort_by_key(|d| d.family.order());
+    if let Some(readings) = crate::mock::readings() {
         let mut s = lock_shared(shared);
         s.devices = readings
             .iter()
@@ -301,6 +300,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             })
             .collect();
         s.readings = readings;
+        s.sort_readings();
         s.status = Status::Ok;
         return None;
     }
@@ -474,9 +474,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             }
         }
         s.readings = records.values().map(|d| d.reading.clone()).collect();
-        s.readings.sort_by(|a, b| {
-            (a.family.order(), &a.name, &a.key).cmp(&(b.family.order(), &b.name, &b.key))
-        });
+        s.sort_readings();
         s.devices = records;
     }
     sample
@@ -552,6 +550,17 @@ struct Shared {
 }
 
 impl Shared {
+    fn sort_readings(&mut self) {
+        let cfg = &self.cfg;
+        self.readings.sort_by(|a, b| {
+            (cfg.device_kind(a).order(), &a.name, &a.key).cmp(&(
+                cfg.device_kind(b).order(),
+                &b.name,
+                &b.key,
+            ))
+        });
+    }
+
     fn new(cfg: Settings) -> Shared {
         Shared {
             refresh_generation: 0,
@@ -890,7 +899,7 @@ impl TrayCtl {
                 crate::tray_icon::render_device(
                     if r.connected { Some(r.level) } else { None },
                     r.charging,
-                    pref.kind.resolve(r.family),
+                    cfg.device_kind(r),
                     content,
                 )
             } else if cfg.tray_device.is_some() && !readings.is_empty() {
@@ -1015,6 +1024,7 @@ impl<'a> UiEnv<'a> {
             self.say(crate::trf!("✘ 保存设置失败：{e}", e = e));
         } else {
             shared.cfg = snapshot;
+            shared.sort_readings();
             crate::i18n::apply(shared.cfg.language);
         }
     }
@@ -3066,6 +3076,28 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_order_uses_manual_type_without_changing_identity_or_detection() {
+        use crate::tray_prefs::TrayKind;
+        let mut s = Shared::new(Settings::default());
+        s.readings = crate::mock::parse("mouse|Device A|78|0\nkeyboard|Device B|96|1");
+        let selected = s.readings[0].clone();
+        s.cfg.ensure_tray_device(&s.readings);
+        s.active_key = Some(selected.key.clone());
+        s.cfg
+            .device_tray
+            .entry(selected.key.clone())
+            .or_default()
+            .kind = TrayKind::Generic;
+        s.sort_readings();
+        assert_eq!(s.readings[1], selected);
+        assert_eq!(s.active_key.as_ref(), Some(&selected.key));
+        assert_eq!(s.cfg.tray_device.as_ref(), Some(&selected.key));
+        s.cfg.device_tray.get_mut(&selected.key).unwrap().kind = TrayKind::Auto;
+        s.sort_readings();
+        assert_eq!(s.readings[0], selected);
+    }
+
     #[test]
     fn complete_identity_keeps_selection_and_independent_preferences() {
         use crate::tray_prefs::{DeviceTray, TrayKind};

@@ -196,6 +196,14 @@ impl Settings {
         self.device_tray.get(key).copied().unwrap_or_default()
     }
 
+    /// 所有界面统一使用手动类型；只有自动识别才读取检测结果。
+    pub fn device_kind(
+        &self,
+        device: &crate::device::DeviceReading,
+    ) -> crate::tray_prefs::TrayKind {
+        self.tray_for(&device.key).kind.resolve(device.family)
+    }
+
     /// 首次选定后固定身份；设备断开或顺序变化时不自动换成另一台。
     pub fn ensure_tray_device(&mut self, readings: &[crate::device::DeviceReading]) -> bool {
         let chosen = if let Some(key) = &self.tray_device {
@@ -204,7 +212,7 @@ impl Settings {
             readings.iter().min_by_key(|r| {
                 (
                     !self.tray_for(&r.key).enabled,
-                    r.family.order(),
+                    self.device_kind(r).order(),
                     r.key.clone(),
                 )
             })
@@ -349,6 +357,41 @@ pub fn format_unix_local(unix: i64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_device_type_survives_reload_and_detection_changes() {
+        use crate::device::DeviceFamily;
+        use crate::i18n::{with_language, Language};
+        use crate::tray_prefs::TrayKind;
+        let mut device = crate::mock::parse("mouse|Test device|78|0").remove(0);
+        let other = crate::mock::parse("keyboard|Other device|96|1").remove(0);
+        let mut cfg = Settings::default();
+        assert_eq!(cfg.device_kind(&device), TrayKind::Mouse);
+        for kind in TrayKind::ALL.into_iter().skip(1) {
+            cfg.device_tray.entry(device.key.clone()).or_default().kind = kind;
+            let loaded = Settings::parse(&cfg.to_text());
+            for family in [
+                DeviceFamily::Mouse,
+                DeviceFamily::Headset,
+                DeviceFamily::Unknown,
+            ] {
+                device.family = family;
+                device.connected = !device.connected;
+                assert_eq!(loaded.device_kind(&device), kind);
+                assert_eq!(loaded.device_kind(&other), TrayKind::Keyboard);
+            }
+        }
+        with_language(Language::Chinese, || {
+            assert_eq!(cfg.device_kind(&device).label(), "其他")
+        });
+        with_language(Language::English, || {
+            assert_eq!(cfg.device_kind(&device).label(), "Other")
+        });
+        cfg.device_tray.get_mut(&device.key).unwrap().kind = TrayKind::Auto;
+        let loaded = Settings::parse(&cfg.to_text());
+        device.family = DeviceFamily::Keyboard;
+        assert_eq!(loaded.device_kind(&device), TrayKind::Keyboard);
+    }
+
     #[test]
     fn tray_selection_migrates_once_and_never_follows_reordering_or_disconnect() {
         let readings = crate::mock::parse("mouse|Mouse A|78|0\nkeyboard|Keyboard B|96|1");

@@ -52,15 +52,6 @@ pub fn family_of(model_name: &str) -> DeviceFamily {
 }
 
 impl DeviceFamily {
-    pub fn order(self) -> u8 {
-        match self {
-            Self::Mouse => 0,
-            Self::Keyboard => 1,
-            Self::Headset => 2,
-            Self::Gamepad => 3,
-            Self::Unknown => 4,
-        }
-    }
     /// 提示语里的名词。
     pub fn noun(self) -> &'static str {
         match self {
