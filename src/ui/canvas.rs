@@ -398,11 +398,6 @@ pub fn draw_frame(
         },
     );
 
-    // 固定导航盖住滚出视口的页面内容。
-    inner.paint(fonts, theme, a.scale, 0.0, a.view_w, a.view_h, |p| {
-        pages::toolbar(p, ui, &frame, a.view_w);
-    });
-
     // ④ 标题栏（不滚动，固定在顶层）
     inner.paint(
         fonts,
@@ -413,6 +408,7 @@ pub fn draw_frame(
         a.view_h,
         |p: &mut Painter| {
             crate::ui::titlebar::draw(p, a.view_w, theme);
+            crate::ui::titlebar::draw_settings(p, ui, a.view_w);
             crate::ui::titlebar::draw_buttons(p, a.view_w, theme, is_max, hover_btn);
         },
     );

@@ -217,6 +217,10 @@ pub fn logical_hit(
         }
     }
 
+    // 设置齿轮属于客户区，不能触发窗口拖动。
+    if crate::ui::titlebar::settings_rect(client_w).contains(x, y) {
+        return HTCLIENT;
+    }
     // ③ 标题栏其余部分 = 可拖动
     if (0.0..=title_h).contains(&y) {
         return HTCAPTION;
@@ -332,6 +336,20 @@ pub fn on_getminmaxinfo(hwnd: Handle, lparam: isize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_gear_receives_client_clicks_beside_window_buttons() {
+        for w in [720.0, 1100.0, 1920.0] {
+            let r = crate::ui::titlebar::settings_rect(w);
+            assert_eq!(
+                logical_hit(r.cx(), r.cy(), w, 740.0, TITLE, false),
+                HTCLIENT
+            );
+            assert_eq!(logical_hit(r.cx(), r.cy(), w, 740.0, TITLE, true), HTCLIENT);
+            assert!(
+                r.right() < crate::ui::titlebar::btn_rect(crate::ui::titlebar::Btn::Minimize, w).x
+            );
+        }
+    }
     use super::*;
 
     const TW: f32 = 1100.0;

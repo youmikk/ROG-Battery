@@ -2519,13 +2519,10 @@ mod tests {
                     extra(p, &frame);
                 }
             });
-            // ③ 导航栏
-            canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
-                super::super::pages::toolbar(p, ui, &frame, w as f32);
-            });
             // ④ 标题栏
             canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
                 super::super::titlebar::draw(p, w as f32, theme);
+                super::super::titlebar::draw_settings(p, ui, w as f32);
                 super::super::titlebar::draw_buttons(p, w as f32, theme, false, ui.hover_btn);
             });
             // ⑤ 模态弹窗（若有）

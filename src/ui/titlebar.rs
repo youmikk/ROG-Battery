@@ -111,6 +111,48 @@ pub fn logo_rect() -> R {
     R::new(14.0, (TITLE_H - d) / 2.0, d, d)
 }
 
+pub fn settings_rect(win_w: f32) -> R {
+    R::new(win_w - BTN_W * 3.0 - 42.0, 4.0, 32.0, 28.0)
+}
+
+pub fn draw_settings(p: &mut Painter, ui: &mut crate::ui::widget::Ui, win_w: f32) {
+    use crate::ui::widget::{Act, Page};
+    ui.chrome_hot(R::new(0.0, 0.0, win_w, TITLE_H), Act::None);
+    let r = settings_rect(win_w);
+    let act = Act::Nav(Page::Settings);
+    let active = ui.page == Page::Settings;
+    if active || ui.hover == Some(act) {
+        p.round(
+            r,
+            6.0,
+            if active {
+                p.t.accent_soft
+            } else {
+                p.t.card_hover
+            },
+        );
+    }
+    let color = if active { p.t.accent } else { p.t.text2 };
+    let mut teeth = Vec::with_capacity(49);
+    for tooth in 0..8 {
+        for (offset, radius) in [
+            (0.0, 6.0),
+            (0.16, 6.0),
+            (0.24, 8.0),
+            (0.68, 8.0),
+            (0.76, 6.0),
+            (1.0, 6.0),
+        ] {
+            let angle = (tooth as f32 + offset) * std::f32::consts::TAU / 8.0;
+            teeth.push((r.cx() + angle.cos() * radius, r.cy() + angle.sin() * radius));
+        }
+    }
+    teeth.push(teeth[0]);
+    p.polyline(&teeth, color, 1.2);
+    p.dot_ring(r.cx(), r.cy(), 2.6, color, 1.3);
+    ui.chrome_hot(r, act);
+}
+
 /// 三条按钮图标的笔宽与几何（逻辑像素）。
 ///
 /// 取值照 Win11 原生按钮的观感：主笔 1.2、细笔 1.1，图标半边长 5 —— 也就是

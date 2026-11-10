@@ -1,4 +1,4 @@
-//! 布局常量；内容居中，导航固定在标题栏下方。
+//! 布局常量；内容居中，页面标题紧贴窗口标题栏。
 
 /// 窗口能缩到的最小逻辑尺寸。
 pub const MIN_WIN_W: f32 = 720.0;
@@ -13,8 +13,7 @@ pub fn min_window_size(scale: f32) -> (i32, i32) {
     )
 }
 
-pub const TOOLBAR_H: f32 = 52.0;
-pub const CONTENT_TOP: f32 = super::titlebar::TITLE_H + TOOLBAR_H;
+pub const CONTENT_TOP: f32 = super::titlebar::TITLE_H;
 
 /// 内容区左右内边距（CSS `.page-body { padding: 6px 40px }`）。
 pub const PAGE_PAD_X: f32 = 40.0;
@@ -130,8 +129,6 @@ pub struct Frame {
     pub viewport: super::gfx::R,
     /// 内容区实际可用宽度（≤ `PAGE_MAX_W`）。
     pub width: f32,
-    #[cfg(test)]
-    pub bp: Breakpoint,
 }
 
 impl Frame {
@@ -145,8 +142,6 @@ impl Frame {
             content: super::gfx::R::new((avail - width) / 2.0, top, width, (h - top).max(0.0)),
             viewport: super::gfx::R::new(0.0, CONTENT_TOP, avail, (h - CONTENT_TOP).max(0.0)),
             width,
-            #[cfg(test)]
-            bp,
         }
     }
 }

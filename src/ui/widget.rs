@@ -66,7 +66,6 @@ pub enum Icon {
     Perf,
     Light,
     Keys,
-    Settings,
 }
 
 /// 下拉框的种类。

@@ -9,7 +9,7 @@
 //!
 //! `x` 有两个体系：
 //! - [`Frame::content`] 的 `x` 已经含左侧内边距，页面元素从它开始排；
-//! - 顶部导航（[`toolbar`]）用窗口坐标，不随滚动移动。
+//! - 标题栏使用窗口坐标，页面正文随滚动移动。
 //!
 //! # 为什么绘制和命中共用一个函数
 //!
@@ -699,79 +699,44 @@ fn draw_icon(p: &mut Painter, icon: Icon, r: R, color: u32, width: f32) {
                 width,
             );
         }
-        // 设置：齿轮用「圆 + 四个方向齿」近似
-        Icon::Settings => {
-            p.dot_ring(x + w * 0.5, y + h * 0.5, w * 0.24, color, width);
-            for (dx, dy) in [(0.0f32, -1.0f32), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)] {
-                p.line(
-                    x + w * 0.5 + dx * w * 0.28,
-                    y + h * 0.5 + dy * h * 0.28,
-                    x + w * 0.5 + dx * w * 0.42,
-                    y + h * 0.5 + dy * h * 0.42,
-                    color,
-                    width,
-                );
-            }
-        }
     }
 }
 
-/// 固定在标题栏下方的导航，图标与点击区域共用按钮中心。
-pub fn toolbar(p: &mut Painter, ui: &mut Ui, f: &Frame, win_w: f32) {
-    let top = crate::ui::titlebar::TITLE_H;
-    let t = p.t;
-    let bar = R::new(0.0, top, win_w, layout::TOOLBAR_H);
-    p.rect(bar, t.bg);
-    ui.chrome_hot(R::new(0.0, 0.0, win_w, layout::CONTENT_TOP), Act::None);
-    for (page, label, x) in [
-        (Page::Home, "我的设备", f.content.x),
-        (Page::Settings, "偏好设置", f.content.right() - 108.0),
-    ] {
-        let r = R::new(x, top + 8.0, 108.0, 34.0);
-        let act = Act::Nav(page);
-        let on = ui.page == page;
-        if on {
-            p.round(r, 8.0, t.accent_soft);
-        } else if ui.hover == Some(act) {
-            p.round(r, 8.0, t.card_hover);
+fn page_heading(p: &mut Painter, ui: &mut Ui, c: &mut Cursor, title: &str, back: Option<Act>) {
+    let top = c.y + 8.0;
+    let mut x = c.x;
+    if let Some(act) = back {
+        let r = R::new(x, top + (layout::H1_H - 32.0) / 2.0, 32.0, 32.0);
+        if ui.hover == Some(act) {
+            p.round(r, 7.0, p.t.accent_soft);
         }
-        let fg = if on { t.accent } else { t.text2 };
-        let icon = R::new(r.x + 12.0, r.cy() - 8.0, 16.0, 16.0);
-        if page == Page::Home {
-            if matches!(ui.page, Page::Home | Page::Settings) {
-                for (dx, dy) in [(0.0, 0.0), (9.0, 0.0), (0.0, 9.0), (9.0, 9.0)] {
-                    p.round_stroke(R::new(icon.x + dx, icon.y + dy, 6.0, 6.0), 1.2, fg, 1.2);
-                }
-            } else {
-                p.polyline(
-                    &[
-                        (icon.x + 9.0, icon.y + 3.0),
-                        (icon.x + 4.0, icon.cy()),
-                        (icon.x + 9.0, icon.bottom() - 3.0),
-                    ],
-                    fg,
-                    1.5,
-                );
-            }
-        } else {
-            draw_icon(p, Icon::Settings, icon, fg, 1.4);
-        }
-        p.text(
-            label,
-            R::new(r.x + 36.0, r.y, r.w - 44.0, r.h),
-            12.5,
-            on,
-            fg,
-            Align::Left,
+        let cx = r.cx();
+        let cy = r.cy();
+        p.polyline(
+            &[(cx + 2.0, cy - 5.0), (cx - 3.0, cy), (cx + 2.0, cy + 5.0)],
+            p.t.text2,
+            1.6,
         );
-        ui.chrome_hot(r, act);
+        p.line(cx - 3.0, cy, cx + 6.0, cy, p.t.text2, 1.6);
+        ui.hot(r, act);
+        x += 42.0;
     }
+    p.text(
+        title,
+        R::new(x, top, c.x + c.w - x, layout::H1_H),
+        font::H1,
+        true,
+        p.t.text,
+        Align::Left,
+    );
+    c.y = top + layout::H1_H + 12.0;
 }
 
 fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let t = p.t;
     let name = d.selected.map(|r| r.name.as_str()).unwrap_or("设备详情");
-    c.h1(p, name);
+    let back = (d.readings.len() > 1).then_some(Act::Nav(Page::Home));
+    page_heading(p, ui, c, name, back);
     let tabs = [
         (Page::Battery, "电量与设置"),
         (Page::Perf, "性能"),
@@ -1163,7 +1128,7 @@ fn draw_drop(p: &mut Painter, ui: &mut Ui, d: &Data, drop: Drop, view_h: f32) {
 /// 首页仅展示设备读数，点击进入该设备的详情。
 fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "我的设备");
+    page_heading(p, ui, c, "设备", None);
     p.text(
         "所有设备的电量，一眼就好。",
         R::new(c.x, c.y - 14.0, c.w, 20.0),
@@ -2327,7 +2292,12 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
 
 fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "设置");
+    let previous = if d.selected.is_some() {
+        Page::Battery
+    } else {
+        Page::Home
+    };
+    page_heading(p, ui, c, "设置", Some(Act::Nav(previous)));
 
     // ---- 程序 ----
     c.h2(p, "程序", true);
@@ -2672,7 +2642,7 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn toolbar_and_dropdown_remain_aligned_after_resize_and_scroll() {
+    fn compact_header_and_dropdown_remain_aligned_after_resize_and_scroll() {
         use crate::ui::canvas::{draw_frame, PaintArgs};
         use crate::ui::gfx::{save_bmp, Canvas, Fonts};
         let mut canvas = Canvas::new();
@@ -2723,7 +2693,7 @@ mod tests {
             ui.set_open_drop(None);
             let mem = draw_frame(&mut canvas, &mut fonts, &mut ui, &args, theme, &data);
             assert_ne!(mem, 0);
-            let file = out.join(format!("topnav-{w}-{scale}.bmp"));
+            let file = out.join(format!("compact-{w}-{scale}.bmp"));
             save_bmp(file.to_str().unwrap(), mem, args.pixel_w, args.pixel_h);
             let frame = Frame::new(w, h);
             let settings = ui
@@ -2732,7 +2702,7 @@ mod tests {
                 .find(|h| h.act == Act::Nav(Page::Settings))
                 .unwrap()
                 .rect;
-            assert_eq!(settings.right(), frame.content.right());
+            assert_eq!(settings, crate::ui::titlebar::settings_rect(w));
             assert_eq!(
                 ui.hit(settings.cx(), settings.cy(), 0.0),
                 Some(Act::Nav(Page::Settings))
@@ -2768,16 +2738,61 @@ mod tests {
                 ui.hit(option.cx(), option.cy() - scroll, scroll),
                 Some(Act::PickDrop(Drop::TrayKind, 4))
             );
-            assert_eq!(ui.hit(w / 2.0, 60.0, scroll), Some(Act::None));
+            assert_eq!(ui.hit(w / 2.0, 18.0, scroll), Some(Act::None));
             ui.on_press(settings.cx(), settings.cy(), scroll);
             assert_eq!(
                 ui.on_release(settings.cx(), settings.cy(), scroll),
                 Some(Act::Nav(Page::Settings))
             );
             assert_eq!(ui.open_drop(), None);
-            let file = out.join(format!("topnav-dropdown-{w}-{scale}.bmp"));
+            let file = out.join(format!("compact-dropdown-{w}-{scale}.bmp"));
             save_bmp(file.to_str().unwrap(), mem, args.pixel_w, args.pixel_h);
         }
+        ui.page = Page::Battery;
+        *ui.scroll_mut(Page::Battery) = 0.0;
+        let readings = [
+            device.clone(),
+            crate::mock::parse("keyboard|Test keyboard|90|0").remove(0),
+        ];
+        let multi = Data {
+            readings: &readings,
+            ..data
+        };
+        let args = PaintArgs {
+            pixel_w: 1100,
+            pixel_h: 760,
+            view_w: 1100.0,
+            view_h: 760.0,
+            scale: 1.0,
+            hwnd: std::ptr::null_mut(),
+        };
+        draw_frame(
+            &mut canvas,
+            &mut fonts,
+            &mut ui,
+            &args,
+            &crate::ui::theme::LIGHT,
+            &multi,
+        );
+        let back = ui
+            .hots
+            .iter()
+            .find(|h| h.act == Act::Nav(Page::Home))
+            .unwrap()
+            .rect;
+        let frame = Frame::new(1100.0, 760.0);
+        assert_eq!(back.x, frame.content.x);
+        assert_eq!(back.cy(), frame.content.y + 8.0 + layout::H1_H / 2.0);
+        ui.page = Page::Settings;
+        draw_frame(
+            &mut canvas,
+            &mut fonts,
+            &mut ui,
+            &args,
+            &crate::ui::theme::LIGHT,
+            &multi,
+        );
+        assert!(ui.hots.iter().any(|h| h.act == Act::Nav(Page::Battery)));
     }
 
     #[test]
