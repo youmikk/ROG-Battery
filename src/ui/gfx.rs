@@ -1,68 +1,3 @@
-//! GDI+ 绘制层。
-//!
-//! # 这一层存在的理由
-//!
-//! 原来 `gui.rs` 用的是 nwg 的原生控件：按钮是系统画的方角灰框，下拉框是
-//! `ComboBox`，滑动条是 `TrackBar`。它们能用，但**颜色、圆角、间距全都改不了**
-//! —— 用户看过网页原型后要求的就是原型那个样子（8px 圆角卡片、4px 圆角控件、
-//! 蓝色强调、悬停高亮）。
-//!
-//! nwg 没有提供「自绘控件」的通道，所以这一页的内容区改成：
-//! **一个自建的子窗口 + 整页 GDI+ 自绘**。nwg 只保留窗口外壳、托盘、菜单、
-//! 消息循环这些和绘制无关的部分。
-//!
-//! # 已实测的性能结论（不要凭直觉推翻）
-//!
-//! 双缓冲不是「为了不闪」的奢侈品，它**更快**：
-//!
-//! | 画法 | 一帧耗时（729×487，含卡片/圆环/曲线/中文）|
-//! |---|---|
-//! | 直接画窗口 DC | 8.22 – 8.53 ms |
-//! | 画内存 DC 再 `BitBlt` | **2.63 – 2.68 ms** |
-//!
-//! 快了 3.1 倍。原因是 GDI+ 在窗口 DC 上做抗锯齿混合时必须**回读目标像素**
-//! （结果 = `alpha*新色 + (1-alpha)*旧色`，"旧色"在窗口 DC 上是屏幕像素，
-//! 回读要穿透 DWM 合成器）。双缓冲把它变成纯内存读，最后一次 `BitBlt`
-//! 用 `SRCCOPY` 直接拷、不做混合。
-//!
-//! 测量方法见 `docs\gdiplus-window-dc.md`，三轮独立运行结果一致。
-//!
-//! # DPI 与滚动：用世界变换做，不用手算
-//!
-//! 页面代码全部按**逻辑像素**布局（和 CSS 的 px 一一对应）。缩放和滚动
-//! 由 GDI+ 的世界变换统一施加：
-//!
-//! ```text
-//! matrix = [scale 0; 0 scale] + translate(0, -scroll*scale)
-//! ```
-//!
-//! 这样带来三个好处：
-//! 1. 页面代码里没有一处 `* scale`，改缩放不影响任何布局代码。
-//! 2. **文字也被正确缩放** —— 这正是之前「字体发虚」的根因：
-//!    进程没声明 DPI 感知时，Windows 把整个窗口当位图拉伸 125%，
-//!    所有文字都糊了。声明感知 + 世界变换之后，字是重新栅格化的，清晰。
-//! 3. 滚动只需要改一个 translate 值，不需要给每个绘制调用传偏移。
-//!
-//! # 六个「编译期零警告、运行时不报错、结果错」的坑
-//!
-//! 全部实测踩过，写在这里省下一次试错：
-//!
-//! 1. **`GdiplusStartup` 的 `suppressBackgroundThread` 必须是 0**。
-//!    设 1 且 `output` 传 `null` 会让 startup 返回 2（InvalidParameter），
-//!    之后每一次 GDI+ 调用都返回 18（GdiplusNotInitialized），画面全空、
-//!    没有任何错误提示。
-//! 2. **`GdipDrawString` 是 7 个参数**。漏掉 `stringFormat` 时编译不报错
-//!    （都是我们自己声明的外部函数），运行时直接在 gdiplus.dll 里
-//!    `0xC0000005` 崩。`stringFormat` 可以传空，但**位置必须占**。
-//! 3. **`BitmapInfo` 的 `colors` 数组必须留位置**（这里用 `[u32; 3]`），
-//!    否则 `CreateDIBSection` 按变长调色板算布局时会读越界。
-//! 4. **`GetDIBits` 那条路是死路**：调用全返回成功，缓冲区却全是 0。
-//!    要读像素只能用 `CreateDIBSection` 直接拿 `bits` 指针。
-//! 5. **`SelectObject` 的顺序**：`gdi_delete_object(bmp)` 必须在
-//!    `gdi_select_object(dc, old_bmp)` **之后**。反过来会让 `DeleteObject`
-//!    静默返回 0（位图还被 DC 选着），**位图永久泄漏**。
-//! 6. 所有 GDI+ 函数都返回 `Status`（0 = Ok）。**不看返回值就会得到
-//!    一张纯底色的图，且没有任何提示**。
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -77,19 +12,6 @@ pub use crate::win32::Gdi;
 /// 成功的 GDI+ 返回值。
 pub const OK: i32 = 0;
 
-/// `GdipCreateLineBrush` 的 `wrap` 参数：平铺模式。
-///
-/// **不能用 4（Clamp）**。虽然 `WrapMode` 枚举里 Clamp = 4 且 C# 的
-/// `new LinearGradientBrush(...)` 允许传它，但**底层线性渐变画刷不支持 Clamp**：
-/// 实测 `GdipCreateLineBrush(..., 4, ...)` 稳定返回 **2（InvalidParameter）**，
-/// 而 0/1/2/3/5/6 全部返回 0。
-///
-/// 这个返回值一旦不检查就是最坏的一类 bug：进度弧、卡片渐变、图表面积渐变
-/// 三处全部**静默不画**，而代码看起来完全正常（电量环只剩一圈灰底环，
-/// 却没有一行报错）。实测 2026-10-22 就是这样上线的。
-///
-/// 语义上的替代：0（Tile）在「渐变轴恰好覆盖绘制区域」时与 Clamp 等价 ——
-/// 我们三处都满足（渐变两端点就是形状的上下边界），所以平铺不会被看到。
 pub const WRAP_TILE: i32 = 0;
 
 #[repr(C)]
@@ -219,6 +141,23 @@ fn GdipResetClip(g: *mut c_void) -> i32;
 
     fn GdipCreatePath(mode: i32, path: *mut *mut c_void) -> i32;
     fn GdipDeletePath(path: *mut c_void) -> i32;
+    fn GdipAddPathString(
+        path: *mut c_void,
+        text: *const u16,
+        len: i32,
+        family: *mut c_void,
+        style: i32,
+        size: f32,
+        layout: *const RectF,
+        format: *mut c_void,
+    ) -> i32;
+    fn GdipGetPathWorldBounds(
+        path: *mut c_void,
+        bounds: *mut RectF,
+        matrix: *mut c_void,
+        pen: *mut c_void,
+    ) -> i32;
+    fn GdipTransformPath(path: *mut c_void, matrix: *mut c_void) -> i32;
     fn GdipAddPathArc(
         path: *mut c_void,
         x: f32,
@@ -308,85 +247,6 @@ extern "system" {
     fn CreateCompatibleBitmap(hdc: Gdi, w: i32, h: i32) -> Gdi;
     fn BitBlt(dst: Gdi, x: i32, y: i32, w: i32, h: i32, src: Gdi, sx: i32, sy: i32, rop: u32) -> i32;
 }
-
-/// 读一个像素的 `COLORREF`（`0x00BBGGRR`，注意**不是** ARGB）。读失败返回 `None`。
-///
-/// 只在测试里用 —— 生产路径不需要回读自己刚画的像素。加它是因为
-/// `ring()` 曾因 `wrap=4` 整段静默不画，而当时唯一的断言是「不崩」。
-#[cfg(test)]
-fn gdi_get_pixel(hdc: Gdi, x: i32, y: i32) -> Option<u32> {
-    #[link(name = "gdi32")]
-    extern "system" {
-        fn GetPixel(hdc: Gdi, x: i32, y: i32) -> u32;
-    }
-    let c = unsafe { GetPixel(hdc, x, y) };
-    // CLR_INVALID = 0xFFFFFFFF（GetPixel 失败）
-    if c == 0xFFFF_FFFF {
-        None
-    } else {
-        Some(c)
-    }
-}
-
-/// 把内存位图的前 `w`×`h` 像素存成 BMP，用于人工目视检查。
-///
-/// # 为什么自己拼文件头
-///
-/// Rust 的 `#[repr(C)]` 会把 14 字节的 `BITMAPFILEHEADER` 补齐成 16 字节
-/// （`bfType`+`bfSize`+两个保留字+`bfOffBits` 之后要对齐 4），直接把它当
-/// 结构体写出去会让整个头错位 2 字节，读图工具报「内存不足」这种完全
-/// 误导人的错误。所以这里用 `to_le_bytes()` 一个字段一个字段拼。
-///
-/// 只在测试里用 —— 生产路径画完就 `BitBlt`，从不需要落盘。
-#[cfg(test)]
-pub(crate) fn save_bmp(path: &str, hdc: Gdi, w: i32, h: i32) {
-    // 每行字节数必须是 4 的倍数（BMP 规定）。
-    let row_bytes = (w * 3 + 3) & !3;
-    let pixel_bytes = row_bytes * h;
-    let file_size = 14 + 40 + pixel_bytes;
-
-    let mut out: Vec<u8> = Vec::with_capacity(file_size as usize);
-    out.extend_from_slice(b"BM");
-    out.extend_from_slice(&(file_size as u32).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // bfReserved1
-    out.extend_from_slice(&0u16.to_le_bytes()); // bfReserved2
-    out.extend_from_slice(&(54u32).to_le_bytes()); // bfOffBits
-
-    out.extend_from_slice(&(40u32).to_le_bytes()); // biSize
-    out.extend_from_slice(&w.to_le_bytes());
-    // biHeight 为正是「自下而上」存，这是 BMP 的原生顺序。
-    out.extend_from_slice(&h.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
-    out.extend_from_slice(&24u16.to_le_bytes()); // biBitCount
-    out.extend_from_slice(&0u32.to_le_bytes()); // biCompression = BI_RGB
-    out.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
-    out.extend_from_slice(&2835i32.to_le_bytes()); // 72 DPI
-    out.extend_from_slice(&2835i32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
-    out.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
-
-    let pad = (row_bytes - w * 3) as usize;
-    for y in (0..h).rev() {
-        for x in 0..w {
-            let c = gdi_get_pixel(hdc, x, y).unwrap_or(0);
-            // `GetPixel` 返回的是 `COLORREF` = `0x00BBGGRR`，**低字节是红**。
-            // BMP 的 24 位像素按 B、G、R 顺序存，所以这里要反过来取。
-            // 第一版我按 R、G、B 写（和内存顺序一致，看着更自然），
-            // 结果整张图红蓝互换：蓝环变橙、红环变蓝，绿色因为对称看不出来
-            // —— 差点误判成「`ring()` 的颜色参数传错了」。
-            out.push(((c >> 16) & 0xFF) as u8); // B
-            out.push(((c >> 8) & 0xFF) as u8); // G
-            out.push((c & 0xFF) as u8); // R
-        }
-        for _ in 0..pad {
-            out.push(0);
-        }
-    }
-    if let Err(e) = std::fs::write(path, &out) {
-        eprintln!("save_bmp 写失败 {path}: {e}");
-    }
-}
-
 
 ///
 /// 空句柄 `0` 必须映射成空指针 —— 所以这里**不能**直接 `as`，
@@ -500,11 +360,6 @@ impl Fonts {
         })
     }
 
-    /// 按顺序试几个字体族，返回第一个能建出来的。
-    ///
-    /// 顺序是「雅黑 UI → 雅黑 → 宋体」：本机实测 `Microsoft YaHei`
-    /// （不带 UI）**不存在**，只有 `Microsoft YaHei UI`。
-    /// 宋体（SimSun）任何中文 Windows 都有，作最后兜底。
     pub fn from_candidates(faces: &[&str]) -> Option<Fonts> {
         for f in faces {
             if let Some(fonts) = Fonts::new(f) {
@@ -598,39 +453,10 @@ impl R {
         )
     }
 
-    /// 扣掉左边一段。
-    #[cfg(test)]
-    pub fn skip_x(&self, dx: f32) -> R {
-        R::new(self.x + dx, self.y, (self.w - dx).max(0.0), self.h)
-    }
-
-    /// 扣掉右边一段。
-    #[cfg(test)]
-    pub fn trim_x(&self, dx: f32) -> R {
-        R::new(self.x, self.y, (self.w - dx).max(0.0), self.h)
-    }
-
-    /// 在矩形内右侧取一段。
-    #[cfg(test)]
-    pub fn tail(&self, w: f32) -> R {
-        R::new(self.right() - w, self.y, w, self.h)
-    }
-
-    /// 在矩形内左侧取一段。
-    #[cfg(test)]
-    pub fn head(&self, w: f32) -> R {
-        R::new(self.x, self.y, w, self.h)
-    }
-
     pub fn contains(&self, px: f32, py: f32) -> bool {
         px >= self.x && px < self.right() && py >= self.y && py < self.bottom()
     }
 
-    /// 两个矩形是否相交（裁剪用）。
-    #[cfg(test)]
-    pub fn intersects(&self, o: &R) -> bool {
-        self.x < o.right() && self.right() > o.x && self.y < o.bottom() && self.bottom() > o.y
-    }
 }
 
 /// 文字在矩形里的对齐方式。
@@ -832,9 +658,44 @@ pub struct Painter<'a> {
 }
 
 impl<'a> Painter<'a> {
+    pub(crate) unsafe fn on_graphics<F: FnOnce(&mut Painter<'_>)>(
+        g: *mut c_void,
+        theme: &Theme,
+        size: f32,
+        scale: f32,
+        draw: F,
+    ) -> Option<()> {
+        let mut fonts = Fonts::from_candidates(&["Segoe UI Semibold", "Segoe UI", "Arial"])?;
+        let mut matrix = std::ptr::null_mut();
+        if GdipCreateMatrix2(scale, 0.0, 0.0, scale, 0.0, 0.0, &mut matrix) != OK {
+            return None;
+        }
+        let status = GdipSetWorldTransform(g, matrix);
+        GdipDeleteMatrix(matrix);
+        if status != OK {
+            return None;
+        }
+        let mut obj = ObjCache::default();
+        {
+            let mut p = Painter {
+                g,
+                obj: &mut obj,
+                fonts: &mut fonts,
+                t: theme,
+                clip: R::new(0.0, 0.0, size, size),
+                scale,
+            };
+            draw(&mut p);
+        }
+        obj.clear();
+        Some(())
+    }
     /// 整块是否在可见区内。
     fn visible(&self, r: R) -> bool {
-        r.y < self.clip.bottom() && r.bottom() > self.clip.y && r.x < self.clip.right() && r.right() > self.clip.x
+        r.y < self.clip.bottom()
+            && r.bottom() > self.clip.y
+            && r.x < self.clip.right()
+            && r.right() > self.clip.x
     }
 
     // ---- 基本图元 ----
@@ -931,26 +792,6 @@ impl<'a> Painter<'a> {
         });
     }
 
-    /// 竖直渐变填充的圆角矩形（卡片顶部高光、选中行）。
-    #[cfg(test)]
-    pub fn round_gradient(&mut self, r: R, radius: f32, top: u32, bottom: u32) {
-        if !self.visible(r) {
-            return;
-        }
-        let g = self.g;
-        self.with_path(r, radius, |p| unsafe {
-            let p1 = PointF { x: 0.0, y: r.y };
-            let p2 = PointF { x: 0.0, y: r.bottom() };
-            let mut b: *mut c_void = std::ptr::null_mut();
-            // wrap 必须用 0（Tile）而不是 4（Clamp）—— 线性渐变画刷拒绝 Clamp，
-            // 传 4 会返回 InvalidParameter 并让整个填充静默跳过。详见 `WRAP_TILE`。
-            if GdipCreateLineBrush(&p1, &p2, top, bottom, WRAP_TILE, &mut b) == OK {
-                GdipFillPath(g, b, p);
-                GdipDeleteBrush(b);
-            }
-        });
-    }
-
     /// 直线。
     pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, color: u32, width: f32) {
         let r = R::new(
@@ -1038,10 +879,6 @@ impl<'a> Painter<'a> {
         }
     }
 
-    /// 多边形填充（曲线图的面积填充）。
-    ///
-    /// `pts` 至少 3 个点，自动闭合。`top`/`bottom` 是竖直渐变的两端颜色
-    /// （原型里面积是 `#4CC2FF` 从 34% 不透明渐变到 2%）。
     pub fn fill_polygon(&mut self, pts: &[(f32, f32)], top: u32, bottom: u32) {
         if pts.len() < 3 {
             return;
@@ -1081,10 +918,6 @@ impl<'a> Painter<'a> {
         }
     }
 
-    /// 圆环进度弧（电量环）。
-    ///
-    /// `frac` 是 0.0–1.0 的填充比例，从正上方（12 点）顺时针。
-    /// 用圆头笔帽，两端是圆的 —— 这是原型里的样子。
     pub fn ring(
         &mut self,
         cx: f32,
@@ -1139,96 +972,6 @@ impl<'a> Painter<'a> {
         }
     }
 
-    /// 充电中的电量环：进度弧 + 一条沿整圈跑动的彗尾。
-    ///
-    /// # 为什么需要单独的绘制函数
-    ///
-    /// 需求是「充电的时候是绿色加动效」。动效不能用「整圈呼吸」——
-    /// 呼吸看起来像环在自己闪，用户分不清是「在充电」还是「界面卡了」。
-    /// 跑动的头只有一个方向，配合静态进度弧，语义很清楚：
-    /// **进度弧表示电量，跑动的头表示正在充**。
-    ///
-    /// # 相位从哪来
-    ///
-    /// 进程内第一次绘制时记下 `Instant`（`OnceLock`），之后每帧取它到现在的
-    /// 毫秒数。不用额外的「动画时钟」参数：动效是纯装饰，只要每帧不重样就够了，
-    /// 而引入时钟状态意味着 canvas 要维护定时器和生命周期，出错会让整块界面
-    /// 不再刷新。`Instant` 是单调时钟 —— 系统时间和时区怎么调都不影响相位，
-    /// 跨睡眠也能继续（醒来只是跳一段，视觉上是「彗尾往前窜了一下」）。
-    ///
-    /// 画充电动效：在电量进度弧上叠加呼吸光晕与流光能量波。
-    pub fn arc_comet(
-        &mut self,
-        cx: f32,
-        cy: f32,
-        radius: f32,
-        width: f32,
-        frac: f32,
-        color: u32,
-        progress_color: u32,
-        track: u32,
-    ) {
-        // 先画底环和基础电量进度弧
-        self.ring(cx, cy, radius, width, frac, progress_color, progress_color, track);
-
-        let box_r = R::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
-        if !self.visible(box_r) {
-            return;
-        }
-
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        let start = START.get_or_init(std::time::Instant::now);
-        let now = start.elapsed().as_secs_f32() * 1000.0;
-        // 柔和呼吸光晕：沿有效电量弧做柔和的光亮呼吸
-        let breath = (now * 0.0032).sin() * 0.5 + 0.5;
-        let glow_alpha = (0x60 as f32 + breath * 0x70 as f32) as u8;
-        let glow_color = with_alpha(color, glow_alpha);
-
-        let active_span = frac.clamp(0.06, 1.0) * 360.0;
-
-        unsafe {
-            let mut brush: *mut c_void = std::ptr::null_mut();
-            let mut pen: *mut c_void = std::ptr::null_mut();
-            if GdipCreateSolidFill(glow_color, &mut brush) == OK {
-                if GdipCreatePen2(brush, width + 2.0, 2, &mut pen) == OK {
-                    GdipSetPenStartCap(pen, 2);
-                    GdipSetPenEndCap(pen, 2);
-                    let mut path: *mut c_void = std::ptr::null_mut();
-                    if GdipCreatePath(0, &mut path) == OK {
-                        GdipAddPathArc(path, box_r.x, box_r.y, box_r.w, box_r.h, -90.0, active_span);
-                        GdipDrawPath(self.g, pen, path);
-                        GdipDeletePath(path);
-                    }
-                    GdipDeletePen(pen);
-                }
-                GdipDeleteBrush(brush);
-            }
-
-            // 能量流动光波：沿有效电量弧平滑往复穿行
-            const PERIOD_MS: f32 = 1500.0;
-            let phase = (now % PERIOD_MS) / PERIOD_MS;
-            let wave_len = (active_span * 0.4).clamp(24.0, 64.0);
-            let wave_start = -90.0 + (active_span - wave_len) * phase;
-
-            let mut w_brush: *mut c_void = std::ptr::null_mut();
-            let mut w_pen: *mut c_void = std::ptr::null_mut();
-            if GdipCreateSolidFill(with_alpha(color, 0xF5), &mut w_brush) == OK {
-                if GdipCreatePen2(w_brush, width + 0.5, 2, &mut w_pen) == OK {
-                    GdipSetPenStartCap(w_pen, 2);
-                    GdipSetPenEndCap(w_pen, 2);
-                    let mut path: *mut c_void = std::ptr::null_mut();
-                    if GdipCreatePath(0, &mut path) == OK {
-                        GdipAddPathArc(path, box_r.x, box_r.y, box_r.w, box_r.h, wave_start, wave_len);
-                        GdipDrawPath(self.g, w_pen, path);
-                        GdipDeletePath(path);
-                    }
-                    GdipDeletePen(w_pen);
-                }
-                GdipDeleteBrush(w_brush);
-            }
-        }
-    }
-
     /// 画实心圆。
     pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: u32) {
         let r = R::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
@@ -1271,6 +1014,88 @@ impl<'a> Painter<'a> {
     }
 
     // ---- 文字 ----
+    pub(crate) fn icon_text(&mut self, text: &str, r: R, size: f32, color: u32, compact: bool) {
+        let brush = self.obj.brush(color);
+        if text.is_empty() || brush.is_null() {
+            return;
+        }
+        unsafe {
+            let mut path = std::ptr::null_mut();
+            if GdipCreatePath(0, &mut path) != OK {
+                return;
+            }
+            let digits: Vec<u16> = text.encode_utf16().collect();
+            let layout = RectF {
+                x: 0.0,
+                y: 0.0,
+                w: 512.0,
+                h: 512.0,
+            };
+            let mut bounds = RectF::default();
+            if GdipAddPathString(
+                path,
+                digits.as_ptr(),
+                digits.len() as i32,
+                self.fonts.family,
+                0,
+                size,
+                &layout,
+                std::ptr::null_mut(),
+            ) == OK
+                && GdipGetPathWorldBounds(
+                    path,
+                    &mut bounds,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ) == OK
+                && bounds.w > 0.0
+                && bounds.h > 0.0
+            {
+                // 纯数字保持字形比例；组合模式保留窄体，给设备图案留出空间。
+                let mut reference = std::ptr::null_mut();
+                let mut reference_bounds = bounds;
+                if !compact && GdipCreatePath(0, &mut reference) == OK {
+                    let zeros = [b'0' as u16; 3];
+                    if GdipAddPathString(
+                        reference,
+                        zeros.as_ptr(),
+                        digits.len().clamp(2, 3) as i32,
+                        self.fonts.family,
+                        0,
+                        size,
+                        &layout,
+                        std::ptr::null_mut(),
+                    ) == OK
+                    {
+                        GdipGetPathWorldBounds(
+                            reference,
+                            &mut reference_bounds,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    GdipDeletePath(reference);
+                }
+                let cap_height = reference_bounds.h.max(bounds.h);
+                let scale = (r.w / bounds.w.max(reference_bounds.w)).min(r.h / cap_height);
+                let (sx, sy) = if compact {
+                    (r.w / bounds.w, r.h / bounds.h)
+                } else {
+                    (scale, scale)
+                };
+                let x = r.cx() - (bounds.x + bounds.w / 2.0) * sx;
+                let y = r.cy() - (bounds.y + bounds.h / 2.0) * sy;
+                let mut matrix = std::ptr::null_mut();
+                if GdipCreateMatrix2(sx, 0.0, 0.0, sy, x, y, &mut matrix) == OK {
+                    GdipTransformPath(path, matrix);
+                    GdipFillPath(self.g, brush, path);
+                    GdipDeleteMatrix(matrix);
+                }
+            }
+            GdipDeletePath(path);
+        }
+    }
+
     /// 画一行字。矩形决定对齐范围，垂直居中。
     pub fn text(&mut self, s: &str, r: R, size: f32, bold: bool, color: u32, align: Align) {
         if !self.visible(r) || s.is_empty() {
@@ -1362,12 +1187,6 @@ impl<'a> Painter<'a> {
     }
 
     // ---- 复合控件 ----
-
-    /// 胶囊标签（`2.4G` / `1000 Hz` / `19 帧`）。
-    pub fn pill(&mut self, r: R, label: &str, fg: u32, bg: u32, size: f32) {
-        self.round(r, r.h / 2.0, bg);
-        self.text(label, r, size, false, fg, Align::Center);
-    }
 
     /// 开关（36×20）。`on` 决定滑块位置和底色。
     ///
@@ -1548,7 +1367,6 @@ pub struct Canvas {
     stable: u32,
 }
 
-/// 位图复用策略（纯函数，便于单测）。
 #[derive(Debug, PartialEq)]
 pub(crate) enum BitmapAction {
     Keep,
@@ -1674,12 +1492,6 @@ impl Canvas {
         self.h = 0;
     }
 
-    /// 当前位图尺寸。
-    #[cfg(test)]
-    pub fn size(&self) -> (i32, i32) {
-        (self.w, self.h)
-    }
-
     /// 位图是否已经够大（够大就不必重新要屏幕 DC 当格式模板）。
     ///
     /// `ensure` 在位图够大时直接返回，但调用方为了给它递模板 DC 会先
@@ -1756,7 +1568,6 @@ impl Canvas {
             return;
         }
         let scale = if scale > 0.1 { scale } else { 1.0 };
-        // 没有共享上下文（单测/零散重绘）就自己建一个，画完删掉。
         let own = self.frame_g.is_null();
         unsafe {
             let mut g = self.frame_g;
@@ -1791,8 +1602,6 @@ impl Canvas {
             }
 
             let clip = clip_rect_for(scroll, view_w, view_h);
-            // 只在内容真的滚动时装裁剪面：scroll=0 时裁剪面正好等于整张位图，
-            // GDI+ 仍要逐图元做相交却挡不掉任何东西 —— 实测整帧多花约 1.2ms。
             if scroll.abs() > 1e-3 {
                 let _ = GdipSetClipRect(g, clip.x, clip.y, clip.w, clip.h, 0);
             } else if !own {
@@ -1837,961 +1646,4 @@ pub fn blit(dst: Gdi, src: Gdi, w: i32, h: i32) {
     unsafe {
         BitBlt(dst, 0, 0, w, h, src, 0, 0, SRCCOPY);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn bitmap_is_kept_when_it_already_fits() {
-        assert_eq!(bitmap_action(Some((1200, 800)), (1100, 740)), BitmapAction::Keep);
-    }
-
-    #[test]
-    fn bitmap_grows_when_too_small() {
-        assert_eq!(bitmap_action(Some((800, 600)), (1100, 740)), BitmapAction::Grow);
-        assert_eq!(bitmap_action(None, (1100, 740)), BitmapAction::Grow);
-    }
-
-    #[test]
-    fn bitmap_is_recreated_only_when_much_too_large() {
-        // 最大化到 2560x1440 再还原：换小，别背着 14 MB
-        assert_eq!(bitmap_action(Some((2560, 1440)), (1100, 740)), BitmapAction::Recreate);
-        // 只大一点就留着，免得拖拽缩放时反复重建
-        assert_eq!(bitmap_action(Some((1300, 800)), (1100, 740)), BitmapAction::Keep);
-    }
-
-    /// 句柄类型只有一个出处：`crate::win32::Gdi`。`ui::gfx::Gdi` 只是再导出，
-    /// 两条路径必须是同一个类型，否则跨模块传句柄会要求到处加 `as`。
-    #[test]
-    fn gdi_handle_is_the_win32_alias() {
-        let _: crate::win32::Gdi = 0;
-        let _: crate::ui::gfx::Gdi = 0;
-        assert_eq!(
-            std::mem::size_of::<crate::ui::gfx::Gdi>(),
-            std::mem::size_of::<usize>()
-        );
-    }
-
-
-    /// 没有位图（还没 ensure）时开/收帧都是空操作，不能 panic。
-    /// 有共享上下文时第二层不再自己建 Graphics —— 由渲染快照测试覆盖真实路径。
-    #[test]
-    fn frame_paint_without_bitmap_is_a_noop() {
-        let mut c = Canvas::new();
-        let t = crate::ui::theme::LIGHT;
-        c.begin_frame_paint(&t);
-        c.begin_frame_paint(&t);
-        assert!(!c.covers(64, 64));
-        c.end_frame_paint();
-        c.end_frame_paint();
-    }
-    use super::*;
-
-    #[test]
-    fn clip_rect_follows_the_scroll_offset() {
-        let c = clip_rect_for(0.0, 1100.0, 740.0);
-        assert_eq!((c.x, c.y, c.w, c.h), (0.0, 0.0, 1100.0, 740.0));
-        // 往下滚 200：从 200 起，高度 740+200（多出的 200 是剔除面的余量）
-        let c = clip_rect_for(200.0, 1100.0, 740.0);
-        assert_eq!((c.x, c.y, c.w, c.h), (0.0, 200.0, 1100.0, 940.0));
-        assert!((c.bottom() - 1140.0).abs() < 0.01, "bottom={}", c.bottom());
-    }
-
-    #[test]
-    fn 空画布永远需要重建位图() {
-        // 没建过位图时必须让调用方去要模板 DC（covers 只负责「已经有了就别说要」）。
-        let c = Canvas::new();
-        assert!(!c.covers(100, 100));
-        assert_eq!(c.size(), (0, 0));
-    }
-
-    #[test]
-    fn 矩形几何() {
-        let r = R::new(10.0, 20.0, 100.0, 50.0);
-        assert_eq!(r.right(), 110.0);
-        assert_eq!(r.bottom(), 70.0);
-        assert_eq!(r.cx(), 60.0);
-        assert_eq!(r.cy(), 45.0);
-        assert!(r.contains(10.0, 20.0));
-        assert!(r.contains(109.9, 69.9));
-        // 右边界和下边界是开区间 —— 相邻矩形不会都认为自己被点中
-        assert!(!r.contains(110.0, 45.0));
-        assert!(!r.contains(60.0, 70.0));
-        assert!(!r.contains(9.9, 45.0));
-    }
-
-    #[test]
-    fn 矩形切片() {
-        let r = R::new(10.0, 20.0, 100.0, 50.0);
-        assert_eq!(r.inset(5.0), R::new(15.0, 25.0, 90.0, 40.0));
-        assert_eq!(r.skip_x(30.0), R::new(40.0, 20.0, 70.0, 50.0));
-        assert_eq!(r.trim_x(30.0), R::new(10.0, 20.0, 70.0, 50.0));
-        assert_eq!(r.tail(20.0), R::new(90.0, 20.0, 20.0, 50.0));
-        assert_eq!(r.head(20.0), R::new(10.0, 20.0, 20.0, 50.0));
-        // 内缩过多不能变成负尺寸（会画出反向的框）
-        let tiny = r.inset(60.0);
-        assert_eq!(tiny.w, 0.0);
-        assert_eq!(tiny.h, 0.0);
-    }
-
-    #[test]
-    fn 相交判断() {
-        let a = R::new(0.0, 0.0, 100.0, 100.0);
-        assert!(a.intersects(&R::new(50.0, 50.0, 100.0, 100.0)));
-        assert!(a.intersects(&R::new(-50.0, -50.0, 100.0, 100.0)));
-        // 只贴边不算相交（开区间）
-        assert!(!a.intersects(&R::new(100.0, 0.0, 10.0, 10.0)));
-        assert!(!a.intersects(&R::new(200.0, 200.0, 10.0, 10.0)));
-    }
-
-    #[test]
-    fn 改alpha不改rgb() {
-        assert_eq!(with_alpha(0xFFFF_0000, 0x13), 0x13FF_0000);
-        assert_eq!(with_alpha(0x0040_90D9, 0xFF), 0xFF40_90D9);
-    }
-
-    #[test]
-    fn 画布初始是空的且不自带位图() {
-        let c = Canvas::new();
-        assert_eq!(c.size(), (0, 0));
-        assert_eq!(c.dc, 0);
-        assert_eq!(c.bmp, 0);
-    }
-
-    #[test]
-    fn gdiplus_可以启动() {
-        // 这个测试在无头环境里也能过：GdiplusStartup 不依赖窗口。
-        assert!(
-            start(),
-            "GdiplusStartup 失败 —— 检查 suppress_background_thread 是不是 0"
-        );
-        // 重复启动必须安全（第二次直接返回 true，不新建令牌）
-        assert!(start());
-    }
-
-    #[test]
-    fn 字体表能建出中文字体() {
-        // 字体族找不到时 new() 返回 None，这里必须能建出来 ——
-        // 否则整套界面全是空白（画字会静默跳过）。
-        assert!(Fonts::new("Microsoft YaHei UI").is_some(), "Microsoft YaHei UI 建不出来");
-        // 回落链必须至少有一个能成
-        let f = Fonts::from_candidates(&["这个名字不存在", "Microsoft YaHei UI", "SimSun"]);
-        assert!(f.is_some(), "回落链一个都建不出来");
-    }
-
-    #[test]
-    fn 量文字宽度返回正数() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut g: *mut c_void = std::ptr::null_mut();
-        unsafe {
-            // 用内存 DC 建一个最小画布来量字
-            let dc = gdi_create_compatible_dc(0);
-            assert_ne!(dc, 0, "CreateCompatibleDC 失败");
-            assert_eq!(GdipCreateFromHDC(dc, &mut g), OK);
-            let t = &super::super::theme::LIGHT;
-            let mut obj = ObjCache::default();
-            let mut p = Painter {
-                g,
-                obj: &mut obj,
-                fonts: &mut fonts,
-                t,
-                clip: R::new(0.0, 0.0, 800.0, 600.0),
-                scale: 1.0,
-            };
-            let (w1, h1) = p.measure("电量历史", 13.0, false);
-            let (w2, _) = p.measure("电量历史电量历史", 13.0, true);
-            assert!(w1 > 10.0, "中文宽度算成了 {w1}");
-            assert!(h1 > 8.0, "行高算成了 {h1}");
-            assert!(w2 > w1 * 1.5, "粗体且加倍的文字没有明显更宽：{w1} vs {w2}");
-            GdipDeleteGraphics(g);
-            gdi_delete_dc(dc);
-        }
-    }
-
-    #[test]
-    fn 画到内存dc不崩() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut canvas = Canvas::new();
-        let dc = gdi_create_compatible_dc(0);
-        assert_ne!(dc, 0);
-        let mem = canvas.ensure(dc, 400, 300);
-        assert_ne!(mem, 0, "双缓冲位图建不出来");
-        assert_eq!(canvas.size(), (400, 300));
-
-        let t = &super::super::theme::LIGHT;
-        canvas.paint(&mut fonts, t, 1.0, 0.0, 400.0, 300.0, |p| {
-            p.rect(R::new(0.0, 0.0, 400.0, 300.0), t.bg);
-            p.card(R::new(10.0, 10.0, 200.0, 100.0), 8.0, t.card, t.border);
-            p.text("电量 82%", R::new(20.0, 20.0, 180.0, 24.0), 13.0, true, t.text, Align::Left);
-            p.pill(R::new(20.0, 60.0, 60.0, 20.0), "2.4G", t.green, t.green_soft, 11.0);
-            p.ring(300.0, 80.0, 40.0, 8.0, 0.82, t.accent, t.accent, t.track);
-            p.line(10.0, 260.0, 390.0, 280.0, t.accent, 2.0);
-            p.switch(R::new(10.0, 130.0, 36.0, 20.0), true, true);
-            p.checkbox(R::new(60.0, 130.0, 16.0, 16.0), true, true);
-            p.slider(R::new(90.0, 130.0, 200.0, 20.0), 0.5, true);
-            p.polyline(&[(10.0, 200.0), (100.0, 180.0), (200.0, 210.0)], t.accent, 2.0);
-            // 面积填充（曲线图用）。传错参数通常直接 0xC0000005 或静默无输出，
-            // 具体像素结果靠真机截图验收 —— 在离屏位图上断言抗锯齿边缘的颜色
-            // 收益不抵成本。
-            p.fill_polygon(
-                &[(10.0, 200.0), (100.0, 180.0), (200.0, 210.0), (200.0, 250.0), (10.0, 250.0)],
-                with_alpha(t.accent, 0x57),
-                with_alpha(t.accent, 0x05),
-            );
-            p.round_gradient(R::new(10.0, 140.0, 100.0, 40.0), 6.0, t.accent_soft, with_alpha(t.accent_soft, 0));
-        });
-
-        // 再画一次（尺寸变化路径：位图只会变大不会变小）
-        // 小幅缩小：沿用原位图，多留一点内存但省一次分配
-        let mem2 = canvas.ensure(dc, 380, 280);
-        assert_eq!(mem2, mem, "小幅缩小不该重建位图");
-        assert_eq!(canvas.size(), (400, 300));
-
-        // 大幅缩小：等尺寸稳定几帧后才换小位图（缩放动画期间不分配，否则卡顿）
-        let mut small = 0;
-        for _ in 0..STABLE_FRAMES + 1 {
-            small = canvas.ensure(dc, 200, 150);
-        }
-        assert_ne!(small, 0);
-        assert_ne!(small, mem, "尺寸稳定后应换一张小位图");
-        assert_eq!(canvas.size(), (200, 150));
-        let small = canvas.ensure(dc, 200, 150);
-        assert_ne!(small, 0);
-        assert_eq!(canvas.size(), (200, 150));
-
-        // 变大会重建
-        let mem3 = canvas.ensure(dc, 800, 600);
-        assert_ne!(mem3, 0);
-        assert_eq!(canvas.size(), (800, 600));
-
-        canvas.release();
-        assert_eq!(canvas.size(), (0, 0));
-        gdi_delete_dc(dc);
-    }
-
-    /// 开一块**真彩**离屏位图模板，返回屏幕 DC。
-    ///
-    /// 测试里绝不能写 `gdi_create_compatible_dc(0)` 再把结果传给 `ensure()`：
-    /// `CreateCompatibleDC(NULL)` 建出的内存 DC 默认选中一张 **1x1 单色位图**，
-    /// 而 `ensure()` 内部用收到的 DC 去 `CreateCompatibleBitmap`
-    /// —— 拿到的是 1bpp 单色画布，任何彩色都被压成黑或白
-    /// （实测：红/绿/蓝填充读回全是 0xFFFFFF，只有纯黑是 0）。
-    ///
-    /// 生产路径没这个问题（`draw_frame` 传的就是 `GetDC(NULL)`），
-    /// 但测试里传错会得到「环没画出来」的假象，非常费时间。
-    #[cfg(test)]
-    fn test_screen_dc() -> crate::win32::Handle {
-        let screen = unsafe { crate::win32::GetDC(std::ptr::null_mut()) };
-        assert!(!screen.is_null(), "GetDC(NULL) 失败");
-        screen
-    }
-
-    #[cfg(test)]
-    fn release_screen_dc(screen: crate::win32::Handle) {
-        unsafe { crate::win32::ReleaseDC(std::ptr::null_mut(), screen) };
-    }
-
-    #[test]
-    fn 滚动通过世界变换生效_不崩() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut canvas = Canvas::new();
-        let dc = gdi_create_compatible_dc(0);
-        let _ = canvas.ensure(dc, 400, 300);
-        let t = &super::super::theme::DARK;
-        // 滚到 1500 的位置画，内容坐标远在可视区之外 —— 不该崩，
-        // 也不该把位图搞脏（visible 会跳过它们）。
-        canvas.paint(&mut fonts, t, 1.5, 1500.0, 400.0, 300.0, |p| {
-            p.rect(R::new(0.0, 0.0, 400.0, 100.0), t.bg);
-            p.card(R::new(10.0, 1510.0, 200.0, 60.0), 8.0, t.card, t.border);
-        });
-        canvas.release();
-        gdi_delete_dc(dc);
-    }
-
-    /// 电量环必须真的画出进度弧。
-    ///
-    /// 这条测试的存在理由：`ring()` 曾经用 `wrap=4` 调 `GdipCreateLineBrush`，
-    /// 返回 InvalidParameter 后整段进度弧被静默跳过 —— 界面上只剩一圈灰底环，
-    /// 而所有测试都通过（原测试只断言「不崩」），截图里发现时已经上线。
-    /// 所以这里**必须回读像素**，不能只测不崩。
-    #[test]
-    fn 电量环真的画出进度弧() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut canvas = Canvas::new();
-        let screen = test_screen_dc();
-        let mem = canvas.ensure(screen as Gdi, 200, 200);
-        assert_ne!(mem, 0);
-
-        // 白底 + 75% 环，环色用纯蓝便于按通道判定。
-        // COLORREF 是 0x00BBGGRR：蓝 = 0xFF0000。
-        canvas.paint(&mut fonts, &super::super::theme::LIGHT, 1.0, 0.0, 200.0, 200.0, |p| {
-            p.rect(R::new(0.0, 0.0, 200.0, 200.0), 0xFFFF_FFFF);
-            p.ring(
-                100.0,
-                100.0,
-                55.0,
-                10.0,
-                0.75,
-                0xFF00_00FF, // 蓝（ARGB）
-                0xFF00_00FF,
-                0x0000_0000, // 不画底环，避免干扰
-            );
-        });
-
-        // 弧从 12 点顺时针扫 360*0.75 = 270°，覆盖 12 → 3 → 6 → 9 点。
-        // 所以 12 点（起点）、3 点、9 点（终点）都在弧内，
-        // **没被覆盖的是 9 点到 12 点之间的左上象限**（GDI+ 角度 180°–270°）。
-        let top = gdi_get_pixel(mem, 100, 48);
-        let right = gdi_get_pixel(mem, 152, 100);
-        let left = gdi_get_pixel(mem, 48, 100);
-        let upper_left = gdi_get_pixel(mem, 61, 61);
-        assert!(
-            top.is_some() && right.is_some() && left.is_some() && upper_left.is_some(),
-            "GetPixel 失败"
-        );
-
-        // COLORREF 是 0x00BBGGRR —— **低字节是红**，蓝在高字节。
-        // 第一版这里写反了（按 ARGB 顺序判），报「12 点没画出进度弧」，
-        // 实际弧早就画好了。
-        let is_blue = |c: u32| ((c >> 16) & 0xFF) > 150 && (c & 0xFF) < 100;
-
-        assert!(is_blue(top.unwrap()), "12 点（弧起点）没有弧，得到 {:#08x}", top.unwrap());
-        assert!(is_blue(right.unwrap()), "3 点应有弧（270° 覆盖到），得到 {:#08x}", right.unwrap());
-        assert!(is_blue(left.unwrap()), "9 点（弧终点）没有弧，得到 {:#08x}", left.unwrap());
-        assert!(
-            !is_blue(upper_left.unwrap()),
-            "左上象限不该有弧（75% 只扫到 9 点），得到 {:#08x}",
-            upper_left.unwrap()
-        );
-
-        canvas.release();
-        release_screen_dc(screen);
-    }
-
-    /// 充电动效的彗尾必须真的画出来。
-    ///
-    /// 为什么单独测：`arc_comet` 是给 `ring` 叠一条弧，**两段都可能失败**——
-    /// 底层进度弧走 `GdipCreateLineBrush`（曾经 wrap=4 静默失败过），
-    /// 彗尾走 `GdipCreateSolidFill`。只测「不崩」的话，两者都失败时测试照样绿。
-    ///
-    /// 因为彗尾位置随时间变，这里**整圈扫一遍**找绿色像素，而不是钉在某一点：
-    /// 钉点会让测试在特定毫秒数上偶发失败（相位每 1200ms 循环一次）。
-    #[test]
-    fn 充电动效的彗尾真的画出来() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut canvas = Canvas::new();
-        let screen = test_screen_dc();
-        let mem = canvas.ensure(screen as Gdi, 200, 200);
-        assert_ne!(mem, 0);
-
-        canvas.paint(&mut fonts, &super::super::theme::LIGHT, 1.0, 0.0, 200.0, 200.0, |p| {
-            p.rect(R::new(0.0, 0.0, 200.0, 200.0), 0xFFFF_FFFF);
-            // 绿色进度弧 + 绿色彗尾，底环不画。
-            p.arc_comet(100.0, 100.0, 55.0, 10.0, 0.5, 0xFF00_FF00, 0xFF00_FF00, 0x0000_0000);
-        });
-
-        // 沿半径 55 的圆周取 360 个点（每度一个），数绿色像素。
-        // 彗尾 60° + 进度弧 180°(50%) 一共约 240° 应该有色，取 60 作阈值，
-        // 余量足够宽 —— 只要求「真的画了」，不锁具体角度。
-        let mut green = 0;
-        for deg in 0..360 {
-            let a = (deg as f32).to_radians();
-            // GDI+ 的 0° 在 3 点方向，屏幕 y 向下，所以 sin 直接加。
-            let x = (100.0 + 55.0 * a.cos()).round() as i32;
-            let y = (100.0 + 55.0 * a.sin()).round() as i32;
-            if let Some(c) = gdi_get_pixel(mem, x, y) {
-                // COLORREF 0x00BBGGRR：绿 = 0x00FF00 → G 通道在中间。
-                if ((c >> 8) & 0xFF) > 150 && (c & 0xFF) < 100 && ((c >> 16) & 0xFF) < 100 {
-                    green += 1;
-                }
-            }
-        }
-        assert!(
-            green >= 60,
-            "充电动效没画出来：圆周 360 点里只有 {green} 个绿色",
-        );
-
-        canvas.release();
-        release_screen_dc(screen);
-    }
-
-    /// 电量环四种状态并排渲染，落一张 BMP 供人工目视检查。
-    ///
-    /// 用 `#[ignore]` 是因为它只产出「给人看的图」，断言价值有限；
-    /// 真正的断言在 `电量环真的画出进度弧` 和 `充电动效的彗尾真的画出来`。
-    /// 运行：`cargo test --release 电量环四态图 -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn 电量环四态图() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut canvas = Canvas::new();
-        let screen = test_screen_dc();
-        let (w, h) = (480, 140);
-        let mem = canvas.ensure(screen as Gdi, w, h);
-        assert_ne!(mem, 0);
-
-        let t = &super::super::theme::LIGHT;
-        // 四格：正常蓝 75% / 低电量红 15% / 充电绿 45% / 休眠灰。
-        let cells: [(f32, u32, u32, bool); 4] = [
-            (0.75, t.accent, t.accent, false),
-            (0.15, t.red, t.red, false),
-            (0.45, t.green, t.green, true),
-            (0.0, t.track, t.track, false),
-        ];
-        canvas.paint(&mut fonts, t, 1.0, 0.0, w as f32, h as f32, |p| {
-            p.rect(R::new(0.0, 0.0, w as f32, h as f32), 0xFFFF_FFFF);
-            for (i, (frac, from, to, comet)) in cells.iter().enumerate() {
-                let cx = 60.0 + i as f32 * 120.0;
-                let cy = 70.0;
-                if *comet {
-                    p.arc_comet(cx, cy, 45.0, 9.0, *frac, *from, *to, t.track);
-                } else {
-                    p.ring(cx, cy, 45.0, 9.0, *frac, *from, *to, t.track);
-                }
-            }
-        });
-
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/target/test-scratch/ring-four-states.bmp"
-        );
-        std::fs::create_dir_all(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("target")
-                .join("test-scratch"),
-        )
-        .ok();
-        save_bmp(path, mem, w, h);
-        println!("已写出 {path}");
-
-        canvas.release();
-        release_screen_dc(screen);
-    }
-
-    /// 卡片渐变也必须真的画出来（同一批 `wrap=4` 受害者）。
-    #[test]
-    fn 卡片渐变真的画出颜色() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut canvas = Canvas::new();
-        let screen = test_screen_dc();
-        let mem = canvas.ensure(screen as Gdi, 120, 120);
-        assert_ne!(mem, 0);
-
-        canvas.paint(&mut fonts, &super::super::theme::LIGHT, 1.0, 0.0, 120.0, 120.0, |p| {
-            p.rect(R::new(0.0, 0.0, 120.0, 120.0), 0xFFFF_FFFF);
-            // 上端纯红、下端纯蓝，中点应当既不是白也不是红/蓝端点。
-            p.round_gradient(
-                R::new(20.0, 20.0, 80.0, 80.0),
-                0.0,
-                0xFF00_0000, // 不透明黑（上）
-                0xFFFF_0000, // 不透明蓝（下，ARGB 顺序）
-            );
-        });
-
-        let mid = gdi_get_pixel(mem, 60, 60).expect("GetPixel 失败");
-        // 渐变没画出来时这里会是白底 0x00FFFFFF。
-        assert_ne!(mid, 0x00FF_FFFF, "卡片渐变没画出来（还是白底）");
-
-        canvas.release();
-        release_screen_dc(screen);
-    }
-
-
-    /// 快照用的 48 小时电量历史：放电 → 充电 → 放电，含充电段以便看到绿色底带。
-    fn demo_rows() -> Vec<crate::history::HistoryRow> {
-        // 固定基准时间，快照才稳定（不随运行时刻变）。
-        let t0 = 1_761_400_000i64;
-        let mut rows: Vec<crate::history::HistoryRow> = Vec::new();
-        // 0..30h：96% → 71%，每 20 分钟一个点
-        let mut level = 96i32;
-        for i in 0..=90i64 {
-            let ts = t0 + i * 1200;
-            rows.push(crate::history::HistoryRow::new(ts, level as u8, false, 2));
-            if i % 3 == 0 && level > 71 {
-                level -= 1;
-            }
-        }
-        // 30h..33h：71% → 100%，充电，每 6 分钟一个点
-        let start = t0 + 90 * 1200;
-        for i in 0..=30i64 {
-            let ts = start + i * 360;
-            let lv = 71 + (i as i32 * 29 / 30);
-            rows.push(crate::history::HistoryRow::new(ts, lv as u8, true, 2));
-        }
-        // 33h..48h：100% → 78%，每 20 分钟一个点
-        let start2 = start + 30 * 360;
-        let mut lv2 = 100i32;
-        for i in 0..=45i64 {
-            let ts = start2 + i * 1200;
-            rows.push(crate::history::HistoryRow::new(ts, lv2 as u8, false, 2));
-            if i % 4 == 0 && lv2 > 78 {
-                lv2 -= 2;
-            }
-        }
-        rows
-    }
-
-    #[test]
-    fn 绘制对象缓存命中后不再新建() {
-        // 同一帧里同一颜色/线宽会被反复用（背景、分隔线、几十处文字），
-        // 缓存必须让第二次调用直接返回同一个句柄。
-        assert!(start());
-        let mut obj = ObjCache::default();
-
-        let b1 = obj.brush(0xFF112233);
-        let b2 = obj.brush(0xFF112233);
-        assert!(!b1.is_null());
-        assert_eq!(b1, b2, "同色画刷没有复用");
-        assert_ne!(b1, obj.brush(0xFF445566), "不同色必须是不同画刷");
-        assert_eq!(obj.brushes.len(), 2);
-
-        let p1 = obj.pen(0xFF000000, 1.0);
-        assert_eq!(p1, obj.pen(0xFF000000, 1.0), "同参数画笔没有复用");
-        // 圆头/平头是不同条目：拿圆头笔画 UI 边框会在四角露出凸起
-        assert_ne!(p1, obj.pen_round(0xFF000000, 1.0));
-        // 线宽不同的必须是不同条目
-        assert_ne!(p1, obj.pen(0xFF000000, 2.0));
-
-        let f1 = obj.fmt_oneline(1);
-        assert_eq!(f1, obj.fmt_oneline(1), "同对齐的字符串格式没有复用");
-        assert_ne!(f1, obj.fmt_wrap());
-
-        // clear 之后句柄全部释放，表清空（下一次 paint 重新建）
-        obj.clear();
-        assert!(obj.brushes.is_empty() && obj.pens.is_empty() && obj.fmts.is_empty());
-    }
-
-    #[test]
-    fn 渲染前端ui效果图() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut canvas = Canvas::new();
-        let screen = test_screen_dc();
-        let w = 1100;
-        let h = 740;
-        let mem = canvas.ensure(screen as Gdi, w, h);
-        assert_ne!(mem, 0);
-
-        let ident = crate::proto::Identity {
-            model_name: "ROG HARPE ACE MINI".to_string(),
-            wired_pid: 0x1B63,
-            wireless_pid: 0x1B65,
-            mouse_sn: "B00000000000".to_string(),
-            dongle_sn: "C00000000001".to_string(),
-            mouse_mac: "00:00:00:00:00:00".to_string(),
-            dongle_mac: "00:00:00:00:00:00".to_string(),
-            dongle_firmware: "7.00.07".to_string(),
-            booster: false,
-        };
-        let state = crate::proto::State {
-            power: 78,
-            charging: 0,
-            sleep_mode: 4,
-            low_warn: 20,
-            poll_code: 3,
-            // 去抖给 4 = 20 ms（出厂默认）。留 0 会显示成「关闭」，快照里像没启用。
-            debounce_code: 4,
-            active_stage: 2,
-            // enc = (dpi - 50) / 50，写真实鼠标的默认四档，快照才看得懂
-            enc: [7, 15, 31, 63], // 400 / 800 / 1600 / 3200
-            rgb: [
-                [0xFF, 0x19, 0x29],
-                [0xFF, 0x00, 0xFF],
-                [0x00, 0x00, 0xFF],
-                [0x00, 0xFF, 0x00],
-            ],
-            // 按键用出厂默认（每个键映射到自己）。留全 0 会让按键页八行都显示
-            // 「无功能」，看着像界面把鼠标按键全废掉了 —— 快照/上架图都不能这样。
-            buttons: crate::proto::BUTTON_SRC,
-            ..Default::default()
-        };
-        let cfg = crate::settings::Settings::default();
-        // 已知结论的估算，快照才看得到「环下方那行」的真实排版。
-        let estimate = crate::history::Estimate {
-            known: true,
-            text: "预计还能用 3 小时 12 分钟".to_string(),
-            percent_per_hour: -6.2,
-            samples: 14,
-            span_minutes: 96.0,
-            hours: 3.2,
-            stale_seconds: 0,
-        };
-        // 48 小时「真实感」历史：先放电 30 小时、再充 3 小时、最后放电 15 小时。
-        // 没有这段数据，快照里的图表永远是「正在读取历史样本」，看不出曲线本身长什么样。
-        let demo = demo_rows();
-        let plot = crate::chart::build(&demo);
-        let demo_len = demo.len();
-        let data = crate::ui::pages::Data {
-            autostart_on: false,
-            state: Some(&state),
-            ident: Some(&ident),
-            link_mode: "Wireless24G",
-            status: String::new(),
-            plot: Some(&plot),
-            estimate: &estimate,
-            rows: demo_len,
-            cfg: &cfg,
-            autostart_text: "已开机自启",
-            version: crate::gui::APP_VERSION,
-            frames: 19,
-            elapsed_ms: 588,
-        };
-
-        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch");
-        std::fs::create_dir_all(&out_dir).ok();
-
-        let render_full_view = |canvas: &mut Canvas, fonts: &mut Fonts, ui: &mut super::super::widget::Ui, data_ref: &super::super::pages::Data, theme: &super::super::theme::Theme, out_name: &str, draw_extra: Option<&dyn Fn(&mut Painter, &super::super::layout::Frame)>, scroll: f32, dim: (f32, f32)| {
-            let (w, h) = (dim.0 as i32, dim.1 as i32);
-            let oy = super::super::titlebar::TITLE_H;
-            let nav_w = ui.nav_width();
-            let mut frame = super::super::layout::Frame::new(w as f32, h as f32, nav_w);
-            frame.content.x += nav_w;
-            frame.content.y += oy;
-            frame.content.h -= oy;
-
-            // ① 整窗铺底
-            canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
-                p.rect(super::R::new(0.0, 0.0, w as f32, h as f32), theme.bg);
-            });
-            // ② 页面
-            canvas.paint(fonts, theme, 1.0, scroll, w as f32, h as f32, |p| {
-                super::super::pages::page(p, ui, data_ref, &frame);
-                if let Some(extra) = draw_extra {
-                    extra(p, &frame);
-                }
-            });
-            // ③ 导航栏
-            canvas.paint(fonts, theme, 1.0, 0.0, nav_w, h as f32, |p| {
-                super::super::pages::nav(p, ui, data_ref, nav_w, h as f32);
-            });
-            // ④ 标题栏
-            canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
-                super::super::titlebar::draw(p, w as f32, nav_w, theme);
-                super::super::titlebar::draw_buttons(p, w as f32, theme, false, ui.hover_btn);
-            });
-            // ⑤ 模态弹窗（若有）
-            if ui.show_close_dialog {
-                canvas.paint(fonts, theme, 1.0, 0.0, w as f32, h as f32, |p| {
-                    super::super::pages::draw_close_dialog(p, ui, w as f32, h as f32);
-                });
-            }
-
-            let out_file = out_dir.join(out_name);
-            save_bmp(out_file.to_str().unwrap(), mem, w, h);
-        };
-
-        // 1. 电量页 浅色模式
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-light.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 2. 电量页 深色模式
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-battery-dark.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 3. 性能页 + 预设色盘
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.palette_tab = 0;
-            let extra = |p: &mut Painter, f: &super::super::layout::Frame| {
-                super::super::pages::draw_palette(
-                    p,
-                    &mut super::super::widget::Ui::default(),
-                    0,
-                    super::R::new(320.0, 180.0, 36.0, 24.0),
-                    Some([255, 0, 0]),
-                    f,
-                );
-            };
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-palette-preset.bmp", Some(&extra), 0.0, (1100.0, 740.0));
-        }
-
-        // 4. 性能页 + 高级自定义色环
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.palette_tab = 1;
-            ui.custom_hue = 330.0;
-            let extra = |p: &mut Painter, f: &super::super::layout::Frame| {
-                let mut ui_p = super::super::widget::Ui::default();
-                ui_p.palette_tab = 1;
-                ui_p.custom_hue = 330.0;
-                super::super::pages::draw_palette(
-                    p,
-                    &mut ui_p,
-                    0,
-                    super::R::new(320.0, 180.0, 36.0, 24.0),
-                    Some([255, 0, 128]),
-                    f,
-                );
-            };
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-palette-ring.bmp", Some(&extra), 0.0, (1100.0, 740.0));
-        }
-
-        // 5. 电量页 正在充电状态（动效光晕与徽标）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
-            let state_charging = crate::proto::State {
-                charging: 1,
-                power: 58,
-                ..state.clone()
-            };
-            let estimate_charging = crate::history::Estimate {
-                known: true,
-                text: "预计 40 分钟后充满".to_string(),
-                percent_per_hour: 62.0,
-                samples: 9,
-                span_minutes: 41.0,
-                hours: 0.68,
-                stale_seconds: 0,
-            };
-            let data_charging = crate::ui::pages::Data {
-                state: Some(&state_charging),
-                status: String::new(),
-                estimate: &estimate_charging,
-                ..data.clone()
-            };
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data_charging, &super::super::theme::DARK, "ui-battery-charging.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 6. 关闭确认模态对话框
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
-            ui.show_close_dialog = true;
-            ui.close_choice = super::super::widget::CloseChoice::Minimize;
-            ui.close_remember = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-close-dialog.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 7. 电量页 展开导航（rail=false，验证设备卡不再被标题栏裁切，#1）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Battery;
-            ui.rail = false;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-expanded.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 8. 性能页 高级折叠收起（排查折叠区色差）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.adv = [false, false];
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-closed.bmp", None, 560.0, (1100.0, 740.0));
-        }
-
-        // 9. 性能页 高级折叠展开（排查展开后色差）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.adv = [true, false];
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-adv-open.bmp", None, 560.0, (1100.0, 740.0));
-        }
-
-        // 10. 按键页（警告条置顶 + 现代行样式）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Keys;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-keys.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 11. 按键页 深色
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Keys;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-keys-dark.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 12. 成功提示 toast
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.set_status("✔ 回报率已生效");
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-ok.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 13. 错误提示 toast
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.set_status("✘ 开机自启失败：权限不足 (错误 5)");
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-toast-err.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 14. 深色 toast
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.set_status("✔ 灯光颜色已生效");
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-toast-dark.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 15. 性能页 LOD 卡片（警告条在卡片外）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-lod.bmp", None, 620.0, (1100.0, 740.0));
-        }
-
-        // 16. 去抖下拉框：靠近视口底部时必须向上翻开（否则整块弹层落到窗外）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.set_open_drop(Some(super::super::widget::Drop::Debounce));
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-drop-up.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 17. DPI 数值框正在编辑：草稿顶到上限（5 位）也不能溢出框外
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            ui.begin_edit(super::super::widget::Edit::Dpi(0), "42000".into());
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-dpi-edit.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 18. 灯光页：交给 Windows 动态光效（方案 A）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Light;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-light-dyn.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 19. 设置页：存储路径卡 + 外观「跟随系统/浅色/深色」三段
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Settings;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings.bmp", None, 620.0, (1100.0, 740.0));
-        }
-
-        // 20. 性能页顶部：DPI 档位每行带「切换」+「应用」
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-perf-top.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 21. 设置页顶部（通用设置：开机自启等）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Settings;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-top.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 21b. 设置页底部「关于」卡：版本号 / 开源仓库 / 商店页
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Settings;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-settings-about.bmp", None, 700.0, (1100.0, 740.0));
-        }
-
-        // 22. 标题栏关闭按钮悬停：红底 + 白叉（必须都可见，不能是透明 alpha）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
-            ui.hover_btn = Some(super::super::titlebar::Btn::Close);
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-titlebar-hover.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 23. 性能页深色：上架图里的深色主题示例（四档彩色指示灯 + 药丸分段控件）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Perf;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::DARK, "ui-perf-dark.bmp", None, 0.0, (1100.0, 740.0));
-        }
-
-        // 23. 窄屏：hero 是「环在上、KPI 单列 4 行」，卡片必须长到装得下
-        //     （早先写死高度，第 3、4 行画到卡外、压住「电量历史」标题）
-        {
-            let mut ui = super::super::widget::Ui::default();
-            ui.page = super::super::widget::Page::Battery;
-            ui.rail = true;
-            render_full_view(&mut canvas, &mut fonts, &mut ui, &data, &super::super::theme::LIGHT, "ui-battery-narrow.bmp", None, 0.0, (700.0, 1040.0));
-        }
-
-        canvas.release();
-        release_screen_dc(screen);
-    }
-    #[test]
-    fn measure_uses_the_same_single_line_format_as_text() {
-        assert!(start());
-        let mut fonts = Fonts::new("Microsoft YaHei UI").expect("字体");
-        let mut canvas = Canvas::new();
-        let dc = gdi_create_compatible_dc(0);
-        assert_ne!(dc, 0);
-        let _mem = canvas.ensure(dc, 400, 300);
-        let t = &super::super::theme::LIGHT;
-        let long = "很长的一行文字".repeat(40);
-        let mut got = (0.0f32, 0.0f32);
-        canvas.paint(&mut fonts, t, 1.0, 0.0, 400.0, 300.0, |p| {
-            got = p.measure(&long, 13.0, false);
-        });
-        assert!(got.0 > 0.0, "宽度应为正: {:?}", got);
-        // 单行度量：高度必须是「一行」的量级。旧实现传 null 格式，GDI+ 允许
-        // 折行，600 个字会返回几十行的高度。
-        assert!(got.1 < 40.0, "measure 返回了多行高度: {:?}", got);
-    }
-
-
-    /// 多档 DPR 的回归：位图按物理像素建、逻辑尺寸不变。
-    ///
-    /// 以前只在 1.0 档测过，`ensure`/`covers` 的边界条件在 1.25/1.5/2.0 下
-    /// 从没被走过 —— 而这三档正是 Windows 最常见的设置。
-    #[test]
-    fn 多档dpr下位图与布局都成立() {
-        assert!(start());
-        let mut canvas = Canvas::new();
-        let screen = test_screen_dc();
-        let logical = (1100.0_f32, 740.0_f32);
-        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-            let w = (logical.0 * scale).round() as i32;
-            let h = (logical.1 * scale).round() as i32;
-            let mem = canvas.ensure(screen as Gdi, w, h);
-            assert_ne!(mem, 0, "scale={scale} 建不出位图");
-            assert!(canvas.covers(w, h), "scale={scale} 位图没覆盖住窗口");
-            // 同一块位图再要一次必须复用，不能每次重建。
-            assert_eq!(canvas.ensure(screen as Gdi, w, h), mem, "scale={scale} 重复建位图");
-            let (mw, mh) = crate::ui::layout::min_window_size(scale);
-            assert!(mw >= 720 && mh >= 520, "scale={scale} 最小窗口尺寸被压小了");
-        }
-        canvas.release();
-        release_screen_dc(screen);
-    }
-
 }

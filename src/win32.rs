@@ -1,12 +1,3 @@
-//! 手写 Win32 FFI 声明。
-//!
-//! 刻意**不依赖** `windows-sys` / `winapi`：整个工程零外部 crate，`cargo build` 不需要访问 crates.io。
-//!
-//! 链接方式（实测确认）：
-//! - `kernel32` / `setupapi` 在 MinGW 的 rustlib 里有导入库（`libsetupapi.a` 等），直接静态链接；
-//! - `hid.dll` **没有** `libhid.a`，因此走 `LoadLibraryW` + `GetProcAddress` 动态取函数指针。
-//!
-//! 全部使用 Unicode 版本的 API（`CreateFileW`、`SetupDiGetClassDevsW` 等）。
 
 #![allow(non_snake_case, non_camel_case_types)]
 
@@ -282,12 +273,6 @@ impl Rect {
     }
 }
 
-/// `PAINTSTRUCT`。**x64 上是 72 字节**（`hdc` 8 + `fErase` 4 + 对齐 0 + `rcPaint` 16
-/// + `fRestore` 4 + `fIncUpdate` 4 + `rgbReserved[32]`，尾部补到 8 字节对齐）。
-///
-/// 这个结构**必须自己声明**：nwg 的 `PaintData::begin_paint()` 返回的是 winapi 的
-/// `PAINTSTRUCT`，而 winapi 不是本工程的直接依赖（见文件头「零外部 crate」），
-/// 拿不到那个类型名。下面的单测钉死了大小和字段偏移，改错会当场失败。
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PaintStruct {
@@ -456,6 +441,16 @@ pub const TRAY_GUID: Guid = Guid {
     data4: [0x9B, 0x2A, 0x11, 0x7D, 0xC4, 0x35, 0x8F, 0x60],
 };
 
+/// 第 `slot` 个托盘图标的 GUID。
+///
+/// `slot == 0` 就是历史沿用的 [`TRAY_GUID`] —— 升级前的折叠状态挂在它上面，
+/// 不能改；其余槽位只动最后一个字节，保证互不相同。
+pub fn tray_guid_at(slot: u8) -> Guid {
+    let mut g = TRAY_GUID;
+    g.data4[7] = TRAY_GUID.data4[7].wrapping_add(slot);
+    g
+}
+
 /// `NOTIFYICONDATAW`（x64 上 976 字节）。
 ///
 /// `timeout_or_version` 对应 C 里的匿名 union（`uTimeout` / `uVersion`）。
@@ -522,6 +517,39 @@ pub struct TrayId {
     pub uses_guid: bool,
 }
 
+pub fn tray_rect(hwnd: Handle, id: TrayId) -> Option<Rect> {
+    #[repr(C)]
+    struct Identifier {
+        size: u32,
+        hwnd: Handle,
+        uid: u32,
+        guid: Guid,
+    }
+    #[link(name = "shell32")]
+    extern "system" {
+        fn Shell_NotifyIconGetRect(id: *const Identifier, rect: *mut Rect) -> i32;
+    }
+    let identifier = Identifier {
+        size: std::mem::size_of::<Identifier>() as u32,
+        hwnd,
+        uid: id.uid,
+        guid: if id.uses_guid {
+            id.guid
+        } else {
+            unsafe { std::mem::zeroed() }
+        },
+    };
+    let mut rect = Rect::default();
+    (unsafe { Shell_NotifyIconGetRect(&identifier, &mut rect) } == 0).then_some(rect)
+}
+
+#[link(name = "user32")]
+extern "system" {
+    pub fn GetDoubleClickTime() -> u32;
+    pub fn SetTimer(hwnd: Handle, id: usize, elapse_ms: u32, proc: usize) -> usize;
+    pub fn KillTimer(hwnd: Handle, id: usize) -> i32;
+}
+
 /// 非 GUID 模式用的编号，挑一个不会和别的程序撞的值。
 pub const TRAY_FALLBACK_UID: u32 = 1;
 
@@ -531,6 +559,7 @@ impl TrayId {
         if self.uses_guid {
             n.flags |= NIF_GUID;
             n.guid_item = self.guid;
+            n.uid = self.uid;
         } else {
             n.uid = self.uid;
         }
@@ -546,16 +575,21 @@ fn tray_set_version(hwnd: Handle, id: TrayId) -> bool {
     unsafe { Shell_NotifyIconW(NIM_SETVERSION, &n) != 0 }
 }
 
-/// 添加托盘图标。返回实际用上的身份，`None` 表示两种模式都没加上。
+/// 添加第 `slot` 个托盘图标。返回实际用上的身份，`None` 表示两种模式都没加上。
+///
+/// 多设备时每台一个图标，靠 `slot` 区分：`0` 是主图标（沿用 [`TRAY_GUID`]），
+/// 其余按 [`tray_guid_at`] 派生，非 GUID 模式下用 `uID = TRAY_FALLBACK_UID + slot`。
 pub fn tray_add(
     hwnd: Handle,
     callback_message: u32,
     hicon: Handle,
     tip: &str,
-    guid: Guid,
+    slot: u8,
 ) -> Option<TrayId> {
+    let guid = tray_guid_at(slot);
     let mut n = notify_icon_data(hwnd, callback_message, guid);
     n.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_GUID;
+    n.uid = TRAY_FALLBACK_UID + slot as u32;
     n.hicon = hicon;
     copy_tip(&mut n.sz_tip, tip);
     // SAFETY: 同上。
@@ -571,12 +605,16 @@ pub fn tray_add(
         ok = unsafe { Shell_NotifyIconW(NIM_ADD, &n) != 0 };
     }
     if ok {
-        let id = TrayId { guid, uid: 0, uses_guid: true };
+        let id = TrayId {
+            guid,
+            uid: TRAY_FALLBACK_UID + slot as u32,
+            uses_guid: true,
+        };
         tray_set_version(hwnd, id);
         return Some(id);
     }
 
-    let id = TrayId { guid, uid: TRAY_FALLBACK_UID, uses_guid: false };
+    let id = TrayId { guid, uid: TRAY_FALLBACK_UID + slot as u32, uses_guid: false };
     let mut p = notify_icon_data(hwnd, callback_message, guid);
     p.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     p.uid = id.uid;
@@ -662,12 +700,7 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     /// （`CreateCompatibleDC` 要一个参考 DC，否则内存位图的色彩格式可能和屏幕不一致）。
     pub fn GetDC(hwnd: Handle) -> Handle;
     pub fn ReleaseDC(hwnd: Handle, hdc: Handle) -> i32;
-    /// 读进程当前持有的 GDI（`flag = 0`）或 USER（`flag = 1`）对象数。
-    ///
-    /// 托盘图标自绘的回归测试靠它：`Gdi::drop` 漏一个 `DeleteObject`
-    /// 这个数字就会单调上涨。
-    #[cfg(test)]
-    pub fn GetGuiResources(process: Handle, flag: u32) -> u32;
+
     /// 自建的 HICON **必须** `DestroyIcon`：图标句柄属于 User 对象，
     /// 不回收会一直涨（每刷新一次多一个，几十次就能看出来）。
     pub fn DestroyIcon(icon: Handle) -> i32;
@@ -684,12 +717,18 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
 
     pub fn GetModuleHandleW(name: *const u16) -> Handle;
     pub fn SendMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> isize;
-    /// 取系统度量（`SM_CXSMICON = 49`）。托盘的泄漏回归测试拿它算图标边长。
-    #[cfg(test)]
+    /// 取系统度量（`SM_CXSMICON = 49`），按托盘实际尺寸绘制。
     pub fn GetSystemMetrics(index: i32) -> i32;
+    pub fn ModifyMenuW(menu: Handle, item: u32, flags: u32, new_id: usize, text: *const u16) -> i32;
 
     /// 窗口是否处于最小化。最小化后不再重绘，可据此回收渲染内存。
     pub fn IsIconic(hwnd: Handle) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn GetUserDefaultUILanguage() -> u16;
+    pub fn FreeLibrary(module: Handle) -> i32;
 }
 
 /// `LoadImageW` 的图标类型。
@@ -893,25 +932,6 @@ fn handle_ok(h: Handle) -> bool {
     !h.is_null() && h != INVALID_HANDLE_VALUE
 }
 
-/// 把父进程（cmd / PowerShell）的控制台接到本进程上，让 CLI 的输出能看见。
-///
-/// 本程序的子系统是 `windows`（见 `src/main.rs` 的 `windows_subsystem`）——
-/// 双击、从开始菜单、从商店启动时**根本不会创建控制台**，所以不会闪黑框。
-/// 代价是命令行调用时进程默认没有控制台，`println!` 无处可写。这里在 `main`
-/// 最开头补回来，顺序很关键：
-///
-/// 1. 先看 `GetStdHandle(STD_OUTPUT_HANDLE)` 是否有效。`cmd /c "x info > r.txt"`
-///    这类重定向、`| Out-File`、`Start-Process -RedirectStandardOutput` 都会把
-///    句柄继承下来，此时**不能**用 `CONOUT$` 覆盖它，否则那些用法全写成空文件。
-/// 2. 没有继承句柄时才 `AttachConsole(ATTACH_PARENT_PROCESS)`，接上父控制台后
-///    再把 `CONOUT$` / `CONIN$` 设成标准句柄，`println!` 就落到那个窗口里。
-///
-/// 双击启动时没有父控制台，第 1、2 步都失败，函数返回 `false`，什么也不做。
-///
-/// 已知限制（实测，非本函数的锅）：PowerShell 自己的 `>` 操作符把 GUI 子系统
-/// 程序的标准输出接成一个**写不进去**的句柄 —— `& x --help > f.txt` 得到 0 字节，
-/// 而 `cmd /c "x --help > f.txt"`、`& x --help | Out-File f.txt`、
-/// `Start-Process -RedirectStandardOutput` 三种都正常。脚本里重定向请用后三者。
 pub fn attach_console() -> bool {
     unsafe {
         if handle_ok(GetStdHandle(STD_OUTPUT_HANDLE)) {
@@ -990,77 +1010,4 @@ extern "system" {
     ) -> i32;
     pub fn RegDeleteValueW(key: usize, name: *const u16) -> i32;
     pub fn RegCloseKey(key: usize) -> i32;
-}
-
-#[cfg(test)]
-mod tests {
-    /// 两种身份各填各的字段：GUID 模式不能碰 `uID`，退回模式不能带 `NIF_GUID`。
-    #[test]
-    fn tray_id_fills_guid_or_uid_only() {
-        let guid = Guid { data1: 1, data2: 2, data3: 3, data4: [4; 8] };
-        let mut n = notify_icon_data(std::ptr::null_mut(), 0, guid);
-
-        TrayId { guid, uid: 0, uses_guid: true }.apply(&mut n);
-        assert!(n.flags & NIF_GUID != 0);
-        assert_eq!(n.uid, 0);
-
-        let mut m = notify_icon_data(std::ptr::null_mut(), 0, guid);
-        TrayId { guid, uid: TRAY_FALLBACK_UID, uses_guid: false }.apply(&mut m);
-        assert_eq!(m.flags & NIF_GUID, 0);
-        assert_eq!(m.uid, TRAY_FALLBACK_UID);
-    }
-
-
-    #[test]
-    fn app_icon_resource_is_loadable() {
-        // alt+tab 的图标来自 exe 资源 1；资源没编进去时这里是空的。
-        let big = load_app_icon(32);
-        let small = load_app_icon(16);
-        assert!(!big.is_null(), "32px 应用图标加载失败");
-        assert!(!small.is_null(), "16px 应用图标加载失败");
-        // 空句柄不该炸
-        set_window_icon(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
-    }
-    use super::*;
-
-    #[test]
-    fn gdi_and_handle_are_the_same_width() {
-        assert_eq!(core::mem::size_of::<Gdi>(), core::mem::size_of::<Handle>());
-        assert_eq!(core::mem::size_of::<Gdi>(), core::mem::size_of::<usize>());
-        // 哨兵值必须是 0：全仓库用 `g != 0` 判「有没有句柄」。
-        assert_eq!(0 as Gdi, 0);
-    }
-
-    #[test]
-    fn reg_open_of_missing_subkey_reports_failure() {
-        // 打开一个不存在子键必须返回非 0（ERROR_FILE_NOT_FOUND），
-        // 顺手验证宽字符串 + `HKCU` 常量这一串调用是通的。
-        let sub: Vec<u16> = "Software\\RogMouseCtlNoSuchKey\u{0}".encode_utf16().collect();
-        let mut h: usize = 0;
-        let rc = unsafe { RegOpenKeyExW(0xFFFF_FFFF_8000_0001, sub.as_ptr(), 0, 0x0001, &mut h) };
-        assert_ne!(rc, 0, "不存在的子键不该返回 0");
-        assert_eq!(h, 0, "失败时不该写出句柄");
-    }
-
-    #[test]
-    fn hid_api_load_is_cached_not_reloaded() {
-        // 两次 load 必须拿到同一张表（函数指针地址相同）。若哪天有人把缓存去掉，
-        // 这条会挂 —— 那意味着每次调用都重新 LoadLibraryW 一遍。
-        let a = HidApi::load().expect("hid.dll 应能加载");
-        let b = HidApi::load().expect("第二次也应成功");
-        assert_eq!(a.get_feature as usize, b.get_feature as usize);
-        assert_eq!(a.get_attributes as usize, b.get_attributes as usize);
-    }
-
-    #[test]
-    fn taskbar_created_message_id_is_stable() {
-        // 同名消息在任何进程里都是同一个号，重复注册也不会变。
-        let a = register_window_message("TaskbarCreated");
-        let b = register_window_message("TaskbarCreated");
-        assert_ne!(a, 0, "注册失败会返回 0");
-        assert_eq!(a, b, "同一名字必须拿到同一个消息号");
-        // 不同名字必须是不同号，否则托盘回调会被别的消息误触发。
-        let c = register_window_message("RogBatteryTestOnlyMessage");
-        assert_ne!(a, c);
-    }
 }

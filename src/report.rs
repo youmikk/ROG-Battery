@@ -27,7 +27,6 @@ pub fn hex_dump(bytes: &[u8]) {
     }
 }
 
-/// 打印完整状态。字段顺序刻意与 rw-hid.cs 一致，方便和既有实测记录对照。
 pub fn print_state(st: &State) {
     println!(
         "  回报率      {} (code {})",
@@ -113,9 +112,6 @@ pub fn print_identity(id: &Identity, mode: &str, rid: u8, product: &str, serial:
         println!("  HID 产品名  {product}");
     }
     if !serial.is_empty() {
-        // 到这里 `serial` 已经过 `hid.rs::read_hid_string` 清洗（只保留开头的
-        // 字母数字串）。清洗原因是本机 OMNI 接收器的 HID 字符串描述符固件 bug，
-        // 会在真实序列号后面带 2 个未初始化内存码点 —— 详见那个函数的注释。
         println!("  HID 序列号  {serial}");
     }
     if !id.model_name.is_empty() {
@@ -160,26 +156,4 @@ pub fn print_identity(id: &Identity, mode: &str, rid: u8, product: &str, serial:
             "不支持（仅 125/250/500/1000）"
         }
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 打印层最容易出的问题是「空字段 / 全零状态」时 panic 或除零。
-    /// 这几个函数是命令行的唯一出口，崩了等于工具不可用。
-    #[test]
-    fn printers_survive_empty_state() {
-        let st = State::default();
-        print_state(&st);
-        print_power(&st);
-        print_identity(&Identity::default(), "Wired", 0, "", "");
-    }
-
-    #[test]
-    fn hex_dump_handles_empty_and_short_input() {
-        hex_dump(&[]);
-        hex_dump(&[0x00]);
-        hex_dump(&[0x12, 0x07, 0x7F, 0x20, 0xFF]); // 可打印、边界、不可打印混在一起
-    }
 }

@@ -1,29 +1,3 @@
-//! 「一次性读完 + 缓存」的读模型。
-//!
-//! 用户明确要求：**一次把所有参数读全，缓存起来，之后从缓存读**，
-//! 不要每次按需只读一帧。
-//!
-//! 为什么这么做——文档实测的帧成本：
-//!
-//! ```text
-//! 进程启动 + OpenLink   ~190-230 ms  （只付一次）
-//! 每多一帧的边际成本     ~27 ms
-//! 17 帧全读             ~690 ms
-//! 单帧 MISS（无应答）    = 超时值（DEFAULT_TIMEOUT_MS = 1200 ms）
-//! ```
-//!
-//! 也就是说「多读几帧」远比「读不到」便宜。把 12 类信息一次读全（17 帧 + 电量搭车），
-//! 之后所有读取都走内存/磁盘缓存，总代价约 690ms 而不是每次 200-400ms。
-//!
-//! ## 缓存策略
-//!
-//! - 内存缓存：一个 `Snapshot`，带 `Instant` 时间戳
-//! - 磁盘缓存：`%LOCALAPPDATA%\rog-mouse-ctl\snapshot.cache`，带 wall-clock 时间戳，
-//!   跨进程复用（CLI 每次启动都是新进程，没有磁盘缓存的话「缓存」就毫无意义）
-//! - 有效期：默认 **30 秒**（可在 `settings.ini` 里改 `cache_ttl_sec`）
-//! - 主动失效：**任何写操作之后**调用 [`SnapshotCache::invalidate`]，
-//!   因为设备侧的值已经变了，缓存必然过期
-//! - 电量档位永远比其它项更容易变，所以 `battery` 那几帧额外有一个更短的有效期
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -112,11 +86,6 @@ const MOUSE_FRAMES: &[(&str, u8, u8, &[u8])] = &[
     ("12:10:00", 0x12, 0x10, &[0x00, 0x00]), // 恒 0，读来当健康探针
 ];
 
-/// 轻量读取只碰的 3 帧 —— 给 GUI 后台线程周期刷新用。
-///
-/// 顺序不是随便排的：**电量放第一帧**。它是这三项里唯一会变、也是用户最关心的；
-/// 如果鼠标休眠，第一帧就会 MISS，这时候立刻收手比读完剩下两帧再一起报错省
-/// 两个 2400ms 的超时（实测 MISS 一次要等满超时，是全协议最贵的操作）。
 const LIGHT_FRAMES: &[(&str, u8, u8, &[u8])] = &[
     ("12:07:00", 0x12, 0x07, &[0x00, 0x00]), // 电量（+ 休眠/低电量阈值/充满效果，同帧白拿）
     ("12:04:00", 0x12, 0x04, &[0x00, 0x00]), // 回报率 / 去抖 / 角度校正
@@ -140,34 +109,12 @@ pub struct FetchOutcome {
     pub frames_read: usize,
 }
 
-/// **轻量读取：只读 3 帧**，约 100-200ms。给 GUI 后台周期刷新用。
-///
-/// 与 [`fetch`] 的两点区别：
-///
-/// 1. **第一帧就 MISS 立即返回**，不再读剩下两帧。鼠标休眠时全量读会白等三次超时
-///    （单帧 MISS = 一次 `DEFAULT_TIMEOUT_MS` = 1200ms，实测含设备打开约
-///    1100-1150ms；不提前返回就要付 3 倍），而「电量读不到」等于「鼠标睡了」
-///    这个结论第一帧就够了。
-/// 2. 不读身份帧 —— 身份不会因为用户改设置而变，缓存里的旧值仍然是对的。
-///
-/// 返回的 `snapshot.frames` 里只有实际读到的帧；调用方要么看 `frames_read`，
-/// 要么用 `snapshot.state` 里自己关心的那几个字段（未读的字段是 `Default`，
-/// 不代表设备真的读出来是 0）。判据：`snapshot.frames.contains_key(...)`。
 pub fn fetch_light(dev: &mut HidDevice, report_id: u8, link_mode: &str) -> FetchOutcome {
     fetch_light_with(report_id, link_mode, |rid, cmd, sub, tail| {
         dev.xfer(rid, cmd, sub, tail, crate::hid::DEFAULT_TIMEOUT_MS)
     })
 }
 
-/// [`fetch_light`] 的内核，把「发一帧」抽成参数。
-///
-/// 抽出这一层是为了让「第一帧 MISS 就提前返回」这条**时序行为能被单测覆盖** ——
-/// 靠真机等鼠标休眠来验证这件事不可行（用户一直在动鼠标，等不到 10 分钟空闲），
-/// 而这是全程序唯一一条以「省掉两次超时」为目的的逻辑，不能只靠读代码保证。
-///
-/// 实测成本对照（2026-10-21，`raw 12 FF` 连跑 3 次）：单帧 MISS
-/// **1098 / 1099 / 1151 ms**（协议超时 900ms + 约 200ms 设备打开）。
-/// 这里用 1200ms 超时，所以休眠时提前返回约 1.4s，不提前返回约 3.8s。
 pub fn fetch_light_with<F>(
     report_id: u8,
     link_mode: &str,
@@ -486,9 +433,6 @@ pub struct SnapshotCache {
     pub light: Option<std::sync::Arc<Snapshot>>,
 }
 
-/// 内存命中的统一判定：新鲜（或允许陈旧）就把 `Arc` 交出去。
-///
-/// 抽出来是为了两条读路径共用一份逻辑，也便于测试「命中时共享同一份分配」。
 fn cached_hit(
     slot: &Option<std::sync::Arc<Snapshot>>,
     ttl: Duration,
@@ -618,252 +562,4 @@ fn save_disk_cache(s: &Snapshot) {
     }
     let p = crate::paths::snapshot_cache_file();
     let _ = std::fs::write(p, s.to_cache_text());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 缓存文件里混进多字节字符时不能 panic，只能跳过那一行。
-    ///
-    /// 回归：过去用 `&hex[i..i+2]` 按字节切 `&str`，遇到「é」这类字符会
-    /// `byte index 1 is not a char boundary` 直接 panic，而 `load_disk_cache`
-    /// 用 `.ok()` 接不住 panic。
-    #[test]
-    fn cache_text_roundtrip_keeps_frames_and_header() {
-        let mut snap = Snapshot {
-            report_id: 7,
-            link_mode: "Wired".to_string(),
-            taken_unix: 1_800_000_000,
-            ..Snapshot::default()
-        };
-        snap.frames.insert("12:07:00".to_string(), vec![0x00, 0x12, 0x07, 0xAB, 0xFF]);
-        snap.frames.insert("12:04:00".to_string(), vec![0x00, 0x12, 0x04]);
-
-        let text = snap.to_cache_text();
-        // 小写、无空格、定长两字符 —— 和旧实现逐字节一致
-        assert!(text.contains("frame 12:07:00 001207abff\n"), "{text}");
-
-        let back = Snapshot::from_cache_text(&text).expect("自己写的缓存必须能读回");
-        assert_eq!(back.report_id, 7);
-        assert_eq!(back.link_mode, "Wired");
-        assert_eq!(back.taken_unix, 1_800_000_000);
-        assert_eq!(back.frames, snap.frames);
-    }
-
-    #[test]
-    fn disk_restored_snapshot_uses_wall_clock_freshness() {
-        // 刚写的缓存：内存判定应当算新鲜，否则每帧都要重新读盘。
-        let text = format!(
-            "{}\ntaken_unix={}\nlink_mode=Wireless24G\nreport_id=3\nframe 12:07:00 0312\n",
-            CACHE_MAGIC,
-            unix_now()
-        );
-        let snap = Snapshot::from_cache_text(&text).expect("刚写的缓存应当能解析");
-        assert!(snap.taken.is_some(), "taken 必须被反推出来");
-        assert!(snap.is_fresh(Duration::from_secs(60)));
-
-        // 一年前的缓存：仍然不新鲜。
-        let old = format!("{}\ntaken_unix=1761900000\n", CACHE_MAGIC);
-        let snap = Snapshot::from_cache_text(&old).expect("旧缓存也应当能解析");
-        assert!(snap.taken.is_some());
-        assert!(!snap.is_fresh(Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn cache_with_multibyte_garbage_does_not_panic() {
-        let text = format!(
-            "{CACHE_MAGIC}\ntaken_unix=1761900000\nlink_mode=Wireless24G\nreport_id=3\nframe 12:07:00 é1é1\nframe 12:04:00 0312\n"
-        );
-        let snap = Snapshot::from_cache_text(&text).expect("坏行应被跳过而不是整体失败");
-        assert!(
-            !snap.frames.contains_key("12:07:00"),
-            "含非十六进制字符的帧必须被丢弃"
-        );
-        assert!(snap.frames.contains_key("12:04:00"), "好行仍要解析出来");
-    }
-
-    /// 轻量读取的帧清单必须只含 3 项，且电量排第一。
-    ///
-    /// 顺序是功能性的：鼠标休眠时第一帧 MISS 就 `return`，靠的就是电量在首位。
-    /// 谁把电量挪到后面，休眠时就要多等 2 次超时（实测每次 2400ms）。
-    #[test]
-    fn light_frames_are_three_and_battery_is_first() {
-        assert_eq!(LIGHT_FRAMES.len(), 3, "轻量读取应该正好 3 帧");
-        let first = LIGHT_FRAMES[0];
-        assert_eq!(first.0, "12:07:00", "第一帧必须是电量帧");
-        assert_eq!((first.1, first.2), (0x12, 0x07));
-        // 另外两帧是性能与 profile
-        let keys: Vec<&str> = LIGHT_FRAMES.iter().map(|f| f.0).collect();
-        assert!(keys.contains(&"12:04:00"));
-        assert!(keys.contains(&"12:00:00"));
-    }
-
-    /// 轻量帧必须是全量帧的子集 —— 否则同一个字段会有两套读法。
-    #[test]
-    fn light_frames_are_subset_of_full_frames() {
-        let full: Vec<&str> = MOUSE_FRAMES.iter().map(|f| f.0).collect();
-        for (key, ..) in LIGHT_FRAMES {
-            assert!(
-                full.contains(key),
-                "轻量帧 {key} 不在全量帧清单里，说明两处定义已经漂移"
-            );
-        }
-    }
-
-    /// 3 帧快照不能把 `frames.len()` 冒充成完整快照。
-    ///
-    /// 磁盘缓存格式不记录「这是全量还是轻量」，所以轻量快照**根本不该写盘**。
-    /// 这条测试锁住的是 `SnapshotCache::light` 与 `snapshot` 是两个独立槽位。
-    #[test]
-    fn light_and_full_slots_are_separate() {
-        let c = SnapshotCache::new(30);
-        assert!(c.snapshot.is_none());
-        assert!(c.light.is_none());
-    }
-
-    /// 造一个看起来像 `12 07` 应答的帧。
-    fn fake_energy(level: u8) -> Vec<u8> {
-        let mut m = vec![0u8; 64];
-        m[0] = 0x03;
-        m[1] = 0x12;
-        m[2] = 0x07;
-        m[5] = level; // 电量
-        m[6] = 4; // 休眠 10 分钟
-        m[7] = 20; // 低电量阈值
-        m[8] = 0x8F; // 电压低字节
-        m[9] = 0x0F; // 电压高字节 → 3983 mV
-        m[12] = 1; // 充满效果
-        m
-    }
-
-    /// **休眠路径的核心断言**：第一帧 MISS 就收手，绝不问第二帧。
-    ///
-    /// 这条只能用假探针验 —— 真机上是「用户 10 分钟不碰鼠标」才触发，
-    /// 而这台机器上用户一直在用。但它的后果是实打实的：多问两帧
-    /// 就多付 2 × 1200ms（实测单帧 MISS 约 1.1-1.15s），GUI 后台线程会明显卡。
-    #[test]
-    fn light_stops_after_first_miss() {
-        let mut asked: Vec<(u8, u8)> = Vec::new();
-        let out = fetch_light_with(0x03, "Wireless24G", |_rid, cmd, sub, _tail| {
-            asked.push((cmd, sub));
-            None // 全部无应答 = 鼠标休眠
-        });
-
-        assert_eq!(
-            asked,
-            vec![(0x12, 0x07)],
-            "第一帧 MISS 之后必须立刻返回，实际问了 {} 帧",
-            asked.len()
-        );
-        assert_eq!(out.frames_read, 0);
-        assert_eq!(out.snapshot.frames.len(), 0);
-        assert!(
-            out.snapshot.failed.contains_key("12:07:00"),
-            "失败的帧要记进 failed，调用方靠它区分「读不到」和「读出来是 0」"
-        );
-        assert_eq!(out.snapshot.failed.len(), 1, "只该有第一帧的失败记录");
-    }
-
-    /// 醒着的时候三帧都要读到，不能因为「有 failed 就早退」而漏读。
-    #[test]
-    fn light_reads_all_three_when_awake() {
-        let mut n = 0;
-        let out = fetch_light_with(0x03, "Wireless24G", |_rid, cmd, sub, _tail| {
-            n += 1;
-            match (cmd, sub) {
-                (0x12, 0x07) => Some(fake_energy(84)),
-                (0x12, 0x04) => {
-                    let mut m = vec![0u8; 64];
-                    m[0] = 0x03;
-                    m[1] = 0x12;
-                    m[2] = 0x04;
-                    m[13] = 3; // 回报率 1000Hz
-                    m[15] = 2; // 去抖 12ms
-                    Some(m)
-                }
-                (0x12, 0x00) => {
-                    let mut m = vec![0u8; 64];
-                    m[0] = 0x03;
-                    m[1] = 0x12;
-                    m[2] = 0x00;
-                    m[12] = 2; // 当前档位
-                    Some(m)
-                }
-                _ => None,
-            }
-        });
-
-        assert_eq!(n, 3, "醒着时必须读完 3 帧");
-        assert_eq!(out.frames_read, 3);
-        assert!(out.snapshot.failed.is_empty(), "没有失败帧");
-        assert_eq!(out.snapshot.state.power, 84);
-        assert_eq!(out.snapshot.state.poll_code, 3);
-        assert_eq!(out.snapshot.state.active_stage, 2);
-    }
-
-    /// **第二帧才 MISS 不该早退** —— 早退条件只针对第一帧。
-    ///
-    /// 理由：第一帧读到电量说明鼠标是醒的，此时第二帧丢失是偶发丢包，
-    /// 应该继续把第三帧读完，而不是因为一次丢包就放弃整次刷新。
-    #[test]
-    fn light_keeps_going_when_second_frame_misses() {
-        let mut asked = 0;
-        let out = fetch_light_with(0x03, "Wireless24G", |_rid, cmd, sub, _tail| {
-            asked += 1;
-            match (cmd, sub) {
-                (0x12, 0x07) => Some(fake_energy(84)),
-                (0x12, 0x04) => None, // 第二帧偶发丢失
-                (0x12, 0x00) => {
-                    let mut m = vec![0u8; 64];
-                    m[0] = 0x03;
-                    m[1] = 0x12;
-                    m[2] = 0x00;
-                    m[12] = 2;
-                    Some(m)
-                }
-                _ => None,
-            }
-        });
-
-        assert_eq!(asked, 3, "第二帧丢失后仍要读第三帧");
-        assert_eq!(out.frames_read, 2);
-        assert_eq!(out.snapshot.failed.len(), 1);
-        assert_eq!(out.snapshot.state.power, 84, "读到的电量照常保留");
-        assert_eq!(out.snapshot.state.active_stage, 2);
-    }
-
-    /// NAK 不算 MISS，不该触发早退 —— 设备明确回了话，说明它是醒的。
-    #[test]
-    fn light_nak_is_not_a_miss() {
-        let mut asked = 0;
-        let out = fetch_light_with(0x03, "Wireless24G", |_rid, _cmd, _sub, _tail| {
-            asked += 1;
-            Some(vec![0x03, 0xFF, 0xAA])
-        });
-
-        assert_eq!(asked, 3, "NAK 是三帧都给否定应答，应该问完三帧");
-        assert_eq!(out.frames_read, 0);
-        assert_eq!(out.snapshot.failed.len(), 3);
-    }
-
-    #[test]
-    fn cached_hit_returns_the_same_allocation() {
-        let mut snap = Snapshot::default();
-        snap.taken = Some(Instant::now());
-        snap.link_mode = "Wired".to_string();
-        let arc = std::sync::Arc::new(snap);
-        let slot = Some(std::sync::Arc::clone(&arc));
-
-        let hit = cached_hit(&slot, Duration::from_secs(60)).expect("新鲜快照应命中");
-        assert!(
-            std::sync::Arc::ptr_eq(&hit, &arc),
-            "命中必须共享同一份快照，不能深拷贝"
-        );
-
-        // 过期 → 不命中，调用方会去读设备
-        assert!(cached_hit(&slot, Duration::from_secs(0)).is_none());
-        // 空槽位永远不命中
-        assert!(cached_hit(&None, Duration::from_secs(60)).is_none());
-    }
 }

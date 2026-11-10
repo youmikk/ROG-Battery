@@ -1,0 +1,16 @@
+New
+- Chinese and English language options, with Windows display language detection by default.
+- Device overview and direct access to details when only one device is detected.
+- A tray battery panel on single click and the main window on double click.
+- Custom device names and types, with consistent display throughout the app.
+- Selection of the device whose battery level appears in the tray.
+
+Improvements
+- A single numeric tray icon with refined text size, spacing, and alignment.
+- Simpler navigation and consistent window controls and device preferences.
+- A rename dialog that matches the app theme.
+
+Fixes
+- Fixed lingering hover backgrounds on title bar buttons.
+- Fixed navigation and control alignment.
+- Fixed inconsistent device types after a manual selection.

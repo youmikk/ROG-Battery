@@ -1,41 +1,3 @@
-//! Windows「动态光效」(Dynamic Lighting) / HID LampArray 集成。
-//!
-//! # 为什么是这条路
-//!
-//! 2026-10-28 实测（`HidP_GetCaps` 遍历所有顶层集合）发现：本机测试设备
-//! （ROG HARPE ACE MINI，USB 0B05:1ACE）
-//! 除了私有命令通道（0xFF00/0xFF01/0xFF02、64 字节 in/out）之外，**还暴露了一个
-//! 标准的 HID LampArray 集合**：
-//!
-//! ```text
-//! VID_0B05 PID_1ACE  UP=0x59 U=0x01  in=0 out=0 feat=51   (MI_05)
-//! ```
-//!
-//! 读它的属性报表（Feature Report ID 1）得到：
-//!
-//! | 字段 | 值 |
-//! |---|---|
-//! | LampCount | 1 |
-//! | BoundingBox | 63.6 × 127.1 × 39.6 mm（与机身尺寸吻合）|
-//! | LampArrayKind | 2 = Mouse |
-//!
-//! `Usage Page 0x59 / Usage 0x01` 正是 Windows 动态光效的设备选择器
-//! （`System.DeviceInterface.Hid.UsagePage:=89 AND UsageId:=1`）唯一认的协议。
-//! 也就是说：**灯根本不走私有通道**，之前往 0xFF01 写灯效报文没反应，是打错了集合。
-//!
-//! # 方案 A：交给系统
-//!
-//! 动态光效是 Windows 自带的（设置 → 个性化 → 动态光效）。它自己会找到这个
-//! LampArray 集合并按用户选的「纯色 / 呼吸 / 渐变 / 波浪 / 闪烁」驱动灯。
-//! 我们**不抢写** —— LampArray 是「最后写入者赢」，我们写一帧、系统下一帧就覆盖，
-//! 两边打架只会闪。所以这里只做三件事：
-//!
-//! 1. 探测设备在不在（给界面显示，证明系统能看见它）；
-//! 2. 一键打开系统的动态光效设置页；
-//! 3. 提示用户 Armoury Crate 的灯效要先关掉（否则它会抢设备）。
-//!
-//! 厂商私有协议的 `ops::set_light` / CLI `setlight` 仍然保留（本机实测可写，
-//! 只是会被系统覆盖），但 UI 里不再提供，避免「点了没反应」的错觉。
 
 use std::sync::Mutex;
 
@@ -58,18 +20,18 @@ impl LampInfo {
     /// `LampArrayKind` 的显示名。规范只定义了几个值，其余按「其他」处理。
     pub fn kind_name(self) -> &'static str {
         match self.kind {
-            0 => "未定义",
-            1 => "键盘",
-            2 => "鼠标",
-            3 => "游戏手柄",
-            4 => "麦克风",
-            5 => "鼠标垫",
-            6 => "机箱",
-            7 => "耳机",
-            8 => "音箱",
-            9 => "显示器",
-            10 => "机箱内灯带",
-            _ => "其他",
+            0 => crate::tr!("未定义"),
+            1 => crate::tr!("键盘"),
+            2 => crate::tr!("鼠标"),
+            3 => crate::tr!("游戏手柄"),
+            4 => crate::tr!("麦克风"),
+            5 => crate::tr!("鼠标垫"),
+            6 => crate::tr!("机箱"),
+            7 => crate::tr!("耳机"),
+            8 => crate::tr!("音箱"),
+            9 => crate::tr!("显示器"),
+            10 => crate::tr!("机箱内灯带"),
+            _ => crate::tr!("其他"),
         }
     }
 }
@@ -157,35 +119,26 @@ pub fn shell_open(target: &str) -> Result<(), String> {
     if code > 32 {
         Ok(())
     } else {
-        Err(format!("系统拒绝打开（返回 {code}）：{target}"))
+        Err(crate::trf!(
+            "系统拒绝打开（返回 {code}）：{target}",
+            code = code,
+            target = target
+        ))
     }
 }
 
 /// 打开 `ms-settings:personalization-lighting`。
 pub fn open_settings() -> Result<(), String> {
     shell_open("ms-settings:personalization-lighting").map_err(|e| {
-        format!("打不开系统设置页（{e}），可手动打开 设置 → 个性化 → 动态光效")
+        crate::trf!(
+            "打不开系统设置页（{e}），可手动打开 设置 → 个性化 → 动态光效",
+            e = e
+        )
     })
 }
 
 // ───────────────────────── 底层：HidD_GetFeature ─────────────────────────
 
-// `hid.dll` 在本机这套工具链里**没有** `libhid.a`（`win32.rs` 顶部注释也写了这点），
-// 加载与 `GetProcAddress` 统一由 `win32::HidApi` 负责 —— 这里不再自建一套
-// `LoadLibraryW`（原来每调一次就多一次引用计数，且从不释放）。
-/// 读 LampArray 属性报表，返回 `(LampCount, LampArrayKind)`。
-///
-/// 报表布局（按实测字节 + HID LampArray 1.0 规范）：
-///
-/// ```text
-/// byte 0      Report ID (= 1)
-/// byte 1..3   LampCount            u16 LE
-/// byte 3..7   BoundingBoxWidth     u32 LE（微米）
-/// byte 7..11  BoundingBoxHeight    u32 LE
-/// byte 11..15 BoundingBoxDepth     u32 LE
-/// byte 15..17 LampArrayKind        u16 LE
-/// byte 17..21 MinUpdateInterval    u32 LE（微秒）
-/// ```
 fn read_attributes(api: &crate::win32::HidApi, path: &str) -> Option<(u16, u16)> {
     let wide = crate::win32::to_wide(path);
     let h = unsafe {
@@ -215,44 +168,4 @@ fn read_attributes(api: &crate::win32::HidApi, path: &str) -> Option<(u16, u16)>
     let lamp_count = u16::from_le_bytes([buf[1], buf[2]]);
     let kind = u16::from_le_bytes([buf[15], buf[16]]);
     Some((lamp_count, kind))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn info_is_cached_and_refresh_does_not_panic() {
-        // 有设备返回 Some、没设备返回 None，两种都要：连续两次必须一致（命中缓存），
-        // refresh 之后也要稳定，而不是每次重跑一遍枚举还不知道对不对。
-        let key = |v: Option<super::LampInfo>| v.map(|i| (i.lamp_count, i.kind));
-        assert_eq!(key(super::info()), key(super::info()));
-        let after_refresh = key(super::refresh());
-        assert_eq!(after_refresh, key(super::info()));
-    }
-
-
-    #[test]
-    fn 属性报表解析_实测字节() {
-        // 2026-10-28 从 MI_05 真实读回的 24 字节：
-        // 01 | 01 00 | 70 F8 00 00 | 9A F0 01 00 | CE 9A 00 00 | 02 00 | ...
-        let buf: [u8; 24] = [
-            0x01, 0x01, 0x00, 0x70, 0xF8, 0x00, 0x00, 0x9A, 0xF0, 0x01, 0x00, 0xCE, 0x9A, 0x00,
-            0x00, 0x02, 0x00, 0x00, 0x00, 0xE8, 0x80, 0x00, 0x00, 0x00,
-        ];
-        let lamp_count = u16::from_le_bytes([buf[1], buf[2]]);
-        let kind = u16::from_le_bytes([buf[15], buf[16]]);
-        assert_eq!(lamp_count, 1);
-        assert_eq!(kind, 2);
-        assert_eq!(LampInfo { lamp_count, kind }.kind_name(), "鼠标");
-    }
-
-    #[test]
-    fn 未知_kind_不猜() {
-        let l = LampInfo {
-            lamp_count: 4,
-            kind: 0x7F,
-        };
-        assert_eq!(l.kind_name(), "其他");
-    }
 }

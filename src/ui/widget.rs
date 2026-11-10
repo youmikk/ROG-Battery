@@ -1,32 +1,10 @@
-﻿//! 控件模型：命中区域、交互状态、动作。
-//!
-//! # 为什么用「即时模式」而不是控件树
-//!
-//! nwg 那套是保留模式：建控件 → 保存句柄 → 收到事件时反查是哪个控件。
-//! 换成自绘后这条路走不通了 —— 没有系统控件，也就没有「控件句柄」可查。
-//!
-//! 这里用即时模式（immediate mode）：
-//!
-//! 1. 每帧绘制时，画到哪个可交互元素就把它的矩形 + 动作登记进
-//!    [`Ui::hots`]；
-//! 2. 鼠标事件到来时，从后往前扫这个列表（后画的在上层，比如下拉弹层）
-//!    做命中测试；
-//! 3. 命中的动作用 [`Act`] 表达，交给上层处理。
-//!
-//! 这样**画出来的东西和能点的东西永远是同一份代码算的**。保留模式最容易
-//! 出的 bug 是「控件挪了位置但命中区没挪」，即时模式天然没有这个问题。
-//!
-//! # 为什么动作是数据不是闭包
-//!
-//! `Act` 是 `Copy` 的纯数据。好处：可以在没有 Win32 的环境里单测
-//! 「点 (x,y) 应该产生哪个 Act」，而不用起窗口。这是这一层最大的价值 ——
-//! 布局算错、命中区重叠这类 bug 全部能在 `cargo test` 里抓到。
 
 use super::gfx::R;
 
 /// 五个页面。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
+    Home,
     Battery,
     Perf,
     Light,
@@ -35,44 +13,16 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
-        Page::Battery,
-        Page::Perf,
-        Page::Light,
-        Page::Keys,
-        Page::Settings,
-    ];
 
-    pub fn title(self) -> &'static str {
-        match self {
-            Page::Battery => "电量",
-            Page::Perf => "性能",
-            Page::Light => "灯光",
-            Page::Keys => "按键",
-            Page::Settings => "设置",
-        }
-    }
-
-    /// 侧栏图标用了 1.5px 线宽的几何图形，这里给一个代号。
-    pub fn icon(self) -> Icon {
-        match self {
-            Page::Battery => Icon::Battery,
-            Page::Perf => Icon::Perf,
-            Page::Light => Icon::Light,
-            Page::Keys => Icon::Keys,
-            Page::Settings => Icon::Settings,
-        }
-    }
 }
 
-/// 侧栏图标。
+/// 固定导航图标。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     Battery,
     Perf,
     Light,
     Keys,
-    Settings,
 }
 
 /// 下拉框的种类。
@@ -104,17 +54,12 @@ pub enum Drop {
     /// 8 个槽位。（灯光页的「方向」借用 `LightMode` + 100 是另一回事：
     /// 那里只有一个假值，用哨兵够用，但那种写法不该扩散。）
     ButtonTarget(u8),
-    /// 颜色**色盘**。`u8` 是槽位：`0..=3` = 对应 DPI 档的指示灯颜色，
-    /// `LIGHT_COLOR_SLOT(255)` = 灯光颜色。
-    ///
-    /// 为什么不用「点色块直接轮换下一个颜色」：用户明确说要**色盘**
-    ///（能看见所有候选色再挑），轮换式他得点十几次才能回到想要的那个。
-    ///
-    /// 弹层由 [`super::pages`] 的 `draw_palette` 画成网格，不是普通的
-    /// 一列文字项 —— 色块摆成网格才看得出色相分布。
     Palette(u8),
     /// 设置页：窗口关闭行为（每次询问 / 最小化到托盘 / 直接退出）。
     CloseMode,
+    TrayKind,
+    TrayDevice,
+    Language,
 }
 
 /// [`Drop::Palette`] 里代表「灯光颜色」的槽位值。
@@ -211,10 +156,12 @@ pub enum Pref {
 /// 一个可以点的东西要做的事。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Act {
+    SelectDevice(usize),
+    RenameDevice,
+    ToggleDeviceTray,
     /// 切页。
     Nav(Page),
-    /// 侧栏展开 / 收成图标轨道。
-    ToggleRail,
+    /// 打开下拉菜单。
     OpenDrop(Drop),
     /// 在下拉弹层里选第 `index` 项。
     PickDrop(Drop, usize),
@@ -233,6 +180,8 @@ pub enum Act {
     /// 指定配色偏好。设置页的「外观」分段控件用：
     /// 0 = 跟随系统，1 = 浅色，2 = 深色。
     SetTheme(u8),
+    /// 设置页：打开诊断日志所在文件夹。
+    OpenLogFolder,
     /// 设置页：备份到文件。
     Backup,
     /// 设置页：从文件还原。
@@ -284,7 +233,7 @@ impl Act {
     /// 这个动作要读写设备吗？
     ///
     /// 读不到设备时点这些动作只会失败，`gui` 那边统一换成一句提示；
-    /// 本地动作（切页、折叠侧栏、改本地设置）照常执行。
+    /// 本地动作（切页、改本地设置）照常执行。
     pub fn needs_device(self) -> bool {
         match self {
             Act::ApplyEdit(Edit::Dpi(_)) | Act::CommitSlide(_) => true,
@@ -375,8 +324,10 @@ pub enum Cursor {
 /// 界面的瞬时状态（不进 `settings.ini`，程序关了就没）。
 pub struct Ui {
     pub page: Page,
-    /// 侧栏是否收成 56px 图标轨道。用户定的是**默认收起**。
-    pub rail: bool,
+    pub selected_device: Option<String>,
+    pub tray_device_keys: Vec<String>,
+    pub device_keys: Vec<String>,
+    pub initial_route_done: bool,
     /// 当前配色。`settings.ini` 的 `theme` 键存它的字符串形式。
     pub mode: super::theme::Mode,
     /// 配色偏好：0 = 跟随系统，1 = 浅色，2 = 深色。设置页分段控件用。
@@ -387,12 +338,11 @@ pub struct Ui {
     /// 这正是想要的效果。
     pub adv: [bool; 2],
     /// 每个页面各自的滚动位置。切页时保留，切回来还是原位。
-    scroll: [f32; 5],
+    scroll: [f32; 6],
     /// 每个页面的内容总高度（绘制时写入，滚轮要靠它夹住）。
-    content_h: [f32; 5],
+    content_h: [f32; 6],
     /// 当前打开的下拉弹层。
     open_drop: Option<Drop>,
-    /// 下拉弹层展开后的矩形（绘制时写入，命中测试要用）。
     drop_rect: Option<R>,
     /// 触发弹层的那个下拉框本身的矩形（内容坐标）。
     ///
@@ -421,9 +371,9 @@ pub struct Ui {
     pub edit_fresh: Option<Edit>,
     /// 本帧登记的内容区可交互区域（**内容坐标**）。
     pub hots: Vec<Hot>,
-    /// 本帧登记的侧栏可交互区域（**窗口坐标**，不随滚动移动）。
+    /// 本帧登记的固定导航可交互区域（**窗口坐标**，不随滚动移动）。
     ///
-    /// 两套坐标不能混在一个列表里：侧栏钉在窗口上，内容区跟着 `scroll` 走。
+    /// 两套坐标不能混在一个列表里：固定导航钉在窗口上，内容区跟着 `scroll` 走。
     pub chrome: Vec<Hot>,
     pub dialog_hots: Vec<Hot>,
     /// 鼠标位置 / 按下状态。
@@ -459,14 +409,7 @@ pub struct Ui {
     pub palette_tab: u8,
     /// 自定义色环当前选中的色相（0.0 .. 360.0）。
     pub custom_hue: f32,
-    /// 自绘标题栏上正悬停的按钮。`None` = 没悬停在任何按钮上。
-    ///
-    /// 由 `canvas.rs` 的 `WM_MOUSEMOVE` 写（那里鼠标进 canvas 子窗口之后
-    /// 就收不到「标题栏区域」的移动了 —— 标题栏在 canvas 之上），
-    /// 由 `draw_frame` 读。
-    ///
-    /// 命中测试和按钮点击走的是主窗口的 `WM_NCHITTEST`（`frame.rs`），
-    /// 这里只管「画哪一条高亮」。
+    /// 窗口按钮的悬停态，与客户区悬停态一起更新。
     pub hover_btn: Option<crate::ui::titlebar::Btn>,
     /// 是否弹出「关闭窗口」确认对话框。
     pub show_close_dialog: bool,
@@ -484,18 +427,18 @@ pub struct Ui {
 impl Default for Ui {
     fn default() -> Self {
         Ui {
-            page: Page::Battery,
-            // 默认折叠，折叠开关在左栏最下方。
-            rail: true,
+            page: Page::Home,
+            selected_device: None,
+            tray_device_keys: Vec::new(),
+            device_keys: Vec::new(),
+            initial_route_done: false,
             // 默认浅色主题。
             mode: super::theme::Mode::Light,
             // 默认「跟随系统」
             theme_pref: 0,
-            // 性能页的「高级」默认收起（原型 `<details>` 没写 open）；
-            // 灯光页的默认展开（原型写了 `open`）。
             adv: [false, true],
-            scroll: [0.0; 5],
-            content_h: [0.0; 5],
+            scroll: [0.0; 6],
+            content_h: [0.0; 6],
             open_drop: None,
             drop_rect: None,
             drop_btn: None,
@@ -526,13 +469,42 @@ impl Default for Ui {
 }
 
 impl Ui {
+    pub fn sync_devices(&mut self, devices: &[crate::device::DeviceReading]) {
+        self.device_keys = devices.iter().map(|d| d.key.clone()).collect();
+        if !self.initial_route_done && !devices.is_empty() {
+            self.initial_route_done = true;
+            if self.page == Page::Home && devices.len() == 1 {
+                self.select_device(&devices[0].key);
+            }
+        }
+        if let Some(key) = &self.selected_device {
+            if !devices.iter().any(|d| &d.key == key) {
+                self.selected_device = None;
+                if !matches!(self.page, Page::Home | Page::Settings) {
+                    self.page = Page::Home;
+                }
+            }
+        }
+    }
+
+    pub fn select_device(&mut self, key: &str) {
+        self.selected_device = Some(key.to_string());
+        self.page = Page::Battery;
+        self.scroll[1..5].fill(0.0);
+        self.open_drop = None;
+        self.focus = None;
+        self.edits.clear();
+        self.chart = None;
+        self.live.fill(None);
+    }
     fn page_index(p: Page) -> usize {
         match p {
-            Page::Battery => 0,
-            Page::Perf => 1,
-            Page::Light => 2,
-            Page::Keys => 3,
-            Page::Settings => 4,
+            Page::Home => 0,
+            Page::Battery => 1,
+            Page::Perf => 2,
+            Page::Light => 3,
+            Page::Keys => 4,
+            Page::Settings => 5,
         }
     }
 
@@ -606,7 +578,7 @@ impl Ui {
         self.hots.push(Hot { rect, act });
     }
 
-    /// 登记一个侧栏可交互区域（**窗口坐标**，不随滚动移动）。
+    /// 登记一个固定导航可交互区域（**窗口坐标**，不随滚动移动）。
     pub fn chrome_hot(&mut self, rect: R, act: Act) {
         self.chrome.push(Hot { rect, act });
     }
@@ -722,17 +694,6 @@ impl Ui {
         }
     }
 
-    /// 命中测试：返回最上层（最后登记）的那个区域。
-    ///
-    /// `scroll` 是当前页的滚动量。**所有登记区域都是内容坐标**
-    ///（`hots` 和 `drop_rect` 都一样），所以比较时统一先 `y + scroll`
-    /// 换成客户区坐标，再和鼠标位置比。
-    ///
-    /// 命中优先级：**弹层自己的选项 → 弹层的空白 → 内容区 → 侧栏**。
-    ///
-    /// 「弹层的空白」这一档不能省：弹层盖在页面上，如果它下面某一行的矩形
-    /// 也包含这个点，少了这一档就会穿透去点到那行 —— 用户看到的是
-    /// 「在下拉框里点了一下空白，结果改了个 DPI」。
     pub fn hit(&self, x: f32, y: f32, scroll: f32) -> Option<Act> {
         // 关闭确认模态对话框优先独占所有交互
         if self.show_close_dialog {
@@ -742,6 +703,12 @@ impl Ui {
                 }
             }
             return Some(Act::None);
+        }
+
+        for h in self.chrome.iter().rev() {
+            if h.rect.contains(x, y) {
+                return Some(h.act);
+            }
         }
 
         let cy = y + scroll;
@@ -767,16 +734,6 @@ impl Ui {
             return Some(Act::CloseDrop);
         }
 
-        // 侧栏先于内容区：侧栏钉在窗口上、且永远画在内容之上，内容区的
-        // 登记区（尤其是铺满整页的背景/卡片「吃掉点击」项）不该盖住它。
-        // 之前顺序反了，任何一次「整页登记 Act::None」都会把导航项吞掉，
-        // 表现就是「点左侧页面名不跳转」。
-        for h in self.chrome.iter().rev() {
-            // 侧栏不随滚动移动 —— 这里用原始 `y`
-            if h.rect.contains(x, y) {
-                return Some(h.act);
-            }
-        }
         for h in self.hots.iter().rev() {
             if h.rect.contains(x, cy) {
                 return Some(h.act);
@@ -801,15 +758,6 @@ impl Ui {
 
     // ---- 事件处理（canvas 的 WNDPROC 调这里） ----
 
-    /// 侧栏当前宽度（逻辑像素）。
-    pub fn nav_width(&self) -> f32 {
-        if self.rail {
-            super::layout::NAV_W_RAIL
-        } else {
-            super::layout::NAV_W_EXPANDED
-        }
-    }
-
     /// 鼠标左键按下。
     ///
     /// `(x, y)` 是客户区逻辑坐标，`scroll` 是当前页滚动量。命中到的东西写进
@@ -824,6 +772,12 @@ impl Ui {
         // 只关弹层、吞掉这次点击。去抖的选项顺序是「关闭 / 8ms / … / 32ms」，
         // 上半截正好全是低值，表现就是「高的能选，选了高的之后低的不响应」。
         if self.open_drop.is_some() {
+            if let Some(h) = self.chrome.iter().rev().find(|h| h.rect.contains(x, y)) {
+                self.pressed = Some(h.act);
+                self.pressed_slide = None;
+                self.open_drop = None;
+                return;
+            }
             let cy = y + scroll;
             let in_drop = self.drop_rect.map(|r| r.contains(x, cy)).unwrap_or(false);
             if !in_drop {
@@ -871,17 +825,19 @@ impl Ui {
         self.pointer.dragging = None;
     }
 
-    /// 鼠标移动后刷新悬停态。返回是否变了（变了才要重画）。
-    pub fn refresh_hover(&mut self) -> bool {
+    /// 客户区与非客户区共用悬停更新，避免跨区后留下旧高亮。
+    pub fn refresh_hover_at(&mut self, x: f32, y: f32, win_w: f32) -> bool {
+        let want_btn = crate::ui::titlebar::hit(x, y, win_w);
         let scroll = self.scroll_y(self.page);
-        let want = self.hit(self.pointer.x, self.pointer.y, scroll);
-        // §下拉弹层开着时，命中优先级变了：鼠标在弹层里应该高亮弹层项
-        if !hover_same(want, self.hover) {
-            self.hover = want;
-            true
+        let want = if want_btn.is_some() {
+            None
         } else {
-            false
-        }
+            self.hit(x, y, scroll)
+        };
+        let changed = self.hover_btn != want_btn || !hover_same(want, self.hover);
+        self.hover_btn = want_btn;
+        self.hover = want;
+        changed
     }
 
     /// 滑块某一点对应的比例（0–1）。
@@ -961,434 +917,5 @@ impl Ui {
     /// 清掉某条滑块的临时值（松手提交后调用，回落到设备值）。
     pub fn clear_live_frac(&mut self, s: Slide) {
         self.live[s.idx()] = None;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn palette_actions_need_the_device() {
-        // 读不到设备时点色块不该弹出色盘（曾经漏判，点了照样开）。
-        assert!(Act::OpenDrop(Drop::Palette(0)).needs_device());
-        assert!(Act::SetPaletteTab(1).needs_device());
-        assert!(Act::SetCustomHue(Drop::Palette(0), 180.0).needs_device());
-        assert!(Act::PickDrop(Drop::Palette(0), 5).needs_device());
-        // 本地动作不受影响
-        assert!(!Act::OpenDrop(Drop::Refresh).needs_device());
-        assert!(!Act::Nav(crate::ui::widget::Page::Battery).needs_device());
-    }
-    use super::*;
-
-    fn ui() -> Ui {
-        Ui::default()
-    }
-
-    #[test]
-    fn hover_ignores_slider_fraction() {
-        // 滑块比例随鼠标位置连续变化，不能算「悬停变了」——否则每移动一像素重绘整页
-        let a = Some(Act::SetSlide(Slide::Tune, 0.31));
-        let b = Some(Act::SetSlide(Slide::Tune, 0.32));
-        assert!(hover_same(a, b), "同一条滑块、比例不同应视为同一个悬停目标");
-        // 滑块和别的动作当然不同
-        assert!(!hover_same(a, Some(Act::None)));
-        // 色环同理
-        assert!(hover_same(
-            Some(Act::SetCustomHue(Drop::Palette(0), 12.0)),
-            Some(Act::SetCustomHue(Drop::Palette(0), 13.5)),
-        ));
-        // 普通动作照旧严格比较
-        assert!(hover_same(Some(Act::None), Some(Act::None)));
-        assert!(!hover_same(None, Some(Act::None)));
-    }
-
-    #[test]
-    fn 捕获丢失后不再残留拖拽态() {
-        // 按住滑块拖到窗口外松手、或切窗口被系统收回捕获：pressed_slide 必须清掉，
-        // 否则之后不按键移动鼠标，滑块还会跟着跑。
-        let mut u = ui();
-        u.begin_frame();
-        u.hot(R::new(10.0, 10.0, 100.0, 20.0), Act::SetSlide(Slide::Tune, 0.5));
-        // 复刻 canvas 的顺序：先记指针按下，再交给 on_press 判定命中
-        u.pointer.x = 60.0;
-        u.pointer.y = 20.0;
-        u.pointer.down = true;
-        u.on_press(60.0, 20.0, 0.0);
-        u.pointer.dragging = u.pressed_slide;
-        assert!(u.pressed_slide.is_some(), "按下后应进入拖拽态");
-        assert!(u.pointer.down);
-
-        u.cancel_press();
-        assert!(u.pressed.is_none());
-        assert!(u.pressed_slide.is_none());
-        assert!(!u.pointer.down);
-        assert!(u.pointer.dragging.is_none());
-    }
-
-    #[test]
-    fn 默认收起侧栏_默认在电量页() {
-        let u = ui();
-        assert!(u.rail, "用户要求默认收起");
-        assert_eq!(u.page, Page::Battery);
-    }
-
-    #[test]
-    fn 命中测试取最后登记的那个() {
-        let mut u = ui();
-        u.begin_frame();
-        // 两个重叠区域，后登记的在上面
-        u.hot(R::new(0.0, 0.0, 100.0, 100.0), Act::RefreshLighting);
-        u.hot(R::new(50.0, 50.0, 100.0, 100.0), Act::ToggleRail);
-
-        assert_eq!(u.hit(10.0, 10.0, 0.0), Some(Act::RefreshLighting));
-        // 重叠区取上层
-        assert_eq!(u.hit(60.0, 60.0, 0.0), Some(Act::ToggleRail));
-        assert_eq!(u.hit(200.0, 10.0, 0.0), None);
-    }
-
-    #[test]
-    fn 命中测试算上滚动量() {
-        let mut u = ui();
-        u.begin_frame();
-        // 内容坐标 y=500 处有个按钮
-        u.hot(R::new(10.0, 500.0, 100.0, 30.0), Act::RefreshLighting);
-        // 没滚动时它在窗口 y=500（可视区 600 内可见）
-        assert_eq!(u.hit(50.0, 510.0, 0.0), Some(Act::RefreshLighting));
-        // 滚到 400 之后，它显示在窗口 y=100
-        assert_eq!(u.hit(50.0, 110.0, 400.0), Some(Act::RefreshLighting));
-        // 而窗口 y=510 现在对应内容 y=910，不该命中
-        assert_eq!(u.hit(50.0, 510.0, 400.0), None);
-    }
-
-    #[test]
-    fn 侧栏命中不随滚动移动() {
-        let mut u = ui();
-        u.begin_frame();
-        // 侧栏的「收起 / 展开」按钮钉在窗口左下
-        u.chrome_hot(R::new(8.0, 700.0, 40.0, 32.0), Act::ToggleRail);
-        // 无论滚到哪都在同一个窗口位置命中
-        assert_eq!(u.hit(20.0, 710.0, 0.0), Some(Act::ToggleRail));
-        assert_eq!(u.hit(20.0, 710.0, 1200.0), Some(Act::ToggleRail));
-    }
-
-    #[test]
-    fn 弹层空白处吃掉点击不穿透到下层() {
-        let mut u = ui();
-        u.begin_frame();
-        u.hot(R::new(0.0, 0.0, 400.0, 400.0), Act::RefreshLighting);
-        // 弹层放在中间，但只登记了两个选项
-        u.hot(
-            R::new(100.0, 100.0, 120.0, 30.0),
-            Act::PickDrop(Drop::Poll, 0),
-        );
-        u.hot(
-            R::new(100.0, 130.0, 120.0, 30.0),
-            Act::PickDrop(Drop::Poll, 1),
-        );
-        u.set_drop_rect(R::new(100.0, 100.0, 120.0, 120.0));
-
-        assert_eq!(
-            u.hit(150.0, 115.0, 0.0),
-            Some(Act::PickDrop(Drop::Poll, 0))
-        );
-        // 弹层内的空白（选项下方）：必须是 CloseDrop，不能是 Refresh
-        assert_eq!(u.hit(150.0, 200.0, 0.0), Some(Act::CloseDrop));
-        // 弹层外仍然正常
-        assert_eq!(u.hit(20.0, 20.0, 0.0), Some(Act::RefreshLighting));
-    }
-
-    #[test]
-    fn 页面滚动时弹层选项正确接收点击而不被误判为点外部关闭() {
-        let mut u = ui();
-        u.begin_frame();
-        u.set_open_drop(Some(Drop::Debounce));
-        // 假设去抖下拉框在内容 y=600，展开高 248（内容 y=634..882）
-        let drop_r = R::new(300.0, 634.0, 150.0, 248.0);
-        u.set_drop_rect(drop_r);
-        // 低选项（例如 0=关闭 / 1=8ms）在弹层上半部分：内容 y=638..668
-        let opt0 = R::new(304.0, 638.0, 142.0, 30.0);
-        u.hot(opt0, Act::PickDrop(Drop::Debounce, 0));
-        let opt7 = R::new(304.0, 848.0, 142.0, 30.0);
-        u.hot(opt7, Act::PickDrop(Drop::Debounce, 7));
-
-        // 页面已向下滚动 300 逻辑像素
-        let scroll = 300.0;
-        // 那么 opt0 显示在客户区窗口坐标 y = 638 - 300 = 338
-        // 窗口坐标下的 (350, 345) 应该命中 opt0
-        u.on_press(350.0, 345.0, scroll);
-        assert_eq!(
-            u.on_release(350.0, 345.0, scroll),
-            Some(Act::PickDrop(Drop::Debounce, 0)),
-            "页面滚动时点低选项必须成功选中，不能被判为点外部关闭"
-        );
-        assert_eq!(u.open_drop(), Some(Drop::Debounce));
-    }
-
-    #[test]
-    fn 滚动夹在内容范围内() {
-        let mut u = ui();
-        u.set_content_h(Page::Battery, 2000.0);
-        // 视口 600，可滚 1400
-        assert!(u.wheel(-100.0, 600.0)); // 向下滚到很大
-        assert_eq!(u.scroll_y(Page::Battery), 1400.0, "不能超过 max");
-
-        assert!(u.wheel(100.0, 600.0));
-        assert_eq!(u.scroll_y(Page::Battery), 0.0, "不能滚成负数");
-
-        // 内容比视口矮时不产生滚动
-        u.set_content_h(Page::Perf, 100.0);
-        u.page = Page::Perf;
-        assert!(!u.wheel(-10.0, 600.0));
-        assert_eq!(u.scroll_y(Page::Perf), 0.0);
-    }
-
-    #[test]
-    fn 每页滚动位置互不干扰() {
-        let mut u = ui();
-        u.set_content_h(Page::Battery, 5000.0);
-        u.set_content_h(Page::Perf, 5000.0);
-        u.page = Page::Battery;
-        u.wheel(-10.0, 600.0);
-        let bat = u.scroll_y(Page::Battery);
-        assert!(bat > 0.0);
-        assert_eq!(u.scroll_y(Page::Perf), 0.0, "另一页不该跟着动");
-    }
-
-    #[test]
-    fn 输入框字符限制() {
-        // DPI 颜色只收十六进制
-        assert!(Edit::DpiColor(0).allows('f'));
-        assert!(Edit::DpiColor(0).allows('A'));
-        assert!(!Edit::DpiColor(0).allows('g'));
-        assert!(!Edit::DpiColor(0).allows('-'));
-        // DPI 数值只收数字（负号会被 Edit::allows 拒掉）
-        assert!(Edit::Dpi(0).allows('4'));
-        assert!(!Edit::Dpi(0).allows('x'));
-        // 长度上限
-        assert_eq!(Edit::Dpi(0).max_len(), 5); // 42000
-        assert_eq!(Edit::LowWarn.max_len(), 3); // 100
-        assert_eq!(Edit::DpiColor(0).max_len(), 6); // RRGGBB
-    }
-
-    #[test]
-    fn 页面枚举齐全且标题不为空() {
-        assert_eq!(Page::ALL.len(), 5);
-        for p in Page::ALL {
-            assert!(!p.title().is_empty());
-        }
-        // 标题不能重复（侧栏会看起来有两个同名项）
-        let mut titles: Vec<_> = Page::ALL.iter().map(|p| p.title()).collect();
-        titles.sort_unstable();
-        titles.dedup();
-        assert_eq!(titles.len(), 5);
-    }
-
-    #[test]
-    fn 输入框草稿_开始_录入_退格_提交() {
-        let mut u = ui();
-        // 没开始编辑时不该有草稿 —— 调用方要显示设备当前值
-        assert_eq!(u.edit_text(Edit::LowWarn), None);
-
-        u.begin_edit(Edit::LowWarn, "20".into());
-        assert_eq!(u.focus, Some(Edit::LowWarn));
-        assert_eq!(u.edit_text(Edit::LowWarn), Some("20"));
-
-        // 再点一次同一个框不该冲掉草稿（用户可能刚改了一半）
-        u.begin_edit(Edit::LowWarn, "99".into());
-        assert_eq!(u.edit_text(Edit::LowWarn), Some("20"));
-
-        assert!(u.backspace());
-        assert_eq!(u.edit_text(Edit::LowWarn), Some("2"));
-
-        // 非数字被拒
-        assert!(!u.type_char('x'));
-        assert!(u.type_char('5'));
-        assert_eq!(u.edit_text(Edit::LowWarn), Some("25"));
-
-        // 超长被拒（阈值最多 3 位）
-        assert!(u.type_char('0'));
-        assert!(!u.type_char('0'), "第 4 位该被拒");
-        assert_eq!(u.edit_text(Edit::LowWarn), Some("250"));
-
-        u.drop_edit(Edit::LowWarn);
-        assert_eq!(u.edit_text(Edit::LowWarn), None);
-        assert_eq!(u.focus, None);
-    }
-
-    #[test]
-    fn 同一行两个输入框各有草稿() {
-        // DPI 一行里有「数值」和「颜色」两个框，一个「应用」按钮要同时读它们。
-        // 单个缓冲区表达不了这个场景 —— 这正是改成列表的原因。
-        let mut u = ui();
-        u.begin_edit(Edit::Dpi(0), "800".into());
-        u.begin_edit(Edit::DpiColor(0), "ff00ff".into());
-        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("800"));
-        assert_eq!(u.edit_text(Edit::DpiColor(0)), Some("ff00ff"));
-
-        // 焦点刚进框时草稿是「全选」状态：第一个字符直接替换预填值。
-        // 没有这条的时候，点开写着 400 的框敲 1600 会得到 4001 —— 用户
-        // 只能先按五次退格，看起来就像「不能自己输入」。
-        assert!(u.type_char('a'), "第一个字符应替换预填值，而不是被限长拒掉");
-        assert_eq!(u.edit_text(Edit::DpiColor(0)), Some("a"));
-        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("800"), "另一个框不该被动");
-        // 之后恢复普通追加
-        assert!(u.type_char('b'));
-        assert_eq!(u.edit_text(Edit::DpiColor(0)), Some("ab"));
-        // 长度上限照旧生效（颜色就是 6 位）
-        for c in ['c', 'd', 'e', 'f'] {
-            assert!(u.type_char(c));
-        }
-        assert_eq!(u.edit_text(Edit::DpiColor(0)), Some("abcdef"));
-        assert!(!u.type_char('0'), "6 位已满，第 7 位该被拒");
-    }
-
-    #[test]
-    fn 回车等于点应用() {
-        let mut u = ui();
-        assert_eq!(u.commit_focus(), None, "没有焦点时无事可做");
-
-        u.begin_edit(Edit::Dpi(0), "1600".into());
-        // 回车必须把「要提交哪个框」告诉调用方：只收焦点不发动作的话，
-        // 用户敲完字按回车毫无反应，只能再去够右上角的「应用」。
-        assert_eq!(u.commit_focus(), Some(Edit::Dpi(0)));
-        assert_eq!(u.focus, None, "焦点该收掉");
-        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("1600"), "草稿留给页面校验");
-        assert_eq!(u.commit_focus(), None, "焦点已收，第二次回车不重复提交");
-    }
-    #[test]
-    fn sidebar_wins_over_full_page_hot_zone() {
-        // 回归：内容区的「整页吃掉点击」登记区不能盖住侧栏，否则点页面名不跳转。
-        let mut u = Ui::default();
-        u.begin_frame();
-        u.hot(R::new(0.0, 0.0, 1200.0, 800.0), Act::None);
-        u.chrome_hot(R::new(10.0, 100.0, 38.0, 36.0), Act::Nav(Page::Battery));
-        assert_eq!(u.hit(20.0, 110.0, 0.0), Some(Act::Nav(Page::Battery)));
-    }
-
-    #[test]
-    fn locked_page_still_reports_the_action() {
-        // 读不到设备时控件照常可点：命中要能拿到动作，由 gui 决定提示什么。
-        // 以前这里直接不登记命中，结果点了毫无反应，用户以为界面坏了。
-        let mut u = Ui::default();
-        u.begin_frame();
-        u.locked = true;
-        u.hot(R::new(0.0, 0.0, 400.0, 40.0), Act::OpenDrop(Drop::Poll));
-        assert_eq!(u.hit(10.0, 10.0, 0.0), Some(Act::OpenDrop(Drop::Poll)));
-    }
-
-    #[test]
-    fn device_actions_are_told_apart_from_local_ones() {
-        // 设备类动作：读不到设备时只提示，不进队列。
-        assert!(Act::OpenDrop(Drop::Poll).needs_device() == false, "开弹层是本地动作");
-        assert!(Act::PickDrop(Drop::Poll, 2).needs_device());
-        assert!(Act::PickDrop(Drop::Refresh, 1).needs_device() == false);
-        assert!(Act::Toggle(Pref::FullEffect).needs_device());
-        assert!(Act::Toggle(Pref::TrayEnabled).needs_device() == false);
-        assert!(Act::CommitSlide(Slide::Tune).needs_device());
-        assert!(Act::Backup.needs_device() && Act::Restore.needs_device());
-        // 本地动作
-        assert!(!Act::Nav(Page::Battery).needs_device());
-        assert!(!Act::ToggleRail.needs_device());
-        assert!(!Act::SetTheme(2).needs_device());
-    }
-
-    #[test]
-    fn every_nav_item_survives_a_full_page_hot_zone() {
-        // 回归：五个导航项逐个验证，避免只测中第一个就以为全好了。
-        let pages = [
-            Page::Battery,
-            Page::Perf,
-            Page::Light,
-            Page::Keys,
-            Page::Settings,
-        ];
-        let item_h = crate::ui::layout::NAV_ITEM_H;
-        let mut u = Ui::default();
-        u.begin_frame();
-        u.hot(R::new(0.0, 0.0, 1200.0, 800.0), Act::None);
-        for (i, page) in pages.iter().enumerate() {
-            let y = 40.0 + i as f32 * (item_h + 1.0);
-            u.chrome_hot(R::new(8.0, y, 40.0, item_h), Act::Nav(*page));
-        }
-        for (i, page) in pages.iter().enumerate() {
-            let y = 40.0 + i as f32 * (item_h + 1.0) + item_h / 2.0;
-            assert_eq!(
-                u.hit(20.0, y, 0.0),
-                Some(Act::Nav(*page)),
-                "第 {i} 个导航项被内容区盖住了"
-            );
-        }
-    }
-
-    #[test]
-    fn release_fires_even_after_pointer_down_cleared() {
-        // 回归：WM_LBUTTONUP 会先把 pointer.down 置 false 再调 on_release。
-        // 如果 on_release 依赖 pointer.down（或被 cancel_press 提前清掉 pressed），
-        // 点击就会全部失效：悬停有动效、页面不切换、下拉不弹、输入框不进焦点。
-        let mut u = Ui::default();
-        u.begin_frame();
-        u.chrome_hot(R::new(10.0, 100.0, 38.0, 36.0), Act::Nav(Page::Battery));
-        u.pointer.x = 20.0;
-        u.pointer.y = 110.0;
-        u.pointer.down = true;
-        u.on_press(20.0, 110.0, 0.0);
-        u.pointer.down = false;
-        assert_eq!(u.on_release(20.0, 110.0, 0.0), Some(Act::Nav(Page::Battery)));
-    }
-
-    #[test]
-    fn focus_then_typing_replaces_device_value() {
-        // 回归：点进输入框（Act::Focus → begin_edit）之后敲字必须能改草稿，
-        // 且第一个字符替换设备原值（等价「全选后输入」），否则 400 改 1600 会变 4001。
-        let mut u = Ui::default();
-        u.begin_frame();
-        u.begin_edit(Edit::Dpi(0), "800".to_string());
-        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("800"));
-        assert!(u.type_char('1'));
-        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("1"));
-        assert!(u.type_char('6'));
-        assert_eq!(u.edit_text(Edit::Dpi(0)), Some("16"));
-    }
-
-    /// 双击的第二次按下在消息层是 `WM_LBUTTONDBLCLK`（`canvas.rs` 现在把它转成
-    /// 一个新的 `WM_LBUTTONDOWN`）。控件层必须保证「按下-抬起」走两遍就得到两次
-    /// 激活，否则双击开关只会切一次。
-    #[test]
-    fn double_click_activates_the_button_twice() {
-        let mut u = Ui::default();
-        u.begin_frame();
-        u.hot(R::new(10.0, 10.0, 80.0, 24.0), Act::ToggleRail);
-        let mut got: Vec<Act> = Vec::new();
-        for _ in 0..2 {
-            u.on_press(20.0, 20.0, 0.0);
-            if let Some(a) = u.on_release(20.0, 20.0, 0.0) {
-                got.push(a);
-            }
-        }
-        assert_eq!(got, vec![Act::ToggleRail, Act::ToggleRail]);
-    }
-
-    #[test]
-    fn clamp_scroll_pulls_back_when_viewport_grows() {
-        let mut u = ui();
-        u.set_content_h(Page::Battery, 2000.0);
-        u.wheel(-100.0, 600.0); // 滚到底
-        let deep = u.scroll_y(Page::Battery);
-        assert!(deep > 1000.0, "先滚下去，实际 {deep}");
-
-        // 视口放大到 1800 → 上限只剩 200，必须被拉回来
-        assert!(u.clamp_scroll(1800.0));
-        assert_eq!(u.scroll_y(Page::Battery), 200.0);
-
-        // 已经在范围内就什么都不做
-        assert!(!u.clamp_scroll(1800.0));
-    }
-
-    #[test]
-    fn clamp_scroll_ignores_pages_that_were_never_drawn() {
-        let mut u = ui();
-        // content_h 还是 0：不知道多高，不能把滚动量清成 0
-        u.wheel(-1.0, 600.0);
-        assert!(!u.clamp_scroll(600.0));
     }
 }

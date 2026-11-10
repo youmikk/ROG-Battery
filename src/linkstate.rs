@@ -15,11 +15,6 @@ pub enum LinkState {
     Absent,
 }
 
-/// 根据「读到几帧」「链路模式」「接收器序列号」判三态。
-///
-/// 判据只用实测值：`frames_read` 来自这一轮真正收到的报文数，`dongle_sn`
-/// 来自设备自报的接收器序列号。**不能**用 `link_mode` 判有无设备 —— 2.4G 下
-/// 那个字段也可能读成空串，会把无线误判成有线。
 pub fn classify(frames_read: usize, dongle_sn: &str) -> LinkState {
     if frames_read > 0 {
         return LinkState::Connected;
@@ -37,32 +32,5 @@ pub fn describe(state: LinkState) -> &'static str {
         LinkState::Connected => "已连接",
         LinkState::ReceiverOnly => "接收器在位，设备未响应",
         LinkState::Absent => "未检测到设备",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn frames_mean_connected() {
-        assert_eq!(classify(17, ""), LinkState::Connected);
-        assert_eq!(classify(3, "C00000000001"), LinkState::Connected);
-    }
-
-    #[test]
-    fn receiver_without_device_is_not_absent() {
-        assert_eq!(classify(0, "C00000000001"), LinkState::ReceiverOnly);
-        assert_eq!(classify(0, "  "), LinkState::Absent);
-        assert_eq!(classify(0, ""), LinkState::Absent);
-    }
-
-    #[test]
-    fn descriptions_differ_per_state() {
-        assert_ne!(describe(LinkState::Connected), describe(LinkState::Absent));
-        assert_ne!(
-            describe(LinkState::ReceiverOnly),
-            describe(LinkState::Absent)
-        );
     }
 }

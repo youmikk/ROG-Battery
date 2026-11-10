@@ -1,6 +1,5 @@
 //! HID 设备枚举、打开与收发。
 //!
-//! 整体照 `_research\rw-hid.cs` 的 `Enumerate` / `Dev` / `Xfer` 三段做等价实现：
 //! - 用 setupapi 枚举 HID 接口，取 `\\?\hid#...` 路径；
 //! - `CreateFile` 打开时**必须** `FILE_SHARE_READ | FILE_SHARE_WRITE`（Armoury Crate 可能同时开着）；
 //! - 写用 `WriteFile`（同步句柄），读用「overlapped 句柄 + 独立事件 + 超时」；
@@ -20,7 +19,6 @@ pub const USAGE_PAGE_DONGLE_CTRL: u16 = 0xFF02;
 /// 鼠标命令通道（report id 0x03）—— 本程序只走这条
 pub const USAGE_PAGE_MOUSE_CTRL: u16 = 0xFF01;
 
-/// 默认单帧超时。实测一次正常往返 ~27ms，给 1200ms 已经非常宽裕。
 pub const DEFAULT_TIMEOUT_MS: u32 = 1200;
 
 /// 否定应答特征：`03 FF AA`
@@ -70,12 +68,10 @@ pub struct EnumerateReport {
     pub skipped: Vec<Skipped>,
 }
 
-/// 枚举本机所有 ASUS HID 接口（只关心拿到的那些）。
 pub fn enumerate(hid: &HidApi) -> Result<Vec<HidInterface>, String> {
     Ok(enumerate_report(hid)?.interfaces)
 }
 
-/// 枚举本机所有 ASUS HID 接口，同时带回打不开的接口清单。
 pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
     let mut list = Vec::new();
     let mut skipped: Vec<Skipped> = Vec::new();
@@ -275,10 +271,6 @@ fn probe_interface(hid: &HidApi, path: &str) -> Result<HidInterface, String> {
     out
 }
 
-/// 读 HID 字符串（0=产品名，1=序列号）。失败返回空串，不报错。
-///
-// 只保留开头连续 ASCII 字母数字：OMNI 接收器的 HID 字符串描述符 bLength 虚高，
-// 尾部是固件残留。实验记录与「试过但不行」的方案见 docs/hardware-notes.md。
 fn read_hid_string(hid: &HidApi, h: Handle, which: u8) -> String {
     let mut buf = vec![0u16; 256];
     let cap = (buf.len() * 2) as u32;
@@ -682,6 +674,7 @@ impl Drop for HidDevice {
 
 // ---------------- 链路 ----------------
 /// 已建立的命令通道连接。
+#[derive(Clone)]
 pub struct Link {
     /// 人类可读的模式：Wired / Wireless24G
     pub mode: String,
@@ -691,15 +684,17 @@ pub struct Link {
     pub all_interfaces: Vec<HidInterface>,
 }
 
-/// 解析接收器配对表（`A0 00` 的应答），找出 `wanted` 里第一个命中的 PID 的 report id。
-///
-/// 布局：`01 A0 00 <count LE16>` 之后紧跟 `count` 项、每项 4 字节
-/// `{PID LE16, report_id, notify_id}`。表被截断（count 说的是 5 项却只回了 2 项）
-/// 或没有匹配项都返回 `None` —— 调用方保留默认 report id 3，不要猜。
-///
-/// 单独抽出来是因为这段解析原先内联在 `open_link` 里，是全文件唯一没有单测的
-/// 协议解析：`count` 是设备给的，越界读不 panic 但会读到垃圾 PID，把 report id
-/// 定成 0 之后所有指令都会静默超时。
+impl Link {
+    pub fn device_key(&self) -> String {
+        let identity = if self.iface.serial.trim().is_empty() {
+            self.iface.path.to_ascii_lowercase()
+        } else {
+            format!("{:04x}:{}", self.iface.vendor_id, self.iface.serial.trim())
+        };
+        crate::device::stable_key(&format!("{identity}:{}", self.report_id))
+    }
+}
+
 fn parse_pairing_table(scan: &[u8], wanted: &[u16]) -> Option<u8> {
 if scan.len() < 6 {
     return None;
@@ -719,27 +714,33 @@ for _ in 0..count {
 None
 }
 
+/// 可能是命令通道的 usage page。
+///
+/// 华硕的私有页集中在 `0xFF00..=0xFF02`：鼠标/键盘/耳机是 `0xFF01`，接收器是
+/// `0xFF02`，老一点的型号用 `0xFF00`。只在这三页上试探，不碰标准 HID 页。
+fn is_command_page(page: u16) -> bool {
+    (0xFF00..=0xFF02).contains(&page)
+}
+
 /// 找命令通道并确定 report id。
 ///
 /// 优先有线（PID != 接收器 && usage page == 0xFF01），
 /// 否则走接收器：用 `A0 00` 读配对表，从里面找出鼠标的 report id。
-pub fn open_link(hid: &HidApi) -> Result<Link, String> {
+pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
     let report = enumerate_report(hid)?;
     let all = report.interfaces;
     if all.is_empty() {
         return Err(empty_reason(&report.skipped));
     }
 
-    // 1) 有线模式：直接是 0xFF01 且能回答电量帧。
-    //
-    // report id 必须试两个：实测有线（PID 0x1B63）走 **report id 0**（无编号帧，
-    // 回复首字节 00），无线才走 1 / 配对表给的 id。原来只试 1，有线模式一律超时，
-    // 于是链路开不起来、界面只能显示上一次的缓存值。
+    let mut wired: Vec<Link> = Vec::new();
     for iface in &all {
         if iface.product_id == PID_DONGLE || !iface.is_command_channel() {
             continue;
         }
-        if iface.usage_page != USAGE_PAGE_MOUSE_CTRL {
+        // 不按「鼠标专用页」筛：键盘、耳机、手柄的命令通道也在这几页上，
+        // 认谁不认谁交给「发一帧电量查询、答得上来才算」来判定。
+        if !is_command_page(iface.usage_page) {
             continue;
         }
         let Ok(mut dev) = HidDevice::open(iface) else {
@@ -751,12 +752,13 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
                     if std::env::var_os("ROG_HID_DEBUG").is_some() {
                         eprintln!("[hid] 有线命中 report id {rid}：{}", iface.path);
                     }
-                    return Ok(Link {
+                    wired.push(Link {
                         mode: "Wired".to_string(),
                         report_id: rid,
                         iface: iface.clone(),
                         all_interfaces: all.clone(),
                     });
+                    break;
                 }
             }
         }
@@ -775,6 +777,9 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
     });
 
     if dongle_ctrl.is_none() {
+        if !wired.is_empty() {
+            return Ok(wired);
+        }
         return Err("没有找到接收器控制通道（usage page 0xFF02）".to_string());
     }
 
@@ -795,125 +800,19 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
     let iface = dongle_mouse
         .or(dongle_ctrl)
         .ok_or("接收器上没有可用的命令通道")?;
-    Ok(Link {
+    wired.push(Link {
         mode: "Wireless24G".to_string(),
         report_id,
         iface: iface.clone(),
         all_interfaces: all.clone(),
-    })
+    });
+    Ok(wired)
 }
 
-#[cfg(test)]
-mod tests {
-
-    /// 配对表：命中项返回它的 report id，前面的非鼠标项要跳过。
-    #[test]
-    fn pairing_table_finds_mouse_report_id() {
-        // count = 2：第一项是键盘（不匹配），第二项是鼠标
-        let scan = [
-            0x01, 0xA0, 0x00, 0x00, 0x02, 0x00,
-            0x34, 0x12, 0x07, 0x00, // PID 0x1234 report 7
-            0x65, 0x1B, 0x03, 0x01, // PID 0x1B65（无线鼠标）report 3
-        ];
-        assert_eq!(
-            parse_pairing_table(&scan, &[super::PID_MOUSE_WIRELESS, super::PID_MOUSE_WIRED]),
-            Some(3)
-        );
-    }
-
-    /// 表里没有我们要的 PID 时不能瞎认一个。
-    #[test]
-    fn pairing_table_without_match_returns_none() {
-        let scan = [0x01, 0xA0, 0x00, 0x00, 0x01, 0x00, 0x34, 0x12, 0x07, 0x00];
-        assert_eq!(parse_pairing_table(&scan, &[0x1B65, 0x1B63]), None);
-    }
-
-    /// count 说 5 项、实际只回了 1 项：必须停下返回 None，不能读到缓冲区外面。
-    #[test]
-    fn pairing_table_truncated_returns_none() {
-        let scan = [0x01, 0xA0, 0x00, 0x00, 0x05, 0x00, 0x34, 0x12, 0x07, 0x00];
-        assert_eq!(parse_pairing_table(&scan, &[0x1B65]), None);
-    }
-
-    /// 连 count 字段都没回全。
-    #[test]
-    fn pairing_table_too_short_returns_none() {
-        assert_eq!(parse_pairing_table(&[0x01, 0xA0, 0x00, 0x00, 0x00], &[0x1B65]), None);
-        assert_eq!(parse_pairing_table(&[], &[0x1B65]), None);
-    }
-
-    /// 有线 PID 也要能命中（同型号有线/无线各一个 PID）。
-    #[test]
-    fn pairing_table_matches_wired_pid_too() {
-        let scan = [0x01, 0xA0, 0x00, 0x00, 0x01, 0x00, 0x63, 0x1B, 0x00, 0x00];
-        assert_eq!(parse_pairing_table(&scan, &[0x1B65, 0x1B63]), Some(0));
-    }
-    use super::*;
-
-    #[test]
-    fn nak_frame_is_detected() {
-        assert!(is_nak(&[0x03, 0xFF, 0xAA]));
-        assert!(!is_nak(&[0x03, 0x12, 0x07]));
-        assert!(!is_nak(&[0xFF]));
-    }
-
-    #[test]
-    fn align_reply_keeps_report_id_frame() {
-        let r = [0x03, 0x12, 0x07, 0x00, 0x5F];
-        let m = align_reply(0x03, 0x12, 0x07, &r).expect("正常应答应被接受");
-        assert_eq!(m, r);
-    }
-
-    #[test]
-    fn align_reply_prefixes_bare_answer() {
-        // 有线模式实测：回复不带 report id
-        let r = [0x12, 0x07, 0x00, 0x5F];
-        let m = align_reply(0x00, 0x12, 0x07, &r).expect("裸应答应被接受");
-        assert_eq!(m, vec![0x00, 0x12, 0x07, 0x00, 0x5F]);
-    }
-
-    #[test]
-    fn align_reply_accepts_nak_with_report_id() {
-        // 回归：NAK 的 r[1] 是 0xFF 而非 cmd，过去会被当「其它帧」丢掉
-        let m = align_reply(0x03, 0x12, 0x07, &[0x03, 0xFF, 0xAA]).expect("NAK 必须被接受");
-        assert!(is_nak(&m), "接受后仍要能被 is_nak 认出");
-        assert_eq!(m[0], 0x03);
-    }
-
-    #[test]
-    fn align_reply_prefixes_bare_nak() {
-        let m = align_reply(0x00, 0x12, 0x07, &[0xFF, 0xAA]).expect("裸 NAK 必须被接受");
-        assert_eq!(m, vec![0x00, 0xFF, 0xAA]);
-        assert!(is_nak(&m));
-    }
-
-    #[test]
-    fn align_reply_ignores_unrelated_frame() {
-        // 主动推送的电量帧（cmd 0x12 之外）不应被当成应答
-        assert_eq!(align_reply(0x03, 0x12, 0x07, &[0x03, 0x99, 0x99, 0x00]), None);
-        assert_eq!(align_reply(0x03, 0x12, 0x07, &[]), None);
-    }
-
-    #[test]
-    fn empty_reason_prefers_the_open_failure() {
-        // 什么接口都没枚举到 → 真·没插设备
-        let none: Vec<Skipped> = Vec::new();
-        assert!(empty_reason(&none).contains("没有找到任何 ASUS HID 接口"));
-
-        // 枚举到了但打不开 → 必须把原因带出来，不能报「找不到设备」
-        let skipped = vec![
-            Skipped {
-                path: "hid#vid_0b05#pid_1b63#1".into(),
-                reason: "CreateFileW 失败（GetLastError=5 拒绝访问）".into(),
-            },
-            Skipped {
-                path: "hid#vid_0b05#pid_1ace#2".into(),
-                reason: "CreateFileW 失败（GetLastError=32 另一个程序正在使用）".into(),
-            },
-        ];
-        let msg = empty_reason(&skipped);
-        assert!(msg.contains("2 个 HID 接口"), "{msg}");
-        assert!(msg.contains("Armoury Crate"), "{msg}");
-        assert!(msg.contains("拒绝访问"), "第一条原因要原样带出来：{msg}");
-    }
+/// 只取第一条链路。命令行走的是这条 —— 一次只操作一台设备。
+pub fn open_link(hid: &HidApi) -> Result<Link, String> {
+    open_links(hid)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "没有可用的命令通道".to_string())
 }

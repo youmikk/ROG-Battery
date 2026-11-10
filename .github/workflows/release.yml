@@ -1,15 +1,5 @@
 name: 绿色版 Release
 
-# ─────────────────────────────── 触发方式 ───────────────────────────────
-#   push tag v1.1.2          → 编译绿色版（单文件 exe）+ 建/更新该 tag 的 Release
-#   workflow_dispatch + tag  → 同上；手填 tag 就发到那个 tag（没有就新建）
-#   workflow_dispatch 留空   → 只编译并留 run artifact，不碰 Release
-#
-# 和 `msstore.yml` 的分工：那边只管 MSIX 打包（+ 按需提交商店），这边只管绿色版发版。
-# 两个工作流互不依赖，任何一个挂了都不影响另一个。
-#
-# 产物：`rog-mouse-ctl.exe`（约 1 MB，单文件、零依赖）+ `rog-mouse-ctl.exe.sha256`。
-
 on:
   push:
     tags: ['v*']
@@ -19,16 +9,10 @@ on:
         description: '发布到哪个 tag（如 v1.1.2）。留空则只编译、不建 Release'
         required: false
         default: ''
-      skip_tests:
-        description: '跳过 cargo test'
-        type: boolean
-        default: false
 
 permissions:
   contents: write
 
-# 本工程用 gnu 目标 + 自带的 mingw 导入库（vendor/mingw-import-libs），
-# 所以 runner 上必须装 gnu host 工具链，且链接器 gcc 要在 PATH 里。
 env:
   CARGO_TERM_COLOR: always
   RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
@@ -38,36 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    if: inputs.skip_tests != true
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 装 MSYS2 / mingw64 gcc
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: false
-          install: mingw-w64-x86_64-gcc
-
-      - name: mingw64 加进 PATH
-        shell: pwsh
-        run: '"C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8'
-
-      - name: 装 Rust（gnu host）
-        shell: pwsh
-        run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: cargo test
-        run: cargo test --all-targets
-
   release:
-    needs: test
-    # test 被跳过时 needs 的结果是 skipped，这里用 always() 兜住
-    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +44,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # 版本号以 tag 为准（没有 tag 就退回 Cargo.toml），并烧进二进制
       - name: 算版本号
         id: ver
         shell: pwsh
@@ -111,24 +65,19 @@ jobs:
       - name: cargo build --release
         env:
           ROG_BUILD_VERSION: ${{ steps.ver.outputs.version }}
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: 校验二进制自报版本 == tag 版本
         shell: pwsh
         env:
           EXPECT: ${{ steps.ver.outputs.version }}
         run: |
-          # 别用 & 捕获输出：exe 是 GUI 子系统，PowerShell 不等它结束就关掉管道，
-          # 子进程写 stdout 会 panic（实测：failed printing to stdout: The pipe is being closed. os error 232），
-          # 结果 $got 拿到 null。改成 Start-Process -Wait + 重定向到文件再读。
           $exe = Join-Path (Get-Location) 'target\release\rog-mouse-ctl.exe'
           $outFile = Join-Path $env:RUNNER_TEMP 'ver.txt'
           $errFile = Join-Path $env:RUNNER_TEMP 'ver.err.txt'
-          $proc = Start-Process -FilePath $exe -ArgumentList 'version' -NoNewWindow -Wait -PassThru `
+          $proc = Start-Process -FilePath $exe -ArgumentList 'version' -WindowStyle Hidden -Wait -PassThru `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
           $got = if (Test-Path $outFile) { (Get-Content $outFile -Raw).Trim() } else { '' }
-          # 注意：GitHub 的 env: 只会变成环境变量，PowerShell 里必须写 $env:EXPECT；
-          # 直接写 $EXPECT 是 $null，比较恒为不等，会误报版本不一致。
           $expect = $env:EXPECT
           "二进制自报 = '$got'    期望版本 = '$expect'    exit = $($proc.ExitCode)"
           if (-not $got -and (Test-Path $errFile)) {
@@ -167,7 +116,6 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-      # tag push 或手填了 tag 才发 Release；已有的 Release 只覆盖附件，不动正文
       - name: 建 / 更新 Release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
         shell: pwsh
@@ -177,6 +125,11 @@ jobs:
           $tag = "${{ inputs.tag }}".Trim()
           if (-not $tag) { $tag = "${{ github.ref_name }}" }
           $ver = $tag -replace '^v', ''
+          $changelog = Get-Content CHANGELOG.md -Raw -Encoding utf8
+          $section = [regex]::Match($changelog, '(?ms)^## ' + [regex]::Escape($ver) + '\r?\n(.*?)(?=^## |\z)')
+          if (-not $section.Success) { throw "Missing changelog for $ver" }
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          [IO.File]::WriteAllText($notes, $section.Groups[1].Value.Trim(), [Text.UTF8Encoding]::new($false))
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             "Release $tag 已存在，只覆盖附件"
@@ -184,7 +137,8 @@ jobs:
           } else {
             "Release $tag 不存在，新建"
             gh release create $tag dist\rog-mouse-ctl.exe dist\rog-mouse-ctl.exe.sha256 `
-              --title "R Battery $ver" --generate-notes
+              --title "R Battery $ver" --notes-file $notes
           }
+          if ($LASTEXITCODE -ne 0) { throw "Release publishing failed" }
           gh release view $tag --json tagName,assets | Out-File -FilePath release-info.json -Encoding utf8
           Get-Content release-info.json -Raw

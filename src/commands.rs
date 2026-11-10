@@ -41,7 +41,7 @@ pub(crate) const SAVE: bool = SAVE_TO_FLASH;
 /// 用户拖完亮度，滑块弹回原位、灯效不变，而底部浮层还诚实地报
 /// 「已还原=是」。这个 bug 在 CLI 上永远看不出来（CLI 本来就要 `--keep`），
 /// 只有真机点一遍才会暴露。
-pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
+pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
     let label = cmd.label();
 
     // 自启这条路**完全不碰 HID**，所以必须在 `open_link` 之前分叉 ——
@@ -54,8 +54,9 @@ pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
     let mut log = |_line: &str| {};
 
     let result = (|| -> Result<crate::ops::ApplyReport, crate::ops::OpsError> {
-        let api = crate::win32::HidApi::load().map_err(crate::ops::OpsError::other)?;
-        let link = hid::open_link(&api).map_err(crate::ops::OpsError::other)?;
+        let link = target.ok_or_else(|| {
+            crate::ops::OpsError::other(crate::tr!("所选设备已断开，请重新连接").to_string())
+        })?;
         let mut dev = HidDevice::open(&link.iface).map_err(crate::ops::OpsError::other)?;
         let rid = link.report_id;
         let mut reader = crate::ops::DirectReader;
@@ -149,13 +150,21 @@ pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
             //
             // 先留一份 warning（`into_result` 会消费 report），
             // 因为「不一致」时 warning 往往是解释原因的那句话。
-            let warning = report.warning.clone();
-            let summary = report.summary();
+            let warning = report.warning.as_ref().map(|warning| {
+                if !crate::i18n::english() { return warning.clone(); }
+                match cmd {
+                    Cmd::Lod(_) => crate::tr!("写 LOD 会重置表面标定（厂商确认无恢复命令）。").to_string(),
+                    Cmd::Sleep(_) => crate::tr!("「永不」休眠会显著增加耗电，设备闲置时不会自动休眠。").to_string(),
+                    Cmd::Button { slot, dst: 0, .. } => crate::trf!("「{}」已被禁用，恢复需要重新绑定或还原备份。", crate::i18n::translate(crate::proto::BUTTON_NAME[*slot & 7])),
+                    _ => crate::i18n::translate(warning).to_string(),
+                }
+            });
+            let summary = crate::tr!("已生效").to_string();
             match report.into_result() {
                 Ok(_) => CmdResult {
                     label,
                     ok: Some(match warning {
-                        Some(w) => format!("{summary}；{w}"),
+                        Some(w) => format!("{summary}: {}", crate::i18n::translate(&w)),
                         None => summary,
                     }),
                     err: None,
@@ -164,7 +173,7 @@ pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
                 Err(e) => {
                     // 先取 hint 再动 `e.message`：`OpsError` 是结构体，
                     // 移走 `message` 之后 `e.kind()` 就借不到了（E0382）。
-                    let hint = crate::cli::error_hint(e.kind());
+                    let hint = crate::i18n::operation_hint(e.kind());
                     CmdResult {
                         label,
                         ok: None,
@@ -178,7 +187,7 @@ pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
             }
         }
         Err(e) => {
-            let hint = crate::cli::error_hint(e.kind());
+            let hint = crate::i18n::operation_hint(e.kind());
             CmdResult {
                 label,
                 ok: None,
@@ -190,7 +199,7 @@ pub(crate) fn run_cmd(cmd: &Cmd) -> CmdResult {
 }
 
 /// 备份 / 还原。需要文件系统，也需要设备。
-pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
+pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
     let label = cmd.label();
     let (path, save) = match cmd {
         Cmd::Backup(p) => (p, true),
@@ -205,23 +214,21 @@ pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
         hint,
     };
 
-    let api = match crate::win32::HidApi::load() {
-        Ok(a) => a,
-        Err(e) => return fail(e, "请确认接收器已插好"),
-    };
-    let link = match hid::open_link(&api) {
-        Ok(l) => l,
-        Err(e) => return fail(e, "请确认接收器已插好"),
+    let Some(link) = target else {
+        return fail(
+            crate::tr!("所选设备已断开").to_string(),
+            crate::tr!("请重新连接设备"),
+        );
     };
     let mut dev = match HidDevice::open(&link.iface) {
         Ok(d) => d,
-        Err(e) => return fail(e, "设备被别的程序占用了？"),
+        Err(e) => return fail(e, crate::tr!("设备被别的程序占用了？")),
     };
 
     if save {
         let out = snapshot::fetch(&mut dev, &link.all_interfaces, link.report_id, &link.mode);
         if out.snapshot.frames.is_empty() {
-            return fail("读不到设备状态，无法备份".into(), "");
+            return fail(crate::tr!("读不到设备状态，无法备份").into(), "");
         }
         let text = crate::backup::render(
             &out.snapshot.state,
@@ -239,7 +246,7 @@ pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
         match std::fs::write(path, text.as_bytes()) {
             Ok(_) => CmdResult {
                 label,
-                ok: Some(format!(
+                ok: Some(crate::trf!(
                     "已写入 {}（{} 个键）",
                     path.display(),
                     crate::backup::BACKUP_KEYS.len()
@@ -247,24 +254,24 @@ pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
                 err: None,
                 hint: "",
             },
-            Err(e) => fail(format!("写文件失败：{e}"), ""),
+            Err(e) => fail(crate::trf!("写文件失败：{e}", e = e), ""),
         }
     } else {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
-            Err(e) => return fail(format!("读不了 {}：{e}", path.display()), ""),
+            Err(e) => return fail(crate::trf!("读不了 {}：{e}", path.display(), e = e), ""),
         };
         let b = match crate::backup::parse(&text) {
             Ok(b) => b,
-            Err(e) => return fail(format!("备份文件解析失败：{e}"), ""),
+            Err(e) => return fail(crate::trf!("备份文件解析失败：{e}", e = e), ""),
         };
         if b.keys_found == 0 {
-            return fail("备份文件里没有任何已知键".into(), "");
+            return fail(crate::tr!("备份文件里没有任何已知键").into(), "");
         }
         // 值解析失败/超范围的键必须让用户看到：静默跳过会让「已还原」变成谎话。
         if !b.rejected.is_empty() {
             return fail(
-                format!(
+                crate::trf!(
                     "备份里有 {} 项值不可用（{}），未还原任何设置",
                     b.rejected.len(),
                     b.rejected.join("；")
@@ -278,7 +285,7 @@ pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
         }) {
             Ok(()) => CmdResult {
                 label,
-                ok: Some(format!("已还原 {} 个键", b.keys_found)),
+                ok: Some(crate::trf!("已还原 {} 个键", b.keys_found)),
                 err: None,
                 hint: "",
             },
@@ -294,7 +301,14 @@ pub(crate) fn run_file_cmd(cmd: &Cmd) -> CmdResult {
 /// - `DisabledByPolicy`：组策略禁止，程序无解
 /// - 其它（`Unknown` / `Disabled`）：读不到或系统没接受
 fn run_autostart(on: bool) -> CmdResult {
-    let label = format!("开机自启 {}", if on { "开启" } else { "关闭" });
+    let label = crate::trf!(
+        "开机自启 {}",
+        if on {
+            crate::tr!("开启")
+        } else {
+            crate::tr!("关闭")
+        }
+    );
     let outcome = if on {
         crate::autostart::enable()
     } else {

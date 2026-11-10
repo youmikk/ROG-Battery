@@ -1,19 +1,8 @@
-//! 续航 / 充满时间估算：最小二乘斜率 + 相位过滤 + 「沿用」缓存。
-//!
-//! 纯计算，不碰文件（读盘在 `super`）。`now_sec` 一律由调用方传入，
-//! 否则「补当前读数」那步会用到真实时间，和合成样本的时序打架、单测没法写。
 
 use super::format::{dur_short, dur_text, reason_text, Why};
 use super::{decide_charge, ChargeState, HistoryRow, HIST_GAP_BREAK_SEC};
 use std::sync::Mutex;
 
-/// 外推上限（小时）。
-///
-/// 原来取 100 小时，本意是不让界面出现「还能用 137 小时」这种没人信的数字。
-/// 但真机实测：这只鼠标 1 小时 48 分才掉 1%（≈0.55 %/h），按 97% 外推就是
-/// **176 小时** —— 完全正常的数据被这个上限判成「异常（请忽略）」，用户看到的
-/// 就是永远的「估算中」。所以放到 1000 小时（≈41 天），再由 [`COARSE_HOURS`]
-/// 用「10 天以上」这种粗粒度表达「很久」，而不是报错。
 const MAX_PREDICT_HOURS: f64 = 1000.0;
 
 /// 超过这个小时数就只说「N 天以上」。
@@ -39,6 +28,56 @@ pub struct Estimate {
 }
 
 impl Estimate {
+    pub fn localized_short_text(&self) -> String {
+        if !crate::i18n::english() {
+            return self.short_text();
+        }
+        if !self.known {
+            return crate::i18n::translate(if self.text == "已充满" {
+                "已充满"
+            } else {
+                "估算中…"
+            })
+            .into();
+        }
+        let d = crate::i18n::duration(self.hours);
+        if self.percent_per_hour > 0.0 {
+            crate::trf!("约 {d}后充满", d = d)
+        } else {
+            crate::trf!("约 {d}", d = d)
+        }
+    }
+
+    pub fn localized_text(&self) -> String {
+        if !crate::i18n::english() {
+            return self.text.clone();
+        }
+        if self.known {
+            let dur = if self.hours >= COARSE_HOURS {
+                crate::tr!("10 天以上").to_string()
+            } else {
+                crate::i18n::duration(self.hours)
+            };
+            return if self.percent_per_hour > 0.0 {
+                crate::trf!("预计 {dur} 后充满", dur = dur)
+            } else {
+                crate::trf!("预计还能用 {dur}", dur = dur)
+            };
+        }
+        let translated = crate::i18n::translate(&self.text);
+        if translated != self.text {
+            return translated.into();
+        }
+        if let Some((head, reason)) = self.text.split_once('：') {
+            return format!(
+                "{}: {}",
+                crate::i18n::translate(head),
+                crate::i18n::translate(reason)
+            );
+        }
+        translated.into()
+    }
+
     /// 环下方那行短结论。`text` 是给「明细」用的整句（"预计还能用 3 小时 12 分钟"），
     /// 环下面那格横向只有 ~150px，放整句会挤，所以另出一版紧凑文案。
     pub fn short_text(&self) -> String {
@@ -95,10 +134,6 @@ pub fn predict_sticky(
     fresh
 }
 
-/// 从历史行推算续航/充满时间，**不做文件 IO**。
-///
-/// `now_sec` 由调用方给：否则「补当前读数」那步会用到真实时间，和合成样本的
-/// 时序打架，单测就没法写。
 pub fn predict_from_rows(
     rows: &[HistoryRow],
     now_level: u8,
@@ -321,10 +356,6 @@ pub(super) fn phase_start(rows: &[HistoryRow], charging: bool) -> usize {
         if r.charging != charging {
             break;
         }
-        // 断档检测：两条样本间隔超过 HIST_GAP_BREAK_SEC 说明中间根本没在观察
-        // （程序没运行 / 机器睡眠 / 鼠标长时间不响应）。这种跨度不能当连续观测用
-        // —— 实测遇到过 6 小时空档，两头差 4%，回归把它当成「6 小时均匀掉 4%」，
-        // 于是算出一个好看但完全错的斜率。碰到断档就截断，只用断档之后这一段。
         if let Some(pt) = prev_t {
             if pt - r.ts > HIST_GAP_BREAK_SEC {
                 break;

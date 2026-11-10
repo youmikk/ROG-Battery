@@ -1,39 +1,4 @@
-﻿# 把 ..\target\release\rog-mouse-ctl.exe + AppxManifest 打成一个 .msix
-#
-# 用法（在本目录下）:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File build-msix.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File build-msix.ps1 -Version 1.0.1.0
-#   powershell -NoProfile -ExecutionPolicy Bypass -File build-msix.ps1 -Verify
-#   powershell -NoProfile -ExecutionPolicy Bypass -File build-msix.ps1 -Sign -CertPath D:\secret\sonder.pfx -CertPassword '***'
-#   powershell -NoProfile -ExecutionPolicy Bypass -File build-msix.ps1 -Sign -Thumbprint <SHA1>
-#   powershell -NoProfile -ExecutionPolicy Bypass -File build-msix.ps1 -Clean
-#
-# 【这个脚本做什么】
-#   0. 检查版本号是否大于本机已安装的同 identity 版本（撞车当场拦住）
-#   1. 检查 ..\target\release\rog-mouse-ctl.exe 存在（不存在就让你先 cargo build --release）
-#   2. 把 AppxManifest.xml.template 里的 @占位符@ 换成 package.props.psd1 里的值
-#   3. 建一个干净的暂存目录 stage\：exe + manifest + Assets\*.png
-#   4. 调 makeappx.exe pack -> AppPackages\Sonder.RBattery_<版本>_x64.msix
-#   5. 可选 -Verify：用 makeappx unpack 把产物解回 scratch\unpack，逐项核对
-#   6. 可选 -Sign：用你已有的上架证书签名（**不会**自动生成证书）
-#
-# 【为什么不自动生成自签名证书】
-#   用户已有可上架的正式证书；商店提交时微软会用自己的证书重签，本地签名只是
-#   为了 Add-AppxPackage 本地测试。自动建证书只会往证书库里塞垃圾，还要手动
-#   删根证书，风险大于收益。所以要签名必须显式给证书。
-#
-# 【为什么暂存目录而不是直接打仓库根目录】
-#   MSIX 会把目录里**所有**文件都塞进包。仓库根目录有 .git、Cargo.toml、src\、
-#   target\ —— 打进去既臃肿又可能泄隐私（源码/编译缓存）。所以必须显式挑文件。
-#
-# 【编码注意（踩过坑）】
-#   本文件必须以 UTF-8 **带 BOM** 保存。PowerShell 5.1 读「UTF-8 无 BOM」的 .ps1
-#   时按系统 ANSI 代码页（本机 GBK）解码，中文注释会被解成乱码，乱码里的字节可能
-#   吞掉后续行，表现为「明明代码没写错却语法错误」「变量莫名是空」。
-#   同理，读带中文的 XML/模板一律走 [System.IO.File]::ReadAllBytes + UTF8.GetString，
-#   不要用 Get-Content -Raw（无 -Encoding 时按 GBK 解，中文必毁）。
-
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string] $Version,
     [switch] $Sign,
@@ -54,36 +19,41 @@ $repo   = Split-Path $root -Parent
 $stage  = Join-Path $root 'stage'
 $pkgDir = Join-Path $root 'AppPackages'
 
+function Remove-BuildDirectory([string] $Path) {
+    $base = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+    $resolved = [IO.Path]::GetFullPath($Path)
+    if (-not $resolved.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Build directory is outside the packaging workspace."
+    }
+    if (Test-Path -LiteralPath $resolved) {
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}
+
 function Write-Step([string] $text) {
     Write-Host ''
     Write-Host "=== $text ===" -ForegroundColor Cyan
 }
 
-# 读 UTF-8 文本并剥掉 BOM（GetString 会把 BOM 解成 U+FEFF，带进 XML 会
-# 「Data at the root level is invalid」）
 function Read-Utf8NoBom([string] $path) {
     $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($path))
     return $text.TrimStart([char] 0xFEFF)
 }
 
-# ---------------- 清理 ----------------
 if ($Clean) {
     foreach ($d in @($stage, $pkgDir, (Join-Path $root 'scratch'))) {
-        if (Test-Path $d) { Remove-Item $d -Recurse -Force; Write-Host "  removed $d" }
+        Remove-BuildDirectory $d
     }
     Write-Host 'Clean done.'
     return
 }
 
-# ---------------- 读配置 ----------------
 $propsPath = Join-Path $root 'package.props.psd1'
 if (-not (Test-Path $propsPath)) {
     throw "找不到参数文件 $propsPath —— msix 目录不完整，重新检查打包资产。"
 }
 $props = Import-PowerShellDataFile -Path $propsPath
 
-# CI（GitHub Actions）用 Variables 覆盖身份字段；本地不设这些环境变量就完全不生效。
-# 为什么允许覆盖：身份字段跟着账号走，不该写死在一个仓库文件里，但本地又要能一键打包。
 foreach ($pair in @(
         @{ Env = 'MSSTORE_PACKAGE_IDENTITY_NAME'; Key = 'IdentityName' }
         @{ Env = 'MSSTORE_PUBLISHER'; Key = 'Publisher' }
@@ -98,7 +68,6 @@ foreach ($pair in @(
 
 if ($Version) { $props.Version = $Version }
 
-# 版本号必须是 4 段数字，且第一段不能是 0（Store 要求 >= 1.0.0.0）
 if ($props.Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     throw "Version 必须是 4 段数字，例如 1.0.0.0（现在是 '$($props.Version)'）。用 -Version 1.0.1.0 指定。"
 }
@@ -106,18 +75,11 @@ if ($props.Version -match '^0\.') {
     throw "Version 第一段不能为 0（Store 要求 >= 1.0.0.0，现在是 $($props.Version)）"
 }
 
-# ---------------- 版本号撞车检查 ----------------
-# 为什么必须有：同一个 identity 下，Store **只接受严格大于**已发布版本的版本号，
-# 本地 Add-AppxPackage 遇到同版本或降级也会直接拒绝（0x80073CF9）。
-# 忘了升版本是最容易犯的错，等商店审核失败才发现太晚，所以在这里当场拦住。
-#
-# 机器上没装这个包（Get-AppxPackage 返回空）就跳过 —— 换机器/新账号打包不该报错。
 if (-not $SkipInstalledVersionCheck) {
     $installed = $null
     try {
         $installed = @(Get-AppxPackage -Name $props.IdentityName -ErrorAction Stop)
     } catch {
-        # Get-AppxPackage 在某些受限上下文里不可用，跳过而不是报错
         Write-Host "（跳过已装版本检查：Get-AppxPackage 不可用 —— $($_.Exception.Message)）"
         $installed = @()
     }
@@ -159,15 +121,17 @@ if (-not $exeName) {
     throw "package.props.psd1 里缺少 Executable 键（应为 'rog-mouse-ctl.exe'）"
 }
 
-# ---------------- 找工具 ----------------
-# 优先用 PATH，其次用 package.props.psd1 里记的绝对路径（本机把 SDK BuildTools
-# 解在 D:\codex\_tools 下，没装 Windows SDK），最后用备选路径。
 function Find-Tool {
     param([string] $Name, [string] $Preferred, [string] $Fallback)
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     if ($Preferred -and (Test-Path $Preferred)) { return $Preferred }
     if ($Fallback -and (Test-Path $Fallback)) { return $Fallback }
+    $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    $tool = Get-ChildItem $sdk -Recurse -Filter $Name -ErrorAction SilentlyContinue |
+        Where-Object { $_.Directory.Name -eq 'x64' } |
+        Sort-Object FullName -Descending | Select-Object -First 1
+    if ($tool) { return $tool.FullName }
     return $null
 }
 
@@ -187,7 +151,6 @@ if (-not $makeappx) {
 }
 Write-Host "makeappx: $makeappx"
 
-# ---------------- 检查 exe ----------------
 $exe = Join-Path (Join-Path $repo 'target\release') $exeName
 if (-not (Test-Path $exe)) {
     throw @"
@@ -206,9 +169,8 @@ if ($exeSize -eq 0) {
 }
 Write-Host ("exe: {0} ({1:N0} bytes)" -f $exe, $exeSize)
 
-# ---------------- 搭暂存目录 ----------------
 Write-Step 'staging'
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+Remove-BuildDirectory $stage
 New-Item -ItemType Directory -Path $stage | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stage 'Assets') | Out-Null
 
@@ -218,9 +180,6 @@ if ($stagedExeSize -ne $exeSize) {
     throw "拷贝 exe 到 stage 后大小不一致（源 $exeSize / 目标 $stagedExeSize），磁盘可能有问题。"
 }
 
-# Assets：manifest 点名的 + 全部 targetsize 变体
-# （targetsize-<n>.png 是给不同缩放比例用的，manifest 只点名一个，但 Windows
-#  会按命名自动挑更合适的，所以全带上更好）
 $assetSrc = Join-Path $root 'Assets'
 if (-not (Test-Path $assetSrc)) {
     throw "找不到 $assetSrc —— Assets 目录缺失，重新拷贝一份 MSIX 素材。"
@@ -235,8 +194,6 @@ foreach ($p in $pngs) {
 $assetCount = @(Get-ChildItem (Join-Path $stage 'Assets')).Count
 Write-Host "assets: $assetCount png"
 
-# manifest 必须点名的若干张，缺一张 makeappx 会报难懂的校验错，
-# 这里先自己查一遍，报错才好懂。
 $requiredAssets = @(
     'StoreLogo.png',
     'Square44x44Logo.png',
@@ -252,7 +209,6 @@ if ($missing.Count -gt 0) {
     throw ("Assets 里缺 manifest 点名的文件: " + ($missing -join ', '))
 }
 
-# ---------------- 生成 manifest ----------------
 Write-Step 'manifest'
 
 $tpl = Read-Utf8NoBom (Join-Path $root 'AppxManifest.xml.template')
@@ -269,23 +225,18 @@ $map = @{
     '@EXECUTABLE@'             = $exeName
 }
 foreach ($k in $map.Keys) {
-    # 用普通字符串替换（不是 -replace），避免值里的 $ 被当正则替换引用
     $tpl = $tpl.Replace($k, [string] $map[$k])
 }
 
-# 检查还有没有漏替换的占位符 —— 漏一个 makeappx 就会报难懂的 XML 校验错
 $leftover = [regex]::Matches($tpl, '@[A-Z_]+@')
 if ($leftover.Count -gt 0) {
     $names = (@($leftover | ForEach-Object { $_.Value } | Sort-Object -Unique)) -join ', '
     throw "模板里还有没替换的占位符: $names（检查 package.props.psd1 是否缺键）"
 }
 
-# 带 BOM 写出：Windows 的 manifest 解析器对无 BOM 的 UTF-8 也能吃，
-# 但带 BOM 可以避免中文 Description 在某些工具里被当 ANSI 读出乱码。
 $manifestPath = Join-Path $stage 'AppxManifest.xml'
 [System.IO.File]::WriteAllText($manifestPath, $tpl, (New-Object System.Text.UTF8Encoding($true)))
 
-# 提前用 XML 解析器验一遍，比 makeappx 报错好懂
 try {
     [xml] $null = Read-Utf8NoBom $manifestPath
 } catch {
@@ -293,7 +244,6 @@ try {
 }
 Write-Host "manifest: $manifestPath"
 
-# ---------------- pack ----------------
 Write-Step 'packing'
 if (-not (Test-Path $pkgDir)) { New-Item -ItemType Directory -Path $pkgDir | Out-Null }
 
@@ -312,9 +262,6 @@ $msixSize = (Get-Item $msixPath).Length
 Write-Host ''
 Write-Host ("packed: {0} ({1:N0} bytes)" -f $msixPath, $msixSize)
 
-# ---------------- 可选：签名 ----------------
-# 商店提交时微软会重新签名，本地签名只是为了 Add-AppxPackage 测试安装。
-# **本脚本不会自动生成证书** —— 没有可用证书就明确报错，让你自己决定。
 if ($Sign) {
     Write-Step 'signing'
 
@@ -336,14 +283,10 @@ if ($Sign) {
         Write-Host "cert file: $CertPath"
         $signArgs += @('/f', $CertPath)
         if ($CertPassword) {
-            # 注意：signtool 的 /p 只收明文密码，会在命令行里留下痕迹。
-            # 本机测试可接受；共享机器上建议把证书装进证书库，改用 -Thumbprint。
             $signArgs += @('/p', $CertPassword)
         }
     }
     else {
-        # 从证书库按 Subject（== manifest Publisher）或显式 -Thumbprint 找。
-        # 刻意不 New-SelfSignedCertificate：用户已有上架证书。
         $cert = $null
         if ($Thumbprint) {
             $cert = Get-ChildItem Cert:\CurrentUser\My |
@@ -392,15 +335,11 @@ if ($Sign) {
     Write-Host '**签名包只用于本地测试，不要提交 Store。** 提交前重跑一次不带 -Sign 的命令。'
 }
 
-# ---------------- 可选：解包校验 ----------------
-# 为什么必须有这一步：包能"打成功"不代表内容对。解回来逐项核对 Identity /
-# Executable / startupTask / runFullTrust 以及文件完整性 —— 这是唯一不碰系统
-# 状态的验证手段（不注册、不安装，绝不会顶掉已上架的商店版）。
 if ($Verify) {
     Write-Step 'verify (unpack)'
 
     $unpackDir = Join-Path (Join-Path $root 'scratch') 'unpack'
-    if (Test-Path $unpackDir) { Remove-Item $unpackDir -Recurse -Force }
+    Remove-BuildDirectory $unpackDir
     New-Item -ItemType Directory -Force -Path $unpackDir | Out-Null
 
     & $makeappx unpack /p $msixPath /d $unpackDir /o
@@ -421,7 +360,6 @@ if ($Verify) {
         }
     }
 
-    # --- manifest ---
     Write-Host ''
     Write-Host ' -- manifest --'
     $unpackedManifest = Join-Path $unpackDir 'AppxManifest.xml'
@@ -481,12 +419,10 @@ if ($Verify) {
     $cap = $doc.SelectSingleNode('/f:Package/f:Capabilities/rescap:Capability[@Name="runFullTrust"]', $ns)
     Add-Check 'runFullTrust capability' ($null -ne $cap) 'rescap:Capability Name="runFullTrust"'
 
-    # 只允许 runFullTrust：HID 不需要额外能力，多声明一个都该被发现
     $allCaps = @($doc.SelectNodes('/f:Package/f:Capabilities/*', $ns))
     $capNames = ($allCaps | ForEach-Object { $_.GetAttribute('Name') }) -join ', '
     Add-Check '能力只有 1 个（无多余声明）' ($allCaps.Count -eq 1) $capNames
 
-    # --- 文件 ---
     Write-Host ''
     Write-Host ' -- files --'
     $unpackedExe = Join-Path $unpackDir $exeName
@@ -506,7 +442,6 @@ if ($Verify) {
         }
     }
 
-    # 包根不允许夹带源码/配置之类
     $allowed = @('AppxManifest.xml', $exeName, 'AppxBlockMap.xml', 'AppxSignature.p7x', '[Content_Types].xml')
     $extra = @(Get-ChildItem $unpackDir -File | Where-Object { $allowed -notcontains $_.Name })
     Add-Check '包根无多余文件' ($extra.Count -eq 0) (($extra | ForEach-Object { $_.Name }) -join ', ')
@@ -519,7 +454,6 @@ if ($Verify) {
     Write-Host '全部通过。'
 }
 
-# ---------------- 收尾 ----------------
 Write-Step 'done'
 Write-Host ("  {0}" -f $msixPath)
 Write-Host ("  {0:N0} bytes" -f $msixSize)

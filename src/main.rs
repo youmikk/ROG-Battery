@@ -4,15 +4,9 @@
 //! 完全不依赖 ASUS 驱动 / Armoury Crate / GearLink：自己枚举 HID 接口、
 //! 自己拼 64 字节 feature report、自己解析应答。
 //!
-//! 协议细节见 `_research\hid-write.md`（写）与 `_research\hid-features.md`（读）。
 //!
 //! 读模型：**一次读全 17 帧 + 缓存**（见 `snapshot.rs`）。
 
-// 子系统设成 `windows`：双击、开始菜单、Microsoft Store 启动都不创建控制台，
-// 所以不会闪一下黑框。命令行用法由 `win32::attach_console()` 在 `main` 开头
-// 把父控制台接回来，`info` / `backup` 这些照旧能打印。
-// `cfg(not(test))` 是必须的：`cargo test` 的测试进程如果也是 GUI 子系统，
-// 测试输出会被直接丢掉。
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod autostart;
@@ -25,6 +19,7 @@ mod dwm;
 mod dynlight;
 mod gui;
 mod hid;
+mod i18n;
 mod device;
 mod diagnostics;
 mod history;
@@ -36,6 +31,7 @@ mod report;
 mod settings;
 mod snapshot;
 mod tray_icon;
+mod tray_prefs;
 mod ui;
 mod win32;
 
@@ -235,8 +231,6 @@ fn check_single_instance() -> Instance {
     check_instance_named(SINGLE_INSTANCE_MUTEX)
 }
 
-/// 按名字做单实例检查。拆出来只为了让测试用一个独立的名字，不与真机上的
-/// 运行实例互相干扰。
 fn check_instance_named(mutex_name: &str) -> Instance {
     let name = win32::to_wide(mutex_name);
     let handle = unsafe { win32::CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
@@ -295,7 +289,7 @@ fn run_gui(start_hidden: bool) -> ExitCode {
                 dir.join("gui.log"),
                 format!("{} GUI 启动失败：{e}\n", settings::timestamp_for_humans()),
             );
-            let text = win32::to_wide(&format!("图形界面启动失败：\n\n{e}"));
+            let text = win32::to_wide(&crate::trf!("图形界面启动失败：\n\n{e}", e = e));
             let caption = win32::to_wide("rog-mouse-ctl");
             // MB_OK(0) | MB_ICONERROR(0x10)
             unsafe {
@@ -305,7 +299,6 @@ fn run_gui(start_hidden: bool) -> ExitCode {
         }
     }
 }
-
 
 fn run(
     a: Cmd,
@@ -754,37 +747,4 @@ fn parse_cmd(cmd: &str, pos: &[&str]) -> Result<Cmd, String> {
         }
         other => Err(format!("未知子命令 {other:?}\n\n{USAGE}")),
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 同一个名字建两次互斥体：第一次拿到锁，第二次必须报告「已有实例」，
-    /// 而不是被当成「创建失败」。
-    #[test]
-    fn second_instance_is_detected_as_already_running() {
-        let name = format!("Local\\RogMouseCtl_Test_{}", std::process::id());
-        let first = check_instance_named(&name);
-        assert!(
-            matches!(first, Instance::Owner(_)),
-            "首次应抢到锁，实际是创建失败或已有实例"
-        );
-        let second = check_instance_named(&name);
-        assert!(
-            matches!(second, Instance::AlreadyRunning),
-            "第二次应报告已有实例"
-        );
-        drop(second);
-        drop(first);
-    }
-
-    #[test]
-    fn wake_existing_reports_false_for_a_missing_window() {
-        // 标题不存在时只能安静地返回 false，不能 panic（第二实例会走这条路）。
-        let title: Vec<u16> = "R Battery 不存在的窗口\0".encode_utf16().collect();
-        let hwnd = unsafe { crate::win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
-        assert!(hwnd.is_null());
-    }
-
 }

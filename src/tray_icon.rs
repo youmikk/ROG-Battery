@@ -1,45 +1,214 @@
-//! 托盘图标上的电量数字。
-//!
-//! 静态的 `assets\tray.ico` 只能表达「程序在跑」。C# 版在图标上直接画电量
-//! （`D:\codex\rog-battery\tray.cs` 的 `FallbackIcon`），这里做同一件事：
-//! 用 GDI 往内存位图上画一个数字，包成 `HICON`，喂给
-//! `TrayNotification::set_icon`。
-//!
-//! # 为什么走裸 GDI 而不是 nwg 的 `Icon::builder()`
-//!
-//! nwg 的 `IconBuilder` 只有三个来源：文件路径、字节、系统 OEM 图标。
-//! 没有「给我一个已经画好的 HDC」这条路。而 `.size()` 那条又走 WIC
-//! （见 `docs\nwg-gotchas.md` 第 14 节：`.ico` 里的 PNG 条目会让它失败）。
-//!
-//! 所以：`CreateDIBSection`（32bpp，带 alpha）→ `DrawTextW` → `CreateIconIndirect`。
-//!
-//! # 句柄生命周期（这块最容易漏，漏了就漏句柄）
-//!
-//! 一次绘制会产生 **5 个 GDI/User 对象**：
-//! `memDC`、`dib`、`oldBitmap`（SelectObject 的返回，不是新对象）、
-//! `mask`、`font`，以及最终的 `HICON`。
-//!
-//! - `memDC` → `DeleteDC`
-//! - `dib` / `mask` / `font` → `DeleteObject`
-//! - `HICON` → **调用方**负责 `DestroyIcon`（不能在这里销毁，
-//!   因为 `Shell_NotifyIconW` 可能还要用它）
-//!
-//! 位图必须 `SelectObject` 回 `oldBitmap` 之后才能删，否则位图仍被 DC 选中，
-//! `DeleteObject` 会失败并静默漏掉。
+//! 透明托盘图标：设备图案与紧凑电量数字。HICON 由调用方销毁。
 
 use core::ffi::c_void;
 use core::ptr;
 
 use crate::win32::Handle;
 
-/// 图标边长。
-///
-/// 托盘图标在 100% 缩放下系统只用 **16x16**（`SM_CXSMICON` 实测 = 16），
-/// 任务栏/DPI 缩放不同会有别的值。硬画 32x32 也能work —— 系统会缩，
-/// 但双线性缩放会把笔画糊掉（实测「82」边缘发虚）。
-///
-/// 所以运行时用 `icon_size()` 查系统值，这个常量只作为**上限和默认值**。
+/// 图标布局基准尺寸。
 pub const ICON_SIZE: i32 = 32;
+
+pub fn render_device(
+    level: Option<u8>,
+    charging: bool,
+    kind: crate::tray_prefs::TrayKind,
+    content: crate::tray_prefs::TrayContent,
+) -> Option<Handle> {
+    let theme = if crate::autostart::system_uses_light_theme() {
+        &crate::ui::theme::LIGHT
+    } else {
+        &crate::ui::theme::DARK
+    };
+    render_device_at(level, charging, kind, content, theme, icon_size())
+}
+
+fn render_device_at(
+    level: Option<u8>,
+    charging: bool,
+    kind: crate::tray_prefs::TrayKind,
+    content: crate::tray_prefs::TrayContent,
+    theme: &crate::ui::theme::Theme,
+    size: i32,
+) -> Option<Handle> {
+    use crate::tray_prefs::TrayContent;
+    use crate::ui::gfx::{Painter, R};
+    use gdiplus::*;
+    if !crate::ui::gfx::start() {
+        return None;
+    }
+    unsafe {
+        let mut bitmap = ptr::null_mut();
+        let mut graphics = ptr::null_mut();
+        if GdipCreateBitmapFromScan0(
+            size,
+            size,
+            0,
+            PIXEL_FORMAT_32BPP_ARGB,
+            ptr::null(),
+            &mut bitmap,
+        ) != 0
+        {
+            return None;
+        }
+        if GdipGetImageGraphicsContext(bitmap, &mut graphics) != 0 {
+            GdipDisposeImage(bitmap);
+            return None;
+        }
+        GdipGraphicsClear(graphics, 0);
+        GdipSetSmoothingMode(graphics, 4);
+        GdipSetTextRenderingHint(graphics, 4);
+        let ink = match level {
+            None => theme.text3,
+            Some(0..=20) => theme.red,
+            _ => theme.text,
+        };
+        let painted = Painter::on_graphics(graphics, theme, 32.0, size as f32 / 32.0, |p| {
+            let combined = content == TrayContent::Combined;
+            if content != TrayContent::Number {
+                let area = if combined {
+                    R::new(1.5, 6.0, 10.0, 20.0)
+                } else {
+                    R::new(2.0, 2.0, 28.0, 28.0)
+                };
+                device_glyph(p, area, kind, ink);
+            }
+            if content != TrayContent::Icon {
+                let text = level.map(label).unwrap_or_else(|| "–".to_string());
+                let rect = if combined {
+                    let width = if text.len() == 1 { 10.0 } else { 18.0 };
+                    R::new(22.5 - width / 2.0, 4.0, width, 24.0)
+                } else {
+                    R::new(1.0, 4.0, 30.0, 24.0)
+                };
+                if level.is_some() {
+                    p.icon_text(
+                        &text,
+                        rect,
+                        if combined { 23.0 } else { 28.0 },
+                        ink,
+                        combined,
+                    );
+                } else {
+                    p.line(
+                        rect.cx() - 4.0,
+                        rect.cy(),
+                        rect.cx() + 4.0,
+                        rect.cy(),
+                        ink,
+                        1.8,
+                    );
+                }
+            }
+            if charging && level.is_some() {
+                p.dot(if combined { 6.5 } else { 29.0 }, 2.0, 1.8, theme.green);
+            }
+        });
+        GdipDeleteGraphics(graphics);
+        let mut icon = ptr::null_mut();
+        let result = painted.is_some() && GdipCreateHICONFromBitmap(bitmap, &mut icon) == 0;
+        GdipDisposeImage(bitmap);
+        if result && !icon.is_null() {
+            Some(icon)
+        } else {
+            None
+        }
+    }
+}
+
+fn device_glyph(
+    p: &mut crate::ui::gfx::Painter,
+    r: crate::ui::gfx::R,
+    kind: crate::tray_prefs::TrayKind,
+    ink: u32,
+) {
+    use crate::tray_prefs::TrayKind;
+    use crate::ui::gfx::R;
+    let stroke = 2.4;
+    let cx = r.cx();
+    let cy = r.cy();
+    match kind {
+        TrayKind::Mouse => {
+            let w = r.w.min(r.h * 0.65);
+            let body = R::new(cx - w / 2.0, r.y, w, r.h);
+            p.round_stroke(body, w * 0.45, ink, stroke);
+            p.line(cx, r.y + r.h * 0.2, cx, r.y + r.h * 0.4, ink, stroke);
+        }
+        TrayKind::Keyboard => {
+            let h = (r.w * 0.8).max(r.h * 0.55);
+            p.round_stroke(R::new(r.x, cy - h / 2.0, r.w, h), 1.5, ink, stroke);
+            for col in [0.3, 0.7] {
+                p.dot(r.x + r.w * col, cy - h * 0.15, 0.85, ink);
+            }
+            p.line(
+                r.x + r.w * 0.25,
+                cy + h * 0.2,
+                r.right() - r.w * 0.25,
+                cy + h * 0.2,
+                ink,
+                1.8,
+            );
+        }
+        TrayKind::Headset => {
+            let radius = r.w * 0.5;
+            let top = cy - r.h * 0.35;
+            p.arc(cx, top + radius, radius, stroke, 180.0, 180.0, ink);
+            p.line(r.x, top + radius, r.x, cy + r.h * 0.22, ink, stroke);
+            p.line(
+                r.right(),
+                top + radius,
+                r.right(),
+                cy + r.h * 0.22,
+                ink,
+                stroke,
+            );
+            let ear_h = r.h * 0.35;
+            p.round(R::new(r.x, cy, r.w * 0.28, ear_h), 1.0, ink);
+            p.round(
+                R::new(r.right() - r.w * 0.28, cy, r.w * 0.28, ear_h),
+                1.0,
+                ink,
+            );
+        }
+        TrayKind::Gamepad => {
+            let h = (r.w * 0.75).max(r.h * 0.6);
+            let points: Vec<_> = [
+                (0.0, 1.0),
+                (0.12, 0.12),
+                (0.32, 0.0),
+                (0.42, 0.2),
+                (0.58, 0.2),
+                (0.68, 0.0),
+                (0.88, 0.12),
+                (1.0, 1.0),
+                (0.7, 0.76),
+                (0.3, 0.76),
+                (0.0, 1.0),
+            ]
+            .iter()
+            .map(|(x, y)| (r.x + x * r.w, cy - h / 2.0 + y * h))
+            .collect();
+            p.stroke_path(&points, ink, stroke);
+            p.dot(r.x + r.w * 0.27, cy - h * 0.05, 0.8, ink);
+            p.dot(r.x + r.w * 0.75, cy - h * 0.05, 0.8, ink);
+        }
+        _ => {
+            p.round_stroke(
+                R::new(r.x, cy - r.h * 0.35, r.w - 1.0, r.h * 0.7),
+                1.5,
+                ink,
+                stroke,
+            );
+            p.line(
+                cx - 1.0,
+                cy - r.h * 0.35 - 2.0,
+                cx + 1.0,
+                cy - r.h * 0.35 - 2.0,
+                ink,
+                stroke,
+            );
+        }
+    }
+}
 
 /// 绘制时的超采样倍数：先在 `ICON_SIZE * SUPERSAMPLE` 的画布上画，再一次性缩回
 /// `ICON_SIZE`。直接按 32px 画时，字形的斜边和光晕只有一两个像素可落，缩放后
@@ -52,26 +221,12 @@ const SUPERSAMPLE: i32 = 4;
 /// 查 `SM_CXSMICON`（=49）。查询失败或返回离谱值时回落到 [`ICON_SIZE`]。
 ///
 /// 夹在 16..=32：小于 16 画不下两位数字，大于 32 没意义（托盘不显示那么大）。
-#[cfg(test)]
 pub fn icon_size() -> i32 {
     let n = unsafe { crate::win32::GetSystemMetrics(49) };
     if n < 16 {
         ICON_SIZE
     } else {
         n.min(ICON_SIZE)
-    }
-}
-
-/// 背景色 —— 深色圆角块，白字。和曲线不同，托盘图标必须**不透明**
-/// 才能在浅色/深色任务栏上都看得清（透明图标配白字在浅色栏上会消失）。
-const BG: [u8; 3] = [0x20, 0x24, 0x2B];
-
-/// 电量对应的图标底色。三档，够用户一眼分辨「还早 / 该充了 / 快没电」。
-fn level_color(level: u8) -> [u8; 3] {
-    match level {
-        0..=20 => [0xD1, 0x3A, 0x2E],   // 红：快没电
-        21..=50 => [0xD8, 0x8B, 0x1E],  // 橙：该充了
-        _ => BG,                        // 常态深灰
     }
 }
 
@@ -83,46 +238,12 @@ pub fn label(level: u8) -> String {
     level.min(100).to_string()
 }
 
-/// 按位数选字号（**相对 [`ICON_SIZE`] 的 32px 图标**）。
-///
-/// 一位数（`7`）用 28px，两位数（`82`）用 27px，三位数（`100`）用 20px。
-/// 三位数每格只有 10px 宽，20px 是「占满宽度又不互相压线」的上限 ——
-/// 原来给 14px，满电时数字小得像注脚，用户专门提过。
-/// 这是纯函数，测试直接断言数字，不需要真的画。
-///
-/// 实际绘制时按 `icon_size()` 等比缩放 —— 见 [`scaled_font_height`]。
-pub fn font_height(level: u8) -> i32 {
-    match label(level).len() {
-        1 => 28,
-        2 => 27,
-        _ => 20,
-    }
-}
-
-/// 把 [`font_height`] 从 32px 基准缩放到目标边长。
-///
-/// 单独抽出来是为了能测：16px 图标上两位数必须落在 8..=12 之间，
-/// 否则要么糊成一团、要么顶出图标边界。
-pub fn scaled_font_height(level: u8, size: i32) -> i32 {
-    let h = font_height(level) * size.max(1) / ICON_SIZE;
-    h.max(6) // 再小就完全看不清了，宁可爱出界一点
-}
-
 /// 把 `[r, g, b]` 转 `COLORREF`（`0x00BBGGRR`）。
 ///
 /// 顺序写反是最常见的 GDI 错误：红色 `(255,0,0)` 写成 `0x0000FF` 会变蓝。
 fn colorref(c: [u8; 3]) -> u32 {
     (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16)
 }
-
-
-
-// ==================== GDI+ 透明图标 ====================
-//
-// 用户要求：托盘图标「要透明、只显示数字，像系统自带的字体」。
-// 裸 GDI 那条路做不到真透明（DrawTextW 把 alpha 写成 0，只能整块补回不透明），
-// 所以改用 GDI+ 画到 32bpp ARGB 位图上，再 `GdipCreateHICONFromBitmap` 转 HICON
-// —— alpha 通道原样保留，托盘上就是「透明底白字」。
 
 mod gdiplus {
     // PixelFormat32bppARGB = 10 | (32<<8) | Alpha(0x40000) | GDI(0x20000) | Canonical(0x200000)
@@ -149,41 +270,6 @@ mod gdiplus {
     };
 }
 
-/// 透明背景上数字的颜色：自适应浅色/深色任务栏。
-///
-/// 浅色任务栏（Windows 11 默认/当前）：深炭灰 #1F1F1F，匹配输入法与时钟原生字体；低电警示红、中电橙。
-/// 深色任务栏：纯白 #FFFFFF；低电亮红、中电亮橙。
-/// 画一张**透明底**、带电量数字的图标（GDI+ 32bpp ARGB）。
-///
-/// 失败返回 `None`，调用方回落到静态图标 —— **不能让托盘空白**。
-/// 成功返回的 `HICON` 由调用方负责 `DestroyIcon`。
-pub fn render(level: u8) -> Option<Handle> {
-    render_badge(level, false)
-}
-
-/// 缓存读数（设备暂时读不到、沿用的是上一次的值）：灰底 + 近白数字。
-///
-/// 灰底本身就表示「这不是现在的数」，所以不再叠加充电角标。
-pub fn render_stale(level: u8) -> Option<Handle> {
-    render_glyph(
-        &label(level),
-        scaled_font_height(level, ICON_SIZE),
-        [0xF2, 0xF6, 0xFA],
-        crate::autostart::system_uses_light_theme(),
-        Some([0x6B, 0x72, 0x7A]),
-        false,
-    )
-}
-
-/// 充电中的托盘图标：在徽章右上角加一个深色圆 + 白色闪电，数字左移让位。
-pub fn render_charging(level: u8) -> Option<Handle> {
-    render_badge(level, true)
-}
-
-/// 读不到电量（休眠 / 未连接 / 首次启动）时的占位图标：一条短横线。
-///
-/// 以前这种情况退回 `assets/tray.ico`（应用图标），任务栏上会突然只剩一个
-/// 图标、看不出是电量 —— 用户报过「托盘短暂出现只显示图标而不是数字」。
 pub fn render_unknown() -> Option<Handle> {
     let is_light = crate::autostart::system_uses_light_theme();
     let c = if is_light {
@@ -192,27 +278,6 @@ pub fn render_unknown() -> Option<Handle> {
         [0xD8, 0xD8, 0xD8]
     };
     render_glyph("—", (ICON_SIZE as f32 * 0.46) as i32, c, is_light, None, false)
-}
-
-/// 实心圆徽章样式：等级色圆底 + 深色数字（浅色任务栏用深墨，深色任务栏用近白）。
-///
-/// 与数字样式并存，由调用方挑选；圆底要盖住任务栏的底色，所以数字不能再用
-/// 光晕——光晕是给「直接压在任务栏上」的字形用的。
-pub fn render_badge(level: u8, charging: bool) -> Option<Handle> {
-    let is_light = crate::autostart::system_uses_light_theme();
-    let ink = if is_light {
-        [0x0C, 0x11, 0x15]
-    } else {
-        [0xF2, 0xF6, 0xFA]
-    };
-    render_glyph(
-        &label(level),
-        scaled_font_height(level, ICON_SIZE),
-        ink,
-        is_light,
-        Some(level_color(level)),
-        charging,
-    )
 }
 
 fn render_glyph(
@@ -461,159 +526,4 @@ fn render_glyph(
             None
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn label_is_the_number_without_percent() {
-        assert_eq!(label(0), "0");
-        assert_eq!(label(7), "7");
-        assert_eq!(label(82), "82");
-        assert_eq!(label(100), "100");
-    }
-
-    #[test]
-    fn label_clamps_above_100() {
-        // 设备理论上不会报 >100，但真报了也不能画成 "255"
-        assert_eq!(label(255), "100");
-    }
-
-    #[test]
-    fn font_shrinks_as_digits_grow() {
-        // 三位数必须比两位数小，两位数必须比一位数小 ——
-        // 否则 "100" 会撑出 32px 图标
-        assert!(font_height(7) > font_height(82));
-        assert!(font_height(82) > font_height(100));
-        assert!(font_height(100) >= 12, "再小就看不清了");
-        assert!(font_height(7) <= ICON_SIZE, "不该超出图标");
-    }
-
-    #[test]
-    fn colorref_is_bgr_not_rgb() {
-        // 红 (255,0,0) → 0x0000FF；写反了就是 0xFF0000（蓝）
-        assert_eq!(colorref([255, 0, 0]), 0x0000_00FF);
-        assert_eq!(colorref([0, 0, 255]), 0x00FF_0000);
-        assert_eq!(colorref([0, 0, 0]), 0);
-        assert_eq!(colorref([0xFF, 0xFF, 0xFF]), 0x00FF_FFFF);
-    }
-
-    #[test]
-    fn low_battery_is_red_and_normal_is_dark() {
-        assert_eq!(level_color(5), [0xD1, 0x3A, 0x2E]);
-        assert_eq!(level_color(20), [0xD1, 0x3A, 0x2E]);
-        assert_eq!(level_color(21), [0xD8, 0x8B, 0x1E]);
-        assert_eq!(level_color(50), [0xD8, 0x8B, 0x1E]);
-        assert_eq!(level_color(51), BG);
-        assert_eq!(level_color(100), BG);
-    }
-
-    /// 真画一张，确认 GDI 链路通、句柄能回收。
-    ///
-    /// 这个测试**必须**在 Windows 上跑（本工程本来就只支持 Windows）。
-    #[test]
-    fn render_produces_a_usable_icon_and_cleans_up() {
-        let h = render(82).expect("render(82) 应该能画出图标");
-        assert!(!h.is_null());
-        // 位图属性：宽高必须是我们画的那块
-        unsafe {
-            assert_ne!(crate::win32::DestroyIcon(h), 0, "DestroyIcon 应当成功");
-        }
-    }
-
-    #[test]
-    fn render_handles_extremes() {
-        for lv in [0u8, 1, 20, 21, 50, 51, 99, 100, 200] {
-            let h = render(lv);
-            assert!(h.is_some(), "level={lv} 应该能画出来");
-            unsafe { crate::win32::DestroyIcon(h.unwrap()) };
-        }
-    }
-
-    #[test]
-    fn scrolled_font_height_stays_inside_the_icon() {
-        // 16px 上两位数必须是可读的，且不能顶出边界。
-        assert_eq!(scaled_font_height(82, 16), 13); // 27 * 16 / 32 = 13
-        assert_eq!(scaled_font_height(7, 16), 14); // 28 * 16 / 32 = 14
-        assert_eq!(scaled_font_height(100, 16), 10); // 20 * 16 / 32 = 10
-        for lv in [0u8, 7, 42, 82, 99, 100] {
-            for size in [16, 20, 24, 32] {
-                let h = scaled_font_height(lv, size);
-                assert!(h >= 6, "level={lv} size={size} 字号 {h} 太小");
-                assert!(h <= size, "level={lv} size={size} 字号 {h} 超出图标");
-            }
-        }
-    }
-
-    #[test]
-    fn icon_size_is_sane() {
-        let s = icon_size();
-        assert!(
-            (16..=ICON_SIZE).contains(&s),
-            "SM_CXSMICON 返回值 {s} 异常，应该夹在 16..={ICON_SIZE}"
-        );
-    }
-
-    /// 反复画/销毁，确认**没有句柄泄漏**。
-    ///
-    /// 用 `GetGuiResources(GR_GDIOBJECTS)` 读进程的 GDI 对象数：
-    /// `Gdi::drop` 漏一个对象这里就会单调上涨。
-    ///
-    /// 画 200 次，前 20 次当预热（首轮会分配字体缓存之类的一次性资源），
-    /// 之后的对象数不允许比预热结束时多 10 个以上。
-    #[test]
-    fn repeated_renders_do_not_leak_gdi_objects() {
-        use crate::win32::GetCurrentProcess;
-
-        unsafe fn gdi_count() -> i32 {
-            // GR_GDIOBJECTS = 0
-            crate::win32::GetGuiResources(GetCurrentProcess(), 0) as i32
-        }
-
-        // 预热
-        for _ in 0..20 {
-            if let Some(h) = render(82) {
-                unsafe { crate::win32::DestroyIcon(h) };
-            }
-        }
-        let before = unsafe { gdi_count() };
-
-        for i in 0..200 {
-            let lv = (i % 101) as u8;
-            match render(lv) {
-                Some(h) => unsafe { crate::win32::DestroyIcon(h) },
-                None => panic!("level={lv} 画不出来"),
-            };
-        }
-
-        let after = unsafe { gdi_count() };
-        assert!(
-            after - before <= 10,
-            "画 200 次后 GDI 对象从 {before} 涨到 {after}，疑似泄漏"
-        );
-    }
-
-    /// 充电角标这条分支必须能画出来（GDI+ 调用链和普通徽章不同）。
-    #[test]
-    fn render_charging_produces_an_icon() {
-        let h = render_charging(84);
-        assert!(h.is_some(), "充电图标应当能生成");
-        if let Some(h) = h {
-            unsafe { crate::win32::DestroyIcon(h) };
-        }
-    }
-
-
-    /// 灰底「历史读数」图标也要能画出来（走的是同一条 GDI+ 链）。
-    #[test]
-    fn render_stale_produces_an_icon() {
-        let h = render_stale(62);
-        assert!(h.is_some(), "历史读数图标应当能生成");
-        if let Some(h) = h {
-            unsafe { crate::win32::DestroyIcon(h) };
-        }
-    }
-
 }

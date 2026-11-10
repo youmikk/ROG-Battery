@@ -34,10 +34,6 @@ pub const HIST_MIN_GAP_SEC: i64 = 60;
 /// 内的行数仍远低于 [`HIST_MAX_LINES`]（心跳行 1440 条/48h，加上电量变化
 /// 行也还在 2000 以内，超了会自动裁剪最旧的）。
 pub const HIST_SAME_GAP_SEC: i64 = 120;
-/// 相邻样本间隔超过这个值就认为「中间没在观察」，回归不能用这段跨度。
-///
-/// 取 2 小时：正常心跳 10 分钟一条，就算把刷新间隔调到 30 分钟也远不到这里；
-/// 而实测碰到的那个坑是 6 小时空档（程序退出 / 机器睡眠），必须拦下来。
 pub const HIST_GAP_BREAK_SEC: i64 = 7200;
 
 /// 命名互斥体名。**不能改** —— C# 版随时可能回来，改了就互斥失效。
@@ -398,8 +394,6 @@ pub struct PruneOutcome {
     /// 是否真的需要重写文件。单纯追加时为 `false` —— 不要为了「顺便整理」去重写，
     /// 那会在别人正在读的瞬间把文件截断。
     pub rewrite: bool,
-    /// 被丢掉的行数。目前只给单测用（`prune_by_count` / `prune_by_time`），
-    /// 诊断输出暂时没用到，留着是因为算它是零成本的。
     #[allow(dead_code)]
     pub dropped: usize,
 }
@@ -431,9 +425,6 @@ pub fn prune_rows(rows: &[HistoryRow], now_sec: i64) -> PruneOutcome {
     }
 }
 
-/// 写一条采样。返回是否真的写了（被去重规则挡下时返回 `Ok(false)`）。
-///
-/// `now_sec` 由调用方给，便于单测灌合成时间轴。
 pub fn record_sample_at(
     level: u8,
     charging: bool,
@@ -603,5 +594,3 @@ pub fn decide_charge(level: u8, charging: bool, mode: i32) -> ChargeState {
     }
     ChargeState::Discharging
 }
-
-// 单测要直接扫相位/方向边界，这里把内部函数引进来（不对外导出）。

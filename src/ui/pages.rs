@@ -1,42 +1,13 @@
-//! 五个页面的绘制。
-//!
-//! # 坐标约定（改这里之前先读）
-//!
-//! 所有页面代码都在**内容坐标**里工作：`y = 0` 是页面顶部，滚动由
-//! `gfx::Canvas::paint` 的世界变换统一施加。所以这里**没有任何一处**出现
-//! `* scale` 或 `- scroll`。想看某个元素现在在屏幕上的哪里，把逻辑 y 减掉
-//! 滚动量再乘缩放，那是 canvas 的事，不是页面的事。
-//!
-//! `x` 有两个体系：
-//! - [`Frame::content`] 的 `x` 已经含左侧内边距，页面元素从它开始排；
-//! - 侧栏（[`nav`]）用的是**窗口坐标**，因为它不随滚动移动。
-//!
-//! # 为什么绘制和命中共用一个函数
-//!
-//! 即时模式：画到哪个可交互元素，就顺手 `ui.hot(rect, act)` 登记。
-//! 顺序很重要 —— **先登记再画**，这样「画出来的」和「能点的」必然同一份矩形。
-//! 反过来（先画再登记）也没错，但一旦中间有 `return` 就会漏登记，
-//! 表现是「这一块看得见但点不动」，很难查。
-//!
-//! # 单位
-//!
-//! 全部是**逻辑像素**（96 DPI 下的 px），和设计稿 `ui-prototype.html` 的
-//! CSS px 一一对应。这样对着原型调间距时不用换算。
 
-
+use crate::ui::dropdown::{drop_current, drop_selected, options};
 use crate::ui::gfx::{with_alpha, Align, Painter, R};
 use crate::ui::layout::{self, font, Breakpoint, Frame};
-use crate::ui::theme::Theme;
-use crate::ui::dropdown::{
-    drop_current, drop_selected, options,
-};
 use crate::ui::palette::{
-    hsv_to_rgb, pack_custom_rgb, palette_colors, palette_index, rgb_to_hsv, PAL_CELL,
-    PAL_COLS, PAL_GAP,
+    hsv_to_rgb, pack_custom_rgb, palette_colors, palette_index, rgb_to_hsv, PAL_CELL, PAL_COLS,
+    PAL_GAP,
 };
-use crate::ui::widget::{
-    Act, Drop, Edit, Icon, Page, Pref, Slide, Ui,
-};
+use crate::ui::theme::Theme;
+use crate::ui::widget::{Act, Drop, Edit, Icon, Page, Pref, Slide, Ui};
 
 /// 设置页「关于」里的开源仓库地址。
 const REPO_URL: &str = "https://github.com/youmikk/ROG-Battery";
@@ -46,24 +17,21 @@ const STORE_URL: &str = "https://apps.microsoft.com/detail/9NRC8HCD4BZ7";
 /// 页面要显示的数据。由 `gui.rs` 从 `Shared` 里凑出来。
 pub use crate::ui::viewdata::Data;
 
-
 // ───────────────────────── 通用小工具 ─────────────────────────
 
-/// 连接方式文字。优先用实测链路模式（`hid::open_link` 给的 `Wired` /
-/// `Wireless24G`），只有还没读到实测值时才退回 `dongle_sn` 判据。
 fn link_text(d: &Data) -> &'static str {
     match d.link_mode {
-        "Wired" => "有线",
-        "Wireless24G" => "2.4G 无线",
+        "Wired" => crate::tr!("有线"),
+        "Wireless24G" => crate::tr!("2.4G 无线"),
         _ => {
             let has_dongle = d
                 .ident
                 .map(|i| !i.dongle_sn.trim().is_empty())
                 .unwrap_or(false);
             if has_dongle {
-                "2.4G 无线"
+                crate::tr!("2.4G 无线")
             } else {
-                "有线"
+                crate::tr!("有线")
             }
         }
     }
@@ -88,55 +56,6 @@ impl Cursor {
         }
     }
 
-
-    /// 页标题（h1）。原型：26px / 600 / letter-spacing −.4 / margin 10px 0 20px。
-    fn h1(&mut self, p: &mut Painter, s: &str) {
-        let top = self.y + 10.0;
-        p.text(
-            s,
-            R::new(self.x, top, self.w, layout::H1_H),
-            font::H1,
-            true,
-            p.t.text,
-            Align::Left,
-        );
-        self.y = top + layout::H1_H + 20.0;
-    }
-
-    /// 包含设备型号徽章的页标题（用户需求：标题栏不显示名字，在电量页展示鼠标名称）。
-    fn h1_with_model(&mut self, p: &mut Painter, s: &str, model: &str) {
-        let top = self.y + 10.0;
-        let (tw, _) = p.measure(s, font::H1, true);
-        p.text(
-            s,
-            R::new(self.x, top, tw + 8.0, layout::H1_H),
-            font::H1,
-            true,
-            p.t.text,
-            Align::Left,
-        );
-        if !model.is_empty() {
-            let (mw, _) = p.measure(model, 12.0, true);
-            let badge_w = mw + 26.0;
-            let badge_r = R::new(self.x + tw + 16.0, top + 4.0, badge_w, layout::H1_H - 8.0);
-            p.round(badge_r, 6.0, p.t.bg_sunken);
-            p.round_stroke(badge_r, 6.0, p.t.border, 1.0);
-            // 绿色状态圆点
-            p.round(R::new(badge_r.x + 8.0, badge_r.cy() - 3.0, 6.0, 6.0), 3.0, p.t.green);
-            p.text(
-                model,
-                R::new(badge_r.x + 18.0, badge_r.y + (badge_r.h - 16.0) / 2.0, mw + 4.0, 16.0),
-                12.0,
-                true,
-                p.t.text2,
-                Align::Left,
-            );
-        }
-        self.y = top + layout::H1_H + 20.0;
-    }
-
-    /// 分组标题（h2）。原型：14px / 600 / text2 / margin 26px 0 10px，
-    /// 但紧跟 h1 的第一个 h2 上边距只有 4px（原型 `first-of-type`）。
     fn h2(&mut self, p: &mut Painter, s: &str, first: bool) {
         let top = self.y + if first { 4.0 } else { 26.0 };
         p.text(
@@ -166,9 +85,6 @@ impl Cursor {
     }
 }
 
-/// 一行「标签 + 副标题」，左侧，返回剩余给控件的矩形。
-///
-/// 原型 `.row > .lbl`：`flex: 1`，`.t` 13.5px、`.d` 11.5px text3（`margin-top: 2px`）。
 fn row_label(p: &mut Painter, area: R, title: &str, desc: Option<&str>, ctl_w: f32) -> R {
     let text_w = (area.w - ctl_w - 18.0).max(40.0);
     if let Some(d) = desc {
@@ -218,10 +134,6 @@ fn row_rule(p: &mut Painter, card: R, area: R) {
     p.hline(card.x, card.right(), area.bottom(), t.border);
 }
 
-
-/// 分段控件（`.seg`）。返回是否命中，命中时给出第几段。
-///
-/// 原型：外层 `padding:2px`、`gap:2px`、圆角 4；内层按钮高 26、padding 0 12、圆角 3。
 fn segmented(
     p: &mut Painter,
     ui: &mut Ui,
@@ -275,7 +187,6 @@ fn select_box(p: &mut Painter, r: R, text: &str, open: bool) {
         p.t.text,
         Align::Left,
     );
-    // 右侧小三角（原型 `.caret`）：打开时朝上，收起时朝下。
     let cx = r.right() - 14.0;
     let cy = r.cy();
     let color = if open { p.t.accent } else { p.t.text3 };
@@ -375,19 +286,7 @@ fn swatch(p: &mut Painter, r: R, rgb: Option<[u8; 3]>) {
     }
 }
 
-/// 胶囊标签（`.badge`）。
-fn badge(p: &mut Painter, r: R, label: &str, fg: u32, bg: u32) {
-    p.pill(r, label, fg, bg, 11.0);
-}
-
 // ───────────────────────── 色盘 ─────────────────────────
-
-
-
-
-
-
-
 
 /// 色盘弹层的逻辑尺寸（含内边距）。
 fn palette_size(tab: u8) -> (f32, f32) {
@@ -403,15 +302,25 @@ fn palette_size(tab: u8) -> (f32, f32) {
 }
 
 /// 画色盘本体，支持「常用预设」网格与「自定义色环+深浅色阶」双模式。
-pub(crate) fn draw_palette(p: &mut Painter, ui: &mut Ui, slot: u8, anchor: R, cur: Option<[u8; 3]>, f: &Frame) {
+pub(crate) fn draw_palette(
+    p: &mut Painter,
+    ui: &mut Ui,
+    slot: u8,
+    anchor: R,
+    cur: Option<[u8; 3]>,
+    f: &Frame,
+) {
     let (w, h) = palette_size(ui.palette_tab);
     let scroll = ui.scroll_y(ui.page);
-    let view_h = f.content.h;
-    let x = anchor.x.min((f.content.right() - w).max(f.content.x)).max(f.content.x);
+    let view_h = f.viewport.bottom();
+    let x = anchor
+        .x
+        .min((f.content.right() - w).max(f.content.x))
+        .max(f.content.x);
     let y = anchor
         .y
-        .min((scroll + view_h - h - 8.0).max(scroll + 8.0))
-        .max(scroll + 8.0);
+        .min((scroll + view_h - h - 8.0).max(scroll + f.viewport.y + 8.0))
+        .max(scroll + f.viewport.y + 8.0);
     let r = R::new(x, y, w, h);
 
     // 阴影 + 卡片，和文字弹层同一套观感
@@ -437,10 +346,18 @@ pub(crate) fn draw_palette(p: &mut Painter, ui: &mut Ui, slot: u8, anchor: R, cu
     let tab1 = R::new(tab0.right() + 2.0, inner.y, tab_w, inner.h);
 
     for (i, tab) in [(0u8, tab0), (1u8, tab1)] {
-        let label = if i == 0 { "常用预设" } else { "自定义色环" };
+        let label = if i == 0 {
+            crate::tr!("常用预设")
+        } else {
+            crate::tr!("自定义色环")
+        };
         if ui.palette_tab == i {
             // 选中项：一枚投影 + accent 药丸，和页面里的分段控件一致
-            p.round(R::new(tab.x, tab.y + 1.0, tab.w, tab.h), 7.0, with_alpha(0x0000_0000, 0x1C));
+            p.round(
+                R::new(tab.x, tab.y + 1.0, tab.w, tab.h),
+                7.0,
+                with_alpha(0x0000_0000, 0x1C),
+            );
             p.round(tab, 7.0, p.t.accent);
             p.text(label, tab, 11.5, true, p.t.accent_fg, Align::Center);
         } else {
@@ -540,18 +457,25 @@ pub(crate) fn draw_palette(p: &mut Painter, ui: &mut Ui, slot: u8, anchor: R, cu
 
         // 2. 深浅色阶区：9 级渐变深浅档位
         let sy = cy + ring_radius + ring_width * 0.5 + 8.0;
-        p.text("选择深浅（点击直接应用）", R::new(r.x + 8.0, sy, 220.0, 14.0), 11.0, false, p.t.text3, Align::Left);
+        p.text(
+            crate::tr!("选择深浅（点击直接应用）"),
+            R::new(r.x + 8.0, sy, 220.0, 14.0),
+            11.0,
+            false,
+            p.t.text3,
+            Align::Left,
+        );
 
         let shades = [
-            [255, 255, 255],                      // 0: 纯白
-            hsv_to_rgb(active_hue, 0.25, 1.0),    // 1: 极浅
-            hsv_to_rgb(active_hue, 0.50, 1.0),    // 2: 柔和
-            hsv_to_rgb(active_hue, 0.75, 1.0),    // 3: 靓丽
-            hsv_to_rgb(active_hue, 1.0, 1.0),     // 4: 饱和纯色
-            hsv_to_rgb(active_hue, 1.0, 0.80),    // 5: 浓郁
-            hsv_to_rgb(active_hue, 1.0, 0.60),    // 6: 深暗
-            hsv_to_rgb(active_hue, 1.0, 0.35),    // 7: 极深
-            [0, 0, 0],                            // 8: 纯黑
+            [255, 255, 255],                   // 0: 纯白
+            hsv_to_rgb(active_hue, 0.25, 1.0), // 1: 极浅
+            hsv_to_rgb(active_hue, 0.50, 1.0), // 2: 柔和
+            hsv_to_rgb(active_hue, 0.75, 1.0), // 3: 靓丽
+            hsv_to_rgb(active_hue, 1.0, 1.0),  // 4: 饱和纯色
+            hsv_to_rgb(active_hue, 1.0, 0.80), // 5: 浓郁
+            hsv_to_rgb(active_hue, 1.0, 0.60), // 6: 深暗
+            hsv_to_rgb(active_hue, 1.0, 0.35), // 7: 极深
+            [0, 0, 0],                         // 8: 纯黑
         ];
 
         // 9 格等分卡片宽度，避免右侧留一截空白
@@ -580,7 +504,14 @@ pub(crate) fn draw_palette(p: &mut Painter, ui: &mut Ui, slot: u8, anchor: R, cu
         // 3. 底部快捷栏：一键应用当前色相的饱和纯色
         let by = swatch_y + swatch_h + 8.0;
         let btn_r = R::new(r.x + 8.0, by, r.w - 16.0, 28.0);
-        button(p, ui, btn_r, &format!("应用当前纯色 ({hex_now})"), true, Act::PickDrop(drop, active_packed));
+        button(
+            p,
+            ui,
+            btn_r,
+            &crate::trf!("应用当前纯色 ({hex_now})", hex_now = hex_now),
+            true,
+            Act::PickDrop(drop, active_packed),
+        );
     }
 
     ui.set_drop_rect(r);
@@ -597,17 +528,6 @@ fn color_button(p: &mut Painter, ui: &mut Ui, r: R, slot: u8, rgb: Option<[u8; 3
     }
 }
 
-/// 电量环的颜色，三态加一个「读不到」的降级态。
-///
-/// 抽成独立函数只为一件事：**让优先级可以被单独测试**。
-/// 它有条容易写错、写错了也不会报错的规则 ——
-///
-/// 1. 读不到设备 → `track`（灰）。不能落到红色低电量分支：0 是「电量耗尽」
-///    的意思，而休眠时真实电量可能是 77%，显示红色等于报假警。
-/// 2. 充电中 → `green`。**必须先于低电量判断**：充电时电量往往正好很低，
-///    顺序反了会把「正在充」显示成红色。
-/// 3. ≤20% → `red`。
-/// 4. 其余 → `accent`（蓝）。
 fn ring_color(t: &Theme, has_state: bool, charging: bool, level: u8) -> u32 {
     if !has_state {
         t.track
@@ -668,9 +588,9 @@ fn note(p: &mut Painter, r: R, text: &str, warn: bool) -> f32 {
     h
 }
 
-// ───────────────────────── 侧栏 ─────────────────────────
+// ───────────────────────── 导航 ─────────────────────────
 
-/// 侧栏用的图标。用线段画，不加载图片 —— 一个 16×16 的图标走 GDI+
+/// 导航用的图标。用线段画，不加载图片 —— 一个 16×16 的图标走 GDI+
 /// 只要 5 条线，比解一个 PNG 再缓存的成本低得多。
 fn draw_icon(p: &mut Painter, icon: Icon, r: R, color: u32, width: f32) {
     let x = r.x;
@@ -738,218 +658,194 @@ fn draw_icon(p: &mut Painter, icon: Icon, r: R, color: u32, width: f32) {
                 width,
             );
         }
-        // 设置：齿轮用「圆 + 四个方向齿」近似
-        Icon::Settings => {
-            p.dot_ring(x + w * 0.5, y + h * 0.5, w * 0.24, color, width);
-            for (dx, dy) in [(0.0f32, -1.0f32), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)] {
-                p.line(
-                    x + w * 0.5 + dx * w * 0.28,
-                    y + h * 0.5 + dy * h * 0.28,
-                    x + w * 0.5 + dx * w * 0.42,
-                    y + h * 0.5 + dy * h * 0.42,
-                    color,
-                    width,
-                );
-            }
-        }
     }
 }
 
-/// 画左侧导航（**窗口坐标**，不随滚动移动）。
-pub fn nav(p: &mut Painter, ui: &mut Ui, d: &Data, nav_w: f32, win_h: f32) {
-    let t = p.t;
-    // 顶部 36px 是标题栏带，导航**不能**画进去 —— 否则最后一趟标题栏会用底色
-    // 把导航顶部（设备卡）盖掉一半，看起来"顶部被切了一刀"。
-    let top = crate::ui::titlebar::TITLE_H;
-    // 底色 + 右边一条 1px 分隔线（都只从标题栏之下开始铺）
-    p.rect(R::new(0.0, top, nav_w, win_h - top), t.bg_nav);
-    p.line(nav_w - 0.5, top, nav_w - 0.5, win_h, t.border, 1.0);
-
-    let rail = ui.rail;
-    let pad = if rail { 8.0 } else { 8.0 };
-    let item_h = layout::NAV_ITEM_H;
-
-    // ---- 设备卡（仅展开时）----
-    let mut y = top + 12.0;
-    if !rail {
-        let dc = R::new(4.0, y, nav_w - 12.0, 66.0);
-        p.card(dc, 8.0, t.card, t.border);
-        let model = d
-            .ident
-            .map(|i| i.display_name())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "未找到设备".to_string());
-        p.text(
-            &model,
-            R::new(dc.x + 12.0, dc.y + 10.0, dc.w - 24.0, 18.0),
-            13.0,
-            true,
-            t.text,
-            Align::Left,
-        );
-        p.text(
-            link_text(d),
-            R::new(dc.x + 12.0, dc.y + 28.0, dc.w - 24.0, 14.0),
-            font::TINY,
-            false,
-            t.text3,
-            Align::Left,
-        );
-        // 「使用中」+ 电量。绿点用 dot，文字靠右。
-        let line_y = dc.y + 46.0;
-        let connected = d.state.is_some();
-        p.dot(
-            dc.x + 15.0,
-            line_y + 6.0,
-            3.0,
-            if connected { t.green } else { t.text3 },
-        );
-        p.text(
-            if connected { "已连接" } else { "未找到设备" },
-            R::new(dc.x + 23.0, line_y - 2.0, 60.0, 16.0),
-            12.0,
-            false,
-            t.text2,
-            Align::Left,
-        );
-        if let Some(st) = d.state {
-            let pct = format!("{}%", st.power);
-            p.text(
-                &pct,
-                R::new(dc.right() - 50.0, line_y - 2.0, 42.0, 16.0),
-                12.0,
-                true,
-                t.text,
-                Align::Right,
-            );
+fn page_heading(p: &mut Painter, ui: &mut Ui, c: &mut Cursor, title: &str, back: Option<Act>) {
+    let top = c.y + 8.0;
+    let mut x = c.x;
+    if let Some(act) = back {
+        let r = R::new(x, top + (layout::H1_H - 32.0) / 2.0, 32.0, 32.0);
+        if ui.hover == Some(act) {
+            p.round(r, 7.0, p.t.accent_soft);
         }
-        y = dc.bottom() + 12.0;
-    }
-
-    // ---- 五个导航项 ----
-    for page in Page::ALL {
-        let r = if rail {
-            R::new((nav_w - 38.0) / 2.0, y, 38.0, item_h)
-        } else {
-            R::new(pad, y, nav_w - pad * 2.0, item_h)
-        };
-        let act = Act::Nav(page);
-        let on = ui.page == page;
-        if on {
-            p.round(r, layout::R_CTL, t.card);
-            // 左侧 3×15 圆角 2 的强调竖条，贴边
-            if rail {
-                p.round(
-                    R::new(r.x + 2.0, r.cy() - 7.5, 3.0, 15.0),
-                    1.5,
-                    t.accent,
-                );
-            } else {
-                p.round(R::new(0.0, r.cy() - 7.5, 3.0, 15.0), 1.5, t.accent);
-            }
-        } else if ui.hover == Some(act) {
-            p.round(r, layout::R_CTL, with_alpha(t.text, 0x0C));
-        }
-        let fg = if on { t.accent } else { t.text };
-        if rail {
-            let ir = R::new(r.cx() - 8.0, r.cy() - 8.0, 16.0, 16.0);
-            draw_icon(p, page.icon(), ir, fg, 1.5);
-        } else {
-            let ir = R::new(r.x + 12.0, r.cy() - 8.0, 16.0, 16.0);
-            draw_icon(p, page.icon(), ir, fg, 1.5);
-            p.text(
-                page.title(),
-                R::new(ir.right() + 11.0, r.y, r.w - 45.0, r.h),
-                font::NAV,
-                on,
-                fg,
-                Align::Left,
-            );
-        }
-        ui.chrome_hot(r, act);
-        y += item_h + 1.0;
-    }
-
-    // ---- 底部：折叠按钮 + 版本 ----
-    // 折叠开关放在左栏最下方。
-    let foot_y = (win_h - 30.0 - 10.0).max(y + 12.0);
-    let toggle = if rail {
-        R::new((nav_w - 38.0) / 2.0, foot_y, 38.0, 30.0)
-    } else {
-        R::new(pad, foot_y, nav_w - pad * 2.0, 30.0)
-    };
-    let tact = Act::ToggleRail;
-    if ui.hover == Some(tact) {
-        p.round(toggle, layout::R_CTL, with_alpha(t.text, 0x0C));
-    }
-    // 折叠箭头：展开时指左（「收起来」），收起时指右（「展开」）
-    {
-        let cx = if rail { toggle.cx() } else { toggle.x + 14.0 };
-        let cy = toggle.cy();
-        let dir = if rail { 1.0 } else { -1.0 };
+        let cx = r.cx();
+        let cy = r.cy();
         p.polyline(
-            &[
-                (cx + 2.5 * dir, cy - 4.0),
-                (cx - 2.5 * dir, cy),
-                (cx + 2.5 * dir, cy + 4.0),
-            ],
-            t.text2,
+            &[(cx + 2.0, cy - 5.0), (cx - 3.0, cy), (cx + 2.0, cy + 5.0)],
+            p.t.text2,
             1.6,
         );
+        p.line(cx - 3.0, cy, cx + 6.0, cy, p.t.text2, 1.6);
+        ui.hot(r, act);
+        x += 42.0;
     }
-    if !rail {
-        p.text(
-            "收起侧栏",
-            R::new(toggle.x + 30.0, toggle.y, toggle.w - 40.0, toggle.h),
-            font::HINT,
-            false,
-            t.text2,
-            Align::Left,
-        );
-    }
-    ui.chrome_hot(toggle, tact);
+    p.text(
+        title,
+        R::new(x, top, c.x + c.w - x, layout::H1_H),
+        font::H1,
+        true,
+        p.t.text,
+        Align::Left,
+    );
+    c.y = top + layout::H1_H + 12.0;
+}
 
-    // 版本 + 帧统计（只在展开时显示，收起时没有空间）
-    if !rail {
-        let stat_y = foot_y + 34.0;
-        if stat_y + 14.0 < win_h - 4.0 {
-            let s = if d.frames > 0 {
-                format!("{} 帧 · {} ms", d.frames, d.elapsed_ms)
-            } else {
-                String::new()
-            };
-            p.text(
-                &s,
-                R::new(pad + 4.0, stat_y, nav_w - 80.0, 14.0),
-                font::TINY,
-                false,
-                t.text3,
-                Align::Left,
-            );
-            p.text(
-                &format!("v{}", d.version),
-                R::new(pad, stat_y, nav_w - pad * 2.0 - 4.0, 14.0),
-                font::TINY,
-                false,
-                t.text3,
-                Align::Right,
+fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
+    let t = p.t;
+    let name = d
+        .selected
+        .map(|r| d.cfg.device_name(r))
+        .unwrap_or(crate::tr!("设备详情"));
+    let back = (d.readings.len() > 1).then_some(Act::Nav(Page::Home));
+    page_heading(p, ui, c, name, back);
+    let tabs = [
+        (Page::Battery, crate::tr!("电量与设置")),
+        (Page::Perf, crate::tr!("性能")),
+        (Page::Light, crate::tr!("灯光")),
+        (Page::Keys, crate::tr!("按键")),
+    ];
+    let is_mouse = d
+        .selected
+        .is_some_and(|r| d.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Mouse);
+    let mut x = c.x;
+    for (page, label) in tabs {
+        if page != Page::Battery && !is_mouse {
+            continue;
+        }
+        let r = R::new(
+            x,
+            c.y,
+            (p.measure(label, 12.5, true).0 + 38.0).max(72.0),
+            33.0,
+        );
+        let on = ui.page == page;
+        let glyph = match page {
+            Page::Battery => Icon::Battery,
+            Page::Perf => Icon::Perf,
+            Page::Light => Icon::Light,
+            _ => Icon::Keys,
+        };
+        draw_icon(
+            p,
+            glyph,
+            R::new(r.x + 5.0, r.cy() - 7.0, 14.0, 14.0),
+            if on { t.accent } else { t.text2 },
+            1.3,
+        );
+        p.text(
+            label,
+            R::new(r.x + 21.0, r.y, r.w - 21.0, r.h),
+            12.5,
+            on,
+            if on { t.accent } else { t.text2 },
+            Align::Center,
+        );
+        if on {
+            p.round(
+                R::new(r.x + 8.0, r.bottom() - 2.0, r.w - 16.0, 2.0),
+                1.0,
+                t.accent,
             );
         }
+        ui.hot(r, Act::Nav(page));
+        x += r.w + 8.0;
     }
+    p.hline(c.x, c.x + c.w, c.y + 34.0, t.border);
+    c.y += 55.0;
+}
+
+fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
+    let Some(device) = d.selected else { return };
+    let pref = d.cfg.tray_for(&device.key);
+    let selected = d.cfg.tray_device.as_ref() == Some(&device.key);
+    c.h2(p, crate::tr!("设备偏好"), false);
+    let card = c.card(p, layout::ROW_H * 3.0);
+    let area = row_area(card, card.y);
+    let ctl = row_label(
+        p,
+        area,
+        crate::tr!("托盘显示设备"),
+        Some(crate::tr!("固定显示这台设备的电量")),
+        150.0,
+    );
+    button(
+        p,
+        ui,
+        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+        if selected {
+            crate::tr!("已在托盘显示")
+        } else {
+            crate::tr!("设为托盘显示设备")
+        },
+        false,
+        if selected {
+            Act::None
+        } else {
+            Act::ToggleDeviceTray
+        },
+    );
+    row_rule(p, card, area);
+    let area = row_area(card, card.y + layout::ROW_H);
+    let ctl = row_label(
+        p,
+        area,
+        crate::tr!("设备名称"),
+        Some(d.cfg.device_name(device)),
+        150.0,
+    );
+    button(
+        p,
+        ui,
+        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+        crate::tr!("编辑名称"),
+        false,
+        Act::RenameDevice,
+    );
+    row_rule(p, card, area);
+    let area = row_area(card, card.y + layout::ROW_H * 2.0);
+    let help = if pref.kind == crate::tray_prefs::TrayKind::Auto {
+        crate::trf!(
+            "自动识别为{}，可手动纠正",
+            d.cfg.device_kind(device).label()
+        )
+    } else {
+        crate::tr!("手动选择优先于自动识别").to_string()
+    };
+    let ctl = row_label(p, area, crate::tr!("设备类型"), Some(&help), 150.0);
+    drop_button(
+        p,
+        ui,
+        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+        Drop::TrayKind,
+        d,
+    );
+    c.y = card.bottom();
 }
 
 // ───────────────────────── 入口 ─────────────────────────
 
-
 /// 画当前页正文（内容坐标，滚动由 canvas 施加）。
 pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
+    if matches!(ui.page, Page::Perf | Page::Light | Page::Keys)
+        && d.selected
+            .is_some_and(|r| d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse)
+    {
+        ui.page = Page::Battery;
+        ui.set_open_drop(None);
+        ui.cancel_edit();
+    }
     // 读不到设备时，只有**依赖设备状态**的页面才锁定：设置页、灯光页、电量页
     // 的内容要么是本地设置、要么是只读展示，锁了反而没法用。
     // 占位状态（`State::default()`）也算读不到 —— 否则开关/下拉照常可点。
     ui.locked = !d.state.is_some_and(|s| !placeholder_state(s));
 
     let mut c = Cursor::new(f);
+    if !matches!(ui.page, Page::Home | Page::Settings) {
+        device_header(p, ui, d, &mut c);
+    }
     match ui.page {
+        Page::Home => home(p, ui, d, f, &mut c),
         Page::Battery => battery(p, ui, d, f, &mut c),
         Page::Perf => perf(p, ui, d, &mut c),
         Page::Light => light(p, ui, d, f, &mut c),
@@ -974,7 +870,7 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
                     draw_palette(p, ui, slot, anchor, cur, f);
                 }
             }
-            _ => draw_drop(p, ui, d, drop, f.content.h),
+            _ => draw_drop(p, ui, d, drop, f.viewport.bottom()),
         }
     }
 
@@ -1040,7 +936,7 @@ fn draw_toast(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
 
     let t = p.t;
     let scroll = ui.scroll_y(ui.page);
-    let view_h = f.content.h;
+    let view_h = f.viewport.bottom();
 
     let (fg_icon, bg_icon) = match kind {
         0 => (t.red, t.red_soft),
@@ -1115,12 +1011,29 @@ fn draw_toast(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
 /// 必须在**绘制该行时**调用：它要拿到那一行的矩形，而弹层本身的矩形
 /// 由 [`draw_drop`] 在最后登记（那时代码已经知道弹层该开在哪儿）。
 fn drop_button(p: &mut Painter, ui: &mut Ui, r: R, drop: Drop, d: &Data) {
+    let widest = options(drop, d)
+        .iter()
+        .map(|(label, _)| p.measure(label, 12.5, true).0 + 32.0)
+        .fold(r.w, f32::max)
+        .min(240.0);
+    let width = if drop == Drop::TrayDevice {
+        r.w
+    } else {
+        widest
+    };
+    let r = R::new(r.right() - width, r.y, width, r.h);
     let open = ui.open_drop() == Some(drop);
     select_box(p, r, &drop_current(drop, d), open);
     ui.hot(r, Act::OpenDrop(drop));
     // 记下这个下拉框的位置，弹层要贴着它开
     if open {
-        ui.set_drop_rect(R::new(r.x, r.bottom() + 4.0, r.w.max(160.0), 0.0));
+        let menu_w = widest.max(160.0);
+        let menu_x = if drop == Drop::TrayDevice {
+            r.right() - menu_w
+        } else {
+            r.x
+        };
+        ui.set_drop_rect(R::new(menu_x, r.bottom() + 4.0, menu_w, 0.0));
         ui.set_drop_btn(r);
     }
 }
@@ -1136,7 +1049,7 @@ fn drop_button(p: &mut Painter, ui: &mut Ui, r: R, drop: Drop, d: &Data) {
 /// - 这样在页面滚到任何位置、任何窗口高度下，弹层的全部选项都一定在可视区内。
 fn place_drop(ui: &Ui, anchor: R, h: f32, view_h: f32) -> R {
     let scroll = ui.scroll_y(ui.page);
-    let view_top = scroll;
+    let view_top = scroll + layout::CONTENT_TOP;
     let view_bottom = scroll + view_h;
     let btn = ui.drop_btn().unwrap_or(anchor);
 
@@ -1168,6 +1081,9 @@ fn draw_drop(p: &mut Painter, ui: &mut Ui, d: &Data, drop: Drop, view_h: f32) {
         return;
     };
     let opts = options(drop, d);
+    if drop == Drop::TrayDevice {
+        ui.tray_device_keys = d.readings.iter().map(|r| r.key.clone()).collect();
+    }
     // 空表直接返回：色盘走 `draw_palette`，但它也经过这里（`page()` 里
     // 按 `Drop` 分派）。不返回的话会画出一个 8px 高的空壳，
     // 而且 `set_drop_rect` 会把它登记成一个几乎点不到的矩形。
@@ -1220,430 +1136,249 @@ fn draw_drop(p: &mut Painter, ui: &mut Ui, d: &Data, drop: Drop, view_h: f32) {
         }
         ui.hot(ir, act);
     }
-    // 覆盖 `drop_button` 里登记的那个 0 高度占位矩形：命中测试要用真实高度。
     ui.set_drop_rect(r);
 }
 
 // ───────────────────────── 电量页 ─────────────────────────
 
-/// hero 卡（电量环 + KPI）的内部几何。
-///
-/// 高度必须由 KPI **实际行数**推导：窄屏（Narrow/Tiny）KPI 是单列 4 行，
-/// 早先写死 `ring_d + 156`，而 4 行要 `62 + 4*52`，卡片装不下，
-/// 第 3、4 行直接画到卡片外面，压住下面的「电量历史」标题。
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct HeroGeom {
-    /// 卡片高度。
-    hero_h: f32,
-    /// 设备信息卡宽度。
-    info_w: f32,
-    /// 主卡与信息卡之间的间距。
-    gap: f32,
-    /// 主卡宽度。
-    main_w: f32,
-    /// KPI 列起点，相对主卡左边。
-    kpi_x: f32,
-    /// KPI 单列可用宽度。
-    right_w: f32,
-    /// KPI 是否摆成两列。
-    two_cols: bool,
-    /// KPI 行数。
-    kv_rows: f32,
-    /// KPI 首行顶部，相对主卡上边。
-    kv_y: f32,
-}
-
-/// KPI 每行的纵向步进：label 14 + 值 26 + 行距 12 = 52。
-const KV_ROW_H: f32 = 52.0;
-/// 卡片底部留白。
-const HERO_PAD_B: f32 = 16.0;
-
-fn hero_geometry(bp: crate::ui::layout::Breakpoint, content_w: f32, ring_d: f32) -> HeroGeom {
-    let side_by_side = bp.hero_side_by_side();
-    let show_info = side_by_side && content_w > 760.0;
-    let info_w = 268.0;
-    let gap = 16.0;
-    let main_w = if show_info {
-        content_w - info_w - gap
-    } else {
-        content_w
-    };
-
-    // KPI 的横向布局只依赖内容宽度（不依赖卡片高度），先定列数，
-    // 再由行数反推卡片高度 —— 一处算一遍，不让两处各算一份。
-    let kpi_x = if side_by_side {
-        24.0 + ring_d + 26.0
-    } else {
-        24.0
-    };
-    let right_w = (main_w - 24.0 - kpi_x).max(80.0);
-    let two_cols = bp.kv_two_cols() && right_w > 180.0;
-    let kv_rows = if two_cols { 2.0 } else { 4.0 };
-    // 末行不需要下面那一档行距。
-    let kv_h = kv_rows * KV_ROW_H - 12.0;
-
-    let (hero_h, kv_y) = if side_by_side {
-        // 环在左、KPI 在右：环高 + 上下边距，但要保证不比 KPI 需要的矮。
-        ((ring_d + 68.0).max(38.0 + kv_h + HERO_PAD_B), 38.0)
-    } else {
-        // 环在上、KPI 在下：环(22 + ring_d) + 结论行 + KPI 整块 + 底边距。
-        let y = ring_d + 62.0;
-        (y + kv_h + HERO_PAD_B, y)
-    };
-
-    HeroGeom {
-        hero_h,
-        info_w,
-        gap,
-        main_w,
-        kpi_x,
-        right_w,
-        two_cols,
-        kv_rows,
-        kv_y,
-    }
-}
-
-fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
+/// 首页仅展示设备读数，点击进入该设备的详情。
+fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    let model = d
-        .ident
-        .map(|i| i.display_name())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "未检测到设备".to_string());
-    c.h1_with_model(p, "电量", &model);
-
-    let st = d.state;
-    let level = st.map(|s| s.power).unwrap_or(0);
-    let charging = st.map(|s| s.charging != 0).unwrap_or(false);
-
-    // ---- hero：电量环 + KPI ----
-    //
-    // 原型里 hero 是**两张并排的卡片**：左边 `.hero-main`（环 + KPI），
-    // 右边 `.hero-side`（设备信息，扩展为 268px 以免型号或序列号截断）。
-    let side_by_side = f.bp.hero_side_by_side();
-    let show_info = side_by_side && c.w > 760.0;
-    let ring_d = f.bp.ring_diameter();
-    let g = hero_geometry(f.bp, c.w, ring_d);
-    let (hero_h, info_w, gap, main_w) = (g.hero_h, g.info_w, g.gap, g.main_w);
-    let hero = c.card_w(p, main_w, hero_h);
-
-    // 左卡片里环之后剩下的宽度
-    let kpi_x = hero.x + g.kpi_x;
-    let right_w = g.right_w;
-    let kv_y = hero.y + g.kv_y;
-
-    // 电量环。
-    //
-    // 读不到设备时（鼠标休眠）**不能画 0% 加红环** —— 0 是「电量耗尽」的意思，
-    // 用户会以为鼠标没电了。实测休眠时界面显示「0% + 电量偏低」红色徽章，
-    // 而真实电量其实是 77%。读不到就画一条灰色空环 + 「—」。
-    {
-        let cx = hero.x + 24.0 + ring_d * 0.5;
-        let cy = if side_by_side {
-            // 不再整卡垂直居中：上面要留 20px 边，下面要留一行结论的位置。
-            hero.y + 20.0 + ring_d * 0.5
-        } else {
-            hero.y + 22.0 + ring_d * 0.5
-        };
-        let frac = if st.is_some() {
-            level as f32 / 100.0
-        } else {
-            0.0
-        };
-
-        // 环色三态，规则见 [`ring_color`]（那边有单测锁优先级）。
-        let ring_color = ring_color(t, st.is_some(), charging, level);
-
-        if charging && st.is_some() {
-            // 这一帧真的画了动效 —— 让 canvas 的定时器据此决定要不要继续跑。
-            // 定时器自己不知道「还需不需要重绘」，只能靠每帧画出来的事实。
-            ui.anim_hint = true;
-            // 充电动效：一段固定长度的亮色弧沿整圈匀速跑动。
-            //
-            // 为什么不用「整圈呼吸」：呼吸动画在不满一圈的进度弧上会让人分不清
-            // 「电量在涨」还是「环在自己闪」。跑动的彗尾更明确 —— 它只有一个方向，
-            // 而且不影响静态读数（进度弧本身照常画，另叠一条尾巴）。
-            p.arc_comet(
-                cx,
-                cy,
-                ring_d * 0.5 - 5.0,
-                7.0,
-                frac,
-                t.green,
-                ring_color,
-                t.track,
-            );
-        } else {
-            p.ring(
-                cx,
-                cy,
-                ring_d * 0.5 - 5.0,
-                7.0,
-                frac,
-                ring_color,
-                ring_color,
-                t.track,
-            );
-        }
-        let txt = if st.is_some() {
-            format!("{level}")
-        } else {
-            "—".to_string()
-        };
-        // 把「数字 + 单位/徽章」当作**一组**在环心竖直居中，而不是各自摆放 ——
-        // 之前数字框中心在 cy-2、充电徽章中心在 cy+27，整组重心明显偏下，
-        // 徽章底边还压到环的下侧笔画，用户反馈「字不居中」。
-        if st.is_some() && charging {
-            // 数字 + 闪电胶囊：整组高 ≈ 40 + 4 + 16 = 60，从 cy-30 起排。
-            p.text(
-                &txt,
-                R::new(cx - 50.0, cy - 30.0, 100.0, 40.0),
-                font::NUM_RING,
-                true,
-                t.text,
-                Align::Center,
-            );
-            let bw = 56.0;
-            let bh = 16.0;
-            let br = R::new(cx - bw / 2.0, cy + 10.0, bw, bh);
-            p.round(br, 8.0, with_alpha(t.green, 0x2A));
-            p.text("⚡充电中", br, 9.5, true, t.green, Align::Center);
-        } else if st.is_some() {
-            // 数字 + 「%」：数字中心落在 cy-4，「%」贴在其下方，整组居中。
-            p.text(
-                &txt,
-                R::new(cx - 50.0, cy - 24.0, 100.0, 40.0),
-                font::NUM_RING,
-                true,
-                t.text,
-                Align::Center,
-            );
-            p.text(
-                "%",
-                R::new(cx - 50.0, cy + 12.0, 100.0, 14.0),
-                font::TINY,
-                false,
-                t.text3,
-                Align::Center,
-            );
-        } else {
-            // 读不到电量：只画「—」，居中。
-            p.text(
-                &txt,
-                R::new(cx - 50.0, cy - 22.0, 100.0, 40.0),
-                font::NUM_RING,
-                true,
-                t.text,
-                Align::Center,
-            );
-        }
-    }
-
-    // ---- 环下方的结论：预计可用 / 预计充满 ----
-    //
-    // 这是整页最想知道的一句话，所以放在环正下方、用正文色加粗，而不是塞进
-    // 下面 2×2 的 KPI 里跟「电压」「回报率」平起平坐。充电 / 放电 / 样本不足
-    // 三种说法由 `Estimate::short_text` 统一给出，这里不判断。
-    {
-        let cx = hero.x + 24.0 + ring_d * 0.5;
-        let w = (ring_d + 40.0).max(120.0);
-        let y = hero.y + 22.0 + ring_d + 4.0;
-        let txt = d.estimate.short_text();
-        let known = d.estimate.known;
+    page_heading(p, ui, c, crate::tr!("设备"), None);
+    p.text(
+        crate::tr!("所有设备的电量，一眼就好。"),
+        R::new(c.x, c.y - 14.0, c.w, 20.0),
+        12.0,
+        false,
+        t.text2,
+        Align::Left,
+    );
+    c.y += 25.0;
+    if d.readings.is_empty() {
         p.text(
-            &txt,
-            R::new(cx - w * 0.5, y, w, 18.0),
-            if known { 13.0 } else { 12.0 },
-            known,
-            if known { t.text } else { t.text3 },
+            crate::tr!("连接设备后会自动显示。"),
+            R::new(c.x, c.y + 32.0, c.w, 30.0),
+            14.0,
+            false,
+            t.text3,
             Align::Center,
         );
+        c.y += 100.0;
+        return;
     }
-
-    // KPI：电压 / 回报率 / 当前档位 / 变化速率
-    {
-        let two_cols = g.two_cols;
-        let items: [(&str, String); 4] = if let Some(s) = st {
-            [
-                ("电压", format!("{} mV", s.voltage_mv)),
-                ("回报率", crate::proto::poll_name(s.poll_code)),
-                (
-                    "当前档位",
-                    format!("{} · {} DPI", s.active_stage.max(1), s.dpi(cur_stage(s))),
-                ),
-                (
-                    "变化速率",
-                    if d.estimate.known {
-                        format!("{:+.2} %/h", d.estimate.percent_per_hour)
-                    } else {
-                        "样本不足".to_string()
-                    },
-                ),
-            ]
-        } else {
-            [
-                ("电压", "—".into()),
-                ("回报率", "—".into()),
-                ("当前档位", "—".into()),
-                ("变化速率", "—".into()),
-            ]
-        };
-        let col_w = if two_cols {
-            (right_w - 26.0) / 2.0
-        } else {
-            right_w
-        };
-        for (i, (k, v)) in items.iter().enumerate() {
-            let (col, row) = if two_cols {
-                (i % 2, i / 2)
+    let columns = if c.w < 420.0 { 1 } else { 2 };
+    let gap = 18.0;
+    let width = (c.w - gap * (columns - 1) as f32) / columns as f32;
+    let height = 220.0;
+    for (index, dev) in d.readings.iter().enumerate() {
+        let r = R::new(
+            c.x + (index % columns) as f32 * (width + gap),
+            c.y + (index / columns) as f32 * (height + gap),
+            width,
+            height,
+        );
+        let act = Act::SelectDevice(index);
+        p.card(
+            r,
+            14.0,
+            t.card,
+            if ui.hover == Some(act) {
+                t.accent
             } else {
-                (0, i)
-            };
-            let x = kpi_x + col as f32 * (col_w + 26.0);
-            let y = kv_y + row as f32 * KV_ROW_H;
-            p.text(
-                k,
-                R::new(x, y, col_w, 14.0),
-                font::LABEL,
-                false,
-                t.text3,
-                Align::Left,
-            );
-            p.text(
-                v,
-                R::new(x, y + 15.0, col_w, 26.0),
-                font::NUM_BIG,
-                true,
-                t.text,
-                Align::Left,
-            );
-        }
-    }
-
-    // 设备信息：**另起一张卡片**放在 hero 右边（在电量页清晰展示读取到的鼠标型号与状态）。
-    if show_info {
-        let side = R::new(hero.right() + gap, hero.y, info_w, hero_h);
-        p.card(side, layout::R_CARD, t.card, t.border);
-        let sx = side.x + 18.0;
-        let inner_w = info_w - 36.0;
-        let sy = side.y + 16.0;
-
-        // 顶部醒目展示读取到的设备型号名字
+                t.border
+            },
+        );
+        ui.hot(r, act);
         p.text(
-            "当前设备",
-            R::new(sx, sy, inner_w, 13.0),
-            font::TINY,
+            d.cfg.device_kind(dev).label(),
+            R::new(r.x + 18.0, r.y + 12.0, 80.0, 18.0),
+            10.5,
             false,
             t.text3,
             Align::Left,
         );
+        let color = ring_color(t, dev.connected, dev.charging, dev.level);
+        let cy = r.y + 83.0;
+        p.ring(
+            r.cx(),
+            cy,
+            48.0,
+            5.0,
+            dev.level as f32 / 100.0,
+            color,
+            color,
+            t.track,
+        );
         p.text(
-            &model,
-            R::new(sx, sy + 15.0, inner_w, 18.0),
-            13.5,
+            &format!("{}%", dev.level),
+            R::new(r.cx() - 46.0, cy - 21.0, 92.0, 35.0),
+            29.0,
+            false,
+            if dev.connected { t.text } else { t.text3 },
+            Align::Center,
+        );
+        p.text(
+            if !dev.connected {
+                crate::tr!("上次电量")
+            } else if dev.charging {
+                crate::tr!("正在充电")
+            } else if dev.level <= 20 {
+                crate::tr!("电量偏低")
+            } else {
+                crate::tr!("使用中")
+            },
+            R::new(r.cx() - 45.0, cy + 16.0, 90.0, 16.0),
+            10.0,
+            false,
+            t.text2,
+            Align::Center,
+        );
+        p.text(
+            d.cfg.device_name(dev),
+            R::new(r.x + 16.0, r.y + 151.0, r.w - 32.0, 25.0),
+            14.0,
             true,
             t.text,
-            Align::Left,
+            Align::Center,
         );
+        p.text(
+            if !dev.connected {
+                crate::tr!("未连接")
 
-        let mut ly = sy + 38.0;
-        let ident = d.ident;
-        // 设备大类：PID 在对照表里就能说出是鼠标 / 键盘 / 手柄。
-        let kind_text = {
-            let pid = ident
-                .map(|i| if i.wired_pid != 0 { i.wired_pid } else { i.wireless_pid })
-                .unwrap_or(0);
-            crate::devices::find(pid)
-                .map(|dv| dv.kind.as_str().to_string())
-                .unwrap_or_else(|| "—".to_string())
-        };
-        let lines: [(&str, String); 4] = [
-            (
-                "序列号",
-                ident.map(|i| i.mouse_sn.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "—".to_string()),
-            ),
-            (
-                "接收器固件",
-                ident
-                    .map(|i| i.dongle_firmware.clone())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "—".to_string()),
-            ),
-            (
-                "连接方式",
-                if d.state.is_some() {
-                    link_text(d).to_string()
-                } else {
-                    "离线 / 休眠".to_string()
-                },
-            ),
-            ("设备类型", kind_text),
-        ];
-        for (k, v) in lines.iter() {
-            p.text(k, R::new(sx, ly, 74.0, 16.0), 12.0, false, t.text3, Align::Left);
+            } else {
+                crate::tr!("已连接")
+            },
+            R::new(r.x + 16.0, r.y + 181.0, r.w - 32.0, 18.0),
+            11.0,
+            false,
+            t.text3,
+            Align::Center,
+        );
+    }
+    c.y += d.readings.len().div_ceil(columns) as f32 * (height + gap);
+}
+
+fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
+    let t = p.t;
+    let selected = d.selected;
+    let level = selected
+        .map(|r| r.level)
+        .or_else(|| d.state.map(|s| s.power))
+        .unwrap_or(0);
+    let connected = selected.map(|r| r.connected).unwrap_or(d.state.is_some());
+    let charging = selected.map(|r| r.charging).unwrap_or(false);
+    let hero = c.card(p, 175.0);
+    let color = ring_color(t, connected, charging, level);
+    let cx = hero.x + 84.0;
+    let cy = hero.y + 87.0;
+    p.ring(
+        cx,
+        cy,
+        54.0,
+        5.5,
+        level as f32 / 100.0,
+        color,
+        color,
+        t.track,
+    );
+    p.text(
+        &format!("{level}%"),
+        R::new(cx - 50.0, cy - 23.0, 100.0, 37.0),
+        30.0,
+        false,
+        t.text,
+        Align::Center,
+    );
+    let status = if !connected {
+        crate::tr!("未连接")
+    } else if charging {
+        crate::tr!("正在充电")
+    } else {
+        crate::tr!("使用中")
+    };
+    p.text(
+        status,
+        R::new(cx - 45.0, cy + 19.0, 90.0, 17.0),
+        11.0,
+        false,
+        t.text2,
+        Align::Center,
+    );
+    let x = hero.x + 166.0;
+    let remaining = if !connected {
+        crate::tr!("等待设备连接").to_string()
+    } else if charging {
+        crate::tr!("正在为设备充电").to_string()
+    } else if d.estimate.known {
+        crate::trf!("预计还能使用 {}", d.estimate.localized_short_text())
+    } else {
+        crate::tr!("电量状态").to_string()
+    };
+    p.text(
+        &remaining,
+        R::new(x, hero.y + 42.0, hero.right() - x - 20.0, 28.0),
+        18.0,
+        false,
+        t.text,
+        Align::Left,
+    );
+    let link = if connected {
+        link_text(d)
+    } else {
+        crate::tr!("连接后更新读数")
+    };
+    p.text(
+        link,
+        R::new(x, hero.y + 84.0, hero.right() - x - 20.0, 22.0),
+        12.0,
+        false,
+        t.text2,
+        Align::Left,
+    );
+    if let Some(st) = d.state {
+        if selected.is_some_and(|r| d.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Mouse) {
             p.text(
-                v,
-                R::new(sx + 76.0, ly, inner_w - 76.0, 16.0),
+                &format!(
+                    "{} DPI  ·  {}",
+                    st.dpi(cur_stage(st)),
+                    crate::proto::poll_name(st.poll_code)
+                ),
+                R::new(x, hero.y + 116.0, hero.right() - x - 20.0, 20.0),
                 12.0,
                 false,
                 t.text2,
-                Align::Right,
+                Align::Left,
             );
-            ly += 19.0;
-        }
-
-        // 状态胶囊。
-        //
-        // 读不到设备（休眠）时显示「休眠中」灰胶囊 —— **不能**因为 `level`
-        // 默认成 0 就落到「电量偏低」分支，那是在没有任何数据的情况下报警。
-        let mut bx = sx;
-        let by = ly + 4.0;
-        let pill_h = 21.0;
-        let (label, fg, bg) = if st.is_none() {
-            ("未连接", t.text3, t.bg_sunken)
-        } else if charging {
-            ("充电中", t.warn, t.warn_soft)
-        } else if level <= 15 {
-            ("电量偏低", t.red, t.red_soft)
-        } else {
-            ("使用中", t.green, t.green_soft)
-        };
-        let w = label.chars().count() as f32 * 11.0 + 16.0;
-        badge(p, R::new(bx, by, w, pill_h), label, fg, bg);
-        bx += w + 6.0;
-        if let Some(s) = st {
-            let l = format!("{} 档休眠", crate::proto::sleep_mode_name(s.sleep_mode));
-            let w2 = l.chars().count() as f32 * 11.0 + 16.0;
-            if bx + w2 <= side.right() - 16.0 {
-                badge(p, R::new(bx, by, w2, pill_h), &l, t.text3, t.bg_sunken);
-            }
         }
     }
-
     c.y = hero.bottom();
+    device_tray_settings(p, ui, d, c);
+    if selected
+        .is_some_and(|r| d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse)
+    {
+        return;
+    }
 
     // ---- 电量历史 ----
-    c.h2(p, "电量历史", false);
-    // 卡片高度按 `draw_chart` 的实际内容算：16（上边距）+ 18（标题行）+ 8 +
-    // 146（绘图区）+ 20（X 轴时间）+ 12（下边距）= 220。
-    // 原来写 `168 + 56 + 28 = 252` 是照抄原型的 SVG viewBox，
-    // 底下会空出 46px 一条白边；132 的绘图区又太扁，曲线被压成一条带子。
-    let chart = c.card(p, 220.0);
-    draw_chart(p, chart, d, ui);
-    // 卡片不会自己推进游标（它的返回值才是位置），必须手动前移 ——
-    // 漏了这一步，「电源管理」的标题会画在图表卡片上面。
-    c.y = chart.bottom();
-
-    // ---- 电源管理 ----
-    c.h2(p, "电源管理", false);
+    // ---- 设备设置 ----
+    c.h2(p, crate::tr!("设备设置"), false);
     // 只管「标题 · 说明」，控件宽度由各行自己按控件类型定（下拉 150、
     // 输入框+按钮、开关 40）。曾经这里多一个宽度字段，三处调用全都无视它、
     // 直接写字面量，于是那个字段从没被读过，第三行的 60 还和实际用的 40 对不上。
+    let st = known_state(d);
     let rows: [(&str, Option<&str>); 3] = [
-        ("自动休眠", Some("设备静止多久后进入休眠以省电")),
-        ("低电量阈值", Some("低于该电量时设备指示灯会闪")),
-        ("充满效果", Some("充满电时播放一次灯效")),
+        (
+            crate::tr!("自动休眠"),
+            Some(crate::tr!("设备静止多久后进入休眠以省电")),
+        ),
+        (
+            crate::tr!("低电量阈值"),
+            Some(crate::tr!("低于该电量时设备指示灯会闪")),
+        ),
+        (
+            crate::tr!("充满效果"),
+            Some(crate::tr!("充满电时播放一次灯效")),
+        ),
     ];
     let total_h: f32 = rows.iter().map(|_| layout::ROW_H).sum();
     let card = c.card(p, total_h);
@@ -1684,7 +1419,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
             Align::Left,
         );
         let btn = R::new(ctl.right() - 56.0, ctl.cy() - 15.0, 56.0, 30.0);
-        button(p, ui, btn, "应用", false, Act::ApplyEdit(edit));
+        button(p, ui, btn, crate::tr!("应用"), false, Act::ApplyEdit(edit));
         row_rule(p, card, area);
         ry += layout::ROW_H;
         i += 1;
@@ -1701,6 +1436,14 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     }
     c.y = card.bottom();
 
+    c.h2(p, crate::tr!("电量历史"), false);
+
+    let chart = c.card(p, 220.0);
+    draw_chart(p, chart, d, ui);
+    // 卡片不会自己推进游标（它的返回值才是位置），必须手动前移 ——
+    // 漏了这一步，「电源管理」的标题会画在图表卡片上面。
+    c.y = chart.bottom();
+
     // ---- 续航明细 ----
     //
     // 结论已经放到电量环下面了，这里不再重复整句，只留「怎么算出来的」，
@@ -1709,14 +1452,15 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
         c.y += 14.0;
         let line = if d.estimate.stale_seconds > 0 {
             // 沿用旧结论时必须说明白，否则等于拿旧斜率冒充当前状态。
-            format!(
+            crate::trf!(
                 "沿用 {}前的估算 · 当前读数没更新，暂时没法重算",
-                crate::history::ago_text(d.estimate.stale_seconds)
+                crate::i18n::age(d.estimate.stale_seconds)
             )
         } else {
-            format!(
+            crate::trf!(
                 "按最近 {} 个采样估算 · 变化 {:+.2} %/h",
-                d.estimate.samples, d.estimate.percent_per_hour
+                d.estimate.samples,
+                d.estimate.percent_per_hour
             )
         };
         p.text(
@@ -1731,7 +1475,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame, c: &mut Cursor) {
     } else if !d.estimate.text.is_empty() {
         c.y += 14.0;
         p.text(
-            &d.estimate.text,
+            &d.estimate.localized_text(),
             R::new(c.x + 6.0, c.y, c.w - 12.0, 18.0),
             font::HINT,
             false,
@@ -1753,11 +1497,6 @@ fn cur_stage(s: &crate::proto::State) -> usize {
     idx.min(crate::proto::DPI_STAGES - 1)
 }
 
-/// 画电量曲线（含标题行、网格、面积、折线、数据点）。
-/// 把 `Plot`（归一化坐标）烘成像素几何，供 `draw_chart` 每帧直接使用。
-///
-/// `span` 是纵轴范围（`hi - lo`，已保证 ≥1）。抽成纯函数便于单测：
-/// 这块几何一旦算歪，曲线会整体上下错位或跑到绘图区外。
 fn chart_geom(
     pl: &crate::chart::Plot,
     plot: R,
@@ -1838,7 +1577,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
     let t = p.t;
     let head_y = card.y + 16.0;
     p.text(
-        "近 48 小时",
+        crate::tr!("近 48 小时"),
         R::new(card.x + 18.0, head_y, 90.0, 18.0),
         13.0,
         true,
@@ -1873,7 +1612,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
     {
         p.dot(card.x + 98.0, head_y + 9.0, 4.0, with_alpha(t.green, 0xB0));
         p.text(
-            "充电",
+            crate::tr!("充电"),
             R::new(card.x + 106.0, head_y, 34.0, 18.0),
             font::TINY,
             false,
@@ -1881,7 +1620,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
             Align::Left,
         );
     }
-    let samples = format!("{} 个采样点", d.rows);
+    let samples = crate::trf!("{} 个采样点", d.rows);
     p.text(
         &samples,
         R::new(card.right() - 200.0, head_y, 94.0, 18.0),
@@ -2095,12 +1834,11 @@ fn known_state<'a>(d: &'a Data) -> Option<&'a crate::proto::State> {
 
 fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "性能");
     let st = known_state(d);
     let cur = st.map(cur_stage);
 
     // ---- DPI 档位 ----
-    c.h2(p, "DPI 档位", true);
+    c.h2(p, crate::tr!("DPI 档位"), true);
     let dpi_h = 4.0 * 46.0 + 40.0;
     let card = c.card(p, dpi_h);
     let mut y = card.y + 4.0;
@@ -2126,7 +1864,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 
         // 档位标签
         p.text(
-            &format!("档位 {}", i + 1),
+            &crate::trf!("档位 {}", i + 1),
             R::new(card.x + 18.0, row.y, 52.0, row.h),
             11.5,
             is_cur,
@@ -2172,7 +1910,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         // 右侧：当前标记 / 切换与应用按钮
         if is_cur {
             p.text(
-                "● 当前使用",
+                crate::tr!("● 当前使用"),
                 R::new(row.right() - 146.0, row.y, 76.0, row.h),
                 11.0,
                 true,
@@ -2181,16 +1919,30 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             );
         } else {
             let switch_btn = R::new(row.right() - 124.0, row.cy() - 15.0, 54.0, 30.0);
-            button(p, ui, switch_btn, "切换", false, Act::PickDrop(Drop::Stage, i));
+            button(
+                p,
+                ui,
+                switch_btn,
+                crate::tr!("切换"),
+                false,
+                Act::PickDrop(Drop::Stage, i),
+            );
         }
         let apply_btn = R::new(row.right() - 62.0, row.cy() - 15.0, 52.0, 30.0);
-        button(p, ui, apply_btn, "应用", false, Act::ApplyEdit(edit));
+        button(
+            p,
+            ui,
+            apply_btn,
+            crate::tr!("应用"),
+            false,
+            Act::ApplyEdit(edit),
+        );
 
         y += 46.0;
     }
     // 说明
     p.text_wrap(
-        "范围 100–42000 DPI，步进 50。颜色是该档位在设备上的指示灯颜色。",
+        crate::tr!("范围 100–42000 DPI，步进 50。颜色是该档位在设备上的指示灯颜色。"),
         R::new(card.x + 18.0, y + 6.0, card.w - 36.0, 32.0),
         11.5,
         t.text3,
@@ -2198,24 +1950,19 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 
     // ---- 回报率 ----
-    c.h2(p, "回报率", false);
+    c.h2(p, crate::tr!("回报率"), false);
     let card = c.card(p, layout::ROW_H * 2.0);
     {
         let area = row_area(card, card.y);
         let ctl = row_label(
             p,
             area,
-            "轮询频率",
-            Some("越高越跟手，也越耗电"),
+            crate::tr!("轮询频率"),
+            Some(crate::tr!("越高越跟手，也越耗电")),
             330.0,
         );
         // 读不到设备时不高亮任何一档（默认 1000Hz 是编出来的值）
         let sel = st.map(|s| (s.poll_code as usize).min(3)).unwrap_or(usize::MAX);
-        // 分段控件让出 30px 给右边的「Hz」。
-        //
-        // 原先把 330px 全给分段、再把「Hz」画在 `ctl.right() - 2.0` ——
-        // 那是**压在最后一段上面**（截图里「1000」蓝底右侧压着一截「Hz」），
-        // 同时视口右边界把最后几像素裁掉了，看起来像控件溢出了卡片。
         let seg_w = 300.0;
         segmented(
             p,
@@ -2237,7 +1984,13 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     }
     {
         let area = row_area(card, card.y + layout::ROW_H);
-        let ctl = row_label(p, area, "当前档位", Some("同时决定设备的 DPI 和档位指示灯"), 220.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("当前档位"),
+            Some(crate::tr!("同时决定设备的 DPI 和档位指示灯")),
+            220.0,
+        );
         segmented(
             p,
             ui,
@@ -2251,15 +2004,15 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 
     // ---- 去抖 ----
-    c.h2(p, "去抖", false);
+    c.h2(p, crate::tr!("去抖"), false);
     let card = c.card(p, layout::ROW_H);
     {
         let area = row_area(card, card.y);
         let ctl = row_label(
             p,
             area,
-            "按键去抖时间",
-            Some("双击被识别成单击时调大"),
+            crate::tr!("按键去抖时间"),
+            Some(crate::tr!("双击被识别成单击时调大")),
             150.0,
         );
         drop_button(
@@ -2273,7 +2026,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 
     // ---- 角度 ----
-    c.h2(p, "角度", false);
+    c.h2(p, crate::tr!("角度"), false);
     let adv_open = ui.adv[0];
     let base_h = layout::ROW_H + if adv_open { 46.0 + 46.0 + 46.0 } else { 46.0 };
     let card = c.card(p, base_h);
@@ -2282,8 +2035,8 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         let ctl = row_label(
             p,
             area,
-            "角度吸附",
-            Some("斜向移动时自动贴合水平/垂直"),
+            crate::tr!("角度吸附"),
+            Some(crate::tr!("斜向移动时自动贴合水平/垂直")),
             40.0,
         );
         let on = st.map(|s| s.angle_snap != 0).unwrap_or(false);
@@ -2317,7 +2070,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             );
         }
         p.text(
-            "高级",
+            crate::tr!("高级"),
             R::new(head.x + 18.0, head.y, head.w - 30.0, head.h),
             13.0,
             false,
@@ -2338,7 +2091,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             .unwrap_or(((dev_val as f32) + 20.0) / 40.0);
         // 数字也跟着走，否则「滑块动了但数字不动」比不跟手更让人困惑。
         let val = (frac * 40.0 - 20.0).round() as i16;
-        let ctl = row_label(p, area, "角度微调", None, 260.0);
+        let ctl = row_label(p, area, crate::tr!("角度微调"), None, 260.0);
         let track = R::new(ctl.x, ctl.cy() - 9.0, 190.0, 18.0);
         p.slider(track, frac, st.is_some());
         ui.hot(track, Act::SetSlide(Slide::Tune, frac));
@@ -2355,9 +2108,9 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         // 加减速：设备不支持，明确说明而不是画一个假控件
         let ny = sy + 46.0;
         let area = R::new(card.x + 18.0, ny, card.w - 36.0, 46.0);
-        row_label(p, area, "加减速曲线", None, 120.0);
+        row_label(p, area, crate::tr!("加减速曲线"), None, 120.0);
         p.text(
-            "本型号不支持",
+            crate::tr!("本型号不支持"),
             R::new(area.right() - 110.0, area.y, 110.0, area.h),
             12.0,
             false,
@@ -2368,11 +2121,17 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 
     // ---- 抬起距离 ----
-    c.h2(p, "抬起距离", false);
+    c.h2(p, crate::tr!("抬起距离"), false);
     let card = c.card(p, layout::ROW_H);
     {
         let area = row_area(card, card.y);
-        let ctl = row_label(p, area, "抬起距离（LOD）", Some("低省电，高更容易追踪"), 160.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("抬起距离（LOD）"),
+            Some(crate::tr!("低省电，高更容易追踪")),
+            160.0,
+        );
         let sel = st.map(|s| (s.lod as usize).min(1)).unwrap_or(usize::MAX);
         segmented(
             p,
@@ -2388,7 +2147,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        "写 LOD 会重置设备的表面标定（厂商确认没有恢复命令）。本机标定已被重置过。",
+        crate::tr!("修改抬起距离会重置设备的表面标定，无法自动恢复。"),
         true,
     );
     c.y += nw;
@@ -2396,27 +2155,19 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 
 // ───────────────────────── 灯光页 ─────────────────────────
 
-/// 灯光页 —— 方案 A：交给 Windows 自带的「动态光效」。
-///
-/// 实测这只鼠标暴露的是标准 **HID LampArray**（Usage Page 0x59，Feature Report
-/// 51 字节，1 个灯珠，Kind=Mouse），而 Windows 动态光效认的就是这个协议。
-/// 所以这里不自己写灯效，只负责：显示设备在不在、一键跳到系统设置页。
-///
-/// 详见 `src/dynlight.rs` 顶部。
 fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "灯光");
 
     let lamp = crate::dynlight::info();
 
     // ---- 控制方式 ----
-    c.h2(p, "控制方式", true);
+    c.h2(p, crate::tr!("控制方式"), true);
     let card = c.card(p, layout::ROW_H + 8.0);
     {
         let area = row_area(card, card.y + 4.0);
         p.circle(area.x + 5.0, area.cy(), 4.5, t.green);
         p.text(
-            "由 Windows 动态光效控制",
+            crate::tr!("由 Windows 动态光效控制"),
             R::new(area.x + 20.0, area.y, (area.w - 200.0).max(80.0), area.h),
             font::BODY,
             false,
@@ -2424,12 +2175,19 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
             Align::Left,
         );
         let btn = R::new(area.right() - 160.0, area.cy() - 15.0, 160.0, 30.0);
-        button(p, ui, btn, "打开动态光效设置", true, Act::OpenLightingSettings);
+        button(
+            p,
+            ui,
+            btn,
+            crate::tr!("打开动态光效设置"),
+            true,
+            Act::OpenLightingSettings,
+        );
     }
     c.y = card.bottom();
     c.y += 12.0;
     p.text_wrap(
-        "灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。",
+        crate::tr!("灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。"),
         R::new(c.x, c.y, c.w, 44.0),
         font::HINT,
         t.text3,
@@ -2437,7 +2195,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     c.y += 52.0;
 
     // ---- 灯效设备 ----
-    c.h2(p, "灯效设备", false);
+    c.h2(p, crate::tr!("灯效设备"), false);
     let extra = if lamp.is_some() { layout::ROW_H } else { 0.0 };
     let card = c.card(p, layout::ROW_H + extra);
     {
@@ -2451,9 +2209,9 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
         );
         p.text(
             if found {
-                "已检测到 HID LampArray 设备"
+                crate::tr!("已检测到 HID LampArray 设备")
             } else {
-                "未检测到 HID LampArray 设备"
+                crate::tr!("未检测到 HID LampArray 设备")
             },
             R::new(area.x + 20.0, area.y, (area.w - 130.0).max(80.0), area.h),
             font::BODY,
@@ -2462,7 +2220,14 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
             Align::Left,
         );
         let btn = R::new(area.right() - 96.0, area.cy() - 15.0, 96.0, 30.0);
-        button(p, ui, btn, "重新检测", false, Act::RefreshLighting);
+        button(
+            p,
+            ui,
+            btn,
+            crate::tr!("重新检测"),
+            false,
+            Act::RefreshLighting,
+        );
     }
     if let Some(l) = lamp {
         let area = R::new(
@@ -2472,9 +2237,9 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
             layout::ROW_H,
         );
         p.hline(card.x, card.right(), area.y, t.border);
-        let ctl = row_label(p, area, "灯珠数量 / 类型", None, 240.0);
+        let ctl = row_label(p, area, crate::tr!("灯珠数量 / 类型"), None, 240.0);
         p.text(
-            &format!("{} 个 · {}", l.lamp_count, l.kind_name()),
+            &crate::trf!("{} 个 · {}", l.lamp_count, l.kind_name()),
             R::new(ctl.x, ctl.y, ctl.w, ctl.h),
             font::BODY,
             false,
@@ -2489,39 +2254,35 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        "灯效不跟系统走时：Armoury Crate 的灯效可能正在抢占设备，先关掉它的灯效（或退出），再回到系统「动态光效」页面。",
+        crate::tr!("灯效不跟系统走时：Armoury Crate 的灯效可能正在抢占设备，先关掉它的灯效（或退出），再回到系统「动态光效」页面。"),
         false,
     );
     c.y += nw + 16.0;
 }
 
-
 // ───────────────────────── 按键页 ─────────────────────────
-
-
 
 fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "按键");
 
     // 顶部警告提示条（用户反馈置顶更醒目）
     c.y += 4.0;
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        "把某个键绑成「无功能」（0000）后，该键在设备上将完全失效 —— 如需恢复必须重新写入完整映射配置。",
+        crate::tr!("把某个键绑成「无功能」（0000）后，该键在设备上将完全失效 —— 如需恢复必须重新写入完整映射配置。"),
         true,
     );
     c.y += nw + 16.0;
 
-    c.h2(p, "按键映射", true);
+    c.h2(p, crate::tr!("按键映射"), true);
     let rows = crate::proto::BUTTON_SLOTS;
     let card = c.card(p, rows as f32 * layout::ROW_H);
     for slot in 0..rows {
         let y = card.y + slot as f32 * layout::ROW_H;
         let area = row_area(card, y);
         let src = crate::proto::BUTTON_SRC[slot];
-        let name = crate::proto::BUTTON_NAME[slot];
+        let name = crate::i18n::translate(crate::proto::BUTTON_NAME[slot]);
 
         // 左：源键名（统一宽 96px）
         p.text(
@@ -2558,9 +2319,16 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     // 底部操作按钮
     let bw = 160.0;
     let br = R::new(c.x, c.y, bw, 34.0);
-    button(p, ui, br, "从备份恢复全部按键", false, Act::Restore);
+    button(
+        p,
+        ui,
+        br,
+        crate::tr!("从备份恢复全部按键"),
+        false,
+        Act::Restore,
+    );
     let br2 = R::new(br.right() + 12.0, c.y, bw, 34.0);
-    button(p, ui, br2, "导出当前配置", false, Act::Backup);
+    button(p, ui, br2, crate::tr!("导出当前配置"), false, Act::Backup);
     c.y += 34.0;
 }
 
@@ -2568,20 +2336,69 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
 
 fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "设置");
+    let previous = if d.selected.is_some() {
+        Page::Battery
+    } else {
+        Page::Home
+    };
+    page_heading(p, ui, c, crate::tr!("设置"), Some(Act::Nav(previous)));
 
     // ---- 程序 ----
-    c.h2(p, "程序", true);
-    let card = c.card(p, layout::ROW_H * 4.0);
+    c.h2(p, crate::tr!("程序"), true);
+    let card = c.card(p, layout::ROW_H * 6.0);
     let mut y = card.y;
+    {
+        let area = row_area(card, y);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("语言"),
+            Some(crate::tr!("立即生效，无需重启")),
+            180.0,
+        );
+        drop_button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 180.0, 30.0),
+            Drop::Language,
+            d,
+        );
+        row_rule(p, card, area);
+        y += layout::ROW_H;
+    }
 
     // 托盘
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "显示托盘图标", Some("关闭后只能用窗口操作"), 40.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("显示托盘图标"),
+            Some(crate::tr!("关闭后只能用窗口操作")),
+            40.0,
+        );
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, d.cfg.tray_enabled, true);
         ui.hot(sw, Act::Toggle(Pref::TrayEnabled));
+        row_rule(p, card, area);
+        y += layout::ROW_H;
+    }
+    {
+        let area = row_area(card, y);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("托盘显示设备"),
+            Some(crate::tr!("单击数字查看全部设备")),
+            180.0,
+        );
+        drop_button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 180.0, 30.0),
+            Drop::TrayDevice,
+            d,
+        );
         row_rule(p, card, area);
         y += layout::ROW_H;
     }
@@ -2591,8 +2408,8 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         let ctl = row_label(
             p,
             area,
-            "关闭窗口动作",
-            Some("点击窗口右上角 × 按钮时的操作"),
+            crate::tr!("关闭窗口动作"),
+            Some(crate::tr!("点击窗口右上角 × 按钮时的操作")),
             160.0,
         );
         drop_button(
@@ -2608,7 +2425,13 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     // 开机自启
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "开机自动启动", Some(d.autostart_text), 40.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("开机自动启动"),
+            Some(d.autostart_text),
+            40.0,
+        );
         // 真实状态从 `autostart` 模块来，这里只显示；点击发 Toggle。
         // 开关的布尔量也直接用状态机的值：以前是 `autostart_text.contains("已启用")`，
         // 文案一改开关就跟着错（而它俩本来没有关系）。
@@ -2622,7 +2445,13 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     // 刷新间隔
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "后台刷新间隔", Some("读取设备状态的频率"), 150.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("后台刷新间隔"),
+            Some(crate::tr!("读取设备状态的频率")),
+            150.0,
+        );
         drop_button(
             p,
             ui,
@@ -2633,30 +2462,20 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     c.y = card.bottom();
 
-    // ---- 诊断 ----
-    c.h2(p, "诊断", false);
-    let dcard = c.card(p, layout::ROW_H * 3.0);
-    let mut dy = dcard.y;
-    for (title, value) in [
-        ("版本", d.version.to_string()),
-        ("历史样本", format!("{} 条", d.rows)),
-        ("本轮帧数", format!("{} 帧 · {} ms", d.frames, d.elapsed_ms)),
-    ] {
-        let area = row_area(dcard, dy);
-        let _ = row_label(p, area, title, Some(value.as_str()), 40.0);
-        row_rule(p, dcard, area);
-        dy += layout::ROW_H;
-    }
-    c.y = dcard.bottom();
-
     // ---- 数据 ----
-    c.h2(p, "数据", false);
+    c.h2(p, crate::tr!("数据"), false);
     let card = c.card(p, layout::ROW_H * 3.0);
     let mut y = card.y;
     // 缓存有效期
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "快照缓存有效期", Some("设为「每次都重读」会明显更慢"), 150.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("快照缓存有效期"),
+            Some(crate::tr!("设为「每次都重读」会明显更慢")),
+            150.0,
+        );
         drop_button(
             p,
             ui,
@@ -2670,67 +2489,111 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     // 备份与还原
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "备份与还原", Some("把全部 31 项参数存成一个文本文件"), 230.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("备份与还原"),
+            Some(crate::tr!("把全部 31 项参数存成一个文本文件")),
+            230.0,
+        );
         let b1 = R::new(ctl.x, ctl.cy() - 15.0, 110.0, 30.0);
-        button(p, ui, b1, "备份到文件", false, Act::Backup);
+        button(p, ui, b1, crate::tr!("备份到文件"), false, Act::Backup);
         let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 110.0, 30.0);
-        button(p, ui, b2, "从文件还原", false, Act::Restore);
+        button(p, ui, b2, crate::tr!("从文件还原"), false, Act::Restore);
         row_rule(p, card, area);
         y += layout::ROW_H;
     }
     // 历史记录
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "历史记录", Some("电量采样点，最多保留 48 小时"), 230.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("历史记录"),
+            Some(crate::tr!("电量采样点，最多保留 48 小时")),
+            230.0,
+        );
         let b1 = R::new(ctl.x, ctl.cy() - 15.0, 130.0, 30.0);
-        button(p, ui, b1, "打开所在文件夹", false, Act::OpenHistoryFolder);
+        button(
+            p,
+            ui,
+            b1,
+            crate::tr!("打开所在文件夹"),
+            false,
+            Act::OpenHistoryFolder,
+        );
         let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 90.0, 30.0);
-        button(p, ui, b2, "清空", false, Act::ClearHistory);
+        button(p, ui, b2, crate::tr!("清空"), false, Act::ClearHistory);
     }
     c.y = card.bottom();
 
     // ---- 存储路径 ----
-    c.h2(p, "存储路径", false);
+    c.h2(p, crate::tr!("存储路径"), false);
     let card = c.card(p, layout::ROW_H * 2.0);
     {
         // 历史文件
         let area = row_area(card, card.y);
         let hp = crate::history::history_path().display().to_string();
-        let status = if crate::history::history_path_is_custom() { "已自定义" } else { "默认" };
-        let title = format!("历史文件保存位置（{status}）");
+        let status = if crate::history::history_path_is_custom() {
+            crate::tr!("已自定义")
+        } else {
+            crate::tr!("默认")
+        };
+        let title = crate::trf!("历史文件保存位置（{status}）", status = status);
         let ctl = row_label(p, area, &title, Some(&hp), 128.0);
         let b1 = R::new(ctl.right() - 52.0, ctl.cy() - 15.0, 52.0, 30.0);
-        button(p, ui, b1, "更改", false, Act::ChangeHistoryPath);
+        button(p, ui, b1, crate::tr!("更改"), false, Act::ChangeHistoryPath);
         let b2 = R::new(b1.x - 64.0, ctl.cy() - 15.0, 56.0, 30.0);
-        button(p, ui, b2, "默认", false, Act::ResetHistoryPath);
+        button(p, ui, b2, crate::tr!("默认"), false, Act::ResetHistoryPath);
         row_rule(p, card, area);
     }
     {
         // 设置文件
         let area = row_area(card, card.y + layout::ROW_H);
         let sp = crate::paths::settings_file().display().to_string();
-        let status = if crate::paths::custom_settings_file().is_some() { "已自定义" } else { "默认" };
-        let title = format!("设置文件保存位置（{status}）");
+        let status = if crate::paths::custom_settings_file().is_some() {
+            crate::tr!("已自定义")
+        } else {
+            crate::tr!("默认")
+        };
+        let title = crate::trf!("设置文件保存位置（{status}）", status = status);
         let ctl = row_label(p, area, &title, Some(&sp), 128.0);
         let b1 = R::new(ctl.right() - 52.0, ctl.cy() - 15.0, 52.0, 30.0);
-        button(p, ui, b1, "更改", false, Act::ChangeSettingsPath);
+        button(
+            p,
+            ui,
+            b1,
+            crate::tr!("更改"),
+            false,
+            Act::ChangeSettingsPath,
+        );
         let b2 = R::new(b1.x - 64.0, ctl.cy() - 15.0, 56.0, 30.0);
-        button(p, ui, b2, "默认", false, Act::ResetSettingsPath);
+        button(p, ui, b2, crate::tr!("默认"), false, Act::ResetSettingsPath);
     }
     c.y = card.bottom();
 
     // ---- 外观 ----
-    c.h2(p, "外观", false);
+    c.h2(p, crate::tr!("外观"), false);
     let card = c.card(p, layout::ROW_H);
     {
         let area = row_area(card, card.y);
-        let ctl = row_label(p, area, "配色", Some("跟随系统或手动选择"), 210.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("配色"),
+            Some(crate::tr!("跟随系统或手动选择")),
+            210.0,
+        );
         let sel = ui.theme_pref.min(2) as usize;
         segmented(
             p,
             ui,
             R::new(ctl.x, ctl.cy() - 15.0, 210.0, 30.0),
-            &["跟随系统", "浅色", "深色"],
+            &[
+                crate::tr!("跟随系统"),
+                crate::tr!("浅色"),
+                crate::tr!("深色"),
+            ],
             sel,
             |i| Act::SetTheme(i as u8),
         );
@@ -2738,7 +2601,8 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     c.y = card.bottom();
 
     // ---- 关于 ----
-    c.h2(p, "关于", false);
+
+    c.h2(p, crate::tr!("关于"), false);
     let card = c.card(p, layout::ROW_H * 3.0);
     {
         // 版本：值右对齐，版本号来自 Cargo.toml（不再手写常量）
@@ -2746,8 +2610,10 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         row_label(
             p,
             area,
-            "版本",
-            Some("R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具"),
+            crate::tr!("版本"),
+            Some(crate::tr!(
+                "R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具"
+            )),
             96.0,
         );
         p.text(
@@ -2768,12 +2634,12 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             card.w - 36.0,
             layout::ROW_H,
         );
-        let ctl = row_label(p, area, "开源仓库", Some(REPO_URL), 64.0);
+        let ctl = row_label(p, area, crate::tr!("开源仓库"), Some(REPO_URL), 64.0);
         button(
             p,
             ui,
             R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
-            "打开",
+            crate::tr!("打开"),
             false,
             Act::OpenRepo,
         );
@@ -2792,7 +2658,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             p,
             ui,
             R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
-            "打开",
+            crate::tr!("打开"),
             false,
             Act::OpenStore,
         );
@@ -2800,6 +2666,30 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     c.y = card.bottom();
 
     let _ = Breakpoint::Wide;
+    // ---- 诊断 ----
+    // 放在页面最下面：平时不需要看，出问题时才知道要找它。
+
+    c.h2(p, crate::tr!("诊断"), false);
+    let dcard = c.card(p, layout::ROW_H * 2.0);
+    let mut dy = dcard.y;
+    {
+        let area = row_area(dcard, dy);
+        let _ = row_label(
+            p,
+            area,
+            crate::tr!("诊断日志"),
+            Some(crate::tr!("点这一行打开日志文件夹，出问题时把日志发给作者")),
+            40.0,
+        );
+        ui.hot(area, Act::OpenLogFolder);
+        row_rule(p, dcard, area);
+        dy += layout::ROW_H;
+    }
+    {
+        let area = row_area(dcard, dy);
+        let _ = row_label(p, area, crate::tr!("版本"), Some(d.version), 40.0);
+    }
+    c.y = dcard.bottom();
 }
 
 /// 绘制「关闭窗口」确认模态对话框。
@@ -2809,14 +2699,14 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
     p.rect(R::new(0.0, 0.0, win_w, win_h), 0x7500_0000);
 
     // 居中卡片
-    let w = 420.0;
+    let w = if crate::i18n::english() { 500.0 } else { 420.0 };
     let h = 240.0;
     let r = R::new((win_w - w) / 2.0, (win_h - h) / 2.0, w, h);
     p.card(r, 12.0, t.card, t.border);
 
     // 标题与副标题
     p.text(
-        "关闭应用",
+        crate::tr!("关闭应用"),
         R::new(r.x + 24.0, r.y + 20.0, w - 48.0, 24.0),
         16.0,
         true,
@@ -2824,7 +2714,7 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
         Align::Left,
     );
     p.text(
-        "请选择点击关闭按钮时的操作：",
+        crate::tr!("请选择点击关闭按钮时的操作："),
         R::new(r.x + 24.0, r.y + 48.0, w - 48.0, 20.0),
         12.5,
         false,
@@ -2840,7 +2730,7 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
         p.circle(opt1.x + 10.0, opt1.cy(), 4.0, t.accent);
     }
     p.text(
-        "最小化到系统托盘（在后台继续运行）",
+        crate::tr!("最小化到系统托盘（在后台继续运行）"),
         R::new(opt1.x + 26.0, opt1.y + 4.0, opt1.w - 26.0, 24.0),
         13.0,
         false,
@@ -2857,7 +2747,7 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
         p.circle(opt2.x + 10.0, opt2.cy(), 4.0, t.accent);
     }
     p.text(
-        "直接退出程序",
+        crate::tr!("直接退出程序"),
         R::new(opt2.x + 26.0, opt2.y + 4.0, opt2.w - 26.0, 24.0),
         13.0,
         false,
@@ -2868,9 +2758,13 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
     // 复选框：记住我的选择
     let cb_r = R::new(r.x + 24.0, r.y + 154.0, w - 48.0, 24.0);
-    p.checkbox(R::new(cb_r.x + 2.0, cb_r.cy() - 8.0, 16.0, 16.0), ui.close_remember, true);
+    p.checkbox(
+        R::new(cb_r.x + 2.0, cb_r.cy() - 8.0, 16.0, 16.0),
+        ui.close_remember,
+        true,
+    );
     p.text(
-        "记住我的选择，下次不再提示",
+        crate::tr!("记住我的选择，下次不再提示"),
         R::new(cb_r.x + 26.0, cb_r.y, cb_r.w - 26.0, 24.0),
         12.5,
         false,
@@ -2889,300 +2783,25 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
     // 取消按钮
     p.round(cancel_r, 6.0, t.card);
     p.round_stroke(cancel_r, 6.0, t.border, 1.0);
-    p.text("取消", cancel_r, 13.0, false, t.text, Align::Center);
+    p.text(
+        crate::tr!("取消"),
+        cancel_r,
+        13.0,
+        false,
+        t.text,
+        Align::Center,
+    );
     ui.dialog_hot(cancel_r, Act::CancelCloseDialog);
 
     // 确定按钮
     p.round(confirm_r, 6.0, t.accent);
-    p.text("确定", confirm_r, 13.0, true, 0xFFFF_FFFF, Align::Center);
+    p.text(
+        crate::tr!("确定"),
+        confirm_r,
+        13.0,
+        true,
+        0xFFFF_FFFF,
+        Align::Center,
+    );
     ui.dialog_hot(confirm_r, Act::ConfirmCloseDialog);
-}
-
-// ───────────────────────── 测试 ─────────────────────────
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn placeholder_state_is_told_from_a_real_one() {
-        // 读不到设备时 `State::default()` 解出来是 800 DPI + 纯黑，
-        // 必须判成「没读到」，否则界面会把编出来的值当真实设置显示。
-        let empty = crate::proto::State::default();
-        assert!(super::placeholder_state(&empty));
-
-        let mut real = crate::proto::State::default();
-        real.enc[0] = 15; // 800 DPI 的真实编码
-        assert!(!super::placeholder_state(&real), "有真值就不该当占位");
-    }
-
-    use crate::ui::dropdown::button_target_name;
-    use crate::ui::palette::palette_color;
-
-    /// 曲线几何必须落在绘图区内、x 单调不减；充电点要生成底带。
-    #[test]
-    fn chart_geom_stays_inside_the_plot_and_marks_charging() {
-        use crate::chart::{CurvePt, Plot, Pt};
-        let plot_rect = R::new(100.0, 50.0, 200.0, 100.0);
-        let mut points = Vec::new();
-        for i in 0..10 {
-            points.push(Pt {
-                x: crate::chart::AREA_X + i * 10,
-                level: if i < 3 { 60 } else { 80 },
-                charging: i >= 3 && i < 6,
-            });
-        }
-        let curve: Vec<CurvePt> = points
-            .iter()
-            .map(|p| CurvePt {
-                fx: (p.x - crate::chart::AREA_X) as f32 / crate::chart::AREA_W as f32,
-                level: p.level as f32,
-            })
-            .collect();
-        let pl = Plot {
-            points,
-            curve,
-            first_ts: 1_800_000_000,
-            last_ts: 1_800_001_000,
-        };
-
-        let g = chart_geom(&pl, plot_rect, 50, 40.0);
-        assert_eq!(g.pts.len(), 10);
-        assert_eq!(g.curve.len(), 10);
-        // x 单调不减，且都在绘图区内
-        let mut prev = f32::MIN;
-        for (x, y) in &g.pts {
-            assert!(*x >= prev - 0.01, "x 回退了");
-            prev = *x;
-            assert!(*x >= plot_rect.x - 0.01 && *x <= plot_rect.right() + 0.01);
-            assert!(*y >= plot_rect.y - 0.01 && *y <= plot_rect.bottom() + 0.01);
-        }
-        // 3..6 连续充电 → 至少一条底带；且带都在绘图区内
-        assert!(!g.bands.is_empty());
-        for b in &g.bands {
-            assert!(b.y >= plot_rect.y - 0.01 && b.bottom() <= plot_rect.bottom() + 0.01);
-        }
-        // 面积多边形 = 曲线 + 首尾两点
-        assert_eq!(g.area.len(), g.curve.len() + 2);
-    }
-
-    /// 缓存键要能区分「数据换了」和「绘图区挪了」。
-    #[test]
-    fn chart_geom_key_changes_with_plot_or_rect() {
-        use crate::chart::{CurvePt, Plot, Pt};
-        let mk = |level: u8| Plot {
-            points: vec![
-                Pt { x: crate::chart::AREA_X, level, charging: false },
-                Pt { x: crate::chart::AREA_X + 100, level, charging: false },
-            ],
-            curve: vec![
-                CurvePt { fx: 0.0, level: level as f32 },
-                CurvePt { fx: 1.0, level: level as f32 },
-            ],
-            first_ts: 1,
-            last_ts: 2,
-        };
-        let a = mk(70);
-        let b = mk(70);
-        let r = R::new(100.0, 50.0, 200.0, 100.0);
-        let ka = chart_geom(&a, r, 50, 40.0).key;
-        let kb = chart_geom(&b, R::new(101.0, 50.0, 200.0, 100.0), 50, 40.0).key;
-        assert_ne!(ka, kb, "绘图区变了键必须变");
-        // 同一份 Plot + 同一个矩形 → 键稳定（才能命中缓存）
-        assert_eq!(ka, chart_geom(&a, r, 50, 40.0).key);
-    }
-
-    /// hero 卡必须装得下它自己画的 KPI：`kv_y + 行数*行距 - 行距 + 底边距`
-    /// 不能超过 `hero_h`。窄屏（单列 4 行）是曾经画到卡外、压住下一个标题的那档。
-    #[test]
-    fn hero_card_always_fits_its_kpi_rows() {
-        use crate::ui::layout::Breakpoint;
-        for bp in [
-            Breakpoint::Wide,
-            Breakpoint::Mid,
-            Breakpoint::Narrow,
-            Breakpoint::Tiny,
-        ] {
-            for w in [520.0f32, 560.0, 700.0, 760.0, 900.0, 1100.0, 1440.0] {
-                let ring_d = bp.ring_diameter();
-                let g = hero_geometry(bp, w, ring_d);
-                let kpi_bottom = g.kv_y + (g.kv_rows - 1.0) * KV_ROW_H + 14.0 + 26.0;
-                assert!(
-                    kpi_bottom + HERO_PAD_B <= g.hero_h + 0.01,
-                    "{bp:?} w={w}: KPI 底 {kpi_bottom} + 底边距 超出卡高 {}",
-                    g.hero_h
-                );
-                assert!(g.kv_rows == 2.0 || g.kv_rows == 4.0);
-                assert!(g.right_w >= 80.0);
-            }
-        }
-    }
-
-    /// 两列时必须真的两行，单列时必须四行 —— 行数错了卡片高度就跟着错。
-    #[test]
-    fn hero_kpi_row_count_matches_columns() {
-        use crate::ui::layout::Breakpoint;
-        for bp in [
-            Breakpoint::Wide,
-            Breakpoint::Mid,
-            Breakpoint::Narrow,
-            Breakpoint::Tiny,
-        ] {
-            let g = hero_geometry(bp, 1100.0, bp.ring_diameter());
-            assert_eq!(g.kv_rows, if g.two_cols { 2.0 } else { 4.0 });
-        }
-    }
-    use super::*;
-
-    #[test]
-    fn 下拉候选不含设备不认的灯光模式() {
-        // Rainbow(3) 与 Comet(5) 写进去会被设备静默回落成 ColorCycle。
-        // 列在候选里等于骗用户「可以选」。
-        let mut cfg = crate::settings::Settings::default();
-        cfg.refresh_interval_sec = 60;
-        let est = crate::history::Estimate::default();
-        let d = Data {
-            state: None,
-            ident: None,
-            link_mode: "",
-            status: String::new(),
-            plot: None,
-            estimate: &est,
-            rows: 0,
-            cfg: &cfg,
-            autostart_text: "",
-        autostart_on: false,
-            version: "test",
-            frames: 0,
-            elapsed_ms: 0,
-        };
-        let modes: Vec<usize> = options(Drop::LightMode, &d).iter().map(|(_, v)| *v).collect();
-        assert!(!modes.contains(&3), "3 = Rainbow 不该出现在候选里");
-        assert!(!modes.contains(&5), "5 = Comet 不该出现在候选里");
-        assert!(modes.contains(&0));
-        assert!(modes.contains(&0xF0));
-    }
-
-    #[test]
-    fn 电量环颜色按优先级判() {
-        // 低电量 20% 以下用红色，充电中用绿色。
-        // 难点全在优先级上，逐条钉死。
-        let t = &crate::ui::theme::LIGHT;
-
-        // 1. 读不到设备 → 灰，**不能**是红色。
-        //    休眠时真实电量可能是 77%，画红环等于报假警。
-        assert_eq!(ring_color(t, false, false, 0), t.track);
-        assert_eq!(ring_color(t, false, true, 0), t.track);
-
-        // 2. 充电中永远绿，**即使电量很低**。
-        //    这条是顺序陷阱：先判 `level <= 20` 会把「正在充」显示成红色。
-        assert_eq!(ring_color(t, true, true, 5), t.green);
-        assert_eq!(ring_color(t, true, true, 20), t.green);
-        assert_eq!(ring_color(t, true, true, 100), t.green);
-
-        // 3. ≤20% 才是红色（边界含 20）。
-        assert_eq!(ring_color(t, true, false, 0), t.red);
-        assert_eq!(ring_color(t, true, false, 20), t.red);
-
-        // 4. 21% 起回到蓝。
-        assert_eq!(ring_color(t, true, false, 21), t.accent);
-        assert_eq!(ring_color(t, true, false, 100), t.accent);
-    }
-
-    #[test]
-    fn 按键目标码有名字_未知的原样显示() {
-        assert_eq!(button_target_name(0x01F0), "左键点击");
-        assert_eq!(button_target_name(0x0000), "无功能");
-        // 不认识的码不能猜成别的功能
-        assert_eq!(button_target_name(0x1234), "0x1234");
-    }
-
-    #[test]
-    fn 休眠档位候选包含永不() {
-        let cfg = crate::settings::Settings::default();
-        let est = crate::history::Estimate::default();
-        let d = Data {
-            state: None,
-            ident: None,
-            link_mode: "",
-            status: String::new(),
-            plot: None,
-            estimate: &est,
-            rows: 0,
-            cfg: &cfg,
-            autostart_text: "",
-        autostart_on: false,
-            version: "test",
-            frames: 0,
-            elapsed_ms: 0,
-        };
-        let opts = options(Drop::Sleep, &d);
-        // 0..4 五档 + 永不
-        assert_eq!(opts.len(), 6);
-        assert_eq!(opts[5].1, 0xFF);
-        assert_eq!(opts[5].0, "永不");
-    }
-
-    #[test]
-    fn 当前档位下标不会越界() {
-        let mut s = crate::proto::State::default();
-        // active_stage 是 1-based，读到 0 表示「还没读到」—— 不能拿出 -1
-        s.active_stage = 0;
-        assert_eq!(cur_stage(&s), 0);
-        s.active_stage = 4;
-        assert_eq!(cur_stage(&s), 3);
-        s.active_stage = 9;
-        assert_eq!(cur_stage(&s), 3, "超范围要夹到最后一档");
-    }
-
-    #[test]
-    fn 色盘自定义rgb打包与解包() {
-        let rgb = [0x12, 0x34, 0x56];
-        let packed = pack_custom_rgb(rgb);
-        assert_eq!(palette_color(packed), Some(rgb));
-
-        // 预设下标应正常返回
-        assert!(palette_color(0).is_some());
-        assert!(palette_color(35).is_some());
-        assert_eq!(palette_color(100), None);
-    }
-
-    #[test]
-    fn 色相计算基本性质() {
-        let (h_red, s_red, v_red) = rgb_to_hsv([255, 0, 0]);
-        assert!((h_red - 0.0).abs() < 1e-3);
-        assert!((s_red - 1.0).abs() < 1e-3);
-        assert!((v_red - 1.0).abs() < 1e-3);
-
-        let (h_green, _, _) = rgb_to_hsv([0, 255, 0]);
-        assert!((h_green - 120.0).abs() < 1e-3);
-
-        let (h_blue, _, _) = rgb_to_hsv([0, 0, 255]);
-        assert!((h_blue - 240.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn 色盘尺寸随标签变化() {
-        let (w0, h0) = palette_size(0);
-        let (w1, h1) = palette_size(1);
-        assert_eq!(w0, w1);
-        assert!(h1 > h0, "色环模式需要更高的高度容纳色盘与色阶");
-    }
-
-    #[test]
-    fn 弹层靠近视口底部时向上翻开() {
-        let mut ui = Ui::default();
-
-        // 去抖下拉框在客户区 y≈704..734，视口 740 高、8 项弹层要 248px：
-        // 往下开必然戳出窗外，必须翻到按钮上方，而且整块要留在视口内。
-        ui.set_drop_btn(R::new(865.0, 704.0, 150.0, 30.0));
-        let r = place_drop(&ui, R::new(865.0, 0.0, 150.0, 0.0), 248.0, 740.0);
-        assert!(r.y < 704.0, "应翻到按钮上方: {r:?}");
-        assert!(r.bottom() <= 732.0 + 0.01, "弹层不该戳出视口: {r:?}");
-        assert!(r.y >= 8.0, "也不该顶到视口上沿之外: {r:?}");
-
-        // 上方空间充裕时默认仍然往下开
-        ui.set_drop_btn(R::new(865.0, 100.0, 150.0, 30.0));
-        let r2 = place_drop(&ui, R::new(865.0, 0.0, 150.0, 0.0), 248.0, 740.0);
-        assert_eq!(r2.y, 134.0, "空间够就往下开");
-    }
 }

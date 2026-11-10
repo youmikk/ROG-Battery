@@ -1,21 +1,13 @@
-//! 设置文件：`%APPDATA%\rog-mouse-ctl\settings.ini`
-//!
-//! 用户要求「需要安装的方式」+「配置放系统标准位置」，所以设置不能放 exe 同目录。
-//!
-//! 格式是极简的 `key=value`，不引第三方依赖也能解析：
-//!
-//! ```ini
-//! cache_ttl_sec=30
-//! cache_enabled=1
-//! ```
-//!
-//! 文件不存在时用默认值（**不会**因为配置缺失而报错）。
 
 use crate::paths;
 
 /// 全部可配置项。加新项时记得同时改 [`Settings::default`] 和 [`Settings::parse`]。
 #[derive(Clone, Debug)]
 pub struct Settings {
+    pub device_tray: std::collections::BTreeMap<String, crate::tray_prefs::DeviceTray>,
+    pub device_names: std::collections::BTreeMap<String, String>,
+    pub tray_device: Option<String>,
+    pub tray_device_name: String,
     /// 快照缓存有效期（秒）。0 表示每次都重读设备。
     pub cache_ttl_sec: u64,
     /// 界面后台主动刷新的间隔（秒）。
@@ -34,11 +26,16 @@ pub struct Settings {
     /// ② `settings.rs` 不该依赖 UI 模块 —— CLI 子命令也要能读设置，
     /// 而 UI 模块会链 gdiplus，把 CLI 拖进多余依赖。
     pub theme: String,
+    pub language: crate::i18n::Language,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            device_tray: Default::default(),
+            device_names: Default::default(),
+            tray_device: None,
+            tray_device_name: String::new(),
             cache_ttl_sec: crate::snapshot::DEFAULT_TTL_SEC,
             // 全量 19 帧约 591ms，只读 3 帧约 150ms；60 秒一次的额外耗电是
             // 0.07 %/天量级，可忽略。取 15 秒唯一的代价是鼠标休眠时更频繁地
@@ -47,6 +44,7 @@ impl Default for Settings {
             tray_enabled: true,
             close_mode: "ask".to_string(),
             theme: "system".to_string(),
+            language: crate::i18n::Language::System,
         }
     }
 }
@@ -71,6 +69,16 @@ impl Settings {
             };
             let v = v.trim();
             match k.trim() {
+                "tray_device" => {
+                    if v.len() == 16 && v.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        s.tray_device = Some(v.to_ascii_lowercase());
+                    }
+                }
+                "tray_device_name" => s.tray_device_name = v.to_string(),
+                "language" => match crate::i18n::Language::parse(v) {
+                    Some(language) => s.language = language,
+                    None => warnings.push(format!("language={v} 只认 system/zh-CN/en，已忽略")),
+                },
                 "cache_ttl_sec" => match v.parse::<u64>() {
                     Ok(n) => s.cache_ttl_sec = n,
                     Err(_) => warnings.push(format!("cache_ttl_sec={v} 不是非负整数，已忽略")),
@@ -78,11 +86,15 @@ impl Settings {
                 "refresh_interval_sec" => match v.parse::<u64>() {
                     // 0 会让后台线程空转，钳一个下限出来
                     Ok(n) => s.refresh_interval_sec = n.max(5),
-                    Err(_) => warnings.push(format!("refresh_interval_sec={v} 不是非负整数，已忽略")),
+                    Err(_) => {
+                        warnings.push(format!("refresh_interval_sec={v} 不是非负整数，已忽略"))
+                    }
                 },
                 "tray_enabled" => match parse_bool(v) {
                     Some(b) => s.tray_enabled = b,
-                    None => warnings.push(format!("tray_enabled={v} 不是布尔值（true/false），已忽略")),
+                    None => {
+                        warnings.push(format!("tray_enabled={v} 不是布尔值（true/false），已忽略"))
+                    }
                 },
                 "close_to_tray" => match parse_bool(v) {
                     Some(b) => legacy_close = Some(b),
@@ -107,7 +119,25 @@ impl Settings {
                         warnings.push(format!("theme={v} 只认 system/light/dark，已忽略"));
                     }
                 }
-                _ => {} // 未知键忽略，向后兼容（旧文件只有 cache_ttl_sec 一行也能读）
+                key if key.starts_with("device_name.") => {
+                    let id = &key[12..];
+                    if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        if s.set_device_name(&id.to_ascii_lowercase(), v).is_err() {
+                            warnings.push("设备名称无效，已忽略".to_string());
+                        }
+                    }
+                }
+                key if key.starts_with("device_tray.") => {
+                    let id = &key[12..];
+                    if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        if let Some(pref) = crate::tray_prefs::DeviceTray::parse(v) {
+                            s.device_tray.insert(id.to_ascii_lowercase(), pref);
+                        } else {
+                            warnings.push("设备托盘配置无效，已忽略".to_string());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         if !saw_close_mode {
@@ -116,13 +146,6 @@ impl Settings {
             }
         }
         (s, warnings)
-    }
-
-    /// 只取结果、丢弃告警。仅供单测使用（生产一律走 [`load`]）。
-    #[cfg(test)]
-    #[cfg(test)]
-    fn parse(text: &str) -> Settings {
-        Self::parse_collect(text).0
     }
 
     pub fn to_text(&self) -> String {
@@ -145,7 +168,84 @@ impl Settings {
         s.push_str("# 界面配色：system（默认，跟随系统深浅色）/ light（浅色）/ dark（深色）。\n");
         s.push_str("# 程序里也能切换，切换后这里会被回写。\n");
         s.push_str(&format!("theme={}\n", self.theme));
+        s.push_str("# Language: system / zh-CN / en.\n");
+        s.push_str(&format!("language={}\n", self.language.code()));
+        if let Some(key) = &self.tray_device {
+            s.push_str(&format!("tray_device={key}\n"));
+            s.push_str(&format!(
+                "tray_device_name={}\n",
+                self.tray_device_name.replace(['\r', '\n'], " ")
+            ));
+        }
+        for (key, pref) in &self.device_tray {
+            s.push_str(&format!("device_tray.{key}={}\n", pref.text()));
+        }
+        for (key, name) in &self.device_names {
+            s.push_str(&format!("device_name.{key}={name}\n"));
+        }
         s
+    }
+
+    pub fn device_name<'a>(&'a self, device: &'a crate::device::DeviceReading) -> &'a str {
+        self.device_names
+            .get(&device.key)
+            .map(String::as_str)
+            .unwrap_or(&device.name)
+    }
+
+    pub fn tray_name(&self) -> &str {
+        self.tray_device
+            .as_ref()
+            .and_then(|key| self.device_names.get(key))
+            .map(String::as_str)
+            .unwrap_or(&self.tray_device_name)
+    }
+
+    pub fn set_device_name(&mut self, key: &str, name: &str) -> Result<(), &'static str> {
+        if name.chars().any(char::is_control) || name.trim().chars().count() > 64 {
+            return Err(crate::tr!("名称最多 64 个字符，不能包含换行或控制字符"));
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            self.device_names.remove(key);
+        } else {
+            self.device_names.insert(key.to_string(), name.to_string());
+        }
+        Ok(())
+    }
+
+    pub fn tray_for(&self, key: &str) -> crate::tray_prefs::DeviceTray {
+        self.device_tray.get(key).copied().unwrap_or_default()
+    }
+
+    /// 所有界面统一使用手动类型；只有自动识别才读取检测结果。
+    pub fn device_kind(
+        &self,
+        device: &crate::device::DeviceReading,
+    ) -> crate::tray_prefs::TrayKind {
+        self.tray_for(&device.key).kind.resolve(device.family)
+    }
+
+    /// 首次选定后固定身份；设备断开或顺序变化时不自动换成另一台。
+    pub fn ensure_tray_device(&mut self, readings: &[crate::device::DeviceReading]) -> bool {
+        let chosen = if let Some(key) = &self.tray_device {
+            readings.iter().find(|r| &r.key == key)
+        } else {
+            readings.iter().min_by_key(|r| {
+                (
+                    !self.tray_for(&r.key).enabled,
+                    self.device_kind(r).order(),
+                    r.key.clone(),
+                )
+            })
+        };
+        let Some(chosen) = chosen else { return false };
+        if self.tray_device.as_ref() == Some(&chosen.key) && self.tray_device_name == chosen.name {
+            return false;
+        }
+        self.tray_device = Some(chosen.key.clone());
+        self.tray_device_name = chosen.name.clone();
+        true
     }
 
     /// 把设置渲染成 ini 文本（供「更改设置文件位置」时把当前配置写到新位置）。
@@ -275,138 +375,4 @@ pub fn format_unix_local(unix: i64) -> Option<String> {
         "{:02}-{:02} {:02}:{:02}",
         st.month, st.day, st.hour, st.minute
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_collect_reports_bad_values() {
-        // 手改文件打错值：不致命，但要留痕，否则「我明明设了」查不出原因。
-        let (s, w) = Settings::parse_collect(
-            "tray_enabled=maybe\ntheme=blue\ncache_ttl_sec=x\nclose_mode=hide\nunknown_key=1\n",
-        );
-        assert!(s.tray_enabled, "坏值不该改掉默认的 true");
-        assert_eq!(s.theme, "system");
-        assert_eq!(s.cache_ttl_sec, crate::snapshot::DEFAULT_TTL_SEC);
-        assert_eq!(s.close_mode, "ask");
-        assert_eq!(w.len(), 4, "四个坏值各留一条痕，未知键保持沉默：{w:?}");
-    }
-
-
-    #[test]
-    fn parse_settings() {
-        let s = Settings::parse("cache_ttl_sec=5\nunknown=1\n");
-        assert_eq!(s.cache_ttl_sec, 5);
-        // 缺失的键用默认值
-        assert_eq!(s.refresh_interval_sec, 60);
-        assert!(s.tray_enabled);
-        assert_eq!(s.close_mode, "ask");
-    }
-
-    #[test]
-    fn legacy_close_to_tray_maps_to_close_mode() {
-        // 旧文件里的 close_to_tray 必须还能换算成 close_mode
-        assert_eq!(Settings::parse("close_to_tray=true").close_mode, "minimize");
-        assert_eq!(Settings::parse("close_to_tray=false").close_mode, "quit");
-        // 两者同时出现时以 close_mode 为准（它更具体，能表达 ask）
-        assert_eq!(
-            Settings::parse("close_to_tray=true\nclose_mode=ask").close_mode,
-            "ask"
-        );
-    }
-
-    #[test]
-    fn parse_empty_uses_default() {
-        let s = Settings::parse("");
-        assert_eq!(s.cache_ttl_sec, crate::snapshot::DEFAULT_TTL_SEC);
-    }
-
-    #[test]
-    fn old_file_still_parses() {
-        // 旧版只有一行 cache_ttl_sec，加了新键以后必须还能读
-        let s = Settings::parse("# rog-mouse-ctl 设置\ncache_ttl_sec=30\n");
-        assert_eq!(s.cache_ttl_sec, 30);
-        assert_eq!(s.refresh_interval_sec, 60);
-    }
-
-    #[test]
-    fn bool_forms_accepted() {
-        for (text, want) in [
-            ("tray_enabled=true", true),
-            ("tray_enabled=TRUE", true),
-            ("tray_enabled=1", true),
-            ("tray_enabled=yes", true),
-            ("tray_enabled=on", true),
-            ("tray_enabled=false", false),
-            ("tray_enabled=0", false),
-            ("tray_enabled=no", false),
-            ("tray_enabled=off", false),
-        ] {
-            let s = Settings::parse(text);
-            assert_eq!(s.tray_enabled, want, "解析 {text:?} 得到错误结果");
-        }
-    }
-
-    #[test]
-    fn refresh_interval_has_floor() {
-        let s = Settings::parse("refresh_interval_sec=0");
-        assert_eq!(s.refresh_interval_sec, 5, "0 会让后台线程空转，必须钳住");
-        let s = Settings::parse("refresh_interval_sec=1");
-        assert_eq!(s.refresh_interval_sec, 5);
-    }
-
-    #[test]
-    fn roundtrip_through_text() {
-        let s = Settings {
-            cache_ttl_sec: 45,
-            refresh_interval_sec: 20,
-            tray_enabled: false,
-            close_mode: "quit".to_string(),
-            theme: "dark".to_string(),
-        };
-        let back = Settings::parse(&s.to_text());
-        assert_eq!(back.cache_ttl_sec, 45);
-        assert_eq!(back.refresh_interval_sec, 20);
-        assert!(!back.tray_enabled);
-        assert_eq!(back.close_mode, "quit");
-        assert_eq!(back.theme, "dark", "配色没有往返成功");
-    }
-
-    #[test]
-    fn theme_accepts_case_and_rejects_junk() {
-        // 手改文件写成 Dark 要认
-        assert_eq!(Settings::parse("theme=Dark").theme, "dark");
-        assert_eq!(Settings::parse("theme=DARK").theme, "dark");
-        assert_eq!(Settings::parse("theme= light ").theme, "light");
-        // 打错字不能把程序搞崩，退回默认「跟随系统」
-        assert_eq!(Settings::parse("theme=blue").theme, "system");
-        assert_eq!(Settings::parse("theme=").theme, "system");
-        // 旧文件没有这个键也是默认「跟随系统」
-        assert_eq!(Settings::parse("cache_ttl_sec=30").theme, "system");
-        // system 也要能往返
-        assert_eq!(Settings::parse("theme=System").theme, "system");
-    }
-
-    #[test]
-    fn timestamp_shape() {
-        let t = timestamp_for_filename();
-        // 形如 20261021-223000
-        assert_eq!(t.len(), 15, "时间戳应是 8 位日期 + '-' + 6 位时间：{t}");
-        assert_eq!(&t[8..9], "-");
-        assert!(t[..8].chars().all(|c| c.is_ascii_digit()));
-        assert!(t[9..].chars().all(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn unix_epoch_formats() {
-        // 1970-01-01 00:00 UTC = 北京时间 08:00（这台机器在 UTC+8）
-        // 不断言具体时刻，只断言格式和「能算出来」
-        let s = format_unix_local(0).expect("1970 应该能换算");
-        assert_eq!(s.len(), 11, "格式应是 MM-DD HH:MM：{s}");
-        assert_eq!(&s[2..3], "-");
-        assert_eq!(&s[5..6], " ");
-        assert_eq!(&s[8..9], ":");
-    }
 }

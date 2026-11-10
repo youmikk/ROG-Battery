@@ -1,33 +1,64 @@
-# R Battery · rog-mouse-ctl
+# R Battery
 
-**ROG 鼠标参数控制工具** —— 无需安装 Armoury Crate 或厂商驱动，即可读取和修改鼠标的
-DPI、回报率、按键去抖、按键映射与电量状态。单文件运行，全程不联网。
+**简体中文** | [English](README.en.md)
 
-[![绿色版下载](https://img.shields.io/badge/%E7%BB%BF%E8%89%B2%E7%89%88-%E4%B8%8B%E8%BD%BD%E6%9C%80%E6%96%B0%E7%89%88-2EA44F?style=for-the-badge&logo=github&logoColor=white)](https://github.com/youmikk/ROG-Battery/releases)
-[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-R%20Battery-0067B8?style=for-the-badge&logo=windows&logoColor=white)](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN&gl=CN)
+轻量的 ROG 外设电量与鼠标设置工具。无需安装 Armoury Crate，通过 Windows HID 接口读取设备状态；单文件运行，无后台服务，不联网。
 
-[![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery?style=flat-square&label=release)](https://github.com/youmikk/ROG-Battery/releases)
-[![Downloads](https://img.shields.io/github/downloads/youmikk/ROG-Battery/total?style=flat-square&label=downloads)](https://github.com/youmikk/ROG-Battery/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4?style=flat-square&logo=windows&logoColor=white)](#系统要求)
-[![Size](https://img.shields.io/badge/size-1.0%20MB-4B5563?style=flat-square)](#安装)
-[![Dependencies](https://img.shields.io/badge/dependencies-none-2EA44F?style=flat-square)](#从源码构建)
+[![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
+[![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#系统要求)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-R%20Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
 
-- 单个 exe，约 **1.0 MB**，无运行时依赖，无需管理员权限，不联网
-- 提供图形界面（五页）与命令行两种形态
-- 直接通过 Windows 自带的 HID 接口通信，不注册后台服务
+[下载绿色版](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [更新日志](CHANGELOG.md)
 
-> **适用范围**：本项目实现的是 ROG 鼠标共用的私有 HID 参数协议，并非某一型号的专用工具。
-> 已验证设备为 **ROG HARPE ACE MINI**（`0B05:1ACE`，USB 直连或经 ROG OMNI 接收器）。
-> 内置 PID 对照表覆盖 15 款鼠标、13 款键盘、2 款手柄与 5 种接收器，详见
-> [支持的型号](#支持的型号)。其他 ROG 鼠标使用同一命令族，但各型号支持的能力存在差异；
-> 不支持的项会在界面上标注「本型号不支持」，不会伪装为执行成功。
+## 1.4.0
+
+- 中文和英文即时切换，默认跟随 Windows 显示语言。
+- 设备卡片首页；只有一台设备时直接进入详情页。
+- 单击数字托盘打开设备电量面板，双击打开主窗口。
+- 自定义设备名称、设备类型和托盘显示设备。
+- 统一标题栏、设备设置与改名窗口的样式。
+
+## 使用
+
+从 Microsoft Store 安装，或下载 `rog-mouse-ctl.exe` 后直接运行，无需管理员权限。连接支持的设备后，程序会自动读取状态。
+
+### 设备与托盘
+
+首页显示检测到的设备，点击卡片进入详情。多设备时可返回设备首页切换；单设备直接打开详情。
+
+系统托盘保留一个电量数字入口。单击打开以托盘图标为中心的悬浮面板，可查看设备电量、刷新或进入设置；双击打开主窗口，右键打开菜单。
+
+详情页的设备偏好依次提供「在托盘显示」「设备名称」「设备类型」。选择的设备用于托盘数字；名称可以编辑或恢复。类型默认自动识别，也可指定鼠标、键盘、耳机、手柄或其他，选择结果会同步到设备首页、详情和托盘。修改类型不会增加设备本身不支持的功能。
+
+### 语言
+
+点击右上角齿轮，进入 **设置 → 语言**，可选「跟随系统」「简体中文」「English」，切换立即生效。
+
+“跟随系统”使用 Windows **显示语言**。仅把 English 移到 Windows“首选语言”列表首位，不一定会改变显示语言；这种情况下可直接在应用中选择 English。
+
+### 功能
+
+| 功能 | 说明 |
+| --- | --- |
+| 电量 | 电量、充电状态、设备信息、最近 48 小时历史和续航估算。 |
+| 鼠标性能 | 支持的型号可调整四档 DPI、回报率、去抖、角度吸附、角度微调和抬起距离。 |
+| 按键 | 支持的型号可重映射按键、导出配置和恢复备份。 |
+| 灯光 | 提供 Windows 动态光效入口，灯效由系统管理。 |
+| 设置 | 明暗主题、开机自启、关闭行为、刷新间隔、存储位置及诊断日志。 |
+
+功能取决于设备型号、固件和连接方式，不支持的设置会在界面中说明。修改抬起距离会重置表面标定，操作前请留意提示。
+
+## 系统要求
+
+- Windows 10 1809（17763）及以上，x64。
+- Windows 动态光效需要受支持的 Windows 11 版本和兼容设备。
+- ROG USB HID 设备或兼容的无线接收器连接；不保证蓝牙模式可用。
+
+Armoury Crate 等软件占用设备时可能造成读写失败，建议先退出相关软件。设备休眠时，唤醒后再刷新。
 
 ## 支持的型号
 
-程序内置一张 PID 对照表（75 个 PID、5 种无线接收器），型号名按 PID 查表得出，不依赖固件自报，
-
-> 表里收录代表「已知型号名，且使用同一套电量 / 参数协议」。具体某一款能改哪些参数仍取决于该型号，
-> 不支持的项会在界面上标注「本型号不支持」。
+已验证 ROG HARPE ACE MINI 的 USB 直连和 ROG OMNI 接收器连接。内置型号表收录以下产品；收录表示可以识别型号，不代表每项功能都已在该硬件上验证。耳机等设备能否读取电量取决于其 HID 协议，不能仅凭设备类型判断兼容性。
 
 ### 鼠标（15 款）
 
@@ -86,129 +117,54 @@ DPI、回报率、按键去抖、按键映射与电量状态。单文件运行�
 | ROG SpeedNova 8K 无线接收器 | `0x1AD0` / `0x1AD1` |
 | 华硕无线接收器 | `0x1D54` |
 
-## 截图
+## 数据与隐私
 
-| 电量 | 性能 |
-| --- | --- |
-| ![电量页](msix/store/screenshots/01-battery.png) | ![性能页](msix/store/screenshots/02-performance.png) |
-| 环形电量、环下预计可用时间、最近 48 小时曲线 | 四档 DPI（含每档指示灯颜色）、回报率、去抖、抬起距离 |
-
-| 按键 | 灯光 |
-| --- | --- |
-| ![按键页](msix/store/screenshots/03-buttons.png) | ![灯光页](msix/store/screenshots/04-lighting.png) |
-| 八个物理按键重映射，支持配置导出与备份恢复 | 交由 Windows 动态光效管理，不占用设备 |
-
-| 设置 | 深色主题 |
-| --- | --- |
-| ![设置页](msix/store/screenshots/05-settings.png) | ![深色主题](msix/store/screenshots/06-dark-theme.png) |
-| 配色、开机自启、关闭行为、文件保存位置 | 跟随系统或手动切换，任务栏数字同步适配明暗 |
-
----
-
-## 功能
-
-### 电量
-
-- 环形电量显示，配合电压、当前档位 DPI 与变化速率
-- 环下方给出预计可用时间，充电时给出预计充满时间，数据来自本机采样
-- 最近 48 小时电量曲线，采样点带时间轴
-- 设备信息：型号、序列号、接收器固件、连接方式（USB / 2.4G）
-
-### 性能
-
-| 项 | 说明 |
-| --- | --- |
-| DPI 四档 | 100–42000，步进 50；每档可单独配置指示灯颜色；「切换」用于换档，「应用」用于写入数值 |
-| 回报率 | 125 / 250 / 500 / 1000 Hz，越高响应越快，功耗也越高 |
-| 按键去抖 | 关闭，或 8–32 ms 共七档；数值越大，双击越不易被识别为两次单击 |
-| 角度吸附 | 斜向移动时自动贴合水平或垂直 |
-| 角度微调 | 可调范围 −20 至 +20 |
-| 抬起距离（LOD） | Low 省电，High 更易追踪。**修改此项会重置鼠标的表面标定**，界面有明确提示 |
-
-### 灯光
-
-灯效交由 **Windows 11 动态光效**统一管理：纯色、呼吸、渐变、波浪、闪烁均由系统提供。
-本程序仅负责识别设备并提供跳转至系统设置页的入口，**不占用设备**。设备是否受支持会在页面上标注。
-
-### 按键
-
-八个物理按键可分别映射到不同功能码，支持导出配置与从备份恢复；绑定为「禁用」前需二次确认。
-
-### 设置
-
-- 配色：跟随系统 / 浅色 / 深色（默认跟随系统）
-- 开机自启：优先写入注册表 Run 键，写入失败时自动降级到启动文件夹
-- 关闭按钮行为：每次询问 / 最小化到托盘 / 直接退出，可记住选择
-- 托盘图标开关、刷新间隔、休眠档位、低电量阈值、充满效果
-- 历史文件与设置文件的**保存位置可修改**
-
-### 托盘
-
-图标直接绘制当前电量数字，并按任务栏明暗自动换色（≤20% 红色、≤50% 橙色，其余为白或深灰）。
-悬停显示四行：型号、连接方式、电量、当前 DPI 与档位。左键或右键均可打开菜单
-（显示主窗口、立即刷新、退出）。
-
-### 其他
-
-单实例运行，重复启动会将已有窗口置于前台；启动首帧不闪黑；关闭前可确认。
-
----
-
-## 安装
-
-**方式一：Microsoft Store** —— [在商店打开](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN&gl=CN)（`9NRC8HCD4BZ7`），支持自动更新。
-
-**方式二：绿色版** —— 从 [Releases](https://github.com/youmikk/ROG-Battery/releases) 下载 `rog-mouse-ctl.exe`，双击即可运行。
-无安装程序，除开机自启外不写注册表。
-
-两种方式的数据位置：
+应用不联网，不上传设备信息或使用数据。设置、设备别名、电量历史、缓存、备份和诊断日志均保存在本机。
 
 | 数据 | 默认位置 |
 | --- | --- |
-| 设置 | `%APPDATA%\rog-mouse-ctl\settings.ini` |
-| 电量历史 | `%LOCALAPPDATA%\rog-battery\history.tsv` |
+| 设置 | `%APPDATA%/rog-mouse-ctl/settings.ini` |
+| 电量历史 | `%LOCALAPPDATA%/rog-battery/history.tsv` |
+| 快照缓存 | `%LOCALAPPDATA%/rog-mouse-ctl/snapshot.cache` |
+| 默认备份目录 | `%USERPROFILE%/Documents/rog-mouse-ctl/backups/` |
 
-通过 MSIX 安装时，上述路径会被系统重定向到 `%LOCALAPPDATA%\Packages\<包族名>\LocalCache\`，卸载时一并清理。
-两个文件的位置均可在「设置 → 存储路径」中修改。
-
-## 系统要求
-
-- Windows 10 1809（17763）及以上，x64
-- 灯效页的「打开动态光效设置」按钮需要 Windows 11 22H2 及以上
-- 支持 USB HID 的 ROG 鼠标、键盘与手柄；型号清单见 [支持的型号](#支持的型号)（已验证：ROG HARPE ACE MINI）
+设置和历史文件的位置可在应用内调整。商店版的应用数据由 Windows 管理；绿色版数据及自定义位置中的文件需手动清理。完整说明见 [隐私政策](PRIVACY.md)。
 
 ## 命令行
 
 ```powershell
-rog-mouse-ctl info            # 只读，读取全部参数（带缓存）
-rog-mouse-ctl quick           # 只读，仅读取电量，速度最快
-rog-mouse-ctl setdpi 2 1600   # 写入第 2 档 DPI
-rog-mouse-ctl backup          # 备份为文本
-rog-mouse-ctl estimate        # 查看电量历史与续航估算
+rog-mouse-ctl.exe info
+rog-mouse-ctl.exe quick
+rog-mouse-ctl.exe setdpi 2 1600
+rog-mouse-ctl.exe backup
+rog-mouse-ctl.exe estimate
+rog-mouse-ctl.exe --help
 ```
 
-全部子命令与返回码见 `rog-mouse-ctl.exe --help`。
+`setdpi` 等写入命令会修改设备配置，具体参数见帮助信息。
 
 ## 从源码构建
 
+安装 Rust GNU 工具链和 MinGW-w64 GCC，并确保 GCC 可在 PATH 中找到。
+
 ```powershell
-.\tools\vendor-import-libs.ps1     # 仅首次需要：生成 import library
-cargo build --release              # 产物为 target\release\rog-mouse-ctl.exe
-cargo test                         # 238 项测试
+rustup toolchain install stable-x86_64-pc-windows-gnu
+cargo +stable-x86_64-pc-windows-gnu build --release --locked
 ```
 
-## 已知限制
+产物为 `target/release/rog-mouse-ctl.exe`。仓库已包含所需 Windows 导入库和图标资源，无需额外安装运行时。更新图标时可使用 `windres -O coff -I assets -i assets/app.rc -o assets/app.o` 重新生成资源。
 
-- **灯效仅通过系统设置**：程序自身也能发送灯效命令，但会与 Windows 动态光效争用设备并导致闪烁，因此默认交由系统管理。
-- **修改 LOD 会重置表面标定**：厂商未提供仅修改 LOD 而不改动标定的命令，界面已给出提示。
-- **不能与 Armoury Crate 同时使用**：它常驻时会占用设备，导致读写失败，请先关闭其灯效或退出程序。
-- **鼠标休眠时所有命令均无响应**：移动鼠标后重试即可，不属于故障。
-- 加减速曲线、部分型号的独立灯区等能力，本机型号不支持，界面中对应项为禁用状态。
+MSIX 打包需要 Windows SDK 中的 MakeAppx：
 
-## 隐私
+```powershell
+powershell -File msix/build-msix.ps1 -Verify
+powershell -File msix/make-upload.ps1
+```
 
-不联网、不收集任何数据、不上报崩溃信息。所有数据仅写入上述两个本地文件。详见 [PRIVACY.md](PRIVACY.md)。
+版本号由 `Cargo.toml` 管理，商店四段版本在 `msix/package.props.psd1` 中同步。`v*` 标签会触发绿色版发布和 MSIX 打包；配置商店凭据与产品 ID 后会提交 Microsoft Store。
 
-## 许可
+## 反馈与许可
+
+问题或兼容性反馈请提交 [GitHub issue](https://github.com/youmikk/ROG-Battery/issues)。提交日志前请检查并移除序列号、个人路径等内容。
 
 仓库暂未附 LICENSE 文件；补充之前版权归作者所有。如需用于其他项目，请先开 issue 说明。

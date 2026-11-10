@@ -1,25 +1,4 @@
-﻿<#
-.SYNOPSIS
-  用 Microsoft Store 提交 API 直接把 .msixupload 提交到商店（不依赖 msstore CLI）。
-
-.DESCRIPTION
-  为什么不用 msstore publish：
-  它要求一个「项目目录」并从项目里推断发布者身份。我们没有 .csproj；
-  放一份 Package.appxmanifest 会让它当成 UWP 项目去 MSBuild restore，
-  在装了 Visual Studio 的 runner 上直接抛 Failed to restore packages。
-  所以这里直接走 REST：
-    取令牌 -> 删旧草稿 -> POST 建草稿 -> PUT 改 fileName -> PUT 传包 -> POST commit
-
-.PARAMETER PackagePath
-  要提交的 .msixupload 或 .msix 文件。
-
-.PARAMETER DryRun
-  只建草稿、不 commit（用于核对）。
-
-.EXAMPLE
-  ./tools/msstore-publish.ps1 -ProductId 9NRC8HCD4BZ7 -PackagePath dist/x.msixupload -DryRun
-#>
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string] $ProductId,
     [Parameter(Mandatory = $true)][string] $PackagePath,
@@ -48,7 +27,6 @@ $pkg = (Resolve-Path $PackagePath).Path
 $pkgName = Split-Path -Leaf $pkg
 Write-Host "包：$pkgName  ($((Get-Item $pkg).Length) B)" -ForegroundColor Cyan
 
-# ── 1. 取 access token（client credentials）────────────────────────────
 Write-Host '获取访问令牌…' -ForegroundColor DarkGray
 $tokenBody = @{
     grant_type    = 'client_credentials'
@@ -60,10 +38,6 @@ $tok = Invoke-RestMethod -Method Post -ContentType 'application/x-www-form-urlen
     -Body $tokenBody -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
 $headers = @{ Authorization = "Bearer $($tok.access_token)" }
 
-# 400 的响应正文才是唯一能说明「哪个字段不对」的东西，但不同 PowerShell 版本取法不同：
-#   PS 7  → $_.ErrorDetails.Message（RestMethod 会填），或 HttpResponseMessage.Content
-#   PS 5.1 → WebException.Response.GetResponseStream()
-# 之前只按 5.1 的取法，在 CI 的 pwsh 7 上永远拿到 null，于是只看到「400 (Bad Request)」。
 function Get-HttpErrorBody {
     param($err)
     if ($err.ErrorDetails -and $err.ErrorDetails.Message) {
@@ -93,101 +67,14 @@ function Get-HttpErrorBody {
 }
 Write-Host '  OK' -ForegroundColor DarkGray
 
-# ── 2. 清掉已有草稿（API 只能删 API 建的草稿）──────────────────────────
 $subsUri = "$api/applications/$ProductId/submissions"
 
-# GET /submissions 的形状文档没写清楚：实测可能是裸数组，也可能包一层 { value: [...] }。
-# 之前只按裸数组解析，遇到包装形状就一个都拿不到 → 旧草稿删不掉 → 建新草稿 409。
-function Get-Submissions {
-    $resp = Invoke-RestMethod -Method Get -Uri $subsUri -Headers $headers
-    if ($resp -is [array]) { return @($resp) }
-    if ($resp.PSObject.Properties['value']) { return @($resp.value) }
-    return @($resp)
+$app = Invoke-RestMethod -Method Get -Uri "$api/applications/$ProductId" -Headers $headers
+if ($app.pendingApplicationSubmission -and $app.pendingApplicationSubmission.id) {
+    throw "An existing Store submission needs attention: $($app.pendingApplicationSubmission.id). It has been left unchanged."
 }
-
-try {
-    $subs = Get-Submissions
-} catch {
-    $subs = @()
-}
-Write-Host "  已列到 $(@($subs).Count) 个提交：$((@($subs) | ForEach-Object { "$($_.id)/$($_.status)" }) -join '  ')" -ForegroundColor DarkGray
-# 只有草稿/失败态可以删；正在认证或发布的提交删不掉，也不能并存第二个提交。
-$deletable = @('PendingCommit', 'CommitFailed')
-$busyStatuses = @('CommitStarted', 'Certification', 'Publishing', 'PreProcessing', 'PendingDelete')
-$busy = $null
-foreach ($s in @($subs)) {
-    if ($null -eq $s -or -not $s.id) { continue }
-    if ($s.status -in $busyStatuses) {
-        $busy = $s
-        continue
-    }
-    if ($s.status -notin $deletable) {
-        Write-Host "跳过提交 $($s.id)（状态 $($s.status)）" -ForegroundColor DarkGray
-        continue
-    }
-    Write-Host "删除旧草稿 $($s.id)（状态 $($s.status)）…" -ForegroundColor DarkGray
-    try {
-        Invoke-RestMethod -Method Delete -Uri "$subsUri/$($s.id)" -Headers $headers | Out-Null
-        Write-Host '  已删除' -ForegroundColor DarkGray
-    } catch {
-        Write-Host "  删除失败：$($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host '  若提示 Ingestion API can only ... created through the API，' -ForegroundColor Yellow
-        Write-Host '  说明该草稿是网页上手工建的，请去 Partner Center 删掉后再跑。' -ForegroundColor Yellow
-        throw
-    }
-}
-
-# 商店同一时间只允许一个提交。上一个提交还在认证/发布时，这里只能等，
-# 不该把整条 CI 判红 —— MSIX 已经作为 artifact 上传了，认证完成后重跑一次即可。
-if ($busy) {
-    Write-Host ''
-    Write-Host "商店已有提交正在进行：id=$($busy.id) status=$($busy.status)" -ForegroundColor Yellow
-    Write-Host "等它结束后重跑本步骤即可（或去这里手动提交）：" -ForegroundColor Yellow
-    Write-Host "  https://partner.microsoft.com/dashboard/products/$ProductId/submissions" -ForegroundColor Yellow
-    Write-Host "::warning::商店已有提交正在进行（$($busy.status)），本次跳过自动提交；MSIX 包已上传为 artifact"
-    exit 0
-}
-
-# ── 3. 建新草稿 ───────────────────────────────────────────────────────
-Write-Host '创建草稿…' -ForegroundColor DarkGray
-# 文档明确：这个方法不要请求体 —— 带 {} 会被判
-#   InvalidParameterValue: The size of Listings must be 1 or more
-# 但 Content-Type 必须是 application/json，否则报 Only JSON content is accepted。
-try {
-    $sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
-} catch {
-    $msg = $_.Exception.Message
-    if ($msg -match 'Conflict' -or $msg -match 'InvalidState') {
-        # 上一次跑挂在半路，留下一个 PendingCommit 草稿，但上面的列表没删掉它。
-        # 这里再清一遍再试一次，别把整条 CI 判红。
-        Write-Host "  提交位被占用（$msg），再清一次草稿后重试…" -ForegroundColor Yellow
-        try {
-            foreach ($x in @(Get-Submissions)) {
-                if ($x.id -and $x.status -in $deletable) {
-                    Write-Host "    删除 $($x.id)（$($x.status)）…" -ForegroundColor DarkGray
-                    try {
-                        Invoke-RestMethod -Method Delete -Uri "$subsUri/$($x.id)" -Headers $headers | Out-Null
-                        Write-Host '      已删除' -ForegroundColor DarkGray
-                    } catch {
-                        Write-Host "      删除失败：$($_.Exception.Message)" -ForegroundColor Yellow
-                    }
-                }
-            }
-        } catch { }
-        Start-Sleep -Seconds 5
-        try {
-            $sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
-        } catch {
-            $msg2 = $_.Exception.Message
-            Write-Host ''
-            Write-Host "创建草稿仍被拒：$msg2" -ForegroundColor Yellow
-            Write-Host "::warning::商店提交位被占用，本次跳过自动提交；MSIX 包已上传为 artifact"
-            exit 0
-        }
-    } else {
-        throw
-    }
-}
+Write-Host '创建草稿…'
+$sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
 if (-not $sub) { throw '创建草稿失败（没有返回提交对象）' }
 Write-Host "  id=$($sub.id)  status=$($sub.status)" -ForegroundColor DarkGray
 
@@ -196,32 +83,12 @@ if ($pkgs.Count -eq 0) { throw '草稿里没有 applicationPackages 槽位，无
 Write-Host "  现有包槽：$($pkgs.Count) 个，第一个 $($pkgs[0].fileName)  fileStatus=$($pkgs[0].fileStatus)" -ForegroundColor DarkGray
 Write-Host "  槽字段：$(($pkgs[0].PSObject.Properties | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor DarkGray
 
-# ── 4. 换包（严格按官方文档的形状）───────────────────────────────────
-# 官方「管理应用提交」文档里写着：
-#   调用"更新应用提交"时，applicationPackages 对象**只需**提供
-#   fileName、fileStatus、minimumDirectXVersion、minimumSystemRam，
-#   其他值（id / version / architecture / languages / capabilities /
-#   targetDeviceFamilies）由合作伙伴中心填充。
-# 之前一直把整份克隆来的槽（带 id 和 version）原样 PUT 回去，所以：
-#   · 带 fileStatus=PendingUpload 时被 400 拒（多余字段）
-#   · 只改 fileName 时返回 200 但商店把 Uploaded 当定稿，commit 后又变回旧包
-# 另外 fileName 指的是**上传的 ZIP 里那个 .msix 的名字**，不是 .msixupload 的名字；
-# .msixupload 本身就是"内含 .msix 的 ZIP"，所以直接把它当 ZIP 传上去正好。
 $verFromName = if ($pkgName -match '_(\d+\.\d+\.\d+\.\d+)_') { $matches[1] } else { $null }
 $innerName = ([System.IO.Path]::GetFileNameWithoutExtension($pkgName)) + '.msix'
 Write-Host "  目标包：$innerName  version=$verFromName（上传档案：$pkgName）" -ForegroundColor DarkGray
 
 $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
 
-# 形状梯度（2026-10-30 用 400 正文逐条验证）：
-#   · minimumDirectXVersion 写 'NotSet' 被拒：'NotSet' is not a valid 'DirectXVersion' value
-#   · 把包槽裁成只剩 fileName 被拒：Please keep all file entries for existing packages
-#     ... The following packages are missing in your update: 2000000000099886849
-#   · 把已有槽的 fileStatus 改回 PendingUpload 也被同一句拒掉 —— 即使 id 原样带着。
-#     → 说明「已存在的包」不能被改成 PendingUpload；要换包只能按错误提示的做法：
-#       旧槽标 PendingDelete、再新增一个 PendingUpload 的新槽（不带 id/version）。
-#   · 只改 fileName（保持 Uploaded）能过，但商店不会重新解析包体，version 仍停在旧值，
-#     因为 SAS 指向的是同一个 blob，覆盖写入后 ingestion 不重新解析。
 $shapes = @(
     @{ name = '旧槽 PendingDelete + 新槽 PendingUpload'
        pkg  = {
@@ -266,10 +133,18 @@ $shapes = @(
 $sub2 = $null
 $acceptedShape = $null
 foreach ($s in $shapes) {
-    # 每次都重新 GET，保证形状是在"干净克隆"上改的
     $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
     $baseSlot = @($cur.applicationPackages)[0]
     $cur.applicationPackages = @((& $s.pkg $baseSlot $innerName $verFromName))
+    $notesRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'msix/store'
+    foreach ($listing in $cur.listings.PSObject.Properties) {
+        $language = if ($listing.Name -like 'zh-*') { 'zh-CN' } elseif ($listing.Name -like 'en-*') { 'en-US' } else { $null }
+        if ($language -and $listing.Value.baseListing) {
+            $notes = Get-Content (Join-Path $notesRoot "release-notes.$language.txt") -Raw -Encoding utf8
+            $listing.Value.baseListing | Add-Member -NotePropertyName releaseNotes -NotePropertyValue $notes.Trim() -Force
+        }
+    }
+
     $body = $cur | ConvertTo-Json -Depth 32
     try {
         $try = Invoke-RestMethod -Method Put -Uri "$subsUri/$($sub.id)" -Headers $headers -Body $body -ContentType 'application/json'
@@ -284,7 +159,6 @@ foreach ($s in $shapes) {
     foreach ($g in $pkgs) {
         Write-Host "  [$($s.name)] -> $($g.fileName)  fileStatus=$($g.fileStatus)  version=$($g.version)" -ForegroundColor DarkGray
     }
-    # 有的形状会返回两条（旧槽 PendingDelete + 新槽 PendingUpload），按文件名找我们那条
     $mine = @($pkgs | Where-Object { $_.fileName -eq $innerName })
     if ($mine.Count -gt 0) { $sub2 = $try; $acceptedShape = $s.name; break }
     Write-Host '    → 商店没接受这个包名，换下一种形状' -ForegroundColor DarkGray
@@ -297,27 +171,11 @@ Write-Host "  已接受形状：$acceptedShape" -ForegroundColor DarkGray
 
 $slot2 = @($sub2.applicationPackages)[0]
 
-# ── 5. 传包（把 .msixupload 当作"内含 .msix 的 ZIP"整份 PUT 到 SAS）──
-#
-# 关键疑点：SAS 地址有两种形态 ——
-#   · 指向具体 blob（.../xxx.zip?sv=...）→ 直接 PUT
-#   · 指向容器（.../container?restype=container&...）→ 必须自己拼上 blob 名
-# 另外 POST 响应里的 fileUploadUrl 与 PUT 响应里的可能不是同一个。
-# 这里把候选地址全列出来，逐个上传并回读 submission，谁的版本对上了就用谁。
-$maskUrl = {
-    param($u)
-    if (-not $u) { return '(空)' }
-    $base, $q = $u -split '\?', 2
-    $q2 = if ($q) { ($q -split '&' | Where-Object { $_ -notmatch '^sig=' }) -join '&' } else { '' }
-    if ($q2) { "$base`?$q2&sig=***" } else { $base }
-}
-
 $cands = @()
 if ($sub.fileUploadUrl) { $cands += @{ n = 'POST 的 fileUploadUrl'; u = $sub.fileUploadUrl } }
 if ($sub2.fileUploadUrl -and $sub2.fileUploadUrl -ne $sub.fileUploadUrl) {
     $cands += @{ n = 'PUT 的 fileUploadUrl'; u = $sub2.fileUploadUrl }
 }
-# 新包条目自己也带 fileUploadUrl 时，那才是给这个包用的
 $mineSlot = @(@($sub2.applicationPackages) | Where-Object { $_.fileName -eq $innerName })
 if ($mineSlot.Count -gt 0 -and $mineSlot[0].fileUploadUrl) {
     $u3 = $mineSlot[0].fileUploadUrl
@@ -336,7 +194,6 @@ $cands = $cands + $extra
 if ($cands.Count -eq 0) { throw '拿不到任何 fileUploadUrl' }
 
 Write-Host "  候选上传地址 $($cands.Count) 个：" -ForegroundColor DarkGray
-foreach ($c in $cands) { Write-Host "    - $($c.n): $(& $maskUrl $c.u)" -ForegroundColor DarkGray }
 
 $bytes = [System.IO.File]::ReadAllBytes($pkg)
 $upHeaders = @{
@@ -353,16 +210,12 @@ foreach ($c in $cands) {
         Invoke-WebRequest -Method Put -Uri $c.u -Headers $upHeaders -Body $bytes -UseBasicParsing | Out-Null
     } catch {
         $d = Get-HttpErrorBody $_
-        if (-not $d) { $d = $_.Exception.Message }
-        Write-Host "  上传失败：$d" -ForegroundColor Yellow
+
+        Write-Host "  上传失败，尝试下一个上传地址。" -ForegroundColor Yellow
         continue
     }
     Write-Host "  已上传 $([math]::Round($bytes.Length / 1MB, 2)) MB" -ForegroundColor DarkGray
 
-    # ingestion 解析包体是异步的：刚传完 fileStatus 还是 PendingUpload、version 还是空的。
-    # 实测 64 秒都填不上 —— 说明真正的解析发生在 commit 之后，所以这里不把
-    # 「version 还没回填」当成失败：只要包名对得上、状态是 PendingUpload 就放行，
-    # 提交后由商店自己解析，然后我们再回读确认版本。
     for ($w = 1; $w -le 4; $w++) {
         Start-Sleep -Seconds 8
         $afterUp = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
@@ -384,7 +237,6 @@ if (-not $uploaded) {
     throw "包体传上去了但商店没认到（当前记的是 $($slotUp.fileName) / version=$($slotUp.version)）。停止提交，避免把旧包发出去。"
 }
 
-# ── 6. commit ─────────────────────────────────────────────────────────
 if ($DryRun) {
     Write-Host ''
     Write-Host 'DryRun：草稿已建好并挂上包，但没有 commit。' -ForegroundColor Yellow
@@ -395,10 +247,6 @@ if ($DryRun) {
 Write-Host '提交认证…' -ForegroundColor DarkGray
 Invoke-RestMethod -Method Post -Uri "$subsUri/$($sub.id)/commit" -Headers $headers -Body '{}' -ContentType 'application/json' | Out-Null
 
-# 提交后再核对：commit 会触发 ingestion 真正解析包体，这里等它把 version 回填出来，
-# 顺便防止「跑绿了但发出去的是旧包」这种静默错误。
-# 实测回填要 100 秒以上（2026-10-30 那次 100 秒还没好、事后查已是 1.2.0.0），
-# 所以给足 5 分钟。
 $finalOk = $false
 for ($w = 1; $w -le 30; $w++) {
     Start-Sleep -Seconds 10
@@ -411,6 +259,9 @@ for ($w = 1; $w -le 30; $w++) {
     $minePkg = @($pkgs | Where-Object { $_.fileName -eq $innerName })
     $gotPkg = if ($minePkg.Count -gt 0) { $minePkg[0] } else { $pkgs[0] }
     Write-Host "  提交后核对（$($w*10)s）：$($gotPkg.fileName)  version=$($gotPkg.version)  status=$($check.status)" -ForegroundColor DarkGray
+    if ($check.status -in @('CommitFailed', 'PreProcessingFailed', 'CertificationFailed', 'PublishFailed')) {
+        throw "Store submission failed: $($check.status)"
+    }
     if ($gotPkg.fileName -eq $innerName -and $gotPkg.version -eq $verFromName) {
         $finalOk = $true
         break
@@ -421,7 +272,7 @@ for ($w = 1; $w -le 30; $w++) {
 if ($finalOk) {
     Write-Host "  ✔ 商店已接收 $innerName（version=$verFromName）" -ForegroundColor Green
 } else {
-    Write-Host "::error::提交后商店里记的包是 $($gotPkg.fileName) / version=$($gotPkg.version)，不是 $innerName / $verFromName —— 去 Partner Center 核对" -ForegroundColor Red
+    throw "Store package version has not been verified: $($gotPkg.version); expected $verFromName"
 }
 
 Write-Host ''

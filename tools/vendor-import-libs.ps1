@@ -1,28 +1,8 @@
-#!/usr/bin/env pwsh
-# Copy the import libraries that rustlib's self-contained MinGW is missing.
-#
-# Why this exists: rustlib's x86_64-pc-windows-gnu self-contained directory
-# ships only 43 Windows import libraries. It has NO libgdiplus.a / libuxtheme.a
-# / libdwmapi.a / libshlwapi.a / libversion.a. To link against those system
-# DLLs, the .a files must come from somewhere else.
-#
-# Why copy only the needed ones instead of adding the whole llvm-mingw lib dir
-# to -L: llvm-mingw's libmsvcrt.a / libmingwex.a would shadow rustlib's same
-# named libs and the CRT dies at startup.
-#
-# IMPORTANT: this file must stay pure ASCII. Windows PowerShell 5.1 decodes .ps1
-# as ANSI (GBK on this machine), so non-ASCII comments get mangled into invalid
-# tokens and the script fails to parse.
-#
-# Usage:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tools/vendor-import-libs.ps1
-
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent $PSScriptRoot
 $dest = Join-Path $repo 'vendor\mingw-import-libs'
 
-# Import libs to borrow from LLVM-MinGW. Add more here as needed.
 $want = @(
     'libgdiplus.a',   # GDI+ self-drawing: rounded corners, gradients, AA text
     'libuxtheme.a',   # visual styles
@@ -31,7 +11,6 @@ $want = @(
     'libversion.a'    # file version info
 )
 
-# Search common install locations for LLVM-MinGW's x86_64-w64-mingw32\lib
 $candidates = @(
     (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'),
     (Join-Path $env:ProgramFiles 'llvm-mingw'),

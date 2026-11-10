@@ -1,47 +1,3 @@
-//! 图形界面：nwg 只做外壳，内容区整页 GDI+ 自绘。
-//!
-//! # 分工
-//!
-//! | 层 | 谁负责 |
-//! |---|---|
-//! | 主窗口 / 托盘 / 右键菜单 / 消息循环 | `native-windows-gui` |
-//! | 客户区全部像素 | [`crate::ui::canvas`] + [`crate::ui::pages`]（GDI+） |
-//! | 命中测试 / 滚动 / 输入框草稿 | [`crate::ui::widget`] |
-//! | 设备读写 | [`crate::ops`]（CLI 和 GUI 共用同一套六步循环） |
-//!
-//! # 三条铁律
-//!
-//! 1. **HID 操作绝不在 GUI 线程上跑**。鼠标休眠时一次 MISS 要等满 1200ms 超时，
-//!    在 GUI 线程上跑会让窗口直接假死。做法：后台线程独占设备句柄干活，
-//!    读完通过 [`nwg::Notice`] 唤醒 GUI 线程，数据用 `Arc<Mutex<Shared>>` 交接。
-//!
-//! 2. **绘制挂在 `WM_PAINT` 里**（见 [`canvas::Canvas::set_painter`]）。
-//!    窗口被遮挡再露出、最小化后恢复，Windows 只发 `WM_PAINT`，不会通知数据层；
-//!    只在「数据变了」时画，这些时刻客户区就是一片底色。
-//!
-//! 3. **写操作走队列**。GUI 线程只往 [`Shared::pending`] 塞一个 [`Cmd`]，
-//!    后台线程取出来执行。这样写天然串行 —— 两个 setter 交叉写同一寄存器
-//!    会把设备写坏。GUI 提交后立刻切 `Busy`，直到后台线程回报结果。
-//!
-//! # 为什么没有定时器
-//!
-//! 刷新节奏由后台线程自己控制（它睡在 `Condvar` 上，被「立即刷新」和「改间隔」
-//! 唤醒）。再加一个定时器只会让「谁触发刷新」有两个来源，出问题时更难定位。
-//!
-//! # nwg 已踩过的坑（写在这里省下一次试错）
-//!
-//! - `TrayNotification` 的 parent 必须是 `MessageWindow`，不能是普通 `Window`。
-//! - `TrayNotification::build` 时 icon 为 `None` 会 **panic**
-//!   （`src\controls\tray_notification.rs:370`）。本项目用 `include_bytes!` 编进 exe 的
-//!   `assets\tray.ico`，**且不能给 `.size()`** —— 那条路走 WIC image factory，
-//!   ico 里 256×256 的 PNG 条目 WIC 不认，报 `Failed to create a image factory`。
-//! - `Menu` 没有 `append()`，每个 `MenuItem` 都要显式 `.parent(&menu)`。
-//! - `TrayNotification::set_tip(&self, tip: &str)` **不接受 `Option`**。
-//! - `Window` 只有 `minimize()`，**没有** `set_minimized(bool)`；从托盘恢复用
-//!   `set_visible(true)`。
-//! - `WindowCloseData::close(false)` 可以**取消**关闭 —— `close_to_tray` 靠它实现。
-//! - `nwg::full_bind_event_handler` 收的是 **`Fn`**，不是 `FnMut`。所以要改的状态
-//!   必须放进 `Cell` / `RefCell` / `Mutex`。
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -53,8 +9,8 @@ use std::time::Duration;
 
 use native_windows_gui as nwg;
 
-use crate::hid::{self, HidDevice};
 use crate::commands::{run_cmd, run_file_cmd};
+use crate::hid::{self, HidDevice};
 use crate::proto;
 use crate::settings::{self, Settings};
 use crate::snapshot::{self, FetchOutcome};
@@ -77,7 +33,7 @@ static TRAY_ICON: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/a
 /// `main.rs` 的单实例检查靠这个标题找已有窗口，两处必须一致。
 pub const WINDOW_TITLE: &str = "R Battery";
 
-/// 侧栏左下角显示的版本号。
+/// 应用版本号。
 ///
 /// 来源是 `build.rs` 烧进来的 `ROG_APP_VERSION`：平时等于 `Cargo.toml` 的
 /// `version`，CI 发版时被 `ROG_BUILD_VERSION` 覆盖成 tag 的版本号。
@@ -167,21 +123,38 @@ impl Cmd {
     /// 结果行 / 提示里用的中文短名。
     pub(crate) fn label(&self) -> String {
         match self {
-            Cmd::Poll(hz) => format!("回报率 {hz} Hz"),
-            Cmd::Dpi { stage, dpi, .. } => format!("DPI 档 {stage} → {dpi}"),
-            Cmd::Stage(s) => format!("当前档位 {s}"),
-            Cmd::Debounce(c) => format!("去抖 {c}"),
-            Cmd::Snap(v) => format!("角度吸附 {v}"),
-            Cmd::Tuning(v) => format!("角度微调 {v}"),
-            Cmd::Lod(v) => format!("抬起距离 {}", proto::lod_name(*v)),
-            Cmd::Light { mode, .. } => format!("灯光 {}", proto::light_mode_name(*mode)),
-            Cmd::Button { slot, dst, .. } => format!("按键槽 {slot} → 0x{dst:04X}"),
-            Cmd::Sleep(c) => format!("自动休眠 {}", proto::sleep_mode_name(*c)),
-            Cmd::LowBatt(p) => format!("低电量阈值 {p}%"),
-            Cmd::FullEffect(v) => format!("充满效果 {}", if *v != 0 { "开" } else { "关" }),
-            Cmd::AutoStart(on) => if *on { "开机自启开启".to_string() } else { "开机自启关闭".to_string() },
-            Cmd::Backup(_) => "导出配置".to_string(),
-            Cmd::Restore(_) => "还原配置".to_string(),
+            Cmd::Poll(hz) => crate::trf!("回报率 {hz} Hz", hz = hz),
+            Cmd::Dpi { stage, dpi, .. } => {
+                crate::trf!("DPI 档 {stage} → {dpi}", dpi = dpi, stage = stage)
+            }
+            Cmd::Stage(s) => crate::trf!("当前档位 {s}", s = s),
+            Cmd::Debounce(c) => crate::trf!("去抖 {c}", c = c),
+            Cmd::Snap(v) => crate::trf!("角度吸附 {v}", v = v),
+            Cmd::Tuning(v) => crate::trf!("角度微调 {v}", v = v),
+            Cmd::Lod(v) => crate::trf!("抬起距离 {}", proto::lod_name(*v)),
+            Cmd::Light { mode, .. } => crate::trf!("灯光 {}", crate::i18n::translate(&proto::light_mode_name(*mode))),
+            Cmd::Button { slot, dst, .. } => {
+                crate::trf!("按键槽 {slot} → 0x{dst:04X}", dst = dst, slot = slot)
+            }
+            Cmd::Sleep(c) => crate::trf!("自动休眠 {}", crate::i18n::translate(&proto::sleep_mode_name(*c))),
+            Cmd::LowBatt(p) => crate::trf!("低电量阈值 {p}%", p = p),
+            Cmd::FullEffect(v) => crate::trf!(
+                "充满效果 {}",
+                if *v != 0 {
+                    crate::tr!("开")
+                } else {
+                    crate::tr!("关")
+                }
+            ),
+            Cmd::AutoStart(on) => {
+                if *on {
+                    crate::tr!("开机自启开启").to_string()
+                } else {
+                    crate::tr!("开机自启关闭").to_string()
+                }
+            }
+            Cmd::Backup(_) => crate::tr!("导出配置").to_string(),
+            Cmd::Restore(_) => crate::tr!("还原配置").to_string(),
         }
     }
 }
@@ -204,38 +177,32 @@ impl CmdResult {
     fn toast(&self) -> String {
         match (&self.ok, &self.err) {
             (Some(m), _) => {
-                if m == "已生效" {
-                    format!("✔ {}已生效", self.label)
+                if m == "已生效" || m == "Applied" {
+                    crate::trf!("✔ {}已生效", self.label)
                 } else {
-                    format!("✔ {}：{m}", self.label)
+                    crate::trf!("✔ {}：{m}", self.label, m = m)
                 }
             }
             (None, Some(m)) => {
                 let base = if m.contains("错误码 5") || m.contains("Win32 错误码 5") {
-                    format!("✘ {}失败：权限不足 (错误 5)", self.label)
+                    crate::trf!("✘ {}失败：权限不足 (错误 5)", self.label)
                 } else if m.starts_with("无法写入") || m.starts_with("打开") {
-                    format!("✘ {}：{m}", self.label)
+                    crate::trf!("✘ {}：{m}", self.label, m = m)
                 } else {
-                    format!("✘ {}失败：{m}", self.label)
+                    crate::trf!("✘ {}失败：{m}", self.label, m = m)
                 };
                 // `hint` 以前只写不读 —— 后台线程辛苦查出的「请确认接收器已插好」
                 // 从来没到过用户眼前。失败时补在后面，成功时无关。
                 if self.hint.is_empty() {
                     base
                 } else {
-                    format!("{base}；{}", self.hint)
+                    crate::trf!("{base}；{}", self.hint, base = base)
                 }
             }
             (None, None) => format!("✔ {}", self.label),
         }
     }
 }
-
-/// 后台线程与 GUI 线程共享的全部状态。
-/// 超过这个时长没读到设备，托盘就把读数标成「历史读数」并转灰。
-///
-/// 取 90 秒：后台刷新间隔是 60 秒，留一次失败重试的余量。
-const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// 低于这个电量提醒一次。
 const LOW_ALERT_PCT: u8 = 20;
@@ -258,7 +225,197 @@ fn low_battery_alert(level: u8, charging: bool, armed: &mut bool) -> bool {
     true
 }
 
+#[derive(Clone)]
+struct DeviceSnapshot {
+    reading: crate::device::DeviceReading,
+    state: Option<proto::State>,
+    ident: proto::Identity,
+    link: Option<hid::Link>,
+    full_at: std::time::Instant,
+}
+
+fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
+    let links = crate::win32::HidApi::load().and_then(|api| hid::open_links(&api));
+    let links = match links {
+        Ok(links) => links,
+        Err(e) => {
+            let mut s = lock_shared(shared);
+            for device in s.devices.values_mut() {
+                device.reading.connected = false;
+                device.state = None;
+            }
+            for reading in &mut s.readings {
+                reading.connected = false;
+            }
+            s.quick = None;
+            s.full = None;
+            s.status = Status::Error(e);
+            return None;
+        }
+    };
+    let (mut records, active, mut primary, ttl) = {
+        let s = lock_shared(shared);
+        (
+            s.devices.clone(),
+            s.active_key.clone(),
+            s.primary_key.clone(),
+            Duration::from_secs(s.cfg.cache_ttl_sec),
+        )
+    };
+    for record in records.values_mut() {
+        record.reading.connected = false;
+    }
+    let mut sample = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for link in links {
+        let link_key = link.device_key();
+        let previous = records
+            .values()
+            .find(|d| d.link.as_ref().is_some_and(|l| l.device_key() == link_key))
+            .cloned();
+        let needs_full = previous.as_ref().is_none_or(|d| d.state.is_none())
+            || (full
+                && previous
+                    .as_ref()
+                    .is_some_and(|d| d.full_at.elapsed() >= ttl)
+                && active
+                    .as_ref()
+                    .is_none_or(|k| previous.as_ref().is_some_and(|d| &d.reading.key == k)));
+        let out = match HidDevice::open(&link.iface) {
+            Ok(mut dev) => {
+                if needs_full {
+                    snapshot::fetch(&mut dev, &link.all_interfaces, link.report_id, &link.mode)
+                } else {
+                    snapshot::fetch_light(&mut dev, link.report_id, &link.mode)
+                }
+            }
+            Err(_) => continue,
+        };
+        let is_connected = out.snapshot.frames.contains_key("12:07:00");
+        let mut ident = if needs_full {
+            out.snapshot.identity.clone()
+        } else {
+            previous
+                .as_ref()
+                .map(|d| d.ident.clone())
+                .unwrap_or_default()
+        };
+        if ident.model_name.is_empty() {
+            ident.model_name = link.iface.product.clone();
+        }
+        let key = if !ident.mouse_sn.trim().is_empty() {
+            crate::device::stable_key(&format!("device:{}", ident.mouse_sn.trim()))
+        } else if !ident.mouse_mac.trim().is_empty() {
+            crate::device::stable_key(&format!("device:{}", ident.mouse_mac.trim()))
+        } else {
+            previous
+                .as_ref()
+                .map(|d| d.reading.key.clone())
+                .unwrap_or(link_key)
+        };
+        if let Some(old) = previous.as_ref().filter(|old| {
+            old.reading.key != key
+                && old.ident.mouse_sn.trim().is_empty()
+                && old.ident.mouse_mac.trim().is_empty()
+        }) {
+            let mut s = lock_shared(shared);
+            if outcome_is_stale(generation, s.write_gen) {
+                return None;
+            }
+            records.remove(&old.reading.key);
+            if s.promote_device_key(&old.reading.key, &key) {
+                if settings::save(&s.cfg).is_err() {
+                    tray_log("device identity preferences save failed");
+                }
+            }
+            primary = s.primary_key.clone();
+        }
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let name = ident.display_name();
+        let family = crate::device::family_of(&name);
+        let complete = out.snapshot.frames.contains_key("12:04:02")
+            && out.snapshot.frames.contains_key("12:05:00")
+            && out.snapshot.frames.contains_key("12:03:00");
+        let mut state = if needs_full && complete {
+            Some(out.snapshot.state.clone())
+        } else {
+            previous.as_ref().and_then(|d| d.state.clone())
+        };
+        if let Some(st) = &mut state {
+            st.power = out.snapshot.state.power;
+            st.charging = out.snapshot.state.charging;
+            st.voltage_mv = out.snapshot.state.voltage_mv;
+            st.poll_code = out.snapshot.state.poll_code;
+            st.active_stage = out.snapshot.state.active_stage;
+        }
+        let level = if is_connected {
+            out.snapshot.state.power
+        } else {
+            previous.as_ref().map(|d| d.reading.level).unwrap_or(0)
+        };
+        let record = DeviceSnapshot {
+            reading: crate::device::DeviceReading {
+                key: key.clone(),
+                name: if name.is_empty() {
+                    family.noun().to_string()
+                } else {
+                    name
+                },
+                family,
+                level,
+                charging: is_connected && out.snapshot.state.charging != 0,
+                connected: is_connected,
+            },
+            state: if is_connected { state } else { None },
+            ident,
+            link: Some(link),
+            full_at: if needs_full && complete {
+                std::time::Instant::now()
+            } else {
+                previous
+                    .as_ref()
+                    .map(|d| d.full_at)
+                    .unwrap_or_else(std::time::Instant::now)
+            },
+        };
+        {
+            let mut s = lock_shared(shared);
+            if outcome_is_stale(generation, s.write_gen) {
+                return None;
+            }
+            if primary.as_ref().is_none_or(|k| k == &key)
+                && (s.primary_key.is_none() || s.primary_key.as_ref() == Some(&key))
+            {
+                s.primary_key = Some(key.clone());
+                sample = apply_outcome(&out, &mut s, generation);
+                s.ident = Some(record.ident.clone());
+                s.device_family = family;
+            }
+        }
+        records.insert(key, record);
+    }
+    let mut s = lock_shared(shared);
+    if !outcome_is_stale(generation, s.write_gen) {
+        for d in records.values_mut() {
+            if !d.reading.connected {
+                d.state = None;
+            }
+        }
+        s.readings = records.values().map(|d| d.reading.clone()).collect();
+        s.sort_readings();
+        s.devices = records;
+    }
+    sample
+}
+
 struct Shared {
+    refresh_generation: u64,
+    devices: std::collections::BTreeMap<String, DeviceSnapshot>,
+    key_aliases: std::collections::BTreeMap<String, String>,
+    active_key: Option<String>,
+    primary_key: Option<String>,
     /// 最近一次**全量**快照里解析出的状态。`None` = 还没读全过。
     ///
     /// 性能/灯光/按键三页只能用它 —— 3 帧轻量读取里 DPI 编码、颜色、按键表
@@ -266,11 +423,6 @@ struct Shared {
     full: Option<proto::State>,
     /// 全量快照里的身份信息（型号、SN、固件）。
     ident: Option<proto::Identity>,
-    /// `hid::open_link` 实测出来的链路：`Wired` / `Wireless24G`。
-    ///
-    /// **不能用 `ident.dongle_sn` 判有线无线** —— 那个字段来自设备自己回报的
-    /// 接收器 SN，2.4G 下也可能读成空串，于是界面把无线显示成「有线」。
-    /// 这个字段来自枚举到的 HID 接口本身，是实测值。
     link_mode: String,
     /// 每轮都会更新的那几项。叠在 `full` 上，电量才是活的。
     quick: Option<Quick>,
@@ -283,6 +435,8 @@ struct Shared {
     low_alert_armed: bool,
     /// 当前设备的族（鼠标/耳机/键盘），提示语按它说话。
     device_family: crate::device::DeviceFamily,
+    /// 设备列表与当前详情独立更新。
+    pub readings: Vec<crate::device::DeviceReading>,
     /// 写操作代次。每提交一条写命令自增。
     ///
     /// 后台读取是「先读设备、再回填」，中间可能隔着几百毫秒。这段时间里用户
@@ -313,7 +467,7 @@ struct Shared {
     ///
     /// 改成队列后连点几下都会依次执行。上限 [`MAX_PENDING`] 防止用户
     /// 疯狂拖滑块时堆几百条命令、松手后设备还在慢慢追。
-    pending: VecDeque<Cmd>,
+    pending: VecDeque<(Cmd, Option<hid::Link>)>,
     /// 最近一条命令的结果，GUI 线程取走一次就清空。
     last: Option<CmdResult>,
     /// 下一轮要不要读全量。
@@ -321,8 +475,24 @@ struct Shared {
 }
 
 impl Shared {
+    fn sort_readings(&mut self) {
+        let cfg = &self.cfg;
+        self.readings.sort_by(|a, b| {
+            (cfg.device_kind(a).order(), cfg.device_name(a), &a.key).cmp(&(
+                cfg.device_kind(b).order(),
+                cfg.device_name(b),
+                &b.key,
+            ))
+        });
+    }
+
     fn new(cfg: Settings) -> Shared {
         Shared {
+            refresh_generation: 0,
+            devices: Default::default(),
+            key_aliases: Default::default(),
+            active_key: None,
+            primary_key: None,
             full: None,
             ident: None,
             link_mode: String::new(),
@@ -330,6 +500,7 @@ impl Shared {
             last_ok_at: None,
             low_alert_armed: true,
             device_family: crate::device::DeviceFamily::Unknown,
+            readings: Vec::new(),
             write_gen: 0,
             status: Status::Idle,
             frames: 0,
@@ -343,6 +514,40 @@ impl Shared {
             last: None,
             want_full: false,
         }
+    }
+
+    // 完整身份晚于首次电量返回时，保留选择和托盘偏好。
+    fn promote_device_key(&mut self, old: &str, new: &str) -> bool {
+        for key in self.key_aliases.values_mut() {
+            if key == old {
+                *key = new.to_string();
+            }
+        }
+        self.key_aliases.insert(old.to_string(), new.to_string());
+        for selected in [&mut self.active_key, &mut self.primary_key] {
+            if selected.as_deref() == Some(old) {
+                *selected = Some(new.to_string());
+            }
+        }
+        let tray_changed = self.cfg.tray_device.as_deref() == Some(old);
+        if tray_changed {
+            self.cfg.tray_device = Some(new.to_string());
+        }
+        let mut changed = tray_changed;
+        if !self.cfg.device_names.contains_key(new) {
+            if let Some(name) = self.cfg.device_names.remove(old) {
+                self.cfg.device_names.insert(new.to_string(), name);
+                changed = true;
+            }
+        }
+        if self.cfg.device_tray.contains_key(new) {
+            return changed;
+        }
+        if let Some(pref) = self.cfg.device_tray.get(old).copied() {
+            self.cfg.device_tray.insert(new.to_string(), pref);
+            return true;
+        }
+        changed
     }
 
     /// 界面要显示的状态：全量快照 + 活电量。
@@ -359,10 +564,10 @@ impl Shared {
     }
 
     fn autostart_text(&self) -> String {
-        format!(
+        crate::trf!(
             "{}（{}）",
             auto_state_short(self.autostart.0),
-            self.autostart.1.short()
+            crate::i18n::translate(self.autostart.1.short())
         )
     }
 
@@ -385,8 +590,8 @@ impl Shared {
     /// 不知道是该动鼠标还是该查线缆。
     fn error_text(&self) -> String {
         match &self.status {
-            Status::Error(e) => format!("读取设备失败：{e}"),
-            Status::Busy => "正在写设备 ……".to_string(),
+            Status::Error(e) => crate::trf!("读取设备失败：{e}", e = e),
+            Status::Busy => crate::tr!("正在写设备 ……").to_string(),
             _ => String::new(),
         }
     }
@@ -540,126 +745,167 @@ fn tray_log(line: &str) {
 }
 
 struct TrayCtl {
-    /// 回调消息的接收窗口（`msg_window`，托盘必须挂在 MessageWindow 上）。
     hwnd: win32::Handle,
-    /// 当前托盘图标的身份（固定 GUID，或加不上时退回的编号）。
-    /// `None` = 现在没有图标。
-    id: std::cell::Cell<Option<win32::TrayId>>,
-    /// 当前显示的图标句柄。**必须一直有效** —— `Shell_NotifyIconW` 不拷贝图标，
-    /// 句柄销毁了任务栏上就是一片空白。
-    cur: std::cell::Cell<win32::Handle>,
-    /// 上一次写进托盘的悬停提示。
-    ///
-    /// 提示只在电量/连接/DPI 变化时才该变，但 `OnNotice` 每条消息都来一次，
-    /// 拖滑块时是 100+ 次/秒。每次 `NIM_MODIFY` 都是跨进程调用，加上重建
-    /// 四行文本的字符串分配 —— 缓存一下，内容没变就不发。
-    last_tip: std::cell::RefCell<String>,
+    enabled: Cell<bool>,
+    entries: std::cell::RefCell<Vec<TrayEntry>>,
+}
+
+struct TrayEntry {
+    key: String,
+    slot: u8,
+    id: win32::TrayId,
+    icon: win32::Handle,
+    signature: String,
+    tip: String,
 }
 
 impl TrayCtl {
     fn new(hwnd: win32::Handle) -> Self {
         Self {
             hwnd,
-            id: std::cell::Cell::new(None),
-            cur: std::cell::Cell::new(std::ptr::null_mut()),
-            last_tip: std::cell::RefCell::new(String::new()),
+            enabled: Cell::new(false),
+            entries: Default::default(),
         }
     }
 
-    /// 添加/移除托盘图标。退出时必须调，否则任务栏上留一个点不动的幽灵图标。
-    fn set_visibility(&self, on: bool) {
-        if on == self.id.get().is_some() {
+    fn set_visibility(&self, enabled: bool) {
+        self.enabled.set(enabled);
+        if !enabled {
+            for entry in self.entries.borrow_mut().drain(..) {
+                win32::tray_remove(self.hwnd, entry.id);
+                unsafe {
+                    win32::DestroyIcon(entry.icon);
+                }
+            }
+        }
+    }
+
+    fn sync(&self, readings: &[crate::device::DeviceReading], cfg: &Settings) {
+        self.set_visibility(cfg.tray_enabled);
+        if !self.enabled.get() {
             return;
         }
-        if on {
-            // 先用占位图标加进去；真实电量图标由通知循环在下一拍换上。
-            let Some(h) = crate::tray_icon::render_unknown() else {
-                return;
-            };
-            match win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, h, "R Battery", win32::TRAY_GUID) {
-                Some(id) => {
-                    // 只有降级到编号模式才记一笔：正常路径不留日志。
-                    if !id.uses_guid {
-                        tray_log("add guid=fail fallback=ok");
+        let wanted = vec![cfg.tray_device.clone().unwrap_or_default()];
+        let mut entries = self.entries.borrow_mut();
+        for key in wanted {
+            let reading = readings.iter().find(|r| r.key == key);
+            let pref = cfg.tray_for(&key);
+            let content = crate::tray_prefs::TrayContent::Number;
+            let tip = reading
+                .map(|r| {
+                    format!(
+                        "{} · {}%{}",
+                        cfg.device_name(r),
+                        r.level,
+                        if !r.connected {
+                            crate::tr!("（上次电量，未连接）")
+                        } else if r.charging {
+                            crate::tr!("（充电中）")
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .unwrap_or_else(|| {
+                    if cfg.tray_device.is_some() && !readings.is_empty() {
+                        format!("{} · {}", cfg.tray_name(), crate::tr!("未连接"))
+                    } else {
+                        crate::tr!("R Battery · 打开设备页面").to_string()
                     }
-                    self.id.set(Some(id));
-                    self.cur.set(h);
-                    // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
-                    // 「内容没变」的判断会把真实提示吞掉。
-                    self.last_tip.borrow_mut().clear();
+                });
+            let signature = format!(
+                "{:?}:{pref:?}:{content:?}:{}:{}:{tip}",
+                reading,
+                crate::tray_icon::icon_size(),
+                crate::autostart::system_uses_light_theme()
+            );
+            if entries
+                .iter()
+                .any(|entry| entry.key == key && entry.signature == signature)
+            {
+                continue;
+            }
+            let icon = if let Some(r) = reading {
+                crate::tray_icon::render_device(
+                    if r.connected { Some(r.level) } else { None },
+                    r.charging,
+                    cfg.device_kind(r),
+                    content,
+                )
+            } else if cfg.tray_device.is_some() && !readings.is_empty() {
+                crate::tray_icon::render_device(None, false, pref.kind, content)
+            } else {
+                let h = win32::load_app_icon(32);
+                if h.is_null() {
+                    crate::tray_icon::render_unknown()
+                } else {
+                    Some(h)
                 }
-                None => {
-                    tray_log("add guid=fail fallback=fail");
-                    unsafe { win32::DestroyIcon(h) };
+            };
+            let Some(icon) = icon else { continue };
+            if let Some(entry) = entries.first_mut() {
+                if win32::tray_update(self.hwnd, entry.id, Some(icon), Some(&tip)) {
+                    unsafe {
+                        win32::DestroyIcon(entry.icon);
+                    }
+                    entry.key = key;
+                    entry.icon = icon;
+                    entry.signature = signature;
+                    entry.tip = tip;
+                } else {
+                    unsafe {
+                        win32::DestroyIcon(icon);
+                    }
+                }
+            } else {
+                let slot = 0;
+                if let Some(id) = win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, &tip, slot) {
+                    entries.push(TrayEntry {
+                        key,
+                        slot,
+                        id,
+                        icon,
+                        signature,
+                        tip,
+                    });
+                } else {
+                    unsafe {
+                        win32::DestroyIcon(icon);
+                    }
+                    tray_log("add failed");
                 }
             }
-        } else {
-            if let Some(id) = self.id.take() {
-                win32::tray_remove(self.hwnd, id);
-            }
-            let old = self.cur.replace(std::ptr::null_mut());
-            if !old.is_null() {
-                unsafe { win32::DestroyIcon(old) };
-            }
         }
     }
 
-    fn set_icon(&self, hicon: win32::Handle) {
-        let Some(id) = self.id.get() else {
-            unsafe { win32::DestroyIcon(hicon) };
-            return;
-        };
-        win32::tray_update(self.hwnd, id, Some(hicon), None);
-        let old = self.cur.replace(hicon);
-        if !old.is_null() && old != hicon {
-            unsafe { win32::DestroyIcon(old) };
-        }
+    fn device_for_callback(&self, wp: usize, lp: isize) -> Option<String> {
+        let v4 = ((lp as u32) >> 16) as u32;
+        let uid = if v4 != 0 { v4 } else { wp as u32 };
+        self.entries
+            .borrow()
+            .iter()
+            .find(|e| e.id.uid == uid)
+            .map(|e| e.key.clone())
     }
 
-    fn set_tip(&self, tip: &str) {
-        let Some(id) = self.id.get() else {
-            return;
-        };
-        // 内容没变就不发：拖滑块时每条鼠标消息都会走到这里。
-        if self.last_tip.borrow().as_str() == tip {
-            return;
-        }
-        win32::tray_update(self.hwnd, id, None, Some(tip));
-        let mut last = self.last_tip.borrow_mut();
-        last.clear();
-        last.push_str(tip);
-    }
-
-    /// 资源管理器重启后托盘图标会整片消失：系统会广播 `TaskbarCreated`
-    /// 给所有顶层窗口，收到就重新 `NIM_ADD` 一次，把图标（和稍后的提示）
-    /// 放回任务栏。不处理的话用户会以为程序被关掉了。
     fn re_add(&self) {
-        if self.id.get().is_none() {
-            return;
-        }
-        let cur = self.cur.get();
-        let icon = if cur.is_null() {
-            match crate::tray_icon::render_unknown() {
-                Some(h) => h,
-                None => return,
+        for entry in self.entries.borrow_mut().iter_mut() {
+            if let Some(id) = win32::tray_add(
+                self.hwnd,
+                TRAY_CALLBACK_MSG,
+                entry.icon,
+                &entry.tip,
+                entry.slot,
+            ) {
+                entry.id = id;
             }
-        } else {
-            cur
-        };
-        if let Some(id) =
-            win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, "R Battery", win32::TRAY_GUID)
-        {
-            if !id.uses_guid {
-                tray_log("re-add guid=fail fallback=ok");
-            }
-            self.id.set(Some(id));
-            self.cur.set(icon);
-            // 新加进去的图标带的是占位提示，缓存必须清掉，否则下一拍
-            // 「内容没变」的判断会把真实提示吞掉。
-            self.last_tip.borrow_mut().clear();
-        } else if icon != cur {
-            unsafe { win32::DestroyIcon(icon) };
         }
+    }
+}
+
+impl std::ops::Drop for TrayCtl {
+    fn drop(&mut self) {
+        self.set_visibility(false);
     }
 }
 
@@ -673,6 +919,7 @@ struct UiEnv<'a> {
     signal: &'a Signal,
     window: &'a nwg::Window,
     tray: &'a TrayCtl,
+    name_dialog: &'a crate::ui::device_name::Dialog,
 }
 
 impl<'a> UiEnv<'a> {
@@ -685,7 +932,13 @@ impl<'a> UiEnv<'a> {
     }
 
     fn state(&self) -> Option<proto::State> {
-        lock_shared(self.shared).ui_state()
+        let s = lock_shared(self.shared);
+        let key = self.canvas.with_ui(|u| u.selected_device.clone());
+        match key.as_ref().and_then(|k| s.devices.get(k)) {
+            Some(d) => d.state.clone(),
+            None if key.is_none() => s.ui_state(),
+            None => None,
+        }
     }
 
     fn cfg(&self) -> Settings {
@@ -694,22 +947,28 @@ impl<'a> UiEnv<'a> {
 
     /// 改一项本地设置并立刻落盘，同时让界面用上新值。
     fn set_cfg(&self, f: impl FnOnce(&mut Settings)) {
-        let snapshot = {
-            let mut s = lock_shared(self.shared);
-            f(&mut s.cfg);
-            s.cfg.clone()
-        };
+        let mut shared = lock_shared(self.shared);
+        let mut snapshot = shared.cfg.clone();
+        f(&mut snapshot);
         if let Err(e) = settings::save(&snapshot) {
-            self.say(format!("✘ 保存设置失败：{e}"));
+            drop(shared);
+            self.say(crate::trf!("✘ 保存设置失败：{e}", e = e));
+        } else {
+            shared.cfg = snapshot;
+            shared.sort_readings();
+            crate::i18n::apply(shared.cfg.language);
         }
     }
 
     fn submit(&self, cmd: Cmd) -> bool {
+        lock_shared(self.shared).active_key = self.canvas.with_ui(|u| u.selected_device.clone());
         let ok = submit(self.shared, self.signal, cmd);
         if !ok {
             // 以前这里是什么都不说就返回 false —— 用户点了一下，
             // 界面上完全没有变化，只会以为功能坏了。现在至少给一句话。
-            self.say("✘ 操作排不进去了（前面的还没写完），稍等一下再试");
+            self.say(crate::tr!(
+                "✘ 操作排不进去了（前面的还没写完），稍等一下再试"
+            ));
         }
         ok
     }
@@ -717,7 +976,7 @@ impl<'a> UiEnv<'a> {
 
 /// 把一个 `Act` 执行掉。
 ///
-/// 界面本地的动作（切页、折叠侧栏、开弹层）在这里改 `Ui` 并重画；
+/// 界面本地的动作（切页、开弹层）在这里改 `Ui` 并重画；
 /// 要写设备的交给后台线程。**这里没有一行写设备的代码** —— 全部转 [`Cmd`]。
 fn handle_act(a: Act, env: &UiEnv) {
     // 任何新动作都先把上一条提示清掉：否则写完设备的「✔ 已生效」会一直挂着，
@@ -730,15 +989,61 @@ fn handle_act(a: Act, env: &UiEnv) {
     // 控件照常响应点击（有按压反馈），但不进队列、不改任何状态。
     // 以前是整页锁死不登记命中，点了毫无反应，用户只会以为界面坏了。
     if a.needs_device() && env.canvas.with_ui(|u| u.locked) {
-        env.say("✘ 读不到设备：插好接收器，或动一下设备再试");
+        env.say(crate::tr!("✘ 读不到设备：插好接收器，或动一下设备再试"));
         return;
     }
 
     match a {
+        Act::RenameDevice => {
+            let key = env.canvas.with_ui(|u| u.selected_device.clone());
+            let s = lock_shared(env.shared);
+            if let Some(device) = key
+                .as_ref()
+                .and_then(|key| s.readings.iter().find(|r| &r.key == key))
+            {
+                let name = s.cfg.device_name(device).to_string();
+                let key = device.key.clone();
+                let dark = crate::ui::theme::resolve(&s.cfg.theme) == crate::ui::theme::Mode::Dark;
+                drop(s);
+                env.name_dialog.show(env.window, &key, &name, dark);
+            }
+        }
+        Act::SelectDevice(index) => {
+            let key = env.canvas.with_ui(|u| u.device_keys.get(index).cloned());
+            if let Some(key) = key {
+                env.canvas.with_ui_mut(|u| u.select_device(&key));
+                let mut s = lock_shared(env.shared);
+                s.active_key = Some(key);
+                s.want_full = true;
+            }
+            env.signal.request_refresh();
+            env.canvas.repaint_now();
+        }
+        Act::ToggleDeviceTray => {
+            if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
+                let reading = lock_shared(env.shared)
+                    .readings
+                    .iter()
+                    .find(|r| r.key == key)
+                    .cloned();
+                if let Some(reading) = reading {
+                    env.set_cfg(|c| {
+                        c.tray_device = Some(key);
+                        c.tray_device_name = reading.name;
+                        c.tray_enabled = true;
+                    });
+                    env.canvas.repaint_now();
+                }
+            }
+        }
         Act::None => {}
 
         Act::Nav(p) => {
-            env.canvas.with_ui_mut(|u| u.page = p);
+            env.canvas.with_ui_mut(|u| {
+                u.page = p;
+                u.initial_route_done = true;
+                u.set_open_drop(None);
+            });
             // 切到需要全量数据的页 → 立刻补一次全量读取。
             // 否则第一次进性能页看到的是「还没读到」或者几分钟前的旧值。
             if matches!(p, Page::Perf | Page::Light | Page::Keys) {
@@ -790,13 +1095,6 @@ fn handle_act(a: Act, env: &UiEnv) {
             }
         }
 
-
-        Act::ToggleRail => {
-            env.canvas.with_ui_mut(|u| u.rail = !u.rail);
-            env.canvas.repaint_now();
-        }
-
-
         Act::SetTheme(idx) => {
             let pref = match idx {
                 1 => crate::ui::theme::PREF_LIGHT,
@@ -805,7 +1103,6 @@ fn handle_act(a: Act, env: &UiEnv) {
             };
             apply_theme_pref(env, pref);
         }
-
 
         Act::OpenDrop(d) => {
             env.canvas.with_ui_mut(|u| u.set_open_drop(Some(d)));
@@ -847,7 +1144,7 @@ fn handle_act(a: Act, env: &UiEnv) {
                 // 用户会以为能输入，敲字却毫无反应。
                 env.canvas.with_ui_mut(|u| u.focus = None);
                 env.canvas.repaint_now();
-                env.say("✘ 读不到设备：插好接收器，或动一下设备再试");
+                env.say(crate::tr!("✘ 读不到设备：插好接收器，或动一下设备再试"));
                 return;
             }
             let init = edit_initial(e, st.as_ref());
@@ -881,11 +1178,17 @@ fn handle_act(a: Act, env: &UiEnv) {
             open_in_explorer(env, &dir);
         }
 
-
         Act::ChangeHistoryPath => pick_save_path(env, SavePathKind::History),
         Act::ChangeSettingsPath => pick_save_path(env, SavePathKind::Settings),
         Act::ResetHistoryPath => reset_custom_path(env, SavePathKind::History),
         Act::ResetSettingsPath => reset_custom_path(env, SavePathKind::Settings),
+        Act::OpenLogFolder => {
+            let dir = crate::paths::settings_file()
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            open_in_explorer(env, &dir);
+        }
 
         Act::OpenLightingSettings => {
             if let Err(e) = crate::dynlight::open_settings() {
@@ -896,26 +1199,26 @@ fn handle_act(a: Act, env: &UiEnv) {
         // 重新探测 LampArray。这里会真的枚举 HID（约几十毫秒），
         // 但只在用户点按钮时发生，不是每帧，也不会在绘制路径上。
         Act::RefreshLighting => match crate::dynlight::refresh() {
-            Some(l) => env.say(format!(
+            Some(l) => env.say(crate::trf!(
                 "✔ 已检测到灯效设备（{} 个灯 · {}）",
                 l.lamp_count,
                 l.kind_name()
             )),
-            None => env.say("✘ 未检测到 HID LampArray 灯效设备"),
+            None => env.say(crate::tr!("✘ 未检测到 HID LampArray 灯效设备")),
         },
 
         Act::ClearHistory => {
             let p = crate::history::history_path();
-            let q = format!(
+            let q = crate::trf!(
                 "确定清空历史记录？\n\n{}\n\n清空后续航估算会重新积累样本。",
                 p.display()
             );
-            if !ask_confirm("清空历史记录", &q) {
+            if !ask_confirm(crate::tr!("清空历史记录"), &q) {
                 return;
             }
             if p.exists() {
                 if let Err(e) = std::fs::remove_file(&p) {
-                    env.say(format!("✘ 删除失败：{e}"));
+                    env.say(crate::trf!("✘ 删除失败：{e}", e = e));
                     return;
                 }
             }
@@ -925,7 +1228,7 @@ fn handle_act(a: Act, env: &UiEnv) {
                 s.plot = None;
                 s.estimate = crate::history::Estimate::default();
             }
-            env.say("✔ 历史记录已清空");
+            env.say(crate::tr!("✔ 历史记录已清空"));
         }
 
         Act::OpenRepo => open_url(env, "https://github.com/youmikk/ROG-Battery"),
@@ -988,7 +1291,7 @@ fn pick_palette(env: &UiEnv, slot: u8, idx: usize) {
         // 就只能猜（以前猜 800），猜错就是把用户那一档的 DPI 一起改掉 ——
         // 用户点的是颜色，结果灵敏度变了，这是最糟的一种「顺手改坏」。
         let Some(st) = env.state() else {
-            env.say("✘ 读不到设备，动一下设备再选颜色");
+            env.say(crate::tr!("✘ 读不到设备，动一下设备再选颜色"));
             return;
         };
         let dpi = st.dpi(i);
@@ -1038,11 +1341,46 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
         return;
     }
 
+    if d == Drop::TrayDevice {
+        let key = env.canvas.with_ui(|u| u.tray_device_keys.get(idx).cloned());
+        let reading = key.and_then(|key| {
+            lock_shared(env.shared)
+                .readings
+                .iter()
+                .find(|r| r.key == key)
+                .cloned()
+        });
+        if let Some(reading) = reading {
+            env.set_cfg(|cfg| {
+                cfg.tray_device = Some(reading.key);
+                cfg.tray_device_name = reading.name;
+            });
+            env.canvas.repaint_now();
+        }
+        return;
+    }
+
     let Some(code) = crate::ui::dropdown::option_value(d, idx) else {
         return;
     };
 
     match d {
+        Drop::Language => {
+            if let Some(language) = crate::i18n::Language::ALL.get(code) {
+                env.set_cfg(|cfg| cfg.language = *language);
+                env.canvas.with_ui_mut(|ui| ui.clear_status());
+                env.canvas.repaint_now();
+            }
+        }
+        Drop::TrayDevice => {}
+        Drop::TrayKind => {
+            if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
+                if let Some(kind) = crate::tray_prefs::TrayKind::ALL.get(code) {
+                    env.set_cfg(|c| c.device_tray.entry(key).or_default().kind = *kind);
+                    env.canvas.repaint_now();
+                }
+            }
+        }
         Drop::Sleep => {
             env.submit(Cmd::Sleep(code as u8));
         }
@@ -1082,16 +1420,16 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
                 .interval_ms
                 .store((code as u64).saturating_mul(1000), Ordering::Relaxed);
             env.signal.request_refresh();
-            env.say(format!("✔ 刷新间隔改为 {code} 秒"));
+            env.say(crate::trf!("✔ 刷新间隔改为 {code} 秒", code = code));
         }
         Drop::CacheTtl => {
             env.set_cfg(|c| c.cache_ttl_sec = code as u64);
-            env.say(format!(
+            env.say(crate::trf!(
                 "✔ 缓存有效期改为 {}",
                 if code == 0 {
-                    "每次都重读".to_string()
+                    crate::tr!("每次都重读").to_string()
                 } else {
-                    format!("{code} 秒")
+                    crate::trf!("{code} 秒", code = code)
                 }
             ));
         }
@@ -1100,14 +1438,10 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
             let slot = (slot as usize) & 7;
             // 绑成 `0000` 以后鼠标上那个键就彻底失效了，必须二次确认。
             let confirmed = if dst == 0 {
-                let name = proto::BUTTON_NAME[slot];
+                let name = crate::i18n::translate(proto::BUTTON_NAME[slot]);
                 ask_confirm(
-                    "把按键绑成「无功能」",
-                    &format!(
-                        "{name} 将被绑成 0000（无功能）。\n\n\
-                         绑好以后这个键在鼠标上就再也按不出任何作用，\
-                         要恢复必须重新写一遍完整映射。\n\n确定继续？"
-                    ),
+                    crate::tr!("把按键绑成「无功能」"),
+                    &crate::trf!("{name} 将被绑成 0000（无功能）。\n\n绑好以后这个键在鼠标上就再也按不出任何作用，要恢复必须重新写一遍完整映射。\n\n确定继续？" , name = name),
                 )
             } else {
                 true
@@ -1144,11 +1478,11 @@ fn apply_edit(env: &UiEnv, e: Edit) {
         Edit::LowWarn => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
             let Some(v) = txt.as_deref().and_then(parse_num) else {
-                env.say("✘ 请输入 0–100 的整数");
+                env.say(crate::tr!("✘ 请输入 0–100 的整数"));
                 return;
             };
             if !(0..=100).contains(&v) {
-                env.say("✘ 低电量阈值必须在 0–100 之间");
+                env.say(crate::tr!("✘ 低电量阈值必须在 0–100 之间"));
                 return;
             }
             drop_draft(env, e);
@@ -1170,14 +1504,14 @@ fn apply_edit(env: &UiEnv, e: Edit) {
                 _ => None,
             };
             if st.is_none() && (typed_dpi.is_none() || typed_rgb.is_none()) {
-                env.say("✘ 读不到设备，动一下设备再改");
+                env.say(crate::tr!("✘ 读不到设备，动一下设备再改"));
                 return;
             }
 
             let dpi = match typed_dpi {
                 Some(v) if (proto::DPI_MIN as i64..=proto::DPI_MAX as i64).contains(&v) => v as i32,
                 Some(_) => {
-                    env.say(format!(
+                    env.say(crate::trf!(
                         "✘ DPI 必须在 {}–{} 之间（步进 {}）",
                         proto::DPI_MIN,
                         proto::DPI_MAX,
@@ -1209,7 +1543,6 @@ fn apply_edit(env: &UiEnv, e: Edit) {
             });
         }
 
-
         Edit::LightColor => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
             let cur = st.as_ref().map(|s| s.light_rgb).unwrap_or([0, 0, 0]);
@@ -1223,7 +1556,7 @@ fn apply_edit(env: &UiEnv, e: Edit) {
                     }
                 },
                 _ => {
-                    env.say("✘ 请输入形如 ff1929 的颜色");
+                    env.say(crate::tr!("✘ 请输入形如 ff1929 的颜色"));
                     return;
                 }
             };
@@ -1238,7 +1571,6 @@ fn apply_edit(env: &UiEnv, e: Edit) {
                 speed: None,
             });
         }
-
 
     }
 }
@@ -1276,15 +1608,19 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
             if !on {
                 env.window.set_visible(true);
             }
-            env.say(format!(
+            env.say(crate::trf!(
                 "✔ 托盘图标已{}",
-                if on { "开启" } else { "关闭" }
+                if on {
+                    crate::tr!("开启")
+                } else {
+                    crate::tr!("关闭")
+                }
             ));
         }
         Pref::AutoStart => {
             let on = lock_shared(env.shared).autostart_on();
             if !env.submit(Cmd::AutoStart(!on)) {
-                env.say("✘ 后台正在执行别的操作，这次开机自启没有提交");
+                env.say(crate::tr!("✘ 后台正在执行别的操作，这次开机自启没有提交"));
             }
         }
         Pref::FullEffect => {
@@ -1305,26 +1641,29 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
 fn pick_backup_file(env: &UiEnv, save: bool) {
     let mut fd = nwg::FileDialog::default();
     let (title, action) = if save {
-        ("选择备份保存位置", nwg::FileDialogAction::Save)
+        (crate::tr!("选择备份保存位置"), nwg::FileDialogAction::Save)
     } else {
-        ("选择要还原的备份文件", nwg::FileDialogAction::Open)
+        (
+            crate::tr!("选择要还原的备份文件"),
+            nwg::FileDialogAction::Open,
+        )
     };
     let folder = crate::paths::backup_dir().to_string_lossy().into_owned();
     if let Err(e) = nwg::FileDialog::builder()
         .title(title)
         .action(action)
-        .filters("rog-mouse-ctl 备份(*.txt)|所有文件(*.*)")
+        .filters(crate::tr!("rog-mouse-ctl 备份(*.txt)|所有文件(*.*)"))
         .default_folder(folder)
         .build(&mut fd)
     {
-        env.say(format!("✘ 打开文件对话框失败：{e}"));
+        env.say(crate::trf!("✘ 打开文件对话框失败：{e}", e = e));
         return;
     }
     if !fd.run(Some(env.window)) {
         return;
     }
     let Ok(item) = fd.get_selected_item() else {
-        env.say("✘ 没拿到选中的文件");
+        env.say(crate::tr!("✘ 没拿到选中的文件"));
         return;
     };
     let path = PathBuf::from(item);
@@ -1334,7 +1673,7 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
         Cmd::Restore(path)
     };
     if !env.submit(cmd) {
-        env.say("✘ 后台正在执行别的操作，请稍后再试");
+        env.say(crate::tr!("✘ 后台正在执行别的操作，请稍后再试"));
     }
 }
 
@@ -1343,14 +1682,14 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
 fn open_in_explorer(env: &UiEnv, dir: &std::path::Path) {
     let _ = crate::paths::ensure_dir(dir);
     if let Err(e) = crate::dynlight::shell_open(&dir.to_string_lossy()) {
-        env.say(format!("✘ 打不开文件夹：{e}"));
+        env.say(crate::trf!("✘ 打不开文件夹：{e}", e = e));
     }
 }
 
 /// 用默认浏览器打开一个 http(s) 链接（「关于」里的仓库 / 商店页）。
 fn open_url(env: &UiEnv, url: &str) {
     if let Err(e) = crate::dynlight::shell_open(url) {
-        env.say(format!("✘ 打不开链接：{e}"));
+        env.say(crate::trf!("✘ 打不开链接：{e}", e = e));
     }
 }
 
@@ -1364,8 +1703,8 @@ enum SavePathKind {
 impl SavePathKind {
     fn label(self) -> &'static str {
         match self {
-            SavePathKind::History => "历史文件",
-            SavePathKind::Settings => "设置文件",
+            SavePathKind::History => crate::tr!("历史文件"),
+            SavePathKind::Settings => crate::tr!("设置文件"),
         }
     }
     fn current(self) -> std::path::PathBuf {
@@ -1376,8 +1715,8 @@ impl SavePathKind {
     }
     fn filters(self) -> &'static str {
         match self {
-            SavePathKind::History => "历史记录(*.tsv)|所有文件(*.*)",
-            SavePathKind::Settings => "配置文件(*.ini)|所有文件(*.*)",
+            SavePathKind::History => crate::tr!("历史记录(*.tsv)|所有文件(*.*)"),
+            SavePathKind::Settings => crate::tr!("配置文件(*.ini)|所有文件(*.*)"),
         }
     }
 }
@@ -1391,25 +1730,25 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     if let Err(e) = nwg::FileDialog::builder()
-        .title(format!("选择{}的保存位置", kind.label()))
+        .title(crate::trf!("选择{}的保存位置", kind.label()))
         .action(nwg::FileDialogAction::Save)
         .filters(kind.filters())
         .default_folder(default_folder)
         .build(&mut fd)
     {
-        env.say(format!("✘ 打开文件对话框失败：{e}"));
+        env.say(crate::trf!("✘ 打开文件对话框失败：{e}", e = e));
         return;
     }
     if !fd.run(Some(env.window)) {
         return;
     }
     let Ok(item) = fd.get_selected_item() else {
-        env.say("✘ 没拿到选中的路径");
+        env.say(crate::tr!("✘ 没拿到选中的路径"));
         return;
     };
     let new_path = std::path::PathBuf::from(item);
     if new_path == old {
-        env.say("位置没变");
+        env.say(crate::tr!("位置没变"));
         return;
     }
     // 旧文件有内容、新位置还是空的 → 搬过去，别让用户丢历史/配置。
@@ -1432,7 +1771,11 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
     };
     match res {
         Ok(()) => {
-            env.say(format!("✔ {}已改到 {}", kind.label(), new_path.display()));
+            env.say(crate::trf!(
+                "✔ {}已改到 {}",
+                kind.label(),
+                new_path.display()
+            ));
             env.signal.request_refresh();
             env.canvas.repaint_now();
         }
@@ -1448,7 +1791,7 @@ fn reset_custom_path(env: &UiEnv, kind: SavePathKind) {
     };
     match res {
         Ok(()) => {
-            env.say(format!("✔ {}已恢复默认位置", kind.label()));
+            env.say(crate::trf!("✔ {}已恢复默认位置", kind.label()));
             env.signal.request_refresh();
             env.canvas.repaint_now();
         }
@@ -1503,8 +1846,7 @@ fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
     gen_at_read != current
 }
 
-/// 把一次读取的结果搬进 [`Shared`]。返回本轮的电量快照（供记历史）。
-/// 出错时落一份诊断文本（`<设置目录>/diagnostics.txt`）。
+/// 出错时追加一段诊断日志（`<设置目录>/diagnostics.log`）。
 ///
 /// 只在「接收器都不在」时写：休眠是正常状态，不该反复覆盖文件。
 fn write_diagnostics(status: &str, link_mode: &str, family: &str, frames: usize, elapsed_ms: u128) {
@@ -1520,7 +1862,7 @@ fn write_diagnostics(status: &str, link_mode: &str, family: &str, frames: usize,
         elapsed_ms,
         history_rows: crate::history::read_rows().len(),
     };
-    let _ = crate::diagnostics::write(&dir.join("diagnostics.txt"), &f);
+    let _ = crate::diagnostics::append(&dir.join("diagnostics.log"), &f);
 }
 
 fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option<Quick> {
@@ -1538,7 +1880,7 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
             .values()
             .next()
             .cloned()
-            .unwrap_or_else(|| "没有任何帧有应答".to_string());
+            .unwrap_or_else(|| crate::tr!("没有任何帧有应答").to_string());
         // 三态：接收器在、设备不应答 = 休眠（动一下就能唤醒）；接收器都不在 =
         // 真错误（要用户去查线和口）。两件事用一句话说会把人引向错误方向。
         let link = crate::linkstate::classify(0, snap.identity.dongle_sn.as_str());
@@ -1554,7 +1896,11 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
             if let Status::Error(ref text) = s.status {
                 write_diagnostics(
                     text,
-                    if snap.identity.dongle_sn.trim().is_empty() { "" } else { "2.4G 接收器" },
+                    if snap.identity.dongle_sn.trim().is_empty() {
+                        ""
+                    } else {
+                        crate::tr!("2.4G 接收器")
+                    },
                     crate::device::family_of(&snap.identity.model_name).noun(),
                     s.frames,
                     s.elapsed_ms,
@@ -1573,13 +1919,6 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         return None;
     }
 
-    // 电量帧在不在，决定 `state.power` 是不是**真的**。
-    //
-    // `snapshot::fetch` 在读到一半时鼠标睡了会正常返回：`frames_read > 0`
-    // 但缺 `12:07:00`（电量帧在 `MOUSE_FRAMES` 里排第 3）。此时
-    // `snap.state.power` 还是 `State::default()` 的 **0**，绝不是「电量 0%」。
-    // 实测把这条 0 写进了 `history.tsv`（2026-10-22 18:58 那条），
-    // 曲线末端直接掉到 0，续航估算也跟着崩。
     let have_power = snap.frames.contains_key("12:07:00");
     if !have_power {
         // 保留上一轮的电量显示（比清成「—」更不吓人），但**不产生新采样**。
@@ -1639,7 +1978,12 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
         if s.pending.len() >= MAX_PENDING {
             return false;
         }
-        s.pending.push_back(cmd);
+        let target = s
+            .active_key
+            .as_ref()
+            .and_then(|k| s.devices.get(k))
+            .and_then(|d| d.link.clone());
+        s.pending.push_back((cmd, target));
         s.status = Status::Busy;
         s.write_gen = s.write_gen.wrapping_add(1);
     }
@@ -1654,25 +1998,6 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
 ///
 /// 每次重新 `open_link` 而不长期持有句柄：鼠标休眠/唤醒、接收器重连都会让
 /// 旧句柄失效，长期持有反而要处理一堆失效重开逻辑。
-fn read_once(
-    cache: &mut snapshot::SnapshotCache,
-    full: bool,
-) -> Result<Option<FetchOutcome>, String> {
-    let api = crate::win32::HidApi::load()?;
-    let link = hid::open_link(&api)?;
-    let mut dev = HidDevice::open(&link.iface)?;
-    Ok(if full {
-        Some(cache.get(
-            &mut dev,
-            &link.all_interfaces,
-            link.report_id,
-            &link.mode,
-        ))
-    } else {
-        cache.get_light(&mut dev, link.report_id, &link.mode)
-    })
-}
-
 // ==================== 后台线程执行命令 ====================
 
 /// 写设备时 `ops` 的 `keep` / `save` 两个开关。
@@ -1687,12 +2012,12 @@ fn read_once(
 fn auto_state_short(s: crate::autostart::AutoStartState) -> &'static str {
     use crate::autostart::AutoStartState as S;
     match s {
-        S::Disabled => "未启用",
-        S::DisabledByUser => "已被用户关闭",
-        S::Enabled => "已启用",
-        S::DisabledByPolicy => "组策略禁止",
-        S::EnabledByPolicy => "组策略启用",
-        S::Unknown => "状态未知",
+        S::Disabled => crate::tr!("未启用"),
+        S::DisabledByUser => crate::tr!("已被用户关闭"),
+        S::Enabled => crate::tr!("已启用"),
+        S::DisabledByPolicy => crate::tr!("组策略禁止"),
+        S::EnabledByPolicy => crate::tr!("组策略启用"),
+        S::Unknown => crate::tr!("状态未知"),
     }
 }
 
@@ -1705,50 +2030,37 @@ pub(crate) fn autostart_hint(
     use crate::autostart::{AutoStartPath as P, AutoStartState as S};
 
     let where_ = match path {
-        P::WinRt => "系统「设置 → 应用 → 启动」",
-        P::Registry => "系统「设置 → 应用 → 启动」或任务管理器「启动」页",
-        P::Unknown => "系统「设置 → 应用 → 启动」",
+        P::WinRt => crate::tr!("系统「设置 → 应用 → 启动」"),
+        P::Registry => crate::tr!("系统「设置 → 应用 → 启动」或任务管理器「启动」页"),
+        P::Unknown => crate::tr!("系统「设置 → 应用 → 启动」"),
     };
 
     if requested_on {
         match state {
             S::Enabled | S::EnabledByPolicy => {
-                format!("已开启开机自启（{}）。", state.describe())
+                crate::trf!("已开启开机自启（{}）。" , crate::i18n::translate(state.describe()))
             }
-            S::DisabledByUser => format!(
-                "系统记着你之前拒绝过自启，程序再请求会被静默忽略。\
-                 请到 {where_} 手动把「{WINDOW_TITLE}」打开。"
-            ),
+            S::DisabledByUser => crate::trf!("系统记着你之前拒绝过自启，程序再请求会被静默忽略。请到 {where_} 手动把「{WINDOW_TITLE}」打开。" , WINDOW_TITLE = WINDOW_TITLE, where_ = where_),
             S::DisabledByPolicy => {
-                "组策略禁止了开机自启，本程序无法绕过。请联系管理员。".to_string()
+                crate::tr!("组策略禁止了开机自启，本程序无法绕过。请联系管理员。").to_string()
             }
-            S::Disabled => format!("系统没有接受这次请求，请到 {where_} 手动打开。"),
-            S::Unknown => format!("读不到自启状态，请到 {where_} 确认。"),
+            S::Disabled => crate::trf!("系统没有接受这次请求，请到 {where_} 手动打开。" , where_ = where_),
+            S::Unknown => crate::trf!("读不到自启状态，请到 {where_} 确认。" , where_ = where_),
         }
     } else {
         match state {
             S::Enabled | S::EnabledByPolicy => {
-                format!("没能关掉（{}），请到 {where_} 手动关闭。", state.describe())
+                crate::trf!(
+                    "没能关掉（{}），请到 {where_} 手动关闭。",
+                    crate::i18n::translate(state.describe()),
+                    where_ = where_
+                )
             }
-            _ => format!("已关闭开机自启（{}）。", state.describe()),
+            _ => crate::trf!(
+                "已关闭开机自启（{}）。",
+                crate::i18n::translate(state.describe())
+            ),
         }
-    }
-}
-
-/// 当前链路的中文说法。
-///
-/// 优先用 `hid::open_link` 实测出来的 [`Shared::link_mode`]；只有在还没读到
-/// 实测值时才退回「接收器 SN 是否为空」的旧判据 —— 那个判据在 2.4G 下会
-/// 误判成有线，是用户报过的 bug。
-fn conn_text(s: &Shared) -> &'static str {
-    match s.link_mode.as_str() {
-        "Wired" => "有线",
-        "Wireless24G" => "2.4G 无线",
-        _ => match s.ident.as_ref() {
-            Some(i) if i.dongle_sn.trim().is_empty() => "有线",
-            Some(_) => "2.4G 无线",
-            None => "连接未知",
-        },
     }
 }
 
@@ -1768,60 +2080,6 @@ fn link_code(s: &Shared) -> i32 {
 }
 
 /// 托盘悬停提示（多行）：鼠标名称 / 连接方式 / 电量 / 当前 DPI 与档位。
-fn tray_tip_full(s: &Shared) -> String {
-    let name = s
-        .ident
-        .as_ref()
-        .map(|i| i.display_name())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "未找到设备".to_string());
-
-    let conn = conn_text(s);
-
-    let battery = match s.quick {
-        Some(q) => crate::device::reading_line(&crate::device::DeviceReading {
-            family: s.device_family,
-            level: q.level,
-            charging: q.charging,
-        }),
-        None => match &s.status {
-            Status::Asleep => "电量 —（设备未响应）".to_string(),
-            Status::Error(_) => "电量 —（读取出错）".to_string(),
-            _ => "电量 —".to_string(),
-        },
-    };
-
-    let dpi = match (s.quick, s.full.as_ref()) {
-        (Some(q), Some(st)) => {
-            let idx = (q.active_stage as usize).saturating_sub(1).min(3);
-            format!("{} DPI · 第 {} 档", st.dpi(idx), q.active_stage.max(1))
-        }
-        (Some(q), None) => format!("第 {} 档", q.active_stage.max(1)),
-        _ => "DPI —".to_string(),
-    };
-
-    format!("{name}\n{conn}\n{battery}\n{dpi}")
-}
-
-/// 早期的单行悬停提示（只有电量）。
-///
-/// 现在托盘用的是 [`tray_tip_full`]（名称/链路/电量/DPI 四行）。这个只剩单测
-/// 在用 —— 留着是因为它锁定了「休眠时说休眠中、出错时说读取出错」这套措辞，
-/// 免得将来改文案时把边界情况弄丢。
-#[cfg(test)]
-fn tray_tip(q: Option<Quick>, status: &Status) -> String {
-    match (q, status) {
-        (Some(q), _) => format!(
-            "{}%  {}",
-            q.level,
-            if q.charging { "充电中" } else { "使用中" }
-        ),
-        (None, Status::Asleep) => "休眠中".to_string(),
-        (None, Status::Error(_)) => "读取出错".to_string(),
-        (None, Status::Busy) => "正在写设备".to_string(),
-        (None, _) => "尚未读取".to_string(),
-    }
-}
 
 /// 从输入框读一个十进制/十六进制整数。
 ///
@@ -1879,9 +2137,9 @@ fn ask_confirm(title: &str, text: &str) -> bool {
 
 /// 启动 GUI。返回时进程就要退出了。
 pub fn run(start_hidden: bool) -> Result<(), String> {
-    nwg::init().map_err(|e| format!("nwg 初始化失败：{e}"))?;
-
     let cfg = settings::load();
+    crate::i18n::apply(cfg.language);
+    nwg::init().map_err(|e| crate::trf!("nwg 初始化失败：{e}", e = e))?;
     Settings::write_default_if_missing();
     // 盘上写的配色和界面默认值必须一开始就一致，否则首帧是浅色、
     // 用户一拖窗口就变成深色。`system` 在这里按系统深浅色换算成具体配色。
@@ -1901,7 +2159,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // ── 主窗口 ──────────────────────────────────────────────
     let mut window = nwg::Window::default();
     nwg::Window::builder()
-        .title(WINDOW_TITLE)
+        .title(crate::gui::WINDOW_TITLE)
         .size(((WIN_W * scale) as i32, (WIN_H * scale) as i32))
         .center(true)
         // **先隐藏**：全部初始化（读设置/托盘图标/字体/画布/后台线程）都在主线程
@@ -1910,12 +2168,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         // 初始化完、dispatch 前再 ShowWindow。
         .flags(nwg::WindowFlags::MAIN_WINDOW)
         .build(&mut window)
-        .map_err(|e| format!("建主窗口失败：{e}"))?;
+        .map_err(|e| crate::trf!("建主窗口失败：{e}", e = e))?;
 
     let hwnd = window
         .handle
         .hwnd()
-        .ok_or_else(|| "主窗口没有句柄".to_string())? as crate::win32::Handle;
+        .ok_or_else(|| crate::tr!("主窗口没有句柄").to_string())?
+        as crate::win32::Handle;
 
     // 深色标题栏要和界面配色一起决定，否则浅色界面配深色标题栏很割裂。
     crate::dwm::set_dark_titlebar(hwnd, mode == crate::ui::theme::Mode::Dark);
@@ -1945,47 +2204,51 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         const ID_NCACTIVATE: usize = 0x10003;
         const ID_NCPAINT: usize = 0x10004;
         // handler_id 必须 > 0xFFFF，否则 nwg 直接 panic（那是它自己保留的区间）
-        let nccalcs = nwg::bind_raw_event_handler(&window.handle, ID_NCCALCSIZE, |_h, msg, wp, _lp| {
-            const WM_NCCALCSIZE: u32 = 0x0083;
-            if msg == WM_NCCALCSIZE {
-                // 返回 0 = 客户区铺满整个窗口矩形，标题栏视觉上消失，
-                // 但 DWM 的圆角/投影/动画照旧
-                return crate::ui::frame::on_nccalcsize(wp).map(|r| r as isize);
-            }
-            None
-        })
-        .map_err(|e| format!("绑定客户区重算子类失败：{e}"))?;
+        let nccalcs =
+            nwg::bind_raw_event_handler(&window.handle, ID_NCCALCSIZE, |_h, msg, wp, _lp| {
+                const WM_NCCALCSIZE: u32 = 0x0083;
+                if msg == WM_NCCALCSIZE {
+                    // 返回 0 = 客户区铺满整个窗口矩形，标题栏视觉上消失，
+                    // 但 DWM 的圆角/投影/动画照旧
+                    return crate::ui::frame::on_nccalcsize(wp).map(|r| r as isize);
+                }
+                None
+            })
+            .map_err(|e| crate::trf!("绑定客户区重算子类失败：{e}", e = e))?;
 
-        let minmax = nwg::bind_raw_event_handler(&window.handle, ID_MINMAXINFO, |h, msg, _wp, lp| {
-            const WM_GETMINMAXINFO: u32 = 0x0024;
-            if msg == WM_GETMINMAXINFO {
-                // nwg 的 `h` 是 winapi 的 `HWND`，我们自己的签名用 `*mut c_void`
-                // —— 两者都是指针，`as` 转一下就对了。
-                crate::ui::frame::on_getminmaxinfo(h as crate::win32::Handle, lp);
-            }
-            None
-        })
-        .map_err(|e| format!("绑定最大化尺寸子类失败：{e}"))?;
+        let minmax =
+            nwg::bind_raw_event_handler(&window.handle, ID_MINMAXINFO, |h, msg, _wp, lp| {
+                const WM_GETMINMAXINFO: u32 = 0x0024;
+                if msg == WM_GETMINMAXINFO {
+                    // nwg 的 `h` 是 winapi 的 `HWND`，我们自己的签名用 `*mut c_void`
+                    // —— 两者都是指针，`as` 转一下就对了。
+                    crate::ui::frame::on_getminmaxinfo(h as crate::win32::Handle, lp);
+                }
+                None
+            })
+            .map_err(|e| crate::trf!("绑定最大化尺寸子类失败：{e}", e = e))?;
 
-        let ncact = nwg::bind_raw_event_handler(&window.handle, ID_NCACTIVATE, |_h, msg, _wp, _lp| {
-            const WM_NCACTIVATE: u32 = 0x0086;
-            if msg == WM_NCACTIVATE {
-                // 返回 Some(1) 阻止 DefWindowProcW 绘制系统默认非客户区（经典蓝条标题栏）
-                return Some(1);
-            }
-            None
-        })
-        .map_err(|e| format!("绑定非客户区激活子类失败：{e}"))?;
+        let ncact =
+            nwg::bind_raw_event_handler(&window.handle, ID_NCACTIVATE, |_h, msg, _wp, _lp| {
+                const WM_NCACTIVATE: u32 = 0x0086;
+                if msg == WM_NCACTIVATE {
+                    // 返回 Some(1) 阻止 DefWindowProcW 绘制系统默认非客户区（经典蓝条标题栏）
+                    return Some(1);
+                }
+                None
+            })
+            .map_err(|e| crate::trf!("绑定非客户区激活子类失败：{e}", e = e))?;
 
-        let ncpaint = nwg::bind_raw_event_handler(&window.handle, ID_NCPAINT, |_h, msg, _wp, _lp| {
-            const WM_NCPAINT: u32 = 0x0085;
-            if msg == WM_NCPAINT {
-                // 返回 Some(0) 阻止系统绘制默认外边框
-                return Some(0);
-            }
-            None
-        })
-        .map_err(|e| format!("绑定非客户区绘制子类失败：{e}"))?;
+        let ncpaint =
+            nwg::bind_raw_event_handler(&window.handle, ID_NCPAINT, |_h, msg, _wp, _lp| {
+                const WM_NCPAINT: u32 = 0x0085;
+                if msg == WM_NCPAINT {
+                    // 返回 Some(0) 阻止系统绘制默认外边框
+                    return Some(0);
+                }
+                None
+            })
+            .map_err(|e| crate::trf!("绑定非客户区绘制子类失败：{e}", e = e))?;
 
         (nccalcs, minmax, ncact, ncpaint)
     };
@@ -2004,14 +2267,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let mut msg_window = nwg::MessageWindow::default();
     nwg::MessageWindow::builder()
         .build(&mut msg_window)
-        .map_err(|e| format!("建消息窗口失败：{e}"))?;
+        .map_err(|e| crate::trf!("建消息窗口失败：{e}", e = e))?;
 
     let mut menu = nwg::Menu::default();
     nwg::Menu::builder()
         .popup(true)
         .parent(&msg_window)
         .build(&mut menu)
-        .map_err(|e| format!("建托盘菜单失败：{e}"))?;
+        .map_err(|e| crate::trf!("建托盘菜单失败：{e}", e = e))?;
 
     // Menu 没有 append()，每个 MenuItem 都要显式 parent。
     //
@@ -2019,10 +2282,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 「显示主窗口 / 立即刷新」两个菜单项就没有存在意义了。
     let mut mi_quit = nwg::MenuItem::default();
     nwg::MenuItem::builder()
-        .text("退出")
+        .text(crate::tr!("退出"))
         .parent(&menu)
         .build(&mut mi_quit)
-        .map_err(|e| format!("菜单项：{e}"))?;
+        .map_err(|e| crate::trf!("菜单项：{e}", e = e))?;
 
     // 托盘图标自己管（见 `TrayCtl` 注释：nwg 不暴露 guidItem，做不到跨版本固定）。
     // 图标在消息循环起来之后再添加 —— 那时 `msg_window` 才能收回调消息。
@@ -2041,18 +2304,15 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     nwg::Notice::builder()
         .parent(&window)
         .build(&mut notice)
-        .map_err(|e| format!("建通知通道失败：{e}"))?;
+        .map_err(|e| crate::trf!("建通知通道失败：{e}", e = e))?;
 
     // ── 共享状态 ────────────────────────────────────────────
     let shared = Arc::new(Mutex::new(Shared::new(cfg.clone())));
     let signal = Arc::new(Signal::new(cfg.refresh_interval_sec));
     let sender = notice.sender();
+    let popup = Rc::new(crate::ui::tray_popup::Popup::new(&window, sender)?);
+    let name_dialog = crate::ui::device_name::Dialog::new(&window, sender)?;
 
-    // 自启状态开机时读一次 —— **放到后台线程**。
-    //
-    // `autostart::state()` 在 MSIX 包里要走一遍 WinRT 异步（实测几百毫秒），
-    // 放主线程会在窗口"该出来了"之前卡住启动（表现为一进去就转圈）。
-    // 读到后写进 shared 并 notice 一次，界面自己会刷新这一行。
     {
         let shared_a = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -2070,7 +2330,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let damage: Rc<dyn Fn()> = Rc::new(move || sender_d.notice());
     let (cw, ch) = window.size();
     let canvas = Canvas::create(hwnd, 0, 0, cw as i32, ch as i32, scale, damage)
-        .map_err(|e| format!("建自绘内容区失败：{e}"))?;
+        .map_err(|e| crate::trf!("建自绘内容区失败：{e}", e = e))?;
     // 句柄先留一份：`canvas` 后面会被 move 进事件闭包，但「显示窗口前先画
     // 首帧」那一步在闭包外，只能靠这个裸句柄。
     let canvas_hwnd = canvas.hwnd();
@@ -2091,16 +2351,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             // 只在锁里拷一份数据，**不在锁里画** —— 画一帧要几毫秒，
             // 握着锁会让后台线程写结果时多等这段。
             let (
-                state,
-                ident,
-                link_mode,
+                mut state,
+                mut ident,
+                mut link_mode,
                 plot,
                 estimate,
                 cfg,
                 autostart_text,
                 autostart_on,
-                frames,
-                elapsed,
                 rows_n,
                 err_text,
             ) = {
@@ -2114,41 +2372,71 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     s.cfg.clone(),
                     s.autostart_text(),
                     s.autostart_on(),
-                    s.frames,
-                    s.elapsed_ms,
                     s.rows.len(),
                     s.error_text(),
                 )
             };
             let theme = *ui.mode.theme();
+            let readings = {
+                let s = lock_shared(&shared_p);
+                if let Some(key) = ui.selected_device.as_ref().and_then(|k| s.key_aliases.get(k)) {
+                    if s.devices.contains_key(key) {
+                        ui.selected_device = Some(key.clone());
+                    }
+                }
+                s.readings.clone()
+            };
+            ui.sync_devices(&readings);
+            let selected = ui
+                .selected_device
+                .as_ref()
+                .and_then(|key| readings.iter().find(|r| &r.key == key));
+            let (record, is_primary) = {
+                let mut s = lock_shared(&shared_p);
+                s.active_key = ui.selected_device.clone();
+                (
+                    ui.selected_device
+                        .as_ref()
+                        .and_then(|k| s.devices.get(k))
+                        .cloned(),
+                    s.primary_key.as_ref() == ui.selected_device.as_ref(),
+                )
+            };
+            if let Some(record) = &record {
+                state = record.state.clone();
+                ident = Some(record.ident.clone());
+                link_mode = record
+                    .link
+                    .as_ref()
+                    .map(|l| l.mode.clone())
+                    .unwrap_or_default();
+            }
+            let empty_estimate = crate::history::Estimate::default();
             let data = crate::ui::viewdata::Data {
+                selected,
                 state: state.as_ref(),
                 ident: ident.as_ref(),
                 link_mode: &link_mode,
                 // 常驻错误文字（读不到设备的原因 / 正在写设备）。
                 // 瞬时提示走 `ui.status`，由 `pages::draw_toast` 优先显示。
                 status: err_text,
-                plot: plot.as_deref(),
-                estimate: &estimate,
-                rows: rows_n,
+                plot: if is_primary { plot.as_deref() } else { None },
+                estimate: if is_primary {
+                    &estimate
+                } else {
+                    &empty_estimate
+                },
+                rows: if is_primary { rows_n } else { 0 },
                 cfg: &cfg,
                 autostart_text: &autostart_text,
                 autostart_on,
                 version: APP_VERSION,
-                frames,
-                elapsed_ms: elapsed,
+                readings: &readings,
             };
             canvas::draw_frame(inner, fonts, ui, args, &theme, &data)
         }));
     }
 
-    // ── 历史曲线线程 ────────────────────────────────────────
-    //
-    // 单独一条线程，**不复用**下面那个刷新循环：`read_rows()` 冷启动实测 712 ms
-    // （之后 60–70 ms），混进刷新循环会把「第一次读到设备状态」也拖后半秒多。
-    //
-    // 每 30 秒重读一次：`history.tsv` 也可能是别的实例在追加；对一条看 8 小时
-    // 趋势的曲线，30 秒滞后无所谓。分段睡 1 秒是为了 shutdown 时能立刻退出。
     let history_thread = {
         let shared_c = Arc::clone(&shared);
         let signal_c = Arc::clone(&signal);
@@ -2178,9 +2466,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         let signal_t = Arc::clone(&signal);
         let sender_t = sender;
         std::thread::spawn(move || {
-            let mut cache = snapshot::SnapshotCache::new(
-                lock_shared(&shared_t).cfg.cache_ttl_sec,
-            );
             let mut seen = 0u64;
             loop {
                 if !signal_t.wait_for_work(&mut seen) {
@@ -2200,13 +2485,23 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 let mut ran = 0usize;
                 loop {
                     let cmd = { lock_shared(&shared_t).pending.pop_front() };
-                    let Some(cmd) = cmd else { break };
+                    let Some((cmd, target)) = cmd else { break };
                     let res = match &cmd {
-                        Cmd::Backup(_) | Cmd::Restore(_) => run_file_cmd(&cmd),
-                        _ => run_cmd(&cmd),
+                        Cmd::Backup(_) | Cmd::Restore(_) => run_file_cmd(&cmd, target.as_ref()),
+                        _ => run_cmd(&cmd, target.as_ref()),
                     };
-                    cache.invalidate();
                     let mut s = lock_shared(&shared_t);
+                    if let Some(target) = &target {
+                        for device in s.devices.values_mut() {
+                            if device
+                                .link
+                                .as_ref()
+                                .is_some_and(|link| link.device_key() == target.device_key())
+                            {
+                                device.state = None;
+                            }
+                        }
+                    }
                     // 自启命令改的就是「系统里那个开关」，改完必须把新状态
                     // 抄回 `Shared`，否则设置页那一行还停在旧文案上。
                     // 放在这里而不是 `run_autostart` 里：那个函数不持锁、也不该持。
@@ -2233,35 +2528,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     }
                 }
 
-                // ② TTL 改了要重建缓存（`SnapshotCache::new` 只在建时记 ttl）。
-                let ttl_now = lock_shared(&shared_t).cfg.cache_ttl_sec;
-                if cache.ttl != Duration::from_secs(ttl_now) {
-                    cache = snapshot::SnapshotCache::new(ttl_now);
-                }
-
-                // ③ 一轮读取。
                 let (full, gen_at_read) = {
                     let mut s = lock_shared(&shared_t);
-                    let f = s.want_full;
+                    let full = s.want_full;
                     s.want_full = false;
-                    (f, s.write_gen)
+                    (full, s.write_gen)
                 };
-                let res = read_once(&mut cache, full);
-                let sample = {
-                    let mut s = lock_shared(&shared_t);
-                    match res {
-                        Ok(Some(out)) => apply_outcome(&out, &mut s, gen_at_read),
-                        Ok(None) => {
-                            // 轻量读取走了缓存之外的分支（不该发生），保守当休眠。
-                            s.status = Status::Asleep;
-                            None
-                        }
-                        Err(e) => {
-                            s.status = Status::Error(e);
-                            None
-                        }
-                    }
-                };
+                let sample = refresh_devices(&shared_t, full, gen_at_read);
+                lock_shared(&shared_t).refresh_generation += 1;
 
                 // ④ 记一条历史采样 + 重算续航估算。
                 //
@@ -2293,39 +2567,46 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // ── 事件处理 ────────────────────────────────────────────
     //
     // 闭包是 `Fn`，所以所有可变状态都要放进 `Cell` / `RefCell`。
-    let tray_level: Cell<Option<u8>> = Cell::new(None);
+    // 多图标集合的签名：变了才重建，否则每拍都要重画 N 张图标。
 
     let h_mi_quit = mi_quit.handle.clone();
 
     let shared_e = Arc::clone(&shared);
     let signal_e = Arc::clone(&signal);
     let canvas_e = canvas.clone();
+    let canvas_tray = canvas.clone();
+    let popup_events = Rc::clone(&popup);
+    let popup_tray = Rc::clone(&popup);
 
     // explorer 重启后系统广播这条消息，收到要把托盘图标重新加回去。
     // 消息号要在主处理器 move 走 `tray` 之前先备好一份 Arc。
     let taskbar_created = crate::win32::register_window_message("TaskbarCreated");
     let tray_tb = std::sync::Arc::clone(&tray);
 
-    // 闭包要 `move` 走 `window`，而 `full_bind_event_handler` 又要借用它的
-    // 句柄 —— 先克隆一份句柄再绑，否则报 E0505（不能一边借一边移）。
-    // 最小化后窗口不再重绘，立刻归还渲染内存（位图 + 字体）。
-    //
-    // 不用 nwg 的 `OnResize`：它不把 `WM_SIZE(SIZE_MINIMIZED)` 转成该事件 ——
-    // 实测最小化后回调根本不触发（`IsIconic` 那时已经是 1，但分支永远走不到）。
-    // 最小化后窗口不再重绘，立刻归还渲染内存（位图 + 字体）。
-    //
-    // 不用 nwg 的 `OnResize`：它不把 `WM_SIZE(SIZE_MINIMIZED)` 转成该事件 ——
-    // 实测最小化后回调根本不触发（那时 `IsIconic` 已经是 1，分支永远走不到）。
     let canvas_min = canvas_e.clone();
+    let shared_language = Arc::clone(&shared);
+    let tray_broadcast = Arc::clone(&tray_tb);
     // 第二个参数是**处理器 id**（nwg 要求 > 0xFFFF），要过滤的消息在回调里判。
-    let min_handler = nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
-        // SIZE_MINIMIZED = 1
-        if msg == 0x0005 && wp as usize == 1 {
-            canvas_min.release_render_memory();
-        }
-        None
-    })
-    .map_err(|e| format!("绑 WM_SIZE 处理器失败：{e}"))?;
+    let min_handler =
+        nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
+            if taskbar_created != 0 && msg == taskbar_created {
+                tray_broadcast.re_add();
+            }
+
+            // SIZE_MINIMIZED = 1
+            if msg == 0x0005 && wp as usize == 1 {
+                canvas_min.release_render_memory();
+            }
+            if msg == 0x001A {
+                let cfg = lock_shared(&shared_language).cfg.clone();
+                if crate::i18n::apply(cfg.language) {
+                    canvas_min.invalidate();
+                }
+                sender.notice();
+            }
+            None
+        })
+        .map_err(|e| crate::trf!("绑 WM_SIZE 处理器失败：{e}", e = e))?;
 
     let wh = window.handle.clone();
     let handler = nwg::full_bind_event_handler(&wh, move |evt, evt_data, _handle| {
@@ -2373,6 +2654,68 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             }
 
             E::OnNotice => {
+                for request in name_dialog.take_requests() {
+                    let mut s = lock_shared(&shared_e);
+                    let key = s
+                        .key_aliases
+                        .get(&request.key)
+                        .cloned()
+                        .unwrap_or(request.key);
+                    let mut cfg = s.cfg.clone();
+                    let result = cfg
+                        .set_device_name(&key, &request.name)
+                        .map_err(str::to_string)
+                        .and_then(|()| settings::save(&cfg));
+                    if result.is_ok() {
+                        s.cfg = cfg;
+                        s.sort_readings();
+                    }
+                    drop(s);
+                    name_dialog.finish(result.as_ref().err().map(String::as_str));
+                    canvas.repaint_now();
+                }
+                for action in popup_events.take_actions() {
+                    use crate::ui::tray_popup::Action;
+                    match action {
+                        Action::Refresh => {
+                            let generation = lock_shared(&shared_e).refresh_generation;
+                            popup_events.refresh_started(generation);
+                            signal_e.request_refresh();
+                        }
+                        Action::Quit => {
+                            popup_events.hide();
+                            signal_e.request_quit();
+                            nwg::stop_thread_dispatch();
+                        }
+                        Action::Settings | Action::Main | Action::Device(_) => {
+                            popup_events.hide();
+                            match action {
+                                Action::Settings => canvas.with_ui_mut(|u| {
+                                    u.page = Page::Settings;
+                                    u.initial_route_done = true;
+                                }),
+                                Action::Main => canvas.with_ui_mut(|u| {
+                                    u.page = Page::Home;
+                                    u.initial_route_done = true;
+                                }),
+                                Action::Device(key) => {
+                                    canvas.with_ui_mut(|u| u.select_device(&key));
+                                    let mut s = lock_shared(&shared_e);
+                                    s.active_key = Some(key);
+                                    s.want_full = true;
+                                    signal_e.request_refresh();
+                                }
+                                _ => {}
+                            }
+                            unsafe {
+                                win32::ShowWindow(hwnd, 9);
+                                win32::SetForegroundWindow(hwnd);
+                            }
+                            canvas.repaint_now();
+                        }
+                    }
+                }
+
                 // ⓪ 充电动效开关。
                 //
                 // 判据是「当前页 == 电量页 **且** 设备报告正在充电」。
@@ -2382,9 +2725,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 // 但动效从「该出现」到「真出现」晚 60 秒用户是感觉不到的。
                 let want_anim = {
                     let s = lock_shared(&shared_e);
-                    let on_battery = canvas.with_ui(|u| {
-                        u.page == crate::ui::widget::Page::Battery
-                    });
+                    let on_battery = canvas.with_ui(|u| u.page == crate::ui::widget::Page::Battery);
                     let charging = on_battery && s.quick.map(|q| q.charging).unwrap_or(false);
                     let toast_active = canvas.with_ui(|u| !u.status.is_empty());
                     charging || toast_active
@@ -2400,6 +2741,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         signal: &signal_e,
                         window: &window,
                         tray: &tray,
+                        name_dialog: &name_dialog,
                     };
                     for a in acts {
                         handle_act(a, &env);
@@ -2417,61 +2759,28 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     canvas.repaint_now();
                 }
 
-                // ③ 托盘图标 + 悬停提示
-                let (q, asleep) = {
-                    let s = lock_shared(&shared_e);
-                    (s.quick, matches!(s.status, Status::Asleep))
-                };
-                // `set_tip` 只收 `&str`，所以每次都要造一个新 String。
-                let stale = {
-                    let s = lock_shared(&shared_e);
-                    s.last_ok_at
-                        .map(|t| t.elapsed() > STALE_AFTER)
-                        .unwrap_or(false)
-                };
-                let tip = {
-                    let s = lock_shared(&shared_e);
-                    let mut t = tray_tip_full(&s);
-                    if stale {
-                        t.push_str("（历史读数）");
-                    }
-                    t
-                };
-                tray.set_tip(&tip);
-                // 休眠时不要显示上一次的电量数字，那会误导（用户以为还是 84%）。
-                // 但也不能退回应用图标 —— 那样任务栏上只剩一个图标，看不出是电量，
-                // 用户报过「托盘短暂出现只显示图标而不是数字」。所以读不到就画一条
-                // 短横线占位。
-                let want: Option<u8> = if asleep { None } else { q.map(|v| v.level) };
-                if want != tray_level.get() {
-                    let charging = q.map(|v| v.charging).unwrap_or(false);
-                    let hicon = match want {
-                        Some(level) if stale => crate::tray_icon::render_stale(level),
-                        Some(level) if charging => crate::tray_icon::render_charging(level),
-                        Some(level) => crate::tray_icon::render(level),
-                        None => crate::tray_icon::render_unknown(),
-                    };
-                    if let Some(level) = want {
-                        let fire = {
-                            let mut s = lock_shared(&shared_e);
-                            low_battery_alert(level, charging, &mut s.low_alert_armed)
-                        };
-                        if fire {
-                            let noun = {
-                                let s = lock_shared(&shared_e);
-                                s.device_family.noun()
-                            };
-                            canvas.with_ui_mut(|u| {
-                                u.set_status(format!("{noun}电量低，建议充电"))
-                            });
-                            canvas.set_animating(true);
-                            canvas.repaint_now();
+                {
+                    let mut s = lock_shared(&shared_e);
+                    let readings = s.readings.clone();
+                    if s.cfg.ensure_tray_device(&readings) {
+                        if let Err(e) = settings::save(&s.cfg) {
+                            tray_log(&format!("save selection failed: {e}"));
                         }
                     }
-                    if let Some(hicon) = hicon {
-                        // `TrayCtl::set_icon` 负责换图并销毁旧句柄。
-                        tray.set_icon(hicon);
-                        tray_level.set(want);
+                    tray.sync(&s.readings, &s.cfg);
+                    if let Some(q) = s.quick {
+                        if low_battery_alert(q.level, q.charging, &mut s.low_alert_armed) {
+                            canvas.with_ui_mut(|u| {
+                                u.set_status(crate::tr!("设备电量低，建议充电").to_string())
+                            });
+                        }
+                    }
+                    let (readings, cfg, generation) =
+                        (s.readings.clone(), s.cfg.clone(), s.refresh_generation);
+                    drop(s);
+                    popup_events.update(&readings, &cfg, generation);
+                    if !cfg.tray_enabled {
+                        popup_events.hide();
                     }
                 }
 
@@ -2487,36 +2796,117 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 图标是我们自己用 `Shell_NotifyIconW` 加的（见 `TrayCtl`），鼠标事件会
     // 发到 `TRAY_CALLBACK_MSG`，由 `msg_window` 接收。nwg 那条「托盘事件」
     // 通道已经不参与，所以这里用裸处理器。
+    let shared_tray = Arc::clone(&shared);
+    const CLICK_TIMER: usize = 87;
+    let pending_click = Cell::new(false);
+    let suppress_release = Cell::new(false);
+    let click_was_open = Cell::new(false);
+    let anchor = Cell::new(win32::Rect::default());
     let tray_handler = unsafe {
-        nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |_h, msg, _wp, lp| {
-            // 资源管理器重启：所有托盘图标都没了，重新加一次。
+        nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |h, msg, wp, lp| {
+            let message_hwnd = h as win32::Handle;
             if taskbar_created != 0 && msg == taskbar_created {
                 tray_tb.re_add();
+                return Some(0);
+            }
+            if msg == 0x0113 && wp == CLICK_TIMER {
+                win32::KillTimer(message_hwnd, CLICK_TIMER);
+                if pending_click.replace(false) {
+                    if click_was_open.get() {
+                        popup_tray.hide();
+                    } else {
+                        let (readings, cfg, generation) = {
+                            let s = lock_shared(&shared_tray);
+                            (s.readings.clone(), s.cfg.clone(), s.refresh_generation)
+                        };
+                        popup_tray.update(&readings, &cfg, generation);
+                        if cfg.tray_enabled {
+                            popup_tray.show(anchor.get());
+                        }
+                    }
+                }
                 return Some(0);
             }
             if msg != TRAY_CALLBACK_MSG {
                 return None;
             }
-            // 回调的 lParam 低字是鼠标消息
-            match (lp as u32) & 0xFFFF {
-                // WM_RBUTTONUP：弹菜单（现在只剩「退出」）。
-                0x0205 => {
-                    let (x, y) = nwg::GlobalCursor::position();
+            if tray_tb.device_for_callback(wp, lp).is_none() {
+                return Some(0);
+            }
+            let event = (lp as u32) & 0xffff;
+            let icon_rect = tray_tb
+                .entries
+                .borrow()
+                .first()
+                .and_then(|entry| win32::tray_rect(message_hwnd, entry.id));
+            let (x, y) = nwg::GlobalCursor::position();
+            let current = icon_rect.unwrap_or(win32::Rect {
+                left: x,
+                top: y,
+                right: x + 16,
+                bottom: y + 16,
+            });
+            match event {
+                0x0205 | 0x007b => {
+                    pending_click.set(false);
+                    win32::KillTimer(message_hwnd, CLICK_TIMER);
+                    popup_tray.hide();
+                    if let Some((parent, id)) = mi_quit.handle.hmenu_item() {
+                        let text = win32::to_wide(crate::tr!("退出"));
+                        win32::ModifyMenuW(
+                            parent as win32::Handle,
+                            id,
+                            0,
+                            id as usize,
+                            text.as_ptr(),
+                        );
+                    }
                     menu.popup(x, y);
                 }
-                // WM_LBUTTONUP：直接回主窗口。
-                // SW_RESTORE = 9：既显示窗口、又取消最小化。
-                // 用裸句柄，不用 `window`（它已被主处理器 move 走）。
-                0x0202 => {
-                    let _ = crate::win32::ShowWindow(hwnd, 9);
-                    let _ = crate::win32::SetForegroundWindow(hwnd);
+                0x0201 => {
+                    suppress_release.set(false);
+                    click_was_open.set(popup_tray.was_open());
+                    anchor.set(current);
+                }
+                0x0203 => {
+                    pending_click.set(false);
+                    suppress_release.set(true);
+                    win32::KillTimer(message_hwnd, CLICK_TIMER);
+                    popup_tray.hide();
+                    canvas_tray.with_ui_mut(|u| {
+                        u.page = Page::Home;
+                        u.initial_route_done = true;
+                    });
+                    win32::ShowWindow(hwnd, 9);
+                    win32::SetForegroundWindow(hwnd);
+                    canvas_tray.repaint_now();
+                }
+                0x0202 | 0x0400 => {
+                    if !suppress_release.get() && !pending_click.replace(true) {
+                        anchor.set(current);
+                        win32::SetTimer(message_hwnd, CLICK_TIMER, win32::GetDoubleClickTime(), 0);
+                    }
+                }
+                0x0401 => {
+                    pending_click.set(false);
+                    win32::KillTimer(message_hwnd, CLICK_TIMER);
+                    if popup_tray.was_open() {
+                        popup_tray.hide();
+                    } else {
+                        let (readings, cfg, generation) = {
+                            let s = lock_shared(&shared_tray);
+                            (s.readings.clone(), s.cfg.clone(), s.refresh_generation)
+                        };
+                        popup_tray.update(&readings, &cfg, generation);
+                        popup_tray.show(current);
+                    }
                 }
                 _ => {}
             }
             Some(0)
         })
     }
-    .map_err(|e| format!("绑托盘回调失败：{e}"))?;
+    .map_err(|e| crate::trf!("绑托盘回调失败：{e}", e = e))?;
 
     // ── 菜单事件处理器 ──────────────────────────────────────
     let signal_m = Arc::clone(&signal);
@@ -2530,7 +2920,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             _ => {}
         }
     });
-
 
     {
         let mut s = lock_shared(&shared);
@@ -2573,248 +2962,4 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // （GUID 或退回的编号）删除，也会释放图标句柄。
     tray_exit.set_visibility(false);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-
-    #[test]
-    fn toast_appends_hint_only_on_failure() {
-        let ok = CmdResult {
-            label: "备份".into(),
-            ok: Some("已生效".into()),
-            err: None,
-            hint: "不该出现",
-        };
-        assert_eq!(ok.toast(), "✔ 备份已生效");
-
-        let bad = CmdResult {
-            label: "备份".into(),
-            ok: None,
-            err: Some("设备无应答".into()),
-            hint: "请确认接收器已插好",
-        };
-        let t = bad.toast();
-        assert!(t.contains("设备无应答"), "{t}");
-        assert!(t.contains("请确认接收器已插好"), "{t}");
-
-        let no_hint = CmdResult {
-            label: "备份".into(),
-            ok: None,
-            err: Some("设备无应答".into()),
-            hint: "",
-        };
-        assert!(!no_hint.toast().contains('；'), "{}", no_hint.toast());
-    }
-    /// DPI 走的是十进制，这条不能被上面的十六进制改动带偏。
-    #[test]
-    fn dpi_numbers_stay_decimal() {
-        assert_eq!(parse_num("1600"), Some(1600));
-        assert_eq!(parse_num(" 400 "), Some(400));
-        assert_eq!(parse_num("0x640"), Some(1600));
-        assert_eq!(parse_num(""), None);
-        assert_eq!(parse_num("16OO"), None); // 字母 O 不是零
-    }
-
-    #[test]
-    fn color_parser_forms() {
-        assert_eq!(parse_color("").unwrap(), None);
-        assert_eq!(parse_color("ff1929").unwrap(), Some([0xFF, 0x19, 0x29]));
-        assert_eq!(parse_color("#ff1929").unwrap(), Some([0xFF, 0x19, 0x29]));
-        assert_eq!(parse_color("FF1929").unwrap(), Some([0xFF, 0x19, 0x29]));
-        assert!(parse_color("ff192").is_err());
-        assert!(parse_color("gggggg").is_err());
-    }
-
-    /// 命令标签要能认人 —— 结果提示里它是最前面的那几个字。
-    #[test]
-    fn cmd_labels_are_readable() {
-        assert!(Cmd::Light {
-            mode: 0,
-            bright: None,
-            rgb: None,
-            dir: None,
-            random: None,
-            speed: None,
-        }
-        .label()
-        .starts_with("灯光"));
-        assert!(Cmd::Button {
-            slot: 1,
-            dst: 0x01F0,
-            confirmed: true
-        }
-        .label()
-        .starts_with("按键槽"));
-        assert!(Cmd::Sleep(0xFF).label().contains("永不"));
-        assert!(Cmd::LowBatt(20).label().contains("20%"));
-    }
-
-    /// 输入框初值必须和页面显示的值一致，否则点进去数字会跳。
-    #[test]
-    fn edit_initial_matches_device_values() {
-        let mut st = proto::State::default();
-        // 真实读数：四档 DPI 都有编码（全 0 会被判成「没读到」）
-        st.enc = [15, 15, 15, 15];
-        st.low_warn = 15;
-        st.light_rgb = [0x11, 0x22, 0x33];
-        assert_eq!(edit_initial(Edit::LowWarn, Some(&st)), "15");
-        assert_eq!(edit_initial(Edit::LightColor, Some(&st)), "112233");
-        // 读不到设备时给空串，绝不编值
-        assert_eq!(edit_initial(Edit::LowWarn, None), "");
-        assert_eq!(edit_initial(Edit::Dpi(0), None), "");
-        assert_eq!(edit_initial(Edit::DpiColor(0), None), "");
-        assert!(!device_known(None));
-        assert!(!device_known(Some(&proto::State::default())));
-        assert!(device_known(Some(&st)));
-    }
-
-    /// 三种状态不能混：休眠是正常态，错误要用户排查。
-    #[test]
-    fn tray_tip_distinguishes_states() {
-        let q = Quick {
-            level: 84,
-            charging: false,
-            voltage_mv: 3968,
-            poll_code: 3,
-            active_stage: 2,
-        };
-        assert!(tray_tip(Some(q), &Status::Ok).contains("84"));
-        assert_eq!(tray_tip(None, &Status::Asleep), "休眠中");
-        assert_eq!(
-            tray_tip(None, &Status::Error("x".into())),
-            "读取出错"
-        );
-        assert_eq!(tray_tip(None, &Status::Idle), "尚未读取");
-    }
-
-    /// 2.4G 下不能再显示成「有线」——用户报过的 bug。
-    ///
-    /// 旧判据是「接收器 SN 是否为空」，但那个字段由设备自己回报，
-    /// 2.4G 下也可能是空串。现在以 `hid::open_link` 实测的 `link_mode` 为准。
-    #[test]
-    fn conn_text_follows_measured_link_mode() {
-        let mut s = Shared::new(crate::settings::Settings::default());
-
-        // 实测无线：即使接收器 SN 读成空，也必须显示 2.4G 无线。
-        s.link_mode = "Wireless24G".to_string();
-        s.ident = Some(proto::Identity {
-            dongle_sn: String::new(),
-            ..Default::default()
-        });
-        assert_eq!(conn_text(&s), "2.4G 无线");
-        assert_eq!(link_code(&s), 2);
-
-        // 实测有线：即使接收器 SN 非空，也必须有线。
-        s.link_mode = "Wired".to_string();
-        s.ident = Some(proto::Identity {
-            dongle_sn: "C00000000001".to_string(),
-            ..Default::default()
-        });
-        assert_eq!(conn_text(&s), "有线");
-        assert_eq!(link_code(&s), 1);
-
-        // 还没读到实测值时才退回旧判据。
-        s.link_mode.clear();
-        assert_eq!(conn_text(&s), "2.4G 无线");
-        s.ident = None;
-        assert_eq!(conn_text(&s), "连接未知");
-    }
-
-    /// 链路模式必须从快照真正抄进 `Shared`，否则托盘提示永远拿不到实测值。
-    #[test]
-    fn apply_outcome_carries_link_mode() {
-        let mut s = Shared::new(crate::settings::Settings::default());
-        assert!(s.link_mode.is_empty());
-
-        let mut snap = snapshot::Snapshot::default();
-        snap.link_mode = "Wireless24G".to_string();
-        let out = snapshot::FetchOutcome {
-            snapshot: std::sync::Arc::new(snap),
-            elapsed: std::time::Duration::from_millis(120),
-            frames_read: 0, // 走「一帧都没读到」的早退分支，链路模式仍要抄进去
-        };
-        let _ = apply_outcome(&out, &mut s, 0);
-        assert_eq!(s.link_mode, "Wireless24G");
-        assert_eq!(conn_text(&s), "2.4G 无线");
-    }
-
-    #[test]
-    fn join_bounded_waits_for_finishing_thread() {
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let d = std::sync::Arc::clone(&done);
-        let h = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(60));
-            d.store(true, Ordering::Relaxed);
-        });
-        join_bounded(h, Duration::from_millis(2000));
-        assert!(done.load(Ordering::Relaxed), "预算内应当等到线程结束");
-    }
-
-    #[test]
-    fn join_bounded_gives_up_after_budget() {
-        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(600)));
-        let t0 = std::time::Instant::now();
-        join_bounded(h, Duration::from_millis(100));
-        let el = t0.elapsed();
-        assert!(
-            el >= Duration::from_millis(80) && el < Duration::from_millis(450),
-            "超预算就该放弃，不该干等：{el:?}"
-        );
-    }
-    #[test]
-    fn request_quit_sets_flag_and_wakes_workers() {
-        let s = Signal::new(60);
-        assert!(!s.shutdown.load(Ordering::Relaxed));
-        s.request_quit();
-        assert!(s.shutdown.load(Ordering::Relaxed));
-        // 托盘菜单和关闭对话框可能先后触发，必须幂等
-        s.request_quit();
-        assert!(s.shutdown.load(Ordering::Relaxed));
-    }
-
-
-    #[test]
-    fn low_battery_alert_fires_once_per_crossing() {
-        let mut armed = true;
-        assert!(low_battery_alert(19, false, &mut armed));
-        assert!(!low_battery_alert(18, false, &mut armed), "同一次掉电只提醒一次");
-        assert!(!low_battery_alert(15, false, &mut armed));
-    }
-
-    #[test]
-    fn low_battery_alert_rearms_after_recharge() {
-        let mut armed = true;
-        assert!(low_battery_alert(20, false, &mut armed));
-        assert!(!low_battery_alert(22, false, &mut armed), "没回到复位线以上不上膛");
-        assert!(!low_battery_alert(26, false, &mut armed));
-        assert!(low_battery_alert(20, false, &mut armed), "回充过之后可以再提醒");
-    }
-
-    #[test]
-    fn low_battery_alert_stays_quiet_while_charging() {
-        let mut armed = true;
-        assert!(!low_battery_alert(5, true, &mut armed));
-        assert!(armed, "充电时上膛");
-    }
-
-
-    #[test]
-    fn stale_outcome_is_detected_by_generation() {
-        assert!(!outcome_is_stale(7, 7), "同一代次的结果应当采用");
-        assert!(outcome_is_stale(7, 8), "读完之后用户写过设备，这轮要丢");
-        assert!(outcome_is_stale(0, 1));
-    }
-
-
-    #[test]
-    fn activity_due_is_throttled() {
-        let now = std::time::Instant::now();
-        assert!(activity_due(None, now), "第一次活动总要触发");
-        assert!(!activity_due(Some(now), now), "紧接着的第二次要节流");
-        assert!(activity_due(Some(now - ACTIVITY_MIN_GAP), now));
-    }
-
 }

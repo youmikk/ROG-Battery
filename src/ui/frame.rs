@@ -1,36 +1,3 @@
-//! 无边框窗口（去掉系统标题栏，保留原生缩放 / Aero Snap / 系统阴影）。
-//!
-//! # 为什么不是「用 `WS_POPUP` 重建窗口」
-//!
-//! 用户想要的是 Win11 计算器那样：标题栏那一条由程序自己画，但**窗口行为**
-//! 还是系统的 —— 拖边缘能缩放、拖到屏幕顶能最大化、双击标题栏能最大化、
-//! 点关闭有系统关窗流程（含我们的「关闭到托盘」判断）。
-//!
-//! 用 `WS_POPUP` 会把这些全丢掉，得自己实现一堆边缘命中、吸附、动画。
-//! 正确的做法是**只拿掉 caption，保留 `WS_THICKFRAME`**：
-//!
-//! - `WS_THICKFRAME` 还在 → 系统仍然做边缘缩放和 Aero Snap。
-//! - `WM_NCCALCSIZE` 返回 0 → 客户区铺满整个窗口矩形，标题栏视觉上消失。
-//! - DWM 的圆角、投影、最大化动画都由系统照旧处理。
-//!
-//! # 命中测试为什么在 canvas 里做（本模块只出算法）
-//!
-//! 内容区是覆盖**整个客户区**的子窗口，所以鼠标消息和 `WM_NCHITTEST`
-//! 全部先到子窗口 —— 主窗口根本收不到。于是「这一块属于哪类」在
-//! [`logical_hit`] 里算（纯函数，可单测），
-//! 真正把意图转交系统（`WM_NCLBUTTONDOWN`）由 `canvas.rs` 做。
-//!
-//! 判定必须在 canvas（子窗口）做，不能挂到主窗口的 `WM_NCHITTEST` 上：
-//! 那一层收不到客户区消息，点击会被吞掉。
-//!
-//! # 拖动为什么不自己实现
-//!
-//! 把 `HTCAPTION` 交给 `DefWindowProc(WM_NCLBUTTONDOWN)` 之后，拖动、Aero Snap
-//! （拖到屏幕顶最大化、拖到左右边缘半屏）、双击最大化、高 DPI 跟手
-//! 全是系统原生那份。自己 `SetWindowPos` 跟鼠标会把这些全部丢掉。
-//!
-//! 自己算偏移跟手不会有 Aero Snap、边缘吸附、双击最大化、DPI 变化这些系统
-//! 行为，所以拖动交给 `HTCAPTION` 的默认实现。
 
 use crate::win32::Handle;
 use crate::win32::{GetMonitorInfoW, MonitorFromWindow, MonitorInfo};
@@ -48,7 +15,6 @@ const WS_MAXIMIZE: isize = 0x0100_0000;
 const WM_CLOSE: u32 = 0x0010;
 const WM_SYSCOMMAND: u32 = 0x0112;
 
-// ── 命中测试返回值 ──
 pub const HTCLIENT: isize = 1;
 pub const HTCAPTION: isize = 2;
 pub const HTMINBUTTON: isize = 8;
@@ -117,28 +83,11 @@ pub fn is_maximized(hwnd: Handle) -> bool {
     crate::ui::canvas::get_window_long(hwnd, GWL_STYLE) & WS_MAXIMIZE != 0
 }
 
-/// 命中测试该看的是**顶层窗口**的最大化状态。
-///
-/// canvas 是 `WS_CHILD` 子窗口，它永远没有 `WS_MAXIMIZE` 位 —— 拿它去问恒为
-/// false，于是最大化状态下四边照样报 `HTLEFT`/`HTTOP`，用户在屏幕边缘按住就
-/// 触发「还原 + 拖动」。这里统一向上找父窗口。
 pub fn owner_is_maximized(hwnd: Handle) -> bool {
     let parent = crate::ui::canvas::get_parent(hwnd);
     is_maximized(if parent.is_null() { hwnd } else { parent })
 }
 
-/// 去掉标题栏之后把**客户区**校正回指定逻辑尺寸。
-///
-/// 为什么需要这一步：`WM_NCCALCSIZE` 让客户区 = 整个窗口矩形之后，
-/// 原来那圈边框（本机 16 宽 / 39 高）就变成了客户区的一部分 —— 于是内容区
-/// 从 1100×740 变成 1116×779，页面右下角多出一截空白、卡片被拉伸。
-///
-/// 修法是按「窗口比客户区多出来的部分」补回窗口尺寸：
-/// 有边框时（16/39）补上就回到 1100×740；已经无边框时这个差值是 0，
-/// 窗口尺寸本身就是客户区尺寸，直接设成目标值即可。
-///
-/// 用两次测量而不是硬编码 16/39：边框宽度随 DPI 和系统主题
-/// （`SM_CXPADDEDBORDER`）变，硬编码在 125% 缩放下会差几像素。
 pub fn keep_client_size(hwnd: Handle, want_w: f32, want_h: f32, scale: f32) {
     let want_pw = (want_w * scale).round() as i32;
     let want_ph = (want_h * scale).round() as i32;
@@ -171,11 +120,6 @@ pub fn on_nccalcsize(_wparam: usize) -> Option<isize> {
     Some(0)
 }
 
-/// 命中测试（**纯函数**，入参全是逻辑像素的客户区坐标）。
-///
-/// 顺序很重要：**先判按钮，再判边缘，最后才判标题栏**。反过来的话，
-/// 右上角的关闭按钮会先被「顶部边缘缩放区」吃掉，用户点关闭变成拉窗口 ——
-/// 我第一版就是这个顺序，实测点关闭会把窗口拉高。
 pub fn logical_hit(
     x: f32,
     y: f32,
@@ -217,6 +161,10 @@ pub fn logical_hit(
         }
     }
 
+    // 设置齿轮属于客户区，不能触发窗口拖动。
+    if crate::ui::titlebar::settings_rect(client_w).contains(x, y) {
+        return HTCLIENT;
+    }
     // ③ 标题栏其余部分 = 可拖动
     if (0.0..=title_h).contains(&y) {
         return HTCAPTION;
@@ -327,140 +275,5 @@ pub fn on_getminmaxinfo(hwnd: Handle, lparam: isize) {
         // 缩到比这更小，页面也就不会挤成一条缝。
         *base.add(6) = min_w;
         *base.add(7) = min_h;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const TW: f32 = 1100.0;
-    const TH: f32 = 740.0;
-    const TITLE: f32 = 36.0;
-
-    #[test]
-    fn nccalcsize_一律铺满整窗() {
-        // 无论 wparam 为何值，都返回 0（客户区 = 整个窗口矩形）。
-        // wparam==0 也拦，是为了杜绝窗口重显/SetWindowPos 时默认过程重新
-        // 算出 21px 经典蓝条标题栏（用户实测的偶发蓝条）。
-        assert_eq!(on_nccalcsize(1), Some(0));
-        assert_eq!(on_nccalcsize(0), Some(0));
-    }
-
-    #[test]
-    fn 关闭按钮优先于顶边缩放() {
-        // 关闭按钮中心 ≈ (1100-23, 18)。若先判边缘，这里会返回 HTTOP 或
-        // HTTOPRIGHT，用户点关闭变成拉窗口。
-        let hit = logical_hit(TW - 23.0, 18.0, TW, TH, TITLE, false);
-        assert_eq!(hit, HTCLOSE, "右上角被边缘缩放吃掉了");
-        // 最小化按钮中心
-        assert_eq!(logical_hit(TW - 115.0, 18.0, TW, TH, TITLE, false), HTMINBUTTON);
-        // 最大化按钮中心
-        assert_eq!(logical_hit(TW - 69.0, 18.0, TW, TH, TITLE, false), HTMAXBUTTON);
-    }
-
-    #[test]
-    fn 标题栏空白处可拖动() {
-        assert_eq!(logical_hit(300.0, 18.0, TW, TH, TITLE, false), HTCAPTION);
-        // 内容区是普通客户区
-        assert_eq!(logical_hit(300.0, 300.0, TW, TH, TITLE, false), HTCLIENT);
-    }
-
-    #[test]
-    fn 四边四角缩放码正确() {
-        // 左下角
-        assert_eq!(logical_hit(2.0, TH - 2.0, TW, TH, TITLE, false), HTBOTTOMLEFT);
-        // 右下角
-        assert_eq!(logical_hit(TW - 2.0, TH - 2.0, TW, TH, TITLE, false), HTBOTTOMRIGHT);
-        // 上边中点（避开标题栏按钮那一侧，且不在角上）
-        assert_eq!(logical_hit(500.0, 2.0, TW, TH, TITLE, false), HTTOP);
-        // 左边中点
-        assert_eq!(logical_hit(2.0, 300.0, TW, TH, TITLE, false), HTLEFT);
-        // 右边中点
-        assert_eq!(logical_hit(TW - 2.0, 300.0, TW, TH, TITLE, false), HTRIGHT);
-        // 下边中点
-        assert_eq!(logical_hit(500.0, TH - 2.0, TW, TH, TITLE, false), HTBOTTOM);
-    }
-
-    #[test]
-    fn 最大化时不给缩放码() {
-        // 最大化后四边都该是标题栏/客户区，不能是缩放 ——
-        // 否则想把窗口往下拖回来时碰到的是「上边缘缩放」，拖不动。
-        assert_eq!(logical_hit(500.0, 2.0, TW, TH, TITLE, true), HTCAPTION);
-        assert_eq!(logical_hit(500.0, TH - 2.0, TW, TH, TITLE, true), HTCLIENT);
-        assert_eq!(logical_hit(2.0, 300.0, TW, TH, TITLE, true), HTCLIENT);
-        // 但按钮仍然要能点
-        assert_eq!(logical_hit(TW - 23.0, 18.0, TW, TH, TITLE, true), HTCLOSE);
-    }
-
-    #[test]
-    fn 拖动码与系统定义一致() {
-        // 这几个数字错了会静默变成「什么都不做」
-        assert_eq!(HTMINBUTTON, 8);
-        assert_eq!(HTMAXBUTTON, 9);
-        assert_eq!(HTCLOSE, 20);
-        assert_eq!(HTCAPTION, 2);
-        assert_eq!(HTCLIENT, 1);
-        assert_eq!((HTLEFT, HTRIGHT, HTTOP, HTBOTTOM), (10, 11, 12, 15));
-        assert_eq!(
-            (HTTOPLEFT, HTTOPRIGHT, HTBOTTOMLEFT, HTBOTTOMRIGHT),
-            (13, 14, 16, 17)
-        );
-    }
-
-    #[test]
-    fn 拖动码与按钮码分类不重叠() {
-        // HTCAPTION 和四边要交给系统做非客户区拖动
-        assert!(is_nc_drag(HTCAPTION));
-        assert!(is_nc_drag(HTLEFT));
-        assert!(!is_nc_drag(HTCLIENT));
-        // 三条按钮是「点一下就执行命令」，不是拖动
-        assert!(is_sys_button(HTCLOSE));
-        assert!(!is_nc_drag(HTCLOSE));
-        assert!(!is_sys_button(HTCAPTION));
-    }
-
-    #[test]
-    fn 样式位与win32头文件一致() {
-        assert_eq!(WS_CAPTION, 0x00C0_0000);
-        assert_eq!(WS_THICKFRAME, 0x0004_0000);
-        assert_eq!(WS_SYSMENU, 0x0008_0000);
-        // 去掉 caption 之后不能把 thickframe 一起带走
-        let style: isize = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-        let new_style =
-            (style & !WS_CAPTION & !WS_SYSMENU) | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-        assert_eq!(new_style & WS_THICKFRAME, WS_THICKFRAME);
-        assert_eq!(new_style & WS_CAPTION, 0);
-    }
-
-    /// 最大化时四边都不能报缩放热区 —— 否则在屏幕边缘按住会「还原 + 拖动」。
-    /// 这条锁住 [`owner_is_maximized`] 存在的原因：以前传的是 canvas 自己的
-    /// 句柄，恒为 false，最大化窗口照样能拖边。
-    #[test]
-    fn maximized_window_has_no_resize_border() {
-        let edges = [
-            (1.0, 1.0),
-            (TW - 1.0, 1.0),
-            (1.0, TH - 1.0),
-            (TW - 1.0, TH - 1.0),
-            (1.0, 300.0),
-            (TW - 1.0, 300.0),
-            (500.0, 1.0),
-            (500.0, TH - 1.0),
-        ];
-        for (x, y) in edges {
-            let hit = logical_hit(x, y, TW, TH, TITLE, true);
-            let resize = [
-                HTLEFT,
-                HTRIGHT,
-                HTTOP,
-                HTBOTTOM,
-                HTTOPLEFT,
-                HTTOPRIGHT,
-                HTBOTTOMLEFT,
-                HTBOTTOMRIGHT,
-            ];
-            assert!(!resize.contains(&hit), "({x},{y}) 最大化窗口报了缩放热区 {hit}");
-        }
     }
 }

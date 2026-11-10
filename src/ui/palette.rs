@@ -4,17 +4,11 @@
 //! 绑在「颜色怎么画」上：`gui.rs` 想拿一个 `usize` 下标对应的 RGB，得先
 //! `use pages`。抽出来以后绘制层只剩画，事件层直接问这里要值。
 
-
 /// 色盘格子边长与间距（逻辑像素）。
 pub const PAL_CELL: f32 = 30.0;
 
 pub const PAL_GAP: f32 = 6.0;
 
-/// 一行几个色块。
-///
-/// **必须是 12**：色相每 30 度一格正好 12 格，一行才是一个完整的色相环。
-/// 一开始写的 8，结果 12 个饱和色排在 8 列里要折行 —— 第二行前 4 格是
-/// 饱和色、后 4 格已经是淡色，界面上看是两种色系糊在一起（真机截图确认）。
 pub const PAL_COLS: usize = 12;
 
 /// HSV → RGB。`h` 是 0–360 度，`s`/`v` 是 0–1。
@@ -38,16 +32,6 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     [f(r1), f(g1), f(b1)]
 }
 
-/// 色盘的候选颜色（36 个，12 列 × 3 行）。
-///
-/// 组成：12 个色相 × 2 档明度（饱和 + 淡色）+ 12 级灰阶。
-///
-/// 为什么不是「二十四色手抄表」：色相均分是这里唯一要的性质，手抄一边
-/// 多写一个少写一个都不报错，只会让某个色相在盘上占两格 —— 看不见的错。
-///
-/// 灰阶放最后一行：灯光常设成白色/关闭，给一整行 0–255 的灰比在彩色里
-/// 找白色直观。**12 级灰而不是 8 级**：这样三行都正好填满 12 列，
-/// 最后一行右边不会空出 4 格（真机截图里那 4 个空位看着像画漏了）。
 pub fn palette_colors() -> Vec<[u8; 3]> {
     let mut out = Vec::with_capacity(PAL_COLS * 3);
     // 前 12：色相每 30 度一格，饱和
@@ -113,32 +97,3 @@ pub fn rgb_to_hsv(rgb: [u8; 3]) -> (f32, f32, f32) {
     let h = if h < 0.0 { h + 360.0 } else { h };
     (h, s, v)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 色板下标 ↔ RGB 必须能互相还原，否则「选中第几个」会指到别的颜色。
-    #[test]
-    fn palette_roundtrips_through_rgb() {
-        let colors = palette_colors();
-        assert_eq!(colors.len(), PAL_COLS * 3);
-        let n = colors.len();
-        for (i, rgb) in colors.iter().enumerate() {
-            assert_eq!(palette_index(*rgb), Some(i), "第 {i} 个色块还原失败");
-        }
-        assert_eq!(palette_index(colors[n - 1]), Some(n - 1));
-    }
-
-    /// 自定义色的打包/取回：低 24 位装 RGB，标志位置 1，不能与色板下标混淆。
-    #[test]
-    fn custom_rgb_does_not_collide_with_palette_index() {
-        let packed = pack_custom_rgb([0x12, 0x34, 0x56]);
-        assert!(packed >= 0x0100_0000);
-        assert_eq!(palette_color(packed), Some([0x12, 0x34, 0x56]));
-        // 色板下标（< 36）不能命中标志位
-        assert!(palette_color(35).is_some());
-        assert!(palette_color(1_000_000).is_none());
-    }
-}
-

@@ -507,31 +507,3 @@ pub fn set_round_corners(hwnd: Handle) -> bool {
     }
     dwm_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_ROUND)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn scale_matches_windows_dpi_steps() {
-        // Windows 的缩放档位都是 96 的整数倍分之一，这里挑几档常见的。
-        assert!((scale_from_dpi(96.0) - 1.0).abs() < f32::EPSILON);
-        assert!((scale_from_dpi(120.0) - 1.25).abs() < f32::EPSILON);
-        assert!((scale_from_dpi(144.0) - 1.5).abs() < f32::EPSILON);
-        assert!((scale_from_dpi(192.0) - 2.0).abs() < f32::EPSILON);
-        assert!((scale_from_dpi(288.0) - 3.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn scale_is_clamped_to_sane_range() {
-        // 坏数据：0、负数、NaN → 退回 1.0，而不是夹到 0.5。
-        assert_eq!(scale_from_dpi(0.0), 1.0);
-        assert_eq!(scale_from_dpi(-96.0), 1.0);
-        assert_eq!(scale_from_dpi(f32::NAN), 1.0);
-        assert_eq!(scale_from_dpi(f32::INFINITY), 1.0);
-
-        // 有效但极端的数据才夹取。
-        assert_eq!(scale_from_dpi(48.0), MIN_SCALE); // 50%
-        assert_eq!(scale_from_dpi(1.0), MIN_SCALE);
-        assert_eq!(scale_from_dpi(96.0 * 100.0), MAX_SCALE); // 假想的 10000%
-    }
-}

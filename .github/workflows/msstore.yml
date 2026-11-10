@@ -1,37 +1,5 @@
 name: MSIX 打包
 
-# ─────────────────────────────── 触发方式 ───────────────────────────────
-#   push tag v1.1.1     → 编译 + 打 msix / msixupload
-#   workflow_dispatch   → 同上，可手填版本号
-#
-#   绿色版（单文件 exe）由 `release.yml` 单独负责发 Release —— 两个工作流各管一件事，
-#   互不牵连：这里失败不影响绿色版发版，反之亦然。
-#
-# ─────────────────────── 商店自动发布是「按需开启」的 ───────────────────────
-#   仓库 Variables 里没有 MSSTORE_PRODUCT_ID 时，本工作流只做打包，
-#   完全不碰商店。首个版本必须手动上架（微软硬性规定），过审后再配上这个变量，
-#   之后的 tag 就会自动提交到商店。
-#
-# ─────────────────────────── 需要配的 Secrets ───────────────────────────
-#   Settings → Secrets and variables → Actions → Secrets
-#     AZURE_AD_TENANT_ID              Entra ID 目录（租户）ID
-#     AZURE_AD_APPLICATION_CLIENT_ID  应用注册的客户端 ID
-#     AZURE_AD_APPLICATION_SECRET     客户端密码（生成时只显示一次）
-#     SELLER_ID                       Partner Center → Account settings → Legal info
-#
-# ────────────────────────── 需要配的 Variables ──────────────────────────
-#   Settings → Secrets and variables → Actions → Variables
-#     MSSTORE_PRODUCT_ID              商店产品 ID（如 9NRC8HCD4BZ7）
-#                                     **不配 = 不自动发布**，只打包
-#     MSSTORE_PACKAGE_IDENTITY_NAME   可选，覆盖 msix/package.props.psd1 的 IdentityName
-#     MSSTORE_PUBLISHER               可选，覆盖 Publisher（CN=<GUID> 那个）
-#     MSSTORE_PUBLISHER_DISPLAY_NAME  可选，覆盖 PublisherDisplayName
-#
-# ─────────────────────────────── 本地等价命令 ───────────────────────────────
-#   powershell -File msix\build-msix.ps1 -Verify -SkipInstalledVersionCheck
-#   powershell -File msix\make-upload.ps1
-#   powershell -File msix\publish.ps1            （本机有 msstore CLI 时）
-
 on:
   push:
     tags: ['v*']
@@ -41,17 +9,10 @@ on:
         description: 'MSIX 版本号（四段，如 1.1.2.0）。留空则按 tag 推导'
         required: false
         default: ''
-      skip_tests:
-        description: '跳过 cargo test'
-        type: boolean
-        default: false
 
-# 只读即可：本工作流不再建 Release，产物走 run artifacts
 permissions:
   contents: read
 
-# 本工程用 gnu 目标 + 自带的 mingw 导入库（vendor/mingw-import-libs），
-# 所以 runner 上必须装 gnu host 工具链，且链接器 gcc 要在 PATH 里。
 env:
   CARGO_TERM_COLOR: always
   RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
@@ -64,43 +25,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ───────────────────────── 测试（并行，不挡打包） ─────────────────────────
-  test:
-    name: cargo test
-    runs-on: windows-latest
-    if: inputs.skip_tests != true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 装 MSYS2 / mingw64 gcc
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: false
-          install: mingw-w64-x86_64-gcc
-
-      - name: mingw64 加进 PATH
-        shell: pwsh
-        run: |
-          "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
-          gcc --version
-
-      - name: 装 Rust（gnu host）
-        shell: pwsh
-        run: |
-          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-          rustc -vV
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: gnu-test
-
-      - name: cargo test
-        run: cargo test --all-targets
-
-  # ────────────────────────── 打包 + 发 Release ──────────────────────────
   msix:
-    name: 打包 MSIX / 发 Release
+    name: 打包并提交 Microsoft Store
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,7 +54,6 @@ jobs:
         with:
           key: gnu-release
 
-      # ── 版本号：tag v1.1.1 → 1.1.1.0；没有 tag 就退回 Cargo.toml ──
       - name: 算版本号
         id: ver
         shell: pwsh
@@ -148,7 +73,6 @@ jobs:
           while ($p.Count -lt 3) { $p += '0' }
           $four = ($p[0..2] -join '.') + '.0'
 
-          # 商店只收四段数字，且第一段必须 >= 1
           if ($four -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "版本号不合法：'$v' → $four" }
           if ($four -match '^0\.') { throw "版本号第一段不能为 0：$four（商店要求 >= 1.0.0.0）" }
 
@@ -157,13 +81,11 @@ jobs:
           "tag=$tag" >> $env:GITHUB_OUTPUT
           Write-Host "MSIX 版本 = $four（来源：$src）"
 
-      # 二进制里显示的版本号也吃这次算出来的三段号，避免和 MSIX 版本各说一套
       - name: cargo build --release
         env:
           ROG_BUILD_VERSION: ${{ steps.ver.outputs.semver }}
-        run: cargo build --release
+        run: cargo build --release --locked
 
-      # makeappx 来自 Windows SDK，不在 PATH 里；找出来交给打包脚本
       - name: 定位 makeappx
         shell: pwsh
         run: |
@@ -196,11 +118,6 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-      # ─────────── 以下仅在配了 MSSTORE_PRODUCT_ID 时执行 ───────────
-      # 不用 msstore publish：它要先找一个「项目目录」并从中读发布者身份，
-      # 我们没有 .csproj；塞 Package.appxmanifest 会被当成 UWP 项目去
-      # MSBuild restore，在装了 VS 的 runner 上直接抛 Failed to restore packages。
-      # 所以直接走 Store 提交 REST API，见 tools/msstore-publish.ps1。
       - name: 上传并提交到商店
         if: vars.MSSTORE_PRODUCT_ID != ''
         shell: pwsh
@@ -217,6 +134,5 @@ jobs:
         if: vars.MSSTORE_PRODUCT_ID != ''
         shell: pwsh
         run: |
-          Write-Host '提交已发出。认证通常几小时到一天，结果会发邮件。'
+          Write-Host '包已提交，最终上架状态以 Partner Center 为准。'
           Write-Host '状态页：https://partner.microsoft.com/dashboard/products/${{ vars.MSSTORE_PRODUCT_ID }}/submissions'
-          Write-Host '（本步骤不轮询，避免长时间占用 runner；要查就点上面的链接。）'

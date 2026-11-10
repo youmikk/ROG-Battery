@@ -1,33 +1,7 @@
-//! 自绘界面。
-//!
-//! # 为什么另起一套
-//!
-//! 原来 `gui.rs` 用 nwg 的原生控件（`Button` / `ComboBox` / `TrackBar` …），
-//! 颜色、圆角、间距全部由系统主题决定，改不了。用户看过网页原型
-//! `docs\mockups\ui-prototype.html` 后要的是原型那个样子（Win11 设置页风格：
-//! 8px 圆角卡片、4px 圆角控件、蓝色强调、左导航可收成图标轨道）。
-//!
-//! nwg 没有「自绘控件」的通道，所以内容区改成自建子窗口 + 整页 GDI+ 自绘。
-//! nwg 只保留和绘制无关的部分：主窗口外壳、托盘图标、右键菜单、消息循环。
-//!
-//! # 分层
-//!
-//! | 模块 | 职责 | 会不会碰 Win32 |
-//! |---|---|---|
-//! | [`theme`] | 配色令牌（浅色/深色两套） | 不会 |
-//! | [`gfx`] | GDI+ 基元 + 双缓冲画布 + 字体缓存 | 会（但只有这一个文件） |
-//! | [`layout`] | 布局常量与响应式断点 | 不会 |
-//! | [`widget`] | 控件树 + 命中测试 + 事件 | 不会 |
-//! | [`titlebar`] | 自绘标题栏（图标 / 标题 / 三个按钮） | 不会（只画） |
-//! | [`frame`] | 去掉系统标题栏、命中测试、最大化修正 | 会 |
-//! | [`pages`] | 五个页面的绘制 | 只画，不读设备 |
-//! | [`canvas`] | 子窗口 + 消息循环 + 事件分发 | 会 |
-//!
-//! 中间几层是**纯逻辑**，可以单测；只有 `gfx`、`frame` 和 `canvas` 碰系统 API。
-//! 这样「点了哪一行」这种判断不用起窗口就能验证。
 
 pub mod canvas;
 pub mod dropdown;
+pub mod device_name;
 pub mod palette;
 pub mod frame;
 pub mod gfx;
@@ -36,4 +10,6 @@ pub mod pages;
 pub mod theme;
 pub mod viewdata;
 pub mod titlebar;
+pub mod tray_popup;
+pub mod panel_icons;
 pub mod widget;

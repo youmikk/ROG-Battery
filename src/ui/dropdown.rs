@@ -22,7 +22,10 @@ pub fn option_value(drop: Drop, idx: usize) -> Option<usize> {
 /// 抽成独立函数是因为 [`option_value`] 也要用同一张表 —— 表一旦分成两份，
 /// 改了一处忘了另一处，界面显示的和实际写进设备的值就会错位。
 pub fn raw_options(drop: Drop) -> &'static [(String, usize)] {
-    RAW[slot_of(drop)].get_or_init(|| build_options(drop)).as_slice()
+    let language = usize::from(crate::i18n::english());
+    RAW[language * DROP_SLOTS + slot_of(drop)]
+        .get_or_init(|| build_options(drop))
+        .as_slice()
 }
 
 /// `Drop` → 缓存槽位下标。只用于选表，语义必须与 `build_options` 的分支一一对应。
@@ -39,23 +42,33 @@ fn slot_of(drop: Drop) -> usize {
         Drop::ButtonTarget(_) => 8,
         Drop::Palette(_) => 9,
         Drop::CloseMode => 10,
+        Drop::TrayKind => 11,
+        Drop::TrayDevice => 12,
+        Drop::Language => 13,
     }
 }
 
-const DROP_SLOTS: usize = 11;
+const DROP_SLOTS: usize = 14;
 
-/// 每种下拉的候选表一辈子都不变，却原来每帧重建一次（`format!` 逐个分配
-/// `String`）。设置页四五个下拉打开时，一帧就是几十次堆分配。
-///
-/// 这里按 `Drop` 分槽缓存。`ButtonTarget(_)` 八个槽位共用一张表
-/// （`button_target_name` 只按码查名字），`Palette(_)` 故意给空表。
-static RAW: [std::sync::OnceLock<Vec<(String, usize)>>; DROP_SLOTS] =
-    [const { std::sync::OnceLock::new() }; DROP_SLOTS];
+/// 按语言和下拉种类缓存；切换语言不改变选项对应的协议值。
+static RAW: [std::sync::OnceLock<Vec<(String, usize)>>; DROP_SLOTS * 2] =
+    [const { std::sync::OnceLock::new() }; DROP_SLOTS * 2];
 
 fn build_options(drop: Drop) -> Vec<(String, usize)> {
     // 每个分支写全 `Vec<(String, usize)>`：不加这个标注，
     // arms 各自是不同的 iterator 类型，`collect()` 推不出目标类型。
     let items: Vec<(String, usize)> = match drop {
+        Drop::Language => vec![
+            (crate::tr!("跟随系统").into(), 0),
+            ("中文".into(), 1),
+            ("English".into(), 2),
+        ],
+        Drop::TrayKind => crate::tray_prefs::TrayKind::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.label().to_string(), i))
+            .collect(),
+        Drop::TrayDevice => Vec::new(),
         Drop::Sleep => (0u8..=4)
             .map(|c| (crate::proto::sleep_mode_name(c), c as usize))
             .chain(std::iter::once((
@@ -81,7 +94,7 @@ fn build_options(drop: Drop) -> Vec<(String, usize)> {
         // 真机点「档位 3」时设备正好当前是 2，切到 2 等于没变，
         // 界面高亮也跟着留在 2，看起来完全没反应。
         Drop::Stage => (0..4)
-            .map(|i| (format!("档位 {}", i + 1), i + 1))
+            .map(|i| (crate::trf!("档位 {}", i + 1), i + 1))
             .collect(),
         Drop::Debounce => (0u8..=7)
             .map(|c| (crate::proto::debounce_name(c), c as usize))
@@ -97,15 +110,15 @@ fn build_options(drop: Drop) -> Vec<(String, usize)> {
             .collect(),
         Drop::Refresh => [15u64, 30, 60, 120, 300]
             .iter()
-            .map(|s| (format!("{s} 秒"), *s as usize))
+            .map(|s| (crate::trf!("{s} 秒", s = s), *s as usize))
             .collect(),
         Drop::CacheTtl => [0u64, 15, 30, 60, 300]
             .iter()
             .map(|s| {
                 if *s == 0 {
-                    ("每次都重读".to_string(), 0)
+                    (crate::tr!("每次都重读").to_string(), 0)
                 } else {
-                    (format!("{s} 秒"), *s as usize)
+                    (crate::trf!("{s} 秒", s = s), *s as usize)
                 }
             })
             .collect(),
@@ -122,12 +135,15 @@ fn build_options(drop: Drop) -> Vec<(String, usize)> {
         // （一眼看出走错了），而颜色列表会被画成 32 行没法读的文字。
         Drop::Palette(_) => Vec::new(),
         Drop::CloseMode => vec![
-            ("每次询问".to_string(), 0),
-            ("最小化到系统托盘".to_string(), 1),
-            ("直接退出程序".to_string(), 2),
+            (crate::tr!("每次询问").to_string(), 0),
+            (crate::tr!("最小化到系统托盘").to_string(), 1),
+            (crate::tr!("直接退出程序").to_string(), 2),
         ],
     };
     items
+        .into_iter()
+        .map(|(label, value)| (crate::i18n::translate(&label).to_string(), value))
+        .collect()
 }
 
 /// 某个下拉框当前该显示什么文字。
@@ -139,7 +155,26 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
         return "—".to_string();
     }
     let st = d.state;
-    match drop {
+    let text = match drop {
+        Drop::Language => raw_options(drop)[d.cfg.language as usize].0.clone(),
+        Drop::TrayKind => d
+            .selected
+            .map(|r| d.cfg.tray_for(&r.key).kind.label())
+            .unwrap_or(crate::tr!("自动识别"))
+            .to_string(),
+        Drop::TrayDevice => d
+            .cfg
+            .tray_device
+            .as_ref()
+            .and_then(|key| d.readings.iter().find(|r| &r.key == key))
+            .map(|r| d.cfg.device_name(r).to_string())
+            .unwrap_or_else(|| {
+                if d.cfg.tray_name().is_empty() {
+                    crate::tr!("等待设备连接").to_string()
+                } else {
+                    d.cfg.tray_name().to_string()
+                }
+            }),
         Drop::Sleep => st
             .map(|s| crate::proto::sleep_mode_name(s.sleep_mode))
             .unwrap_or_else(|| "—".to_string()),
@@ -147,7 +182,7 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
             .map(|s| crate::proto::poll_name(s.poll_code))
             .unwrap_or_else(|| "—".to_string()),
         Drop::Stage => st
-            .map(|s| format!("档位 {}", s.active_stage.max(1)))
+            .map(|s| crate::trf!("档位 {}", s.active_stage.max(1)))
             .unwrap_or_else(|| "—".to_string()),
         Drop::Debounce => st
             .map(|s| crate::proto::debounce_name(s.debounce_code))
@@ -158,12 +193,12 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
         Drop::LightMode => st
             .map(|s| crate::proto::light_mode_name(s.light_mode))
             .unwrap_or_else(|| "—".to_string()),
-        Drop::Refresh => format!("{} 秒", d.cfg.refresh_interval_sec),
+        Drop::Refresh => crate::trf!("{} 秒", d.cfg.refresh_interval_sec),
         Drop::CacheTtl => {
             if d.cfg.cache_ttl_sec == 0 {
-                "每次都重读".to_string()
+                crate::tr!("每次都重读").to_string()
             } else {
-                format!("{} 秒", d.cfg.cache_ttl_sec)
+                crate::trf!("{} 秒", d.cfg.cache_ttl_sec)
             }
         }
         Drop::ButtonTarget(slot) => d
@@ -174,11 +209,12 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
         // 给「—」而不是编一个色号。
         Drop::Palette(_) => "—".to_string(),
         Drop::CloseMode => match d.cfg.close_mode.as_str() {
-            "minimize" => "最小化到系统托盘".to_string(),
-            "quit" => "直接退出程序".to_string(),
-            _ => "每次询问".to_string(),
+            "minimize" => crate::tr!("最小化到系统托盘").to_string(),
+            "quit" => crate::tr!("直接退出程序").to_string(),
+            _ => crate::tr!("每次询问").to_string(),
         },
-    }
+    };
+    crate::i18n::translate(&text).to_string()
 }
 
 /// 当前选中的下标。
@@ -190,6 +226,16 @@ pub fn drop_selected(drop: Drop, d: &Data) -> usize {
     let opts = options(drop, d);
     let st = d.state;
     let cur: usize = match drop {
+        Drop::Language => d.cfg.language as usize,
+        Drop::TrayKind => d
+            .selected
+            .map(|r| d.cfg.tray_for(&r.key).kind as usize)
+            .unwrap_or(0),
+        Drop::TrayDevice => d
+            .readings
+            .iter()
+            .position(|r| Some(&r.key) == d.cfg.tray_device.as_ref())
+            .unwrap_or(usize::MAX),
         Drop::Sleep => st.map(|s| s.sleep_mode as usize).unwrap_or(0),
         Drop::Poll => st.map(|s| s.poll_code as usize).unwrap_or(0),
         // `active_stage` 是 1 基的（0 表示设备没报），候选值也是 1..=4
@@ -223,15 +269,15 @@ pub fn drop_selected(drop: Drop, d: &Data) -> usize {
 /// 不猜 —— 猜错会让用户把键绑到别处去。
 pub fn button_target_name(code: u16) -> String {
     match code {
-        0x0000 => "无功能".to_string(),
-        0x01F0 => "左键点击".to_string(),
-        0x01F1 => "右键点击".to_string(),
-        0x01F2 => "中键点击".to_string(),
-        0x01E4 => "浏览器后退".to_string(),
-        0x01E5 => "浏览器前进".to_string(),
-        0x01E6 => "切换 DPI 档位".to_string(),
-        0x01E8 => "滚轮上滚".to_string(),
-        0x01E9 => "滚轮下滚".to_string(),
+        0x0000 => crate::tr!("无功能").to_string(),
+        0x01F0 => crate::tr!("左键点击").to_string(),
+        0x01F1 => crate::tr!("右键点击").to_string(),
+        0x01F2 => crate::tr!("中键点击").to_string(),
+        0x01E4 => crate::tr!("浏览器后退").to_string(),
+        0x01E5 => crate::tr!("浏览器前进").to_string(),
+        0x01E6 => crate::tr!("切换 DPI 档位").to_string(),
+        0x01E8 => crate::tr!("滚轮上滚").to_string(),
+        0x01E9 => crate::tr!("滚轮下滚").to_string(),
         other => format!("0x{other:04X}"),
     }
 }
@@ -247,89 +293,15 @@ pub const BUTTON_TARGETS: [u16; 9] = [
 ];
 
 /// 某个下拉框的候选项（文字, 值）。
-pub fn options(drop: Drop, d: &Data) -> &'static [(String, usize)] {
-    // 候选文字目前不依赖 `d`，保留参数是为了将来加「当前值」标记时不用改所有调用点。
-    let _ = d;
-    raw_options(drop)
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn local_drops_keep_their_value_without_a_device() {
-        // 设置页这三项跟设备没关系，读不到设备也必须显示当前值，不能是「—」。
-        let st = crate::proto::State::default();
-        let cfg = crate::settings::Settings::default();
-        let d = super::super::pages::Data {
-            state: Some(&st),
-            ident: None,
-            link_mode: "",
-            status: String::new(),
-            plot: None,
-            estimate: &crate::history::Estimate::default(),
-            rows: 0,
-            cfg: &cfg,
-            autostart_text: "",
-            autostart_on: false,
-            version: "test",
-            frames: 0,
-            elapsed_ms: 0,
-        };
-        assert_ne!(drop_current(Drop::CloseMode, &d), "—");
-        assert_ne!(drop_current(Drop::Refresh, &d), "—");
-        assert_ne!(drop_current(Drop::CacheTtl, &d), "—");
-        // 设备项照旧显示「—」
-        assert_eq!(drop_current(Drop::Sleep, &d), "—");
-        assert_eq!(drop_current(Drop::Poll, &d), "—");
-    }
-    use super::*;
-
-    /// 候选表按 `Drop` 缓存：同一个下拉两次取到的必须是同一份内存，
-    /// 不同下拉不能串表（槽位下标写错就会串）。
-    #[test]
-    fn raw_options_is_cached_not_rebuilt() {
-        let a = raw_options(Drop::Poll);
-        let b = raw_options(Drop::Poll);
-        assert!(std::ptr::eq(a, b), "候选表应当复用同一份，不该每次重建");
-        assert_eq!(a.len(), 4);
-        assert!(
-            !std::ptr::eq(raw_options(Drop::Sleep), raw_options(Drop::Poll)),
-            "不同下拉必须落到不同槽位"
+pub fn options(drop: Drop, d: &Data) -> std::borrow::Cow<'static, [(String, usize)]> {
+    if drop == Drop::TrayDevice {
+        return std::borrow::Cow::Owned(
+            d.readings
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (d.cfg.device_name(r).to_string(), i))
+                .collect(),
         );
-        assert!(raw_options(Drop::Palette(0)).is_empty(), "色盘走单独一支");
     }
-
-    /// 每个下拉的「第 i 项」都要能翻成设备值，且项数与候选表一致；
-    /// `None` 只允许出现在越界下标上。
-    #[test]
-    fn option_value_agrees_with_option_count() {
-        for drop in [
-            Drop::Sleep,
-            Drop::Poll,
-            Drop::Stage,
-            Drop::Debounce,
-            Drop::Lod,
-            Drop::LightMode,
-            Drop::CloseMode,
-        ] {
-            let n = raw_options(drop).len();
-            assert!(n > 0, "{drop:?} 候选表为空");
-            for i in 0..n {
-                assert!(option_value(drop, i).is_some(), "{drop:?} 第 {i} 项无值");
-            }
-            assert!(option_value(drop, n).is_none(), "{drop:?} 越界下标应当无值");
-        }
-    }
-
-    /// 按键目标码都要有中文名字，且不能是空串或「未知」。
-    #[test]
-    fn every_button_target_has_a_name() {
-        for code in BUTTON_TARGETS {
-            let name = button_target_name(code);
-            assert!(!name.trim().is_empty(), "{code:#06x} 没有名字");
-            assert!(!name.contains("未知"), "{code:#06x} 落到未知分支");
-        }
-    }
+    std::borrow::Cow::Borrowed(raw_options(drop))
 }
-

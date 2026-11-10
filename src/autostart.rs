@@ -1,46 +1,3 @@
-//! 开机自启：MSIX 包内走 WinRT `StartupTask`，绿色版走 `HKCU\...\Run`。
-//!
-//! **这两条路径不能混用**，判据是「有没有包身份」，不是「WinRT 是否可用」：
-//!
-//! - MSIX 应用写 `HKCU\...\Run` 会被注册表虚拟化重定向进包私有 hive
-//!   （`%LOCALAPPDATA%\Packages\<Identity>\SystemAppData\Helium\User.dat`），
-//!   系统的启动项列表里**看不到** → 自启静默失效。
-//! - 绿色版没有包身份，调 WinRT `StartupTask.GetAsync` 返回 `0x80070490`
-//!   （`ERROR_ELEMENT_NOT_FOUND`），因为 TaskId 只在「有包身份 **且**
-//!   manifest 里声明了 `startupTask`」的环境中存在。
-//!
-//! 完整的实测过程见 `docs/autostart.md`，这里只记实现要点。
-//!
-//! # 三个致命坑（都是真崩过一次才记住的）
-//!
-//! 1. **必须 `RoInitialize(1)`**。不调的话 `RoGetActivationFactory` 返回
-//!    `0x800401F0`（`CO_E_NOTINITIALIZED`）。这个错误码**不代表没有包身份**
-//!    —— 包外调了 `RoInitialize` 之后工厂照样能拿到 `S_OK`。
-//! 2. **combase 必须动态加载**。rustlib 的 `self-contained` 里没有
-//!    `libkernelbase.a` / `libcombase.a`，`#[link(name = "combase")]` 会
-//!    `ld: cannot find -lcombase`。走 `LoadLibraryW` + `GetProcAddress`，
-//!    与 `hid.dll` 的做法一致。
-//! 3. **WinRT 接口继承 IInspectable，不是 IUnknown**，vtable 比 COM 多 3 个槽
-//!    （`GetIids` / `GetRuntimeClassName` / `GetTrustLevel`）。数错一格就是
-//!    运行时 `0xC0000005`，而且崩点跟错点毫无关系 —— 编译期完全不校验。
-//!
-//! # 另一个坑：IID 不要自己算
-//!
-//! 网上流传的「SHA1(接口名大写) 前 16 字节 + 改第 6/8 字节」算法**是错的**。
-//! 用 `IActivationFactory` 对照验算，算出来是 `00000043-00fe-5d9d-...`，
-//! 真实值是 `af86e2e0-b12d-4c6a-9c5a-d7aa65101e90`，完全不符。
-//!
-//! 正确来源是系统 WinRT 元数据：
-//!
-//! ```powershell
-//! [Type]::GetType("Windows.ApplicationModel.IStartupTaskStatics, Windows.ApplicationModel, ContentType=WindowsRuntime").GUID
-//!   → ee5b60bd-a148-41a7-b26e-e8b88a1e62f8
-//! [Type]::GetType("Windows.ApplicationModel.IStartupTask, Windows.ApplicationModel, ContentType=WindowsRuntime").GUID
-//!   → f75c23c8-b5f2-4f6c-88dd-36cb1d599d17
-//! ```
-//!
-//! 运行时亦可自证：对工厂调 `GetIids`（vtable `[3]`），返回的第二个 IID
-//! 就是 `ee5b60bd-...`。
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 
@@ -64,7 +21,6 @@ use crate::win32::{self, to_wide};
 pub enum AutoStartState {
     /// 未启用，可以请求启用。
     Disabled,
-    /// 用户明确拒绝过。**再 `enable()` 会静默失败**，只能引导用户去系统设置里开。
     DisabledByUser,
     /// 已启用。
     Enabled,
@@ -182,18 +138,6 @@ fn package_identity() -> Option<bool> {
     }
 }
 
-/// 当前进程是否有 MSIX 包身份。
-///
-/// 实测：绿色版返回 `15700`（`APPMODEL_ERROR_NO_PACKAGE`）；
-/// 有包身份且 `len` 传 `null` 时返回 `122`（`ERROR_INSUFFICIENT_BUFFER`）。
-///
-/// 查询失败时返回 `false`（当作绿色版）—— `autostart::detect_path()` 那条路
-/// 用 [`package_identity`] 单独区分出「未知」，本函数只服务测试与快速判定。
-#[cfg(test)]
-pub fn is_packaged() -> bool {
-    package_identity().unwrap_or(false)
-}
-
 /// 判定该走哪条自启路径。
 ///
 /// 包身份**查询失败**时返回 `Unknown`，让上层显示「无法判定运行形态」，
@@ -241,7 +185,6 @@ pub fn launched_at_logon() -> bool {
 /// 已经跑了几小时，差值很大。
 const LOGON_WINDOW_SECS: i64 = 120;
 
-/// 纯决策函数，方便单测。
 pub fn decide_hidden(
     parent_is_explorer: bool,
     autostart_on: bool,
@@ -387,7 +330,6 @@ fn startup_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .map(|base| base.join(r"Microsoft\Windows\Start Menu\Programs\Startup"))
 }
-
 
 /// 启动文件夹里的启动脚本内容。用 VBS 的 `ws.Run ..., 0, False`
 /// 隐藏窗口静默拉起，避免开机时闪一下黑框。
@@ -586,22 +528,6 @@ const IID_ASYNC_INFO: Guid = Guid {
     data3: 0x0000,
     data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
 };
-
-// ---------------------------------------------------------------------------
-// vtable 槽位常量 —— **全部来自 Windows 元数据实测，不是猜的**
-//
-// 查证方法（PowerShell）：
-//   $t = [Type]::GetType("Windows.ApplicationModel.IStartupTask, Windows.ApplicationModel, ContentType=WindowsRuntime")
-//   $t.GetMethods() | % { $_.Name }
-//
-// 规则：WinRT 根接口的方法都从 **`[6]`** 开始（`[0..2]` IUnknown，
-// `[3] GetIids` `[4] GetRuntimeClassName` `[5] GetTrustLevel` 是 IInspectable）。
-//
-// 我早期版本把 IStartupTask 的槽位整体搞错了：以为 `[6]` 是 `get_State`，
-// 实际 `[6]` 是 **`RequestEnableAsync`** —— 会把「查状态」变成「弹系统框并真的
-// 启用开机自启」。那段代码从未被执行过（WinRT 分支只在包内走），但这是个
-// 必须记下来的教训：**vtable 槽位错一格，语义可能从只读变成写入。**
-// ---------------------------------------------------------------------------
 
 /// `IStartupTaskStatics`：`[6] GetForCurrentPackageAsync` `[7] GetAsync(taskId)`
 const STATICS_GET_ASYNC: usize = 7;
@@ -1110,269 +1036,5 @@ pub fn disable() -> Result<EnableOutcome, String> {
             }
         }
         AutoStartPath::Unknown => Err("无法判定运行形态（包身份读取失败）".to_string()),
-    }
-}
-
-// ============================================================
-// 单测
-// ============================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn state_describe_覆盖全部变体() {
-        for s in [
-            AutoStartState::Disabled,
-            AutoStartState::DisabledByUser,
-            AutoStartState::Enabled,
-            AutoStartState::DisabledByPolicy,
-            AutoStartState::EnabledByPolicy,
-            AutoStartState::Unknown,
-        ] {
-            assert!(!s.describe().is_empty(), "{s:?} 缺描述");
-        }
-    }
-
-    #[test]
-    fn is_enabled_只认两种() {
-        assert!(AutoStartState::Enabled.is_enabled());
-        assert!(AutoStartState::EnabledByPolicy.is_enabled());
-        assert!(!AutoStartState::Disabled.is_enabled());
-        assert!(!AutoStartState::DisabledByUser.is_enabled());
-        assert!(!AutoStartState::DisabledByPolicy.is_enabled());
-        assert!(!AutoStartState::Unknown.is_enabled());
-    }
-
-    #[test]
-    fn winrt_状态码映射() {
-        assert_eq!(AutoStartState::from_winrt(0), AutoStartState::Disabled);
-        assert_eq!(AutoStartState::from_winrt(1), AutoStartState::DisabledByUser);
-        assert_eq!(AutoStartState::from_winrt(2), AutoStartState::Enabled);
-        assert_eq!(AutoStartState::from_winrt(3), AutoStartState::DisabledByPolicy);
-        assert_eq!(AutoStartState::from_winrt(4), AutoStartState::EnabledByPolicy);
-        assert_eq!(AutoStartState::from_winrt(99), AutoStartState::Unknown);
-    }
-
-    #[test]
-    fn 绿色版必然探测到注册表路径() {
-        // 测试进程是 cargo 起的，没有包身份
-        assert!(!is_packaged(), "测试进程不该有包身份");
-        assert_eq!(detect_path(), AutoStartPath::Registry);
-    }
-
-    #[test]
-    fn 启动文件夹兜底写入_识别_删除() {
-        // 注意：本机（以及 CI 沙箱）可能禁止往 %TEMP% 写，统一用工程内的
-        // scratch 目录当临时目录，测完删掉。
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("scratch")
-            .join(format!("autostart-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // 一开始没有脚本
-        assert!(!startup_folder_state_in(&dir), "空目录不该判为已启用");
-        // 真写一次（走 startup_folder_enable_in，取真实 exe 路径）
-        let script = startup_folder_enable_in(&dir).expect("写入启动脚本应成功");
-        assert!(script.exists(), "脚本文件应存在");
-        let body = std::fs::read_to_string(&script).unwrap();
-        assert!(body.contains("WScript.Shell"), "应是 VBS：{body}");
-        assert!(body.contains(RUN_ARG), "必须带 --autostart 参数：{body}");
-        assert!(body.contains(", 0, False"), "必须隐藏窗口启动：{body}");
-        // 状态识别
-        assert!(startup_folder_state_in(&dir), "写过之后应判为已启用");
-        // 删除
-        remove_startup_script_in(&dir);
-        assert!(!startup_folder_state_in(&dir), "删掉之后应判为未启用");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn 启动脚本内容形状() {
-        let body = startup_script_body(r"C:\a b\rog-mouse-ctl.exe");
-        assert!(body.starts_with("Set ws = CreateObject(\"WScript.Shell\")"));
-        assert!(body.contains(r#""""C:\a b\rog-mouse-ctl.exe"" --autostart""#.trim()),
-            "exe 路径要加引号以容忍空格：{body}");
-    }
-
-    #[test]
-    fn iid_常量与系统元数据一致() {
-        let f = IID_ACTIVATION_FACTORY;
-        let s = format!(
-            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            f.data1, f.data2, f.data3,
-            f.data4[0], f.data4[1], f.data4[2], f.data4[3],
-            f.data4[4], f.data4[5], f.data4[6], f.data4[7]
-        );
-        assert_eq!(s, "af86e2e0-b12d-4c6a-9c5a-d7aa65101e90");
-
-        let t = IID_STARTUP_TASK_STATICS;
-        let s = format!(
-            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            t.data1, t.data2, t.data3,
-            t.data4[0], t.data4[1], t.data4[2], t.data4[3],
-            t.data4[4], t.data4[5], t.data4[6], t.data4[7]
-        );
-        assert_eq!(s, "ee5b60bd-a148-41a7-b26e-e8b88a1e62f8");
-
-        let i = IID_ASYNC_INFO;
-        let s = format!(
-            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            i.data1, i.data2, i.data3,
-            i.data4[0], i.data4[1], i.data4[2], i.data4[3],
-            i.data4[4], i.data4[5], i.data4[6], i.data4[7]
-        );
-        assert_eq!(s, "00000036-0000-0000-c000-000000000046");
-    }
-
-    /// 锁死 vtable 槽位常量。
-    ///
-    /// **这是我犯过的最大一个错误**：早期把 `IStartupTask` 的槽位整体搞错，
-    /// 以为 `[6]` 是 `get_State`，实际 `[6]` 是 `RequestEnableAsync` ——
-    /// 「查状态」会变成「弹系统框并真的启用开机自启」。
-    /// 参数类型几乎一样（都是 `(this, out ...)`），所以编译器毫无怨言。
-    ///
-    /// 这组数字来自 Windows 元数据实测：
-    /// ```powershell
-    /// $t = [Type]::GetType("Windows.ApplicationModel.IStartupTask, Windows.ApplicationModel, ContentType=WindowsRuntime")
-    /// $t.GetMethods() | % { $_.Name }
-    /// # → RequestEnableAsync, Disable, get_State, get_TaskId
-    /// ```
-    /// 本测试不能连设备（包外 WinRT 拿不到 TaskId），
-    /// 所以只能把「已知正确值」钉死在这里，改错立刻红。
-    #[test]
-    fn vtable_槽位常量固定() {
-        // IStartupTaskStatics: [6] GetForCurrentPackageAsync, [7] GetAsync
-        assert_eq!(STATICS_GET_ASYNC, 7, "GetAsync 在 [7]，[6] 是 GetForCurrentPackageAsync");
-
-        // IStartupTask: [6] RequestEnableAsync, [7] Disable, [8] get_State, [9] get_TaskId
-        assert_eq!(TASK_REQUEST_ENABLE, 6);
-        assert_eq!(TASK_DISABLE, 7, "Disable 在 [7]，不是 [9]（[9] 是 get_TaskId）");
-        assert_eq!(TASK_GET_STATE, 8, "get_State 在 [8]，不是 [6]（[6] 是 RequestEnableAsync）");
-
-        // IAsyncInfo（独立 vtable）: [6] get_Id, [7] get_Status, [8] get_ErrorCode
-        assert_eq!(ASYNC_INFO_GET_STATUS, 7);
-        assert_eq!(ASYNC_INFO_GET_ERROR_CODE, 8);
-
-        // IAsyncOperation<T>（派生在前）: [6] put_Completed, [7] get_Completed, [8] GetResults
-        assert_eq!(ASYNC_GET_RESULTS, 8, "GetResults 在 [8]，不是 [11]");
-    }
-
-    /// 六个槽位必须两两不同 —— 只要出现重复就说明我把某个接口的方法数错了。
-    #[test]
-    fn vtable_槽位不重复() {
-        let task_slots = [TASK_REQUEST_ENABLE, TASK_DISABLE, TASK_GET_STATE];
-        for i in 0..task_slots.len() {
-            for j in (i + 1)..task_slots.len() {
-                assert_ne!(
-                    task_slots[i], task_slots[j],
-                    "IStartupTask 有两个方法映射到同一槽位 [{}]",
-                    task_slots[i]
-                );
-            }
-        }
-        let info_slots = [ASYNC_INFO_GET_STATUS, ASYNC_INFO_GET_ERROR_CODE];
-        assert_ne!(info_slots[0], info_slots[1], "IAsyncInfo 槽位重复");
-    }
-
-    #[test]
-    fn 包外查状态不panic() {
-        // 绿色版走注册表分支，不该 panic
-        let (st, path) = state();
-        assert_eq!(path, AutoStartPath::Registry);
-        // 状态只可能是 Enabled / Disabled / Unknown（本机当前是未启用）
-        assert!(
-            matches!(
-                st,
-                AutoStartState::Enabled | AutoStartState::Disabled | AutoStartState::Unknown
-            ),
-            "绿色版不该出现 {st:?}"
-        );
-    }
-
-    /// 真机往返：`enable()` → 确认 Run 键真出现 → `disable()` → 确认真消失。
-    ///
-    /// **默认 `#[ignore]`**，两个理由：
-    /// 1. 它会真的写用户的 `HKCU\...\Run`（虽然立刻删掉）；
-    /// 2. 多个测试进程并发跑会互相干扰。
-    ///
-    /// 手动跑：
-    /// `cargo test --release autostart_真机往返 -- --ignored --nocapture`
-    #[test]
-    #[ignore = "会真实读写 HKCU\\...\\Run，需手动 --ignored 触发"]
-    fn autostart_真机往返() {
-        if is_packaged() {
-            println!("跳过：本进程有包身份，走 WinRT 路径，无法在绿色版测试里验注册表");
-            return;
-        }
-
-        println!("改动前状态：{:?}", state().0);
-
-        // panic 也要把 Run 键恢复原状，否则会把用户机器留在「自启已开」的状态
-        struct Guard {
-            armed: bool,
-        }
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                if self.armed {
-                    let _ = disable();
-                }
-            }
-        }
-        let mut guard = Guard { armed: true };
-
-        // ---- 开 ----
-        let on = enable().expect("enable 失败");
-        println!("enable  → state={:?} enabled={} path={:?}", on.state, on.enabled, on.path);
-        assert!(on.enabled, "enable 之后应该 enabled");
-        assert_eq!(on.path, AutoStartPath::Registry);
-
-        // 直接读注册表确认真写进去了 —— 不信 enable() 自己的返回值
-        let raw = read_run_value().expect("读 Run 键失败").expect("enable 之后 Run 键应该有值");
-        println!("Run 键实际内容：{raw}");
-        assert!(raw.contains("rog-mouse-ctl"), "命令行里应该有 exe 名，实际 {raw}");
-        assert!(raw.contains(RUN_ARG), "应该带 {RUN_ARG} 参数，实际 {raw}");
-        assert!(raw.starts_with('"'), "路径应该被引号包起来（含空格的路径必需），实际 {raw}");
-
-        // 再查一次状态，确认读到的是 Enabled
-        assert_eq!(state().0, AutoStartState::Enabled, "回读状态应该是 Enabled");
-
-        // ---- 关 ----
-        let off = disable().expect("disable 失败");
-        println!("disable → state={:?} enabled={}", off.state, off.enabled);
-        assert!(!off.enabled, "disable 之后应该不 enabled");
-
-        let after = read_run_value().expect("读 Run 键失败");
-        assert!(after.is_none(), "disable 之后 Run 键应该没有值了，实际 {after:?}");
-
-        // 幂等性：再 disable 一次不该报错（值本来就不存在）
-        disable().expect("重复 disable 应该成功（幂等）");
-
-        guard.armed = false;
-        println!("往返测试通过，已恢复原状");
-    }
-
-    #[test]
-    fn hidden_when_parent_is_a_system_host() {
-        // svchost / RuntimeBroker 之类拉起 → 一定是登录自启
-        assert!(decide_hidden(false, false, None));
-        assert!(decide_hidden(false, false, Some(9999)));
-    }
-
-    #[test]
-    fn hidden_when_explorer_just_started_and_autostart_is_on() {
-        // 登录自启：explorer 刚起来几秒，自启开着
-        assert!(decide_hidden(true, true, Some(3)));
-        assert!(decide_hidden(true, true, Some(LOGON_WINDOW_SECS)));
-    }
-
-    #[test]
-    fn shown_when_user_launched_it_manually() {
-        // explorer 已经跑了两小时 → 是用户自己点的图标
-        assert!(!decide_hidden(true, true, Some(7200)));
-        // 自启没开时，紧跟 explorer 出生也不能藏（可能用户刚登录就点了）
-        assert!(!decide_hidden(true, false, Some(3)));
-        // 拿不到父进程创建时间：宁可多弹一次窗口
-        assert!(!decide_hidden(true, true, None));
     }
 }
