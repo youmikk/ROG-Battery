@@ -97,8 +97,8 @@ pub fn draw(p: &mut Painter, win_w: f32, theme: &Theme) {
     let r = logo_rect();
     p.image_rounded(crate::ui::gfx::app_icon_bitmap(), r, 5.0);
     p.text(
-        "R Battery",
-        R::new(r.right() + 9.0, 0.0, 100.0, TITLE_H),
+        crate::mock::window_title(),
+        R::new(r.right() + 9.0, 0.0, 210.0, TITLE_H),
         12.5,
         true,
         theme.text,

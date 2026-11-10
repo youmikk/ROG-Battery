@@ -528,10 +528,7 @@ impl Default for Ui {
 impl Ui {
     pub fn sync_devices(&mut self, devices: &[crate::device::DeviceReading]) {
         self.device_keys = devices.iter().map(|d| d.key.clone()).collect();
-        if devices.is_empty() {
-            return;
-        }
-        if !self.initial_route_done {
+        if !self.initial_route_done && !devices.is_empty() {
             self.initial_route_done = true;
             if self.page == Page::Home && devices.len() == 1 {
                 self.select_device(&devices[0].key);
@@ -1035,6 +1032,16 @@ mod tests {
         let mut u = super::Ui::default();
         *u.scroll_mut(super::Page::Settings) = 10.0;
         assert_eq!(u.scroll_y(super::Page::Settings), 10.0);
+    }
+
+    #[test]
+    fn removing_last_device_returns_to_empty_overview() {
+        let mut u = super::Ui::default();
+        u.sync_devices(&[crate::device::DeviceReading { key: "mock".into(), ..Default::default() }]);
+        assert_eq!(u.page, super::Page::Battery);
+        u.sync_devices(&[]);
+        assert_eq!(u.page, super::Page::Home);
+        assert!(u.selected_device.is_none());
     }
 
     #[test]

@@ -700,7 +700,9 @@ impl Signal {
 
     /// 等到「有新工作」或「过了一个间隔」。返回 `false` = 该退出了。
     fn wait_for_work(&self, seen: &mut u64) -> bool {
-        let interval = self.interval_ms.load(Ordering::Relaxed).max(1000);
+        let interval = if crate::mock::enabled() { 1000 } else {
+            self.interval_ms.load(Ordering::Relaxed).max(1000)
+        };
         let mut n = lock_poke(&self.poke);
         if *n == *seen {
             let (g, _) = self
@@ -2220,7 +2222,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // ── 主窗口 ──────────────────────────────────────────────
     let mut window = nwg::Window::default();
     nwg::Window::builder()
-        .title(WINDOW_TITLE)
+        .title(crate::mock::window_title())
         .size(((WIN_W * scale) as i32, (WIN_H * scale) as i32))
         .center(true)
         // **先隐藏**：全部初始化（读设置/托盘图标/字体/画布/后台线程）都在主线程

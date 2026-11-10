@@ -217,7 +217,7 @@ enum Instance {
 /// [`crate::gui::WINDOW_TITLE`]，用标题找而不靠类名 —— 类名由 nwg 生成，换库
 /// 版本就会变。
 fn wake_existing() -> bool {
-    let title: Vec<u16> = format!("{}\0", crate::gui::WINDOW_TITLE)
+    let title: Vec<u16> = format!("{}\0", crate::mock::window_title())
         .encode_utf16()
         .collect();
     let hwnd = unsafe { crate::win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
@@ -234,7 +234,11 @@ fn wake_existing() -> bool {
 
 /// 单实例互斥检查。已有实例时激活它的窗口并返回 [`Instance::AlreadyRunning`]。
 fn check_single_instance() -> Instance {
-    check_instance_named(SINGLE_INSTANCE_MUTEX)
+    check_instance_named(if crate::mock::enabled() {
+        "Local\\RogMouseCtl_Mock_SingleInstance"
+    } else {
+        SINGLE_INSTANCE_MUTEX
+    })
 }
 
 /// 按名字做单实例检查。拆出来只为了让测试用一个独立的名字，不与真机上的
@@ -247,7 +251,7 @@ fn check_instance_named(mutex_name: &str) -> Instance {
     }
     let err = unsafe { win32::GetLastError() };
     if err == ERROR_ALREADY_EXISTS {
-        let title = win32::to_wide(crate::gui::WINDOW_TITLE);
+        let title = win32::to_wide(crate::mock::window_title());
         let hwnd = unsafe { win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
         if !hwnd.is_null() {
             unsafe {

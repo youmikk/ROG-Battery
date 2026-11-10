@@ -91,6 +91,9 @@ fn cache() -> std::sync::MutexGuard<'static, Option<Option<LampInfo>>> {
 /// 探测放在**持锁**区间内：枚举要开十几个句柄、耗时几十毫秒，并发首调各跑一遍
 /// 既浪费又会在界面首帧叠出明显卡顿。持锁期间不做任何回调，不会自锁。
 pub fn info() -> Option<LampInfo> {
+    if crate::mock::enabled() {
+        return None;
+    }
     let mut g = cache();
     if let Some(v) = *g {
         return v;

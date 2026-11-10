@@ -462,6 +462,9 @@ pub const TRAY_GUID: Guid = Guid {
 /// 不能改；其余槽位只动最后一个字节，保证互不相同。
 pub fn tray_guid_at(slot: u8) -> Guid {
     let mut g = TRAY_GUID;
+    if crate::mock::enabled() {
+        g.data1 ^= 0x4D4F434B;
+    }
     g.data4[7] = TRAY_GUID.data4[7].wrapping_add(slot);
     g
 }

@@ -7,6 +7,14 @@
 
 use crate::device::{DeviceFamily, DeviceReading};
 
+pub fn enabled() -> bool {
+    std::env::var_os("ROG_MOCK_DEVICES").is_some()
+}
+
+pub fn window_title() -> &'static str {
+    if enabled() { "R Battery · 模拟设备" } else { crate::gui::WINDOW_TITLE }
+}
+
 /// 解析夹具文本。坏行跳过 —— 模拟工具不该因为一行写错就整体失效。
 pub fn parse(text: &str) -> Vec<DeviceReading> {
     let mut out = Vec::new();
@@ -48,10 +56,10 @@ pub fn parse(text: &str) -> Vec<DeviceReading> {
     out
 }
 
-/// 读夹具文件。未启用或读不到都返回 `None`（当作「没有模拟」）。
+/// 模拟模式读不到文件时显示空列表，不回退到真实硬件。
 pub fn readings() -> Option<Vec<DeviceReading>> {
     let path = std::env::var_os("ROG_MOCK_DEVICES")?;
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     Some(parse(&text))
 }
 
