@@ -427,7 +427,7 @@ fn monitor_scale(monitor: Handle) -> f32 {
 }
 
 fn place(anchor: Rect, work: Rect, width: i32, height: i32, gap: i32) -> (i32, i32) {
-    let x = (anchor.right - width).clamp(
+    let x = (anchor.left + (anchor.right - anchor.left - width) / 2).clamp(
         work.left + gap,
         (work.right - width - gap).max(work.left + gap),
     );
@@ -806,13 +806,22 @@ mod tests {
         }
     }
     #[test]
-    fn popup_stays_inside_negative_monitor_work_area() {
+    fn popup_centers_on_icon_and_stays_inside_negative_monitor_work_area() {
         let work = Rect {
             left: -1920,
             top: 0,
             right: 0,
             bottom: 1040,
         };
+        let centered = Rect {
+            left: -1000,
+            top: 1040,
+            right: -984,
+            bottom: 1056,
+        };
+        let (x, y) = place(centered, work, 410, 367, 8);
+        assert_eq!(x * 2 + 410, centered.left + centered.right);
+        assert_eq!(y + 367 + 8, centered.top);
         for anchor in [
             Rect {
                 left: -80,
