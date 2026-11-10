@@ -109,7 +109,7 @@ pub enum Drop {
     /// 设置页：窗口关闭行为（每次询问 / 最小化到托盘 / 直接退出）。
     CloseMode,
     TrayKind,
-    TrayContent,
+    TrayDevice,
     Language,
 }
 
@@ -375,6 +375,7 @@ pub enum Cursor {
 pub struct Ui {
     pub page: Page,
     pub selected_device: Option<String>,
+    pub tray_device_keys: Vec<String>,
     pub device_keys: Vec<String>,
     pub initial_route_done: bool,
     /// 当前配色。`settings.ini` 的 `theme` 键存它的字符串形式。
@@ -479,6 +480,7 @@ impl Default for Ui {
         Ui {
             page: Page::Home,
             selected_device: None,
+            tray_device_keys: Vec::new(),
             device_keys: Vec::new(),
             initial_route_done: false,
             // 默认浅色主题。
@@ -1024,7 +1026,7 @@ mod tests {
     fn local_tray_preferences_do_not_require_hardware() {
         assert!(!super::Act::ToggleDeviceTray.needs_device());
         assert!(!super::Drop::TrayKind.needs_device());
-        assert!(!super::Drop::TrayContent.needs_device());
+        assert!(!super::Drop::TrayDevice.needs_device());
         let mut u = super::Ui::default();
         *u.scroll_mut(super::Page::Settings) = 10.0;
         assert_eq!(u.scroll_y(super::Page::Settings), 10.0);

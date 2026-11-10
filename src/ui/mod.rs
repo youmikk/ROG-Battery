@@ -36,4 +36,6 @@ pub mod pages;
 pub mod theme;
 pub mod viewdata;
 pub mod titlebar;
+pub mod tray_popup;
+pub mod panel_icons;
 pub mod widget;

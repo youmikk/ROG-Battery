@@ -535,6 +535,39 @@ pub struct TrayId {
     pub uses_guid: bool,
 }
 
+pub fn tray_rect(hwnd: Handle, id: TrayId) -> Option<Rect> {
+    #[repr(C)]
+    struct Identifier {
+        size: u32,
+        hwnd: Handle,
+        uid: u32,
+        guid: Guid,
+    }
+    #[link(name = "shell32")]
+    extern "system" {
+        fn Shell_NotifyIconGetRect(id: *const Identifier, rect: *mut Rect) -> i32;
+    }
+    let identifier = Identifier {
+        size: std::mem::size_of::<Identifier>() as u32,
+        hwnd,
+        uid: id.uid,
+        guid: if id.uses_guid {
+            id.guid
+        } else {
+            unsafe { std::mem::zeroed() }
+        },
+    };
+    let mut rect = Rect::default();
+    (unsafe { Shell_NotifyIconGetRect(&identifier, &mut rect) } == 0).then_some(rect)
+}
+
+#[link(name = "user32")]
+extern "system" {
+    pub fn GetDoubleClickTime() -> u32;
+    pub fn SetTimer(hwnd: Handle, id: usize, elapse_ms: u32, proc: usize) -> usize;
+    pub fn KillTimer(hwnd: Handle, id: usize) -> i32;
+}
+
 /// 非 GUID 模式用的编号，挑一个不会和别的程序撞的值。
 pub const TRAY_FALLBACK_UID: u32 = 1;
 
@@ -718,6 +751,7 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
 #[link(name = "kernel32")]
 extern "system" {
     pub fn GetUserDefaultUILanguage() -> u16;
+    pub fn FreeLibrary(module: Handle) -> i32;
 }
 
 /// `LoadImageW` 的图标类型。

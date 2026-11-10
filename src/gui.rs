@@ -483,6 +483,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
 }
 
 struct Shared {
+    refresh_generation: u64,
     devices: std::collections::BTreeMap<String, DeviceSnapshot>,
     key_aliases: std::collections::BTreeMap<String, String>,
     active_key: Option<String>,
@@ -553,6 +554,7 @@ struct Shared {
 impl Shared {
     fn new(cfg: Settings) -> Shared {
         Shared {
+            refresh_generation: 0,
             devices: Default::default(),
             key_aliases: Default::default(),
             active_key: None,
@@ -593,14 +595,18 @@ impl Shared {
                 *selected = Some(new.to_string());
             }
         }
+        let tray_changed = self.cfg.tray_device.as_deref() == Some(old);
+        if tray_changed {
+            self.cfg.tray_device = Some(new.to_string());
+        }
         if self.cfg.device_tray.contains_key(new) {
-            return false;
+            return tray_changed;
         }
         if let Some(pref) = self.cfg.device_tray.get(old).copied() {
             self.cfg.device_tray.insert(new.to_string(), pref);
             return true;
         }
-        false
+        tray_changed
     }
 
     /// 界面要显示的状态：全量快照 + 活电量。
@@ -803,7 +809,6 @@ struct TrayCtl {
     hwnd: win32::Handle,
     enabled: Cell<bool>,
     entries: std::cell::RefCell<Vec<TrayEntry>>,
-    slots: std::cell::RefCell<std::collections::BTreeMap<String, u8>>,
 }
 
 struct TrayEntry {
@@ -821,7 +826,6 @@ impl TrayCtl {
             hwnd,
             enabled: Cell::new(false),
             entries: Default::default(),
-            slots: Default::default(),
         }
     }
 
@@ -842,30 +846,12 @@ impl TrayCtl {
         if !self.enabled.get() {
             return;
         }
-        let visible: Vec<_> = readings
-            .iter()
-            .filter(|r| cfg.tray_for(&r.key).enabled)
-            .collect();
-        let wanted: Vec<String> = if visible.is_empty() {
-            vec![String::new()]
-        } else {
-            visible.iter().map(|r| r.key.clone()).collect()
-        };
+        let wanted = vec![cfg.tray_device.clone().unwrap_or_default()];
         let mut entries = self.entries.borrow_mut();
-        entries.retain(|entry| {
-            if wanted.contains(&entry.key) {
-                return true;
-            }
-            win32::tray_remove(self.hwnd, entry.id);
-            unsafe {
-                win32::DestroyIcon(entry.icon);
-            }
-            false
-        });
         for key in wanted {
-            let reading = visible.iter().find(|r| r.key == key);
+            let reading = readings.iter().find(|r| r.key == key);
             let pref = cfg.tray_for(&key);
-            let content = pref.effective_content(readings.len());
+            let content = crate::tray_prefs::TrayContent::Number;
             let tip = reading
                 .map(|r| {
                     format!(
@@ -881,7 +867,13 @@ impl TrayCtl {
                         }
                     )
                 })
-                .unwrap_or_else(|| crate::tr!("R Battery · 打开设备页面").to_string());
+                .unwrap_or_else(|| {
+                    if cfg.tray_device.is_some() && !readings.is_empty() {
+                        format!("{} · {}", cfg.tray_device_name, crate::tr!("未连接"))
+                    } else {
+                        crate::tr!("R Battery · 打开设备页面").to_string()
+                    }
+                });
             let signature = format!(
                 "{:?}:{pref:?}:{content:?}:{}:{}:{tip}",
                 reading,
@@ -901,6 +893,8 @@ impl TrayCtl {
                     pref.kind.resolve(r.family),
                     content,
                 )
+            } else if cfg.tray_device.is_some() && !readings.is_empty() {
+                crate::tray_icon::render_device(None, false, pref.kind, content)
             } else {
                 let h = win32::load_app_icon(32);
                 if h.is_null() {
@@ -910,11 +904,12 @@ impl TrayCtl {
                 }
             };
             let Some(icon) = icon else { continue };
-            if let Some(entry) = entries.iter_mut().find(|e| e.key == key) {
+            if let Some(entry) = entries.first_mut() {
                 if win32::tray_update(self.hwnd, entry.id, Some(icon), Some(&tip)) {
                     unsafe {
                         win32::DestroyIcon(entry.icon);
                     }
+                    entry.key = key;
                     entry.icon = icon;
                     entry.signature = signature;
                     entry.tip = tip;
@@ -924,24 +919,7 @@ impl TrayCtl {
                     }
                 }
             } else {
-                let slot = if key.is_empty() {
-                    0
-                } else {
-                    let mut slots = self.slots.borrow_mut();
-                    if let Some(slot) = slots.get(&key) {
-                        *slot
-                    } else {
-                        let slot = (1..=255).find(|slot| !slots.values().any(|s| s == slot));
-                        let Some(slot) = slot else {
-                            unsafe {
-                                win32::DestroyIcon(icon);
-                            }
-                            continue;
-                        };
-                        slots.insert(key.clone(), slot);
-                        slot
-                    }
-                };
+                let slot = 0;
                 if let Some(id) = win32::tray_add(self.hwnd, TRAY_CALLBACK_MSG, icon, &tip, slot) {
                     entries.push(TrayEntry {
                         key,
@@ -1088,16 +1066,19 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
         Act::ToggleDeviceTray => {
             if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
-                env.set_cfg(|c| {
-                    let pref = c.device_tray.entry(key).or_default();
-                    pref.enabled = !pref.enabled;
-                    if pref.enabled {
+                let reading = lock_shared(env.shared)
+                    .readings
+                    .iter()
+                    .find(|r| r.key == key)
+                    .cloned();
+                if let Some(reading) = reading {
+                    env.set_cfg(|c| {
+                        c.tray_device = Some(key);
+                        c.tray_device_name = reading.name;
                         c.tray_enabled = true;
-                    }
-                });
-                env.tray.set_visibility(env.cfg().tray_enabled);
-                env.canvas.with_ui_mut(|u| u.set_open_drop(None));
-                env.canvas.repaint_now();
+                    });
+                    env.canvas.repaint_now();
+                }
             }
         }
         Act::None => {}
@@ -1408,6 +1389,25 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
         return;
     }
 
+    if d == Drop::TrayDevice {
+        let key = env.canvas.with_ui(|u| u.tray_device_keys.get(idx).cloned());
+        let reading = key.and_then(|key| {
+            lock_shared(env.shared)
+                .readings
+                .iter()
+                .find(|r| r.key == key)
+                .cloned()
+        });
+        if let Some(reading) = reading {
+            env.set_cfg(|cfg| {
+                cfg.tray_device = Some(reading.key);
+                cfg.tray_device_name = reading.name;
+            });
+            env.canvas.repaint_now();
+        }
+        return;
+    }
+
     let Some(code) = crate::ui::dropdown::option_value(d, idx) else {
         return;
     };
@@ -1420,20 +1420,13 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
                 env.canvas.repaint_now();
             }
         }
-        Drop::TrayKind | Drop::TrayContent => {
+        Drop::TrayDevice => {}
+        Drop::TrayKind => {
             if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
-                env.set_cfg(|c| {
-                    let pref = c.device_tray.entry(key).or_default();
-                    if d == Drop::TrayKind {
-                        if let Some(kind) = crate::tray_prefs::TrayKind::ALL.get(code) {
-                            pref.kind = *kind;
-                        }
-                    } else if let Some(content) = crate::tray_prefs::TrayContent::ALL.get(code) {
-                        pref.content = *content;
-                        pref.content_auto = false;
-                    }
-                });
-                env.canvas.repaint_now();
+                if let Some(kind) = crate::tray_prefs::TrayKind::ALL.get(code) {
+                    env.set_cfg(|c| c.device_tray.entry(key).or_default().kind = *kind);
+                    env.canvas.repaint_now();
+                }
             }
         }
         Drop::Sleep => {
@@ -2416,6 +2409,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let shared = Arc::new(Mutex::new(Shared::new(cfg.clone())));
     let signal = Arc::new(Signal::new(cfg.refresh_interval_sec));
     let sender = notice.sender();
+    let popup = Rc::new(crate::ui::tray_popup::Popup::new(&window, sender)?);
 
     // 自启状态开机时读一次 —— **放到后台线程**。
     //
@@ -2651,6 +2645,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     (full, s.write_gen)
                 };
                 let sample = refresh_devices(&shared_t, full, gen_at_read);
+                lock_shared(&shared_t).refresh_generation += 1;
 
                 // ④ 记一条历史采样 + 重算续航估算。
                 //
@@ -2690,6 +2685,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let signal_e = Arc::clone(&signal);
     let canvas_e = canvas.clone();
     let canvas_tray = canvas.clone();
+    let popup_events = Rc::clone(&popup);
+    let popup_tray = Rc::clone(&popup);
 
     // explorer 重启后系统广播这条消息，收到要把托盘图标重新加回去。
     // 消息号要在主处理器 move 走 `tray` 之前先备好一份 Arc。
@@ -2708,9 +2705,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 实测最小化后回调根本不触发（那时 `IsIconic` 已经是 1，分支永远走不到）。
     let canvas_min = canvas_e.clone();
     let shared_language = Arc::clone(&shared);
+    let tray_broadcast = Arc::clone(&tray_tb);
     // 第二个参数是**处理器 id**（nwg 要求 > 0xFFFF），要过滤的消息在回调里判。
     let min_handler =
         nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
+            if taskbar_created != 0 && msg == taskbar_created {
+                tray_broadcast.re_add();
+            }
+
             // SIZE_MINIMIZED = 1
             if msg == 0x0005 && wp as usize == 1 {
                 canvas_min.release_render_memory();
@@ -2719,8 +2721,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 let cfg = lock_shared(&shared_language).cfg.clone();
                 if crate::i18n::apply(cfg.language) {
                     canvas_min.invalidate();
-                    sender.notice();
                 }
+                sender.notice();
             }
             None
         })
@@ -2772,6 +2774,48 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             }
 
             E::OnNotice => {
+                for action in popup_events.take_actions() {
+                    use crate::ui::tray_popup::Action;
+                    match action {
+                        Action::Refresh => {
+                            let generation = lock_shared(&shared_e).refresh_generation;
+                            popup_events.refresh_started(generation);
+                            signal_e.request_refresh();
+                        }
+                        Action::Quit => {
+                            popup_events.hide();
+                            signal_e.request_quit();
+                            nwg::stop_thread_dispatch();
+                        }
+                        Action::Settings | Action::Main | Action::Device(_) => {
+                            popup_events.hide();
+                            match action {
+                                Action::Settings => canvas.with_ui_mut(|u| {
+                                    u.page = Page::Settings;
+                                    u.initial_route_done = true;
+                                }),
+                                Action::Main => canvas.with_ui_mut(|u| {
+                                    u.page = Page::Home;
+                                    u.initial_route_done = true;
+                                }),
+                                Action::Device(key) => {
+                                    canvas.with_ui_mut(|u| u.select_device(&key));
+                                    let mut s = lock_shared(&shared_e);
+                                    s.active_key = Some(key);
+                                    s.want_full = true;
+                                    signal_e.request_refresh();
+                                }
+                                _ => {}
+                            }
+                            unsafe {
+                                win32::ShowWindow(hwnd, 9);
+                                win32::SetForegroundWindow(hwnd);
+                            }
+                            canvas.repaint_now();
+                        }
+                    }
+                }
+
                 // ⓪ 充电动效开关。
                 //
                 // 判据是「当前页 == 电量页 **且** 设备报告正在充电」。
@@ -2816,6 +2860,12 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
                 {
                     let mut s = lock_shared(&shared_e);
+                    let readings = s.readings.clone();
+                    if s.cfg.ensure_tray_device(&readings) {
+                        if let Err(e) = settings::save(&s.cfg) {
+                            tray_log(&format!("save selection failed: {e}"));
+                        }
+                    }
                     tray.sync(&s.readings, &s.cfg);
                     if let Some(q) = s.quick {
                         if low_battery_alert(q.level, q.charging, &mut s.low_alert_armed) {
@@ -2823,6 +2873,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                                 u.set_status(crate::tr!("设备电量低，建议充电").to_string())
                             });
                         }
+                    }
+                    let (readings, cfg, generation) =
+                        (s.readings.clone(), s.cfg.clone(), s.refresh_generation);
+                    drop(s);
+                    popup_events.update(&readings, &cfg, generation);
+                    if !cfg.tray_enabled {
+                        popup_events.hide();
                     }
                 }
 
@@ -2839,24 +2896,63 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 发到 `TRAY_CALLBACK_MSG`，由 `msg_window` 接收。nwg 那条「托盘事件」
     // 通道已经不参与，所以这里用裸处理器。
     let shared_tray = Arc::clone(&shared);
-    let signal_tray = Arc::clone(&signal);
+    const CLICK_TIMER: usize = 87;
+    let pending_click = Cell::new(false);
+    let suppress_release = Cell::new(false);
+    let click_was_open = Cell::new(false);
+    let anchor = Cell::new(win32::Rect::default());
     let tray_handler = unsafe {
-        nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |_h, msg, wp, lp| {
-            // 资源管理器重启：所有托盘图标都没了，重新加一次。
+        nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |h, msg, wp, lp| {
+            let message_hwnd = h as win32::Handle;
             if taskbar_created != 0 && msg == taskbar_created {
                 tray_tb.re_add();
+                return Some(0);
+            }
+            if msg == 0x0113 && wp == CLICK_TIMER {
+                win32::KillTimer(message_hwnd, CLICK_TIMER);
+                if pending_click.replace(false) {
+                    if click_was_open.get() {
+                        popup_tray.hide();
+                    } else {
+                        let (readings, cfg, generation) = {
+                            let s = lock_shared(&shared_tray);
+                            (s.readings.clone(), s.cfg.clone(), s.refresh_generation)
+                        };
+                        popup_tray.update(&readings, &cfg, generation);
+                        if cfg.tray_enabled {
+                            popup_tray.show(anchor.get());
+                        }
+                    }
+                }
                 return Some(0);
             }
             if msg != TRAY_CALLBACK_MSG {
                 return None;
             }
-            // 回调的 lParam 低字是鼠标消息
-            match (lp as u32) & 0xFFFF {
-                // WM_RBUTTONUP：弹菜单（现在只剩「退出」）。
-                0x0205 => {
+            if tray_tb.device_for_callback(wp, lp).is_none() {
+                return Some(0);
+            }
+            let event = (lp as u32) & 0xffff;
+            let icon_rect = tray_tb
+                .entries
+                .borrow()
+                .first()
+                .and_then(|entry| win32::tray_rect(message_hwnd, entry.id));
+            let (x, y) = nwg::GlobalCursor::position();
+            let current = icon_rect.unwrap_or(win32::Rect {
+                left: x,
+                top: y,
+                right: x + 16,
+                bottom: y + 16,
+            });
+            match event {
+                0x0205 | 0x007b => {
+                    pending_click.set(false);
+                    win32::KillTimer(message_hwnd, CLICK_TIMER);
+                    popup_tray.hide();
                     if let Some((parent, id)) = mi_quit.handle.hmenu_item() {
-                        let text = crate::win32::to_wide(crate::tr!("退出"));
-                        crate::win32::ModifyMenuW(
+                        let text = win32::to_wide(crate::tr!("退出"));
+                        win32::ModifyMenuW(
                             parent as win32::Handle,
                             id,
                             0,
@@ -2864,27 +2960,45 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             text.as_ptr(),
                         );
                     }
-                    let (x, y) = nwg::GlobalCursor::position();
                     menu.popup(x, y);
                 }
-                // WM_LBUTTONUP：直接回主窗口。
-                // SW_RESTORE = 9：既显示窗口、又取消最小化。
-                // 用裸句柄，不用 `window`（它已被主处理器 move 走）。
-                0x0202 | 0x0400 | 0x0401 => {
-                    if let Some(key) = tray_tb.device_for_callback(wp, lp) {
-                        if key.is_empty() {
-                            canvas_tray.with_ui_mut(|u| u.page = Page::Home);
-                        } else {
-                            canvas_tray.with_ui_mut(|u| u.select_device(&key));
-                            let mut s = lock_shared(&shared_tray);
-                            s.active_key = Some(key);
-                            s.want_full = true;
-                            signal_tray.request_refresh();
-                        }
-                        canvas_tray.repaint_now();
+                0x0201 => {
+                    suppress_release.set(false);
+                    click_was_open.set(popup_tray.was_open());
+                    anchor.set(current);
+                }
+                0x0203 => {
+                    pending_click.set(false);
+                    suppress_release.set(true);
+                    win32::KillTimer(message_hwnd, CLICK_TIMER);
+                    popup_tray.hide();
+                    canvas_tray.with_ui_mut(|u| {
+                        u.page = Page::Home;
+                        u.initial_route_done = true;
+                    });
+                    win32::ShowWindow(hwnd, 9);
+                    win32::SetForegroundWindow(hwnd);
+                    canvas_tray.repaint_now();
+                }
+                0x0202 | 0x0400 => {
+                    if !suppress_release.get() && !pending_click.replace(true) {
+                        anchor.set(current);
+                        win32::SetTimer(message_hwnd, CLICK_TIMER, win32::GetDoubleClickTime(), 0);
                     }
-                    let _ = crate::win32::ShowWindow(hwnd, 9);
-                    let _ = crate::win32::SetForegroundWindow(hwnd);
+                }
+                0x0401 => {
+                    pending_click.set(false);
+                    win32::KillTimer(message_hwnd, CLICK_TIMER);
+                    if popup_tray.was_open() {
+                        popup_tray.hide();
+                    } else {
+                        let (readings, cfg, generation) = {
+                            let s = lock_shared(&shared_tray);
+                            (s.readings.clone(), s.cfg.clone(), s.refresh_generation)
+                        };
+                        popup_tray.update(&readings, &cfg, generation);
+                        popup_tray.show(current);
+                    }
                 }
                 _ => {}
             }
@@ -2976,68 +3090,31 @@ mod tests {
     }
 
     #[test]
-    fn tray_entries_stay_bound_to_devices_when_hidden_or_reordered() {
+    fn tray_keeps_one_registration_when_selection_or_device_order_changes() {
         nwg::init().unwrap();
         let mut window = nwg::MessageWindow::default();
         nwg::MessageWindow::builder().build(&mut window).unwrap();
         let tray = TrayCtl::new(window.handle.hwnd().unwrap() as win32::Handle);
         let readings = crate::mock::parse("mouse|Mouse A|78|0\nkeyboard|Keyboard B|96|1");
         let mut cfg = Settings::default();
+        cfg.ensure_tray_device(&readings);
+        tray.sync(&readings, &cfg);
+        assert_eq!(tray.entries.borrow().len(), 1);
+        let uid = tray.entries.borrow()[0].id.uid;
+        assert_eq!(tray.entries.borrow()[0].key, readings[0].key);
+        cfg.tray_device = Some(readings[1].key.clone());
+        cfg.tray_device_name = readings[1].name.clone();
+        tray.sync(&readings, &cfg);
+        assert_eq!(tray.entries.borrow()[0].id.uid, uid);
+        assert_eq!(tray.entries.borrow()[0].key, readings[1].key);
         tray.sync(&readings[..1], &cfg);
-        let single_signature = tray.entries.borrow()[0].signature.clone();
-        let first_id = tray.entries.borrow()[0].id.uid;
-        tray.sync(&readings, &cfg);
-        assert_ne!(tray.entries.borrow()[0].signature, single_signature);
-        assert_eq!(tray.entries.borrow()[0].id.uid, first_id);
-        let ids: Vec<_> = tray
-            .entries
-            .borrow()
-            .iter()
-            .map(|entry| (entry.key.clone(), entry.id.uid))
-            .collect();
-        assert_eq!(ids.len(), 2, "系统托盘注册失败");
-        for (key, uid) in &ids {
-            assert_eq!(
-                tray.device_for_callback(0, ((*uid << 16) | 0x400) as isize)
-                    .as_deref(),
-                Some(key.as_str())
-            );
-        }
-        cfg.device_tray
-            .entry(readings[0].key.clone())
-            .or_default()
-            .enabled = false;
-        tray.sync(&readings, &cfg);
         assert_eq!(tray.entries.borrow().len(), 1);
-        assert_eq!(tray.entries.borrow()[0].id.uid, ids[1].1);
-        cfg.device_tray
-            .entry(readings[0].key.clone())
-            .or_default()
-            .enabled = true;
-        let reversed = vec![readings[1].clone(), readings[0].clone()];
-        tray.sync(&reversed, &cfg);
-        for (key, uid) in &ids {
-            assert_eq!(
-                tray.entries
-                    .borrow()
-                    .iter()
-                    .find(|entry| &entry.key == key)
-                    .unwrap()
-                    .id
-                    .uid,
-                *uid
-            );
-        }
+        assert!(tray.entries.borrow()[0].tip.contains(crate::tr!("未连接")));
+        assert_eq!(
+            tray.device_for_callback(0, ((uid << 16) | 0x400) as isize),
+            cfg.tray_device
+        );
         tray.re_add();
-        for reading in &readings {
-            cfg.device_tray
-                .entry(reading.key.clone())
-                .or_default()
-                .enabled = false;
-        }
-        tray.sync(&readings, &cfg);
-        assert_eq!(tray.entries.borrow().len(), 1);
-        assert!(tray.entries.borrow()[0].key.is_empty());
         cfg.tray_enabled = false;
         tray.sync(&readings, &cfg);
         assert!(tray.entries.borrow().is_empty());

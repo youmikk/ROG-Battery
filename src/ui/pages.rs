@@ -807,49 +807,51 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let Some(device) = d.selected else { return };
     let pref = d.cfg.tray_for(&device.key);
+    let selected = d.cfg.tray_device.as_ref() == Some(&device.key);
     c.h2(p, crate::tr!("托盘显示"), false);
-    let card = c.card(p, layout::ROW_H * if pref.enabled { 3.0 } else { 1.0 });
+    let card = c.card(p, layout::ROW_H * 2.0);
     let area = row_area(card, card.y);
     let ctl = row_label(
         p,
         area,
-        crate::tr!("在托盘显示电量"),
-        Some(crate::tr!("仅控制这台设备")),
-        40.0,
+        crate::tr!("托盘显示设备"),
+        Some(crate::tr!("固定显示这台设备的电量")),
+        180.0,
     );
-    let sw = R::new(ctl.x, ctl.cy() - 10.0, 40.0, 20.0);
-    p.switch(sw, pref.enabled, true);
-    ui.hot(sw, Act::ToggleDeviceTray);
-    if pref.enabled {
-        row_rule(p, card, area);
-        let area = row_area(card, card.y + layout::ROW_H);
-        let help = if pref.kind == crate::tray_prefs::TrayKind::Auto {
-            crate::trf!(
-                "自动识别为{}，可手动纠正",
-                crate::i18n::translate(device.family.noun())
-            )
+    button(
+        p,
+        ui,
+        R::new(ctl.x, ctl.cy() - 15.0, 180.0, 30.0),
+        if selected {
+            crate::tr!("已在托盘显示")
         } else {
-            crate::tr!("手动选择优先于自动识别").to_string()
-        };
-        let ctl = row_label(p, area, crate::tr!("托盘图标"), Some(&help), 150.0);
-        drop_button(
-            p,
-            ui,
-            R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
-            Drop::TrayKind,
-            d,
-        );
-        row_rule(p, card, area);
-        let area = row_area(card, card.y + layout::ROW_H * 2.0);
-        let ctl = row_label(p, area, crate::tr!("显示内容"), None, 150.0);
-        drop_button(
-            p,
-            ui,
-            R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
-            Drop::TrayContent,
-            d,
-        );
-    }
+            crate::tr!("设为托盘显示设备")
+        },
+        false,
+        if selected {
+            Act::None
+        } else {
+            Act::ToggleDeviceTray
+        },
+    );
+    row_rule(p, card, area);
+    let area = row_area(card, card.y + layout::ROW_H);
+    let help = if pref.kind == crate::tray_prefs::TrayKind::Auto {
+        crate::trf!(
+            "自动识别为{}，可手动纠正",
+            crate::i18n::translate(device.family.noun())
+        )
+    } else {
+        crate::tr!("手动选择优先于自动识别").to_string()
+    };
+    let ctl = row_label(p, area, crate::tr!("设备图标"), Some(&help), 150.0);
+    drop_button(
+        p,
+        ui,
+        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+        Drop::TrayKind,
+        d,
+    );
     c.y = card.bottom();
 }
 
@@ -1093,6 +1095,9 @@ fn draw_drop(p: &mut Painter, ui: &mut Ui, d: &Data, drop: Drop, view_h: f32) {
         return;
     };
     let opts = options(drop, d);
+    if drop == Drop::TrayDevice {
+        ui.tray_device_keys = d.readings.iter().map(|r| r.key.clone()).collect();
+    }
     // 空表直接返回：色盘走 `draw_palette`，但它也经过这里（`page()` 里
     // 按 `Drop` 分派）。不返回的话会画出一个 8px 高的空壳，
     // 而且 `set_drop_rect` 会把它登记成一个几乎点不到的矩形。
@@ -2381,7 +2386,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
 
     // ---- 程序 ----
     c.h2(p, crate::tr!("程序"), true);
-    let card = c.card(p, layout::ROW_H * 5.0);
+    let card = c.card(p, layout::ROW_H * 6.0);
     let mut y = card.y;
     {
         let area = row_area(card, y);
@@ -2416,6 +2421,25 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, d.cfg.tray_enabled, true);
         ui.hot(sw, Act::Toggle(Pref::TrayEnabled));
+        row_rule(p, card, area);
+        y += layout::ROW_H;
+    }
+    {
+        let area = row_area(card, y);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("托盘显示设备"),
+            Some(crate::tr!("单击数字查看全部设备")),
+            220.0,
+        );
+        drop_button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 220.0, 30.0),
+            Drop::TrayDevice,
+            d,
+        );
         row_rule(p, card, area);
         y += layout::ROW_H;
     }
@@ -3101,7 +3125,7 @@ mod tests {
     }
 
     #[test]
-    fn tray_controls_only_exist_when_enabled_even_offline() {
+    fn tray_selection_and_kind_work_even_offline() {
         use crate::ui::gfx::{Canvas, Fonts};
         let screen = unsafe { crate::win32::GetDC(std::ptr::null_mut()) };
         assert!(!screen.is_null());
@@ -3149,13 +3173,13 @@ mod tests {
                 ui.hots
                     .iter()
                     .any(|h| h.act == Act::OpenDrop(Drop::TrayKind)),
-                enabled
+                true
             );
             assert_eq!(
                 ui.hots
                     .iter()
-                    .any(|h| h.act == Act::OpenDrop(Drop::TrayContent)),
-                enabled
+                    .any(|h| h.act == Act::OpenDrop(Drop::TrayDevice)),
+                false
             );
         }
         canvas.release();

@@ -56,13 +56,6 @@ pub enum TrayContent {
 
 impl TrayContent {
     pub const ALL: [Self; 3] = [Self::Combined, Self::Number, Self::Icon];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Combined => crate::tr!("图标＋电量"),
-            Self::Number => crate::tr!("仅电量数字"),
-            Self::Icon => crate::tr!("仅设备图标"),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,16 +78,6 @@ impl Default for DeviceTray {
 }
 
 impl DeviceTray {
-    pub fn effective_content(self, device_count: usize) -> TrayContent {
-        if !self.content_auto {
-            self.content
-        } else if device_count == 1 {
-            TrayContent::Number
-        } else {
-            TrayContent::Combined
-        }
-    }
-
     pub fn parse(value: &str) -> Option<Self> {
         let mut parts = value.split(',');
         let enabled = match parts.next()? {
@@ -154,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_content_follows_device_count_and_survives_other_preferences() {
+    fn legacy_automatic_preferences_still_parse() {
         let pref = DeviceTray {
             enabled: false,
             kind: TrayKind::Mouse,
@@ -162,13 +145,10 @@ mod tests {
         };
         let loaded = DeviceTray::parse(&pref.text()).unwrap();
         assert_eq!(loaded, pref);
-        assert_eq!(loaded.effective_content(1), TrayContent::Number);
-        assert_eq!(loaded.effective_content(2), TrayContent::Combined);
-        assert_eq!(loaded.effective_content(1), TrayContent::Number);
     }
 
     #[test]
-    fn explicit_and_legacy_content_never_changes_with_device_count() {
+    fn legacy_content_preferences_still_roundtrip() {
         for content in TrayContent::ALL {
             let pref = DeviceTray {
                 content,
@@ -177,12 +157,9 @@ mod tests {
             };
             let loaded = DeviceTray::parse(&pref.text()).unwrap();
             assert_eq!(loaded, pref);
-            for count in [1, 2, 4] {
-                assert_eq!(loaded.effective_content(count), content);
-            }
         }
         assert_eq!(
-            DeviceTray::parse("1,0,0").unwrap().effective_content(1),
+            DeviceTray::parse("1,0,0").unwrap().content,
             TrayContent::Combined
         );
     }

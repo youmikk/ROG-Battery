@@ -17,6 +17,8 @@ use crate::paths;
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub device_tray: std::collections::BTreeMap<String, crate::tray_prefs::DeviceTray>,
+    pub tray_device: Option<String>,
+    pub tray_device_name: String,
     /// 快照缓存有效期（秒）。0 表示每次都重读设备。
     pub cache_ttl_sec: u64,
     /// 界面后台主动刷新的间隔（秒）。
@@ -42,6 +44,8 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             device_tray: Default::default(),
+            tray_device: None,
+            tray_device_name: String::new(),
             cache_ttl_sec: crate::snapshot::DEFAULT_TTL_SEC,
             // 全量 19 帧约 591ms，只读 3 帧约 150ms；60 秒一次的额外耗电是
             // 0.07 %/天量级，可忽略。取 15 秒唯一的代价是鼠标休眠时更频繁地
@@ -75,6 +79,12 @@ impl Settings {
             };
             let v = v.trim();
             match k.trim() {
+                "tray_device" => {
+                    if v.len() == 16 && v.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        s.tray_device = Some(v.to_ascii_lowercase());
+                    }
+                }
+                "tray_device_name" => s.tray_device_name = v.to_string(),
                 "language" => match crate::i18n::Language::parse(v) {
                     Some(language) => s.language = language,
                     None => warnings.push(format!("language={v} 只认 system/zh-CN/en，已忽略")),
@@ -169,6 +179,13 @@ impl Settings {
         s.push_str(&format!("theme={}\n", self.theme));
         s.push_str("# Language: system / zh-CN / en.\n");
         s.push_str(&format!("language={}\n", self.language.code()));
+        if let Some(key) = &self.tray_device {
+            s.push_str(&format!("tray_device={key}\n"));
+            s.push_str(&format!(
+                "tray_device_name={}\n",
+                self.tray_device_name.replace(['\r', '\n'], " ")
+            ));
+        }
         for (key, pref) in &self.device_tray {
             s.push_str(&format!("device_tray.{key}={}\n", pref.text()));
         }
@@ -177,6 +194,28 @@ impl Settings {
 
     pub fn tray_for(&self, key: &str) -> crate::tray_prefs::DeviceTray {
         self.device_tray.get(key).copied().unwrap_or_default()
+    }
+
+    /// 首次选定后固定身份；设备断开或顺序变化时不自动换成另一台。
+    pub fn ensure_tray_device(&mut self, readings: &[crate::device::DeviceReading]) -> bool {
+        let chosen = if let Some(key) = &self.tray_device {
+            readings.iter().find(|r| &r.key == key)
+        } else {
+            readings.iter().min_by_key(|r| {
+                (
+                    !self.tray_for(&r.key).enabled,
+                    r.family.order(),
+                    r.key.clone(),
+                )
+            })
+        };
+        let Some(chosen) = chosen else { return false };
+        if self.tray_device.as_ref() == Some(&chosen.key) && self.tray_device_name == chosen.name {
+            return false;
+        }
+        self.tray_device = Some(chosen.key.clone());
+        self.tray_device_name = chosen.name.clone();
+        true
     }
 
     /// 把设置渲染成 ini 文本（供「更改设置文件位置」时把当前配置写到新位置）。
@@ -311,6 +350,23 @@ pub fn format_unix_local(unix: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn tray_selection_migrates_once_and_never_follows_reordering_or_disconnect() {
+        let readings = crate::mock::parse("mouse|Mouse A|78|0\nkeyboard|Keyboard B|96|1");
+        let mut cfg = Settings::default();
+        cfg.device_tray
+            .entry(readings[0].key.clone())
+            .or_default()
+            .enabled = false;
+        assert!(cfg.ensure_tray_device(&readings));
+        assert_eq!(cfg.tray_device.as_ref(), Some(&readings[1].key));
+        let mut loaded = Settings::parse(&cfg.to_text());
+        assert_eq!(loaded.tray_device, cfg.tray_device);
+        assert_eq!(loaded.tray_device_name, readings[1].name);
+        assert!(!loaded.ensure_tray_device(&readings[..1]));
+        assert_eq!(loaded.tray_device, cfg.tray_device);
+        assert!(!loaded.ensure_tray_device(&[readings[1].clone(), readings[0].clone()]));
+    }
+    #[test]
     fn language_defaults_to_system_and_roundtrips_all_choices() {
         use crate::i18n::Language;
         assert_eq!(Settings::default().language, Language::System);
@@ -433,6 +489,8 @@ mod tests {
     fn roundtrip_through_text() {
         let s = Settings {
             device_tray: Default::default(),
+            tray_device: None,
+            tray_device_name: String::new(),
             cache_ttl_sec: 45,
             refresh_interval_sec: 20,
             tray_enabled: false,

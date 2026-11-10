@@ -43,7 +43,7 @@ fn slot_of(drop: Drop) -> usize {
         Drop::Palette(_) => 9,
         Drop::CloseMode => 10,
         Drop::TrayKind => 11,
-        Drop::TrayContent => 12,
+        Drop::TrayDevice => 12,
         Drop::Language => 13,
     }
 }
@@ -68,11 +68,7 @@ fn build_options(drop: Drop) -> Vec<(String, usize)> {
             .enumerate()
             .map(|(i, k)| (k.label().to_string(), i))
             .collect(),
-        Drop::TrayContent => crate::tray_prefs::TrayContent::ALL
-            .iter()
-            .enumerate()
-            .map(|(i, k)| (k.label().to_string(), i))
-            .collect(),
+        Drop::TrayDevice => Vec::new(),
         Drop::Sleep => (0u8..=4)
             .map(|c| (crate::proto::sleep_mode_name(c), c as usize))
             .chain(std::iter::once((
@@ -166,16 +162,19 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
             .map(|r| d.cfg.tray_for(&r.key).kind.label())
             .unwrap_or(crate::tr!("自动识别"))
             .to_string(),
-        Drop::TrayContent => d
-            .selected
-            .map(|r| {
-                d.cfg
-                    .tray_for(&r.key)
-                    .effective_content(d.readings.len())
-                    .label()
-            })
-            .unwrap_or(crate::tr!("图标＋电量"))
-            .to_string(),
+        Drop::TrayDevice => d
+            .cfg
+            .tray_device
+            .as_ref()
+            .and_then(|key| d.readings.iter().find(|r| &r.key == key))
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| {
+                if d.cfg.tray_device_name.is_empty() {
+                    crate::tr!("等待设备连接").to_string()
+                } else {
+                    d.cfg.tray_device_name.clone()
+                }
+            }),
         Drop::Sleep => st
             .map(|s| crate::proto::sleep_mode_name(s.sleep_mode))
             .unwrap_or_else(|| "—".to_string()),
@@ -232,10 +231,11 @@ pub fn drop_selected(drop: Drop, d: &Data) -> usize {
             .selected
             .map(|r| d.cfg.tray_for(&r.key).kind as usize)
             .unwrap_or(0),
-        Drop::TrayContent => d
-            .selected
-            .map(|r| d.cfg.tray_for(&r.key).effective_content(d.readings.len()) as usize)
-            .unwrap_or(0),
+        Drop::TrayDevice => d
+            .readings
+            .iter()
+            .position(|r| Some(&r.key) == d.cfg.tray_device.as_ref())
+            .unwrap_or(usize::MAX),
         Drop::Sleep => st.map(|s| s.sleep_mode as usize).unwrap_or(0),
         Drop::Poll => st.map(|s| s.poll_code as usize).unwrap_or(0),
         // `active_stage` 是 1 基的（0 表示设备没报），候选值也是 1..=4
@@ -293,10 +293,17 @@ pub const BUTTON_TARGETS: [u16; 9] = [
 ];
 
 /// 某个下拉框的候选项（文字, 值）。
-pub fn options(drop: Drop, d: &Data) -> &'static [(String, usize)] {
-    // 候选文字目前不依赖 `d`，保留参数是为了将来加「当前值」标记时不用改所有调用点。
-    let _ = d;
-    raw_options(drop)
+pub fn options(drop: Drop, d: &Data) -> std::borrow::Cow<'static, [(String, usize)]> {
+    if drop == Drop::TrayDevice {
+        return std::borrow::Cow::Owned(
+            d.readings
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (r.name.clone(), i))
+                .collect(),
+        );
+    }
+    std::borrow::Cow::Borrowed(raw_options(drop))
 }
 
 #[cfg(test)]
@@ -312,7 +319,6 @@ mod tests {
             Drop::LightMode,
             Drop::CloseMode,
             Drop::TrayKind,
-            Drop::TrayContent,
             Drop::ButtonTarget(0),
         ] {
             let zh = with_language(Language::Chinese, || raw_options(drop));
@@ -330,60 +336,6 @@ mod tests {
             });
         }
         assert!(!Drop::Language.needs_device());
-    }
-
-    #[test]
-    fn tray_dropdown_matches_automatic_and_explicit_content() {
-        use crate::tray_prefs::TrayContent;
-        let readings = crate::mock::parse("mouse|Mouse|78|0\nkeyboard|Keyboard|96|1");
-        let cfg = crate::settings::Settings::default();
-        let estimate = crate::history::Estimate::default();
-        let mut d = super::super::pages::Data {
-            selected: Some(&readings[0]),
-            readings: &readings[..1],
-            state: None,
-            ident: None,
-            link_mode: "",
-            status: String::new(),
-            plot: None,
-            estimate: &estimate,
-            rows: 0,
-            cfg: &cfg,
-            autostart_text: "",
-            autostart_on: false,
-            version: "test",
-        };
-        assert_eq!(
-            drop_current(Drop::TrayContent, &d),
-            TrayContent::Number.label()
-        );
-        assert_eq!(
-            drop_selected(Drop::TrayContent, &d),
-            TrayContent::Number as usize
-        );
-        d.readings = &readings;
-        assert_eq!(
-            drop_current(Drop::TrayContent, &d),
-            TrayContent::Combined.label()
-        );
-        assert_eq!(
-            drop_selected(Drop::TrayContent, &d),
-            TrayContent::Combined as usize
-        );
-        let mut explicit_cfg = cfg.clone();
-        let pref = explicit_cfg.device_tray.entry(readings[0].key.clone()).or_default();
-        pref.content = TrayContent::Icon;
-        pref.content_auto = false;
-        d.cfg = &explicit_cfg;
-        d.readings = &readings[..1];
-        assert_eq!(
-            drop_current(Drop::TrayContent, &d),
-            TrayContent::Icon.label()
-        );
-        assert_eq!(
-            drop_selected(Drop::TrayContent, &d),
-            TrayContent::Icon as usize
-        );
     }
 
     #[test]

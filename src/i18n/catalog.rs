@@ -2,6 +2,16 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("托盘显示设备") => { if $crate::i18n::english() { "Device shown in tray" } else { "托盘显示设备" } };
+    ("固定显示这台设备的电量") => { if $crate::i18n::english() { "Keep this device’s battery in the tray" } else { "固定显示这台设备的电量" } };
+    ("已在托盘显示") => { if $crate::i18n::english() { "Shown in tray" } else { "已在托盘显示" } };
+    ("设为托盘显示设备") => { if $crate::i18n::english() { "Show this device in tray" } else { "设为托盘显示设备" } };
+    ("设备图标") => { if $crate::i18n::english() { "Device icon" } else { "设备图标" } };
+    ("单击数字查看全部设备") => { if $crate::i18n::english() { "Click the number to view all devices" } else { "单击数字查看全部设备" } };
+    ("正在刷新…") => { if $crate::i18n::english() { "Refreshing…" } else { "正在刷新…" } };
+    ("已更新") => { if $crate::i18n::english() { "Updated" } else { "已更新" } };
+    ("打开主窗口") => { if $crate::i18n::english() { "Open main window" } else { "打开主窗口" } };
+    ("字体初始化失败") => { if $crate::i18n::english() { "Could not initialize fonts" } else { "字体初始化失败" } };
     ("有线") => { if $crate::i18n::english() { "Wired" } else { "有线" } };
     ("2.4G 无线") => { if $crate::i18n::english() { "2.4 GHz wireless" } else { "2.4G 无线" } };
     ("常用预设") => { if $crate::i18n::english() { "Presets" } else { "常用预设" } };
@@ -277,6 +287,7 @@ macro_rules! tr {
 
 #[macro_export]
 macro_rules! trf {
+    ("{} 台设备", $($args:tt)*) => { if $crate::i18n::english() { format!("{} devices", $($args)*) } else { format!("{} 台设备", $($args)*) } };
     ("应用当前纯色 ({hex_now})", $($args:tt)*) => { if $crate::i18n::english() { format!("Apply color ({hex_now})", $($args)*) } else { format!("应用当前纯色 ({hex_now})", $($args)*) } };
     ("自动识别为{}，可手动纠正", $($args:tt)*) => { if $crate::i18n::english() { format!("Detected as {}; change if needed", $($args)*) } else { format!("自动识别为{}，可手动纠正", $($args)*) } };
     ("预计还能使用 {}", $($args:tt)*) => { if $crate::i18n::english() { format!("Estimated remaining: {}", $($args)*) } else { format!("预计还能使用 {}", $($args)*) } };
