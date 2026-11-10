@@ -84,20 +84,6 @@ impl Cursor {
     }
 
 
-    /// 页标题（h1）。原型：26px / 600 / letter-spacing −.4 / margin 10px 0 20px。
-    fn h1(&mut self, p: &mut Painter, s: &str) {
-        let top = self.y + 10.0;
-        p.text(
-            s,
-            R::new(self.x, top, self.w, layout::H1_H),
-            font::H1,
-            true,
-            p.t.text,
-            Align::Left,
-        );
-        self.y = top + layout::H1_H + 20.0;
-    }
-
     /// 分组标题（h2）。原型：14px / 600 / text2 / margin 26px 0 10px，
     /// 但紧跟 h1 的第一个 h2 上边距只有 4px（原型 `first-of-type`）。
     fn h2(&mut self, p: &mut Painter, s: &str, first: bool) {
@@ -1819,7 +1805,6 @@ fn known_state<'a>(d: &'a Data) -> Option<&'a crate::proto::State> {
 
 fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "性能");
     let st = known_state(d);
     let cur = st.map(cur_stage);
 
@@ -2129,7 +2114,6 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 /// 详见 `src/dynlight.rs` 顶部。
 fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "灯光");
 
     let lamp = crate::dynlight::info();
 
@@ -2226,7 +2210,6 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
 
 fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    c.h1(p, "按键");
 
     // 顶部警告提示条（用户反馈置顶更醒目）
     c.y += 4.0;
