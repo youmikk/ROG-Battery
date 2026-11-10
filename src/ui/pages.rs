@@ -48,17 +48,17 @@ pub use crate::ui::viewdata::Data;
 /// `Wireless24G`），只有还没读到实测值时才退回 `dongle_sn` 判据。
 fn link_text(d: &Data) -> &'static str {
     match d.link_mode {
-        "Wired" => "有线",
-        "Wireless24G" => "2.4G 无线",
+        "Wired" => crate::tr!("有线"),
+        "Wireless24G" => crate::tr!("2.4G 无线"),
         _ => {
             let has_dongle = d
                 .ident
                 .map(|i| !i.dongle_sn.trim().is_empty())
                 .unwrap_or(false);
             if has_dongle {
-                "2.4G 无线"
+                crate::tr!("2.4G 无线")
             } else {
-                "有线"
+                crate::tr!("有线")
             }
         }
     }
@@ -384,10 +384,18 @@ pub(crate) fn draw_palette(
     let tab1 = R::new(tab0.right() + 2.0, inner.y, tab_w, inner.h);
 
     for (i, tab) in [(0u8, tab0), (1u8, tab1)] {
-        let label = if i == 0 { "常用预设" } else { "自定义色环" };
+        let label = if i == 0 {
+            crate::tr!("常用预设")
+        } else {
+            crate::tr!("自定义色环")
+        };
         if ui.palette_tab == i {
             // 选中项：一枚投影 + accent 药丸，和页面里的分段控件一致
-            p.round(R::new(tab.x, tab.y + 1.0, tab.w, tab.h), 7.0, with_alpha(0x0000_0000, 0x1C));
+            p.round(
+                R::new(tab.x, tab.y + 1.0, tab.w, tab.h),
+                7.0,
+                with_alpha(0x0000_0000, 0x1C),
+            );
             p.round(tab, 7.0, p.t.accent);
             p.text(label, tab, 11.5, true, p.t.accent_fg, Align::Center);
         } else {
@@ -487,18 +495,25 @@ pub(crate) fn draw_palette(
 
         // 2. 深浅色阶区：9 级渐变深浅档位
         let sy = cy + ring_radius + ring_width * 0.5 + 8.0;
-        p.text("选择深浅（点击直接应用）", R::new(r.x + 8.0, sy, 220.0, 14.0), 11.0, false, p.t.text3, Align::Left);
+        p.text(
+            crate::tr!("选择深浅（点击直接应用）"),
+            R::new(r.x + 8.0, sy, 220.0, 14.0),
+            11.0,
+            false,
+            p.t.text3,
+            Align::Left,
+        );
 
         let shades = [
-            [255, 255, 255],                      // 0: 纯白
-            hsv_to_rgb(active_hue, 0.25, 1.0),    // 1: 极浅
-            hsv_to_rgb(active_hue, 0.50, 1.0),    // 2: 柔和
-            hsv_to_rgb(active_hue, 0.75, 1.0),    // 3: 靓丽
-            hsv_to_rgb(active_hue, 1.0, 1.0),     // 4: 饱和纯色
-            hsv_to_rgb(active_hue, 1.0, 0.80),    // 5: 浓郁
-            hsv_to_rgb(active_hue, 1.0, 0.60),    // 6: 深暗
-            hsv_to_rgb(active_hue, 1.0, 0.35),    // 7: 极深
-            [0, 0, 0],                            // 8: 纯黑
+            [255, 255, 255],                   // 0: 纯白
+            hsv_to_rgb(active_hue, 0.25, 1.0), // 1: 极浅
+            hsv_to_rgb(active_hue, 0.50, 1.0), // 2: 柔和
+            hsv_to_rgb(active_hue, 0.75, 1.0), // 3: 靓丽
+            hsv_to_rgb(active_hue, 1.0, 1.0),  // 4: 饱和纯色
+            hsv_to_rgb(active_hue, 1.0, 0.80), // 5: 浓郁
+            hsv_to_rgb(active_hue, 1.0, 0.60), // 6: 深暗
+            hsv_to_rgb(active_hue, 1.0, 0.35), // 7: 极深
+            [0, 0, 0],                         // 8: 纯黑
         ];
 
         // 9 格等分卡片宽度，避免右侧留一截空白
@@ -527,7 +542,14 @@ pub(crate) fn draw_palette(
         // 3. 底部快捷栏：一键应用当前色相的饱和纯色
         let by = swatch_y + swatch_h + 8.0;
         let btn_r = R::new(r.x + 8.0, by, r.w - 16.0, 28.0);
-        button(p, ui, btn_r, &format!("应用当前纯色 ({hex_now})"), true, Act::PickDrop(drop, active_packed));
+        button(
+            p,
+            ui,
+            btn_r,
+            &crate::trf!("应用当前纯色 ({hex_now})", hex_now = hex_now),
+            true,
+            Act::PickDrop(drop, active_packed),
+        );
     }
 
     ui.set_drop_rect(r);
@@ -720,14 +742,17 @@ fn page_heading(p: &mut Painter, ui: &mut Ui, c: &mut Cursor, title: &str, back:
 
 fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let t = p.t;
-    let name = d.selected.map(|r| r.name.as_str()).unwrap_or("设备详情");
+    let name = d
+        .selected
+        .map(|r| r.name.as_str())
+        .unwrap_or(crate::tr!("设备详情"));
     let back = (d.readings.len() > 1).then_some(Act::Nav(Page::Home));
     page_heading(p, ui, c, name, back);
     let tabs = [
-        (Page::Battery, "电量与设置"),
-        (Page::Perf, "性能"),
-        (Page::Light, "灯光"),
-        (Page::Keys, "按键"),
+        (Page::Battery, crate::tr!("电量与设置")),
+        (Page::Perf, crate::tr!("性能")),
+        (Page::Light, crate::tr!("灯光")),
+        (Page::Keys, crate::tr!("按键")),
     ];
     let is_mouse = d
         .selected
@@ -740,7 +765,7 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         let r = R::new(
             x,
             c.y,
-            if page == Page::Battery { 112.0 } else { 72.0 },
+            (p.measure(label, 12.5, true).0 + 38.0).max(72.0),
             33.0,
         );
         let on = ui.page == page;
@@ -782,10 +807,16 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let Some(device) = d.selected else { return };
     let pref = d.cfg.tray_for(&device.key);
-    c.h2(p, "托盘显示", false);
+    c.h2(p, crate::tr!("托盘显示"), false);
     let card = c.card(p, layout::ROW_H * if pref.enabled { 3.0 } else { 1.0 });
     let area = row_area(card, card.y);
-    let ctl = row_label(p, area, "在托盘显示电量", Some("仅控制这台设备"), 40.0);
+    let ctl = row_label(
+        p,
+        area,
+        crate::tr!("在托盘显示电量"),
+        Some(crate::tr!("仅控制这台设备")),
+        40.0,
+    );
     let sw = R::new(ctl.x, ctl.cy() - 10.0, 40.0, 20.0);
     p.switch(sw, pref.enabled, true);
     ui.hot(sw, Act::ToggleDeviceTray);
@@ -793,11 +824,14 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
         row_rule(p, card, area);
         let area = row_area(card, card.y + layout::ROW_H);
         let help = if pref.kind == crate::tray_prefs::TrayKind::Auto {
-            format!("自动识别为{}，可手动纠正", device.family.noun())
+            crate::trf!(
+                "自动识别为{}，可手动纠正",
+                crate::i18n::translate(device.family.noun())
+            )
         } else {
-            "手动选择优先于自动识别".to_string()
+            crate::tr!("手动选择优先于自动识别").to_string()
         };
-        let ctl = row_label(p, area, "托盘图标", Some(&help), 150.0);
+        let ctl = row_label(p, area, crate::tr!("托盘图标"), Some(&help), 150.0);
         drop_button(
             p,
             ui,
@@ -807,7 +841,7 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
         );
         row_rule(p, card, area);
         let area = row_area(card, card.y + layout::ROW_H * 2.0);
-        let ctl = row_label(p, area, "显示内容", None, 150.0);
+        let ctl = row_label(p, area, crate::tr!("显示内容"), None, 150.0);
         drop_button(
             p,
             ui,
@@ -1000,6 +1034,12 @@ fn draw_toast(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
 /// 必须在**绘制该行时**调用：它要拿到那一行的矩形，而弹层本身的矩形
 /// 由 [`draw_drop`] 在最后登记（那时代码已经知道弹层该开在哪儿）。
 fn drop_button(p: &mut Painter, ui: &mut Ui, r: R, drop: Drop, d: &Data) {
+    let widest = options(drop, d)
+        .iter()
+        .map(|(label, _)| p.measure(label, 12.5, true).0 + 32.0)
+        .fold(r.w, f32::max)
+        .min(240.0);
+    let r = R::new(r.right() - widest, r.y, widest, r.h);
     let open = ui.open_drop() == Some(drop);
     select_box(p, r, &drop_current(drop, d), open);
     ui.hot(r, Act::OpenDrop(drop));
@@ -1114,9 +1154,9 @@ fn draw_drop(p: &mut Painter, ui: &mut Ui, d: &Data, drop: Drop, view_h: f32) {
 /// 首页仅展示设备读数，点击进入该设备的详情。
 fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
-    page_heading(p, ui, c, "设备", None);
+    page_heading(p, ui, c, crate::tr!("设备"), None);
     p.text(
-        "所有设备的电量，一眼就好。",
+        crate::tr!("所有设备的电量，一眼就好。"),
         R::new(c.x, c.y - 14.0, c.w, 20.0),
         12.0,
         false,
@@ -1126,7 +1166,7 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     c.y += 25.0;
     if d.readings.is_empty() {
         p.text(
-            "连接设备后会自动显示。",
+            crate::tr!("连接设备后会自动显示。"),
             R::new(c.x, c.y + 32.0, c.w, 30.0),
             14.0,
             false,
@@ -1189,13 +1229,13 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         );
         p.text(
             if !dev.connected {
-                "上次电量"
+                crate::tr!("上次电量")
             } else if dev.charging {
-                "正在充电"
+                crate::tr!("正在充电")
             } else if dev.level <= 20 {
-                "电量偏低"
+                crate::tr!("电量偏低")
             } else {
-                "使用中"
+                crate::tr!("使用中")
             },
             R::new(r.cx() - 45.0, cy + 16.0, 90.0, 16.0),
             10.0,
@@ -1213,11 +1253,11 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         );
         p.text(
             if !dev.connected {
-                "未连接"
+                crate::tr!("未连接")
             } else if dev.simulated {
-                "模拟设备"
+                crate::tr!("模拟设备")
             } else {
-                "已连接"
+                crate::tr!("已连接")
             },
             R::new(r.x + 16.0, r.y + 181.0, r.w - 32.0, 18.0),
             11.0,
@@ -1261,11 +1301,11 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         Align::Center,
     );
     let status = if !connected {
-        "未连接"
+        crate::tr!("未连接")
     } else if charging {
-        "正在充电"
+        crate::tr!("正在充电")
     } else {
-        "使用中"
+        crate::tr!("使用中")
     };
     p.text(
         status,
@@ -1277,13 +1317,13 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     );
     let x = hero.x + 166.0;
     let remaining = if !connected {
-        "等待设备连接".to_string()
+        crate::tr!("等待设备连接").to_string()
     } else if charging {
-        "正在为设备充电".to_string()
+        crate::tr!("正在为设备充电").to_string()
     } else if d.estimate.known {
-        format!("预计还能使用 {}", d.estimate.short_text())
+        crate::trf!("预计还能使用 {}", d.estimate.localized_short_text())
     } else {
-        "电量状态".to_string()
+        crate::tr!("电量状态").to_string()
     };
     p.text(
         &remaining,
@@ -1294,11 +1334,11 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         Align::Left,
     );
     let link = if selected.is_some_and(|r| r.simulated) {
-        "模拟设备"
+        crate::tr!("模拟设备")
     } else if connected {
         link_text(d)
     } else {
-        "连接后更新读数"
+        crate::tr!("连接后更新读数")
     };
     p.text(
         link,
@@ -1332,15 +1372,24 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
 
     // ---- 电量历史 ----
     // ---- 设备设置 ----
-    c.h2(p, "设备设置", false);
+    c.h2(p, crate::tr!("设备设置"), false);
     // 只管「标题 · 说明」，控件宽度由各行自己按控件类型定（下拉 150、
     // 输入框+按钮、开关 40）。曾经这里多一个宽度字段，三处调用全都无视它、
     // 直接写字面量，于是那个字段从没被读过，第三行的 60 还和实际用的 40 对不上。
     let st = known_state(d);
     let rows: [(&str, Option<&str>); 3] = [
-        ("自动休眠", Some("设备静止多久后进入休眠以省电")),
-        ("低电量阈值", Some("低于该电量时设备指示灯会闪")),
-        ("充满效果", Some("充满电时播放一次灯效")),
+        (
+            crate::tr!("自动休眠"),
+            Some(crate::tr!("设备静止多久后进入休眠以省电")),
+        ),
+        (
+            crate::tr!("低电量阈值"),
+            Some(crate::tr!("低于该电量时设备指示灯会闪")),
+        ),
+        (
+            crate::tr!("充满效果"),
+            Some(crate::tr!("充满电时播放一次灯效")),
+        ),
     ];
     let total_h: f32 = rows.iter().map(|_| layout::ROW_H).sum();
     let card = c.card(p, total_h);
@@ -1381,7 +1430,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
             Align::Left,
         );
         let btn = R::new(ctl.right() - 56.0, ctl.cy() - 15.0, 56.0, 30.0);
-        button(p, ui, btn, "应用", false, Act::ApplyEdit(edit));
+        button(p, ui, btn, crate::tr!("应用"), false, Act::ApplyEdit(edit));
         row_rule(p, card, area);
         ry += layout::ROW_H;
         i += 1;
@@ -1398,7 +1447,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     }
     c.y = card.bottom();
 
-    c.h2(p, "电量历史", false);
+    c.h2(p, crate::tr!("电量历史"), false);
     // 卡片高度按 `draw_chart` 的实际内容算：16（上边距）+ 18（标题行）+ 8 +
     // 146（绘图区）+ 20（X 轴时间）+ 12（下边距）= 220。
     // 原来写 `168 + 56 + 28 = 252` 是照抄原型的 SVG viewBox，
@@ -1419,14 +1468,15 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         c.y += 14.0;
         let line = if d.estimate.stale_seconds > 0 {
             // 沿用旧结论时必须说明白，否则等于拿旧斜率冒充当前状态。
-            format!(
+            crate::trf!(
                 "沿用 {}前的估算 · 当前读数没更新，暂时没法重算",
-                crate::history::ago_text(d.estimate.stale_seconds)
+                crate::i18n::age(d.estimate.stale_seconds)
             )
         } else {
-            format!(
+            crate::trf!(
                 "按最近 {} 个采样估算 · 变化 {:+.2} %/h",
-                d.estimate.samples, d.estimate.percent_per_hour
+                d.estimate.samples,
+                d.estimate.percent_per_hour
             )
         };
         p.text(
@@ -1441,7 +1491,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     } else if !d.estimate.text.is_empty() {
         c.y += 14.0;
         p.text(
-            &d.estimate.text,
+            &d.estimate.localized_text(),
             R::new(c.x + 6.0, c.y, c.w - 12.0, 18.0),
             font::HINT,
             false,
@@ -1548,7 +1598,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
     let t = p.t;
     let head_y = card.y + 16.0;
     p.text(
-        "近 48 小时",
+        crate::tr!("近 48 小时"),
         R::new(card.x + 18.0, head_y, 90.0, 18.0),
         13.0,
         true,
@@ -1583,7 +1633,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
     {
         p.dot(card.x + 98.0, head_y + 9.0, 4.0, with_alpha(t.green, 0xB0));
         p.text(
-            "充电",
+            crate::tr!("充电"),
             R::new(card.x + 106.0, head_y, 34.0, 18.0),
             font::TINY,
             false,
@@ -1591,7 +1641,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
             Align::Left,
         );
     }
-    let samples = format!("{} 个采样点", d.rows);
+    let samples = crate::trf!("{} 个采样点", d.rows);
     p.text(
         &samples,
         R::new(card.right() - 200.0, head_y, 94.0, 18.0),
@@ -1809,7 +1859,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let cur = st.map(cur_stage);
 
     // ---- DPI 档位 ----
-    c.h2(p, "DPI 档位", true);
+    c.h2(p, crate::tr!("DPI 档位"), true);
     let dpi_h = 4.0 * 46.0 + 40.0;
     let card = c.card(p, dpi_h);
     let mut y = card.y + 4.0;
@@ -1835,7 +1885,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 
         // 档位标签
         p.text(
-            &format!("档位 {}", i + 1),
+            &crate::trf!("档位 {}", i + 1),
             R::new(card.x + 18.0, row.y, 52.0, row.h),
             11.5,
             is_cur,
@@ -1881,7 +1931,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         // 右侧：当前标记 / 切换与应用按钮
         if is_cur {
             p.text(
-                "● 当前使用",
+                crate::tr!("● 当前使用"),
                 R::new(row.right() - 146.0, row.y, 76.0, row.h),
                 11.0,
                 true,
@@ -1890,16 +1940,30 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             );
         } else {
             let switch_btn = R::new(row.right() - 124.0, row.cy() - 15.0, 54.0, 30.0);
-            button(p, ui, switch_btn, "切换", false, Act::PickDrop(Drop::Stage, i));
+            button(
+                p,
+                ui,
+                switch_btn,
+                crate::tr!("切换"),
+                false,
+                Act::PickDrop(Drop::Stage, i),
+            );
         }
         let apply_btn = R::new(row.right() - 62.0, row.cy() - 15.0, 52.0, 30.0);
-        button(p, ui, apply_btn, "应用", false, Act::ApplyEdit(edit));
+        button(
+            p,
+            ui,
+            apply_btn,
+            crate::tr!("应用"),
+            false,
+            Act::ApplyEdit(edit),
+        );
 
         y += 46.0;
     }
     // 说明
     p.text_wrap(
-        "范围 100–42000 DPI，步进 50。颜色是该档位在设备上的指示灯颜色。",
+        crate::tr!("范围 100–42000 DPI，步进 50。颜色是该档位在设备上的指示灯颜色。"),
         R::new(card.x + 18.0, y + 6.0, card.w - 36.0, 32.0),
         11.5,
         t.text3,
@@ -1907,15 +1971,15 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 
     // ---- 回报率 ----
-    c.h2(p, "回报率", false);
+    c.h2(p, crate::tr!("回报率"), false);
     let card = c.card(p, layout::ROW_H * 2.0);
     {
         let area = row_area(card, card.y);
         let ctl = row_label(
             p,
             area,
-            "轮询频率",
-            Some("越高越跟手，也越耗电"),
+            crate::tr!("轮询频率"),
+            Some(crate::tr!("越高越跟手，也越耗电")),
             330.0,
         );
         // 读不到设备时不高亮任何一档（默认 1000Hz 是编出来的值）
@@ -1946,7 +2010,13 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     }
     {
         let area = row_area(card, card.y + layout::ROW_H);
-        let ctl = row_label(p, area, "当前档位", Some("同时决定设备的 DPI 和档位指示灯"), 220.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("当前档位"),
+            Some(crate::tr!("同时决定设备的 DPI 和档位指示灯")),
+            220.0,
+        );
         segmented(
             p,
             ui,
@@ -1960,15 +2030,15 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 
     // ---- 去抖 ----
-    c.h2(p, "去抖", false);
+    c.h2(p, crate::tr!("去抖"), false);
     let card = c.card(p, layout::ROW_H);
     {
         let area = row_area(card, card.y);
         let ctl = row_label(
             p,
             area,
-            "按键去抖时间",
-            Some("双击被识别成单击时调大"),
+            crate::tr!("按键去抖时间"),
+            Some(crate::tr!("双击被识别成单击时调大")),
             150.0,
         );
         drop_button(
@@ -1982,7 +2052,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 
     // ---- 角度 ----
-    c.h2(p, "角度", false);
+    c.h2(p, crate::tr!("角度"), false);
     let adv_open = ui.adv[0];
     let base_h = layout::ROW_H + if adv_open { 46.0 + 46.0 + 46.0 } else { 46.0 };
     let card = c.card(p, base_h);
@@ -1991,8 +2061,8 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         let ctl = row_label(
             p,
             area,
-            "角度吸附",
-            Some("斜向移动时自动贴合水平/垂直"),
+            crate::tr!("角度吸附"),
+            Some(crate::tr!("斜向移动时自动贴合水平/垂直")),
             40.0,
         );
         let on = st.map(|s| s.angle_snap != 0).unwrap_or(false);
@@ -2026,7 +2096,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             );
         }
         p.text(
-            "高级",
+            crate::tr!("高级"),
             R::new(head.x + 18.0, head.y, head.w - 30.0, head.h),
             13.0,
             false,
@@ -2047,7 +2117,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             .unwrap_or(((dev_val as f32) + 20.0) / 40.0);
         // 数字也跟着走，否则「滑块动了但数字不动」比不跟手更让人困惑。
         let val = (frac * 40.0 - 20.0).round() as i16;
-        let ctl = row_label(p, area, "角度微调", None, 260.0);
+        let ctl = row_label(p, area, crate::tr!("角度微调"), None, 260.0);
         let track = R::new(ctl.x, ctl.cy() - 9.0, 190.0, 18.0);
         p.slider(track, frac, st.is_some());
         ui.hot(track, Act::SetSlide(Slide::Tune, frac));
@@ -2064,9 +2134,9 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         // 加减速：设备不支持，明确说明而不是画一个假控件
         let ny = sy + 46.0;
         let area = R::new(card.x + 18.0, ny, card.w - 36.0, 46.0);
-        row_label(p, area, "加减速曲线", None, 120.0);
+        row_label(p, area, crate::tr!("加减速曲线"), None, 120.0);
         p.text(
-            "本型号不支持",
+            crate::tr!("本型号不支持"),
             R::new(area.right() - 110.0, area.y, 110.0, area.h),
             12.0,
             false,
@@ -2077,11 +2147,17 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 
     // ---- 抬起距离 ----
-    c.h2(p, "抬起距离", false);
+    c.h2(p, crate::tr!("抬起距离"), false);
     let card = c.card(p, layout::ROW_H);
     {
         let area = row_area(card, card.y);
-        let ctl = row_label(p, area, "抬起距离（LOD）", Some("低省电，高更容易追踪"), 160.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("抬起距离（LOD）"),
+            Some(crate::tr!("低省电，高更容易追踪")),
+            160.0,
+        );
         let sel = st.map(|s| (s.lod as usize).min(1)).unwrap_or(usize::MAX);
         segmented(
             p,
@@ -2097,7 +2173,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        "写 LOD 会重置设备的表面标定（厂商确认没有恢复命令）。本机标定已被重置过。",
+        crate::tr!("写 LOD 会重置设备的表面标定（厂商确认没有恢复命令）。本机标定已被重置过。"),
         true,
     );
     c.y += nw;
@@ -2118,13 +2194,13 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     let lamp = crate::dynlight::info();
 
     // ---- 控制方式 ----
-    c.h2(p, "控制方式", true);
+    c.h2(p, crate::tr!("控制方式"), true);
     let card = c.card(p, layout::ROW_H + 8.0);
     {
         let area = row_area(card, card.y + 4.0);
         p.circle(area.x + 5.0, area.cy(), 4.5, t.green);
         p.text(
-            "由 Windows 动态光效控制",
+            crate::tr!("由 Windows 动态光效控制"),
             R::new(area.x + 20.0, area.y, (area.w - 200.0).max(80.0), area.h),
             font::BODY,
             false,
@@ -2132,12 +2208,19 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
             Align::Left,
         );
         let btn = R::new(area.right() - 160.0, area.cy() - 15.0, 160.0, 30.0);
-        button(p, ui, btn, "打开动态光效设置", true, Act::OpenLightingSettings);
+        button(
+            p,
+            ui,
+            btn,
+            crate::tr!("打开动态光效设置"),
+            true,
+            Act::OpenLightingSettings,
+        );
     }
     c.y = card.bottom();
     c.y += 12.0;
     p.text_wrap(
-        "灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。",
+        crate::tr!("灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。"),
         R::new(c.x, c.y, c.w, 44.0),
         font::HINT,
         t.text3,
@@ -2145,7 +2228,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     c.y += 52.0;
 
     // ---- 灯效设备 ----
-    c.h2(p, "灯效设备", false);
+    c.h2(p, crate::tr!("灯效设备"), false);
     let extra = if lamp.is_some() { layout::ROW_H } else { 0.0 };
     let card = c.card(p, layout::ROW_H + extra);
     {
@@ -2159,9 +2242,9 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
         );
         p.text(
             if found {
-                "已检测到 HID LampArray 设备"
+                crate::tr!("已检测到 HID LampArray 设备")
             } else {
-                "未检测到 HID LampArray 设备"
+                crate::tr!("未检测到 HID LampArray 设备")
             },
             R::new(area.x + 20.0, area.y, (area.w - 130.0).max(80.0), area.h),
             font::BODY,
@@ -2170,7 +2253,14 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
             Align::Left,
         );
         let btn = R::new(area.right() - 96.0, area.cy() - 15.0, 96.0, 30.0);
-        button(p, ui, btn, "重新检测", false, Act::RefreshLighting);
+        button(
+            p,
+            ui,
+            btn,
+            crate::tr!("重新检测"),
+            false,
+            Act::RefreshLighting,
+        );
     }
     if let Some(l) = lamp {
         let area = R::new(
@@ -2180,9 +2270,9 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
             layout::ROW_H,
         );
         p.hline(card.x, card.right(), area.y, t.border);
-        let ctl = row_label(p, area, "灯珠数量 / 类型", None, 240.0);
+        let ctl = row_label(p, area, crate::tr!("灯珠数量 / 类型"), None, 240.0);
         p.text(
-            &format!("{} 个 · {}", l.lamp_count, l.kind_name()),
+            &crate::trf!("{} 个 · {}", l.lamp_count, l.kind_name()),
             R::new(ctl.x, ctl.y, ctl.w, ctl.h),
             font::BODY,
             false,
@@ -2197,7 +2287,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        "灯效不跟系统走时：Armoury Crate 的灯效可能正在抢占设备，先关掉它的灯效（或退出），再回到系统「动态光效」页面。",
+        crate::tr!("灯效不跟系统走时：Armoury Crate 的灯效可能正在抢占设备，先关掉它的灯效（或退出），再回到系统「动态光效」页面。"),
         false,
     );
     c.y += nw + 16.0;
@@ -2216,19 +2306,19 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        "把某个键绑成「无功能」（0000）后，该键在设备上将完全失效 —— 如需恢复必须重新写入完整映射配置。",
+        crate::tr!("把某个键绑成「无功能」（0000）后，该键在设备上将完全失效 —— 如需恢复必须重新写入完整映射配置。"),
         true,
     );
     c.y += nw + 16.0;
 
-    c.h2(p, "按键映射", true);
+    c.h2(p, crate::tr!("按键映射"), true);
     let rows = crate::proto::BUTTON_SLOTS;
     let card = c.card(p, rows as f32 * layout::ROW_H);
     for slot in 0..rows {
         let y = card.y + slot as f32 * layout::ROW_H;
         let area = row_area(card, y);
         let src = crate::proto::BUTTON_SRC[slot];
-        let name = crate::proto::BUTTON_NAME[slot];
+        let name = crate::i18n::translate(crate::proto::BUTTON_NAME[slot]);
 
         // 左：源键名（统一宽 96px）
         p.text(
@@ -2265,9 +2355,16 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     // 底部操作按钮
     let bw = 160.0;
     let br = R::new(c.x, c.y, bw, 34.0);
-    button(p, ui, br, "从备份恢复全部按键", false, Act::Restore);
+    button(
+        p,
+        ui,
+        br,
+        crate::tr!("从备份恢复全部按键"),
+        false,
+        Act::Restore,
+    );
     let br2 = R::new(br.right() + 12.0, c.y, bw, 34.0);
-    button(p, ui, br2, "导出当前配置", false, Act::Backup);
+    button(p, ui, br2, crate::tr!("导出当前配置"), false, Act::Backup);
     c.y += 34.0;
 }
 
@@ -2280,17 +2377,42 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     } else {
         Page::Home
     };
-    page_heading(p, ui, c, "设置", Some(Act::Nav(previous)));
+    page_heading(p, ui, c, crate::tr!("设置"), Some(Act::Nav(previous)));
 
     // ---- 程序 ----
-    c.h2(p, "程序", true);
-    let card = c.card(p, layout::ROW_H * 4.0);
+    c.h2(p, crate::tr!("程序"), true);
+    let card = c.card(p, layout::ROW_H * 5.0);
     let mut y = card.y;
+    {
+        let area = row_area(card, y);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("语言"),
+            Some(crate::tr!("立即生效，无需重启")),
+            180.0,
+        );
+        drop_button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 180.0, 30.0),
+            Drop::Language,
+            d,
+        );
+        row_rule(p, card, area);
+        y += layout::ROW_H;
+    }
 
     // 托盘
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "显示托盘图标", Some("关闭后只能用窗口操作"), 40.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("显示托盘图标"),
+            Some(crate::tr!("关闭后只能用窗口操作")),
+            40.0,
+        );
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, d.cfg.tray_enabled, true);
         ui.hot(sw, Act::Toggle(Pref::TrayEnabled));
@@ -2303,8 +2425,8 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         let ctl = row_label(
             p,
             area,
-            "关闭窗口动作",
-            Some("点击窗口右上角 × 按钮时的操作"),
+            crate::tr!("关闭窗口动作"),
+            Some(crate::tr!("点击窗口右上角 × 按钮时的操作")),
             160.0,
         );
         drop_button(
@@ -2320,7 +2442,13 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     // 开机自启
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "开机自动启动", Some(d.autostart_text), 40.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("开机自动启动"),
+            Some(d.autostart_text),
+            40.0,
+        );
         // 真实状态从 `autostart` 模块来，这里只显示；点击发 Toggle。
         // 开关的布尔量也直接用状态机的值：以前是 `autostart_text.contains("已启用")`，
         // 文案一改开关就跟着错（而它俩本来没有关系）。
@@ -2334,7 +2462,13 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     // 刷新间隔
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "后台刷新间隔", Some("读取设备状态的频率"), 150.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("后台刷新间隔"),
+            Some(crate::tr!("读取设备状态的频率")),
+            150.0,
+        );
         drop_button(
             p,
             ui,
@@ -2346,13 +2480,19 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     c.y = card.bottom();
 
     // ---- 数据 ----
-    c.h2(p, "数据", false);
+    c.h2(p, crate::tr!("数据"), false);
     let card = c.card(p, layout::ROW_H * 3.0);
     let mut y = card.y;
     // 缓存有效期
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "快照缓存有效期", Some("设为「每次都重读」会明显更慢"), 150.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("快照缓存有效期"),
+            Some(crate::tr!("设为「每次都重读」会明显更慢")),
+            150.0,
+        );
         drop_button(
             p,
             ui,
@@ -2366,67 +2506,111 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     // 备份与还原
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "备份与还原", Some("把全部 31 项参数存成一个文本文件"), 230.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("备份与还原"),
+            Some(crate::tr!("把全部 31 项参数存成一个文本文件")),
+            230.0,
+        );
         let b1 = R::new(ctl.x, ctl.cy() - 15.0, 110.0, 30.0);
-        button(p, ui, b1, "备份到文件", false, Act::Backup);
+        button(p, ui, b1, crate::tr!("备份到文件"), false, Act::Backup);
         let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 110.0, 30.0);
-        button(p, ui, b2, "从文件还原", false, Act::Restore);
+        button(p, ui, b2, crate::tr!("从文件还原"), false, Act::Restore);
         row_rule(p, card, area);
         y += layout::ROW_H;
     }
     // 历史记录
     {
         let area = row_area(card, y);
-        let ctl = row_label(p, area, "历史记录", Some("电量采样点，最多保留 48 小时"), 230.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("历史记录"),
+            Some(crate::tr!("电量采样点，最多保留 48 小时")),
+            230.0,
+        );
         let b1 = R::new(ctl.x, ctl.cy() - 15.0, 130.0, 30.0);
-        button(p, ui, b1, "打开所在文件夹", false, Act::OpenHistoryFolder);
+        button(
+            p,
+            ui,
+            b1,
+            crate::tr!("打开所在文件夹"),
+            false,
+            Act::OpenHistoryFolder,
+        );
         let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 90.0, 30.0);
-        button(p, ui, b2, "清空", false, Act::ClearHistory);
+        button(p, ui, b2, crate::tr!("清空"), false, Act::ClearHistory);
     }
     c.y = card.bottom();
 
     // ---- 存储路径 ----
-    c.h2(p, "存储路径", false);
+    c.h2(p, crate::tr!("存储路径"), false);
     let card = c.card(p, layout::ROW_H * 2.0);
     {
         // 历史文件
         let area = row_area(card, card.y);
         let hp = crate::history::history_path().display().to_string();
-        let status = if crate::history::history_path_is_custom() { "已自定义" } else { "默认" };
-        let title = format!("历史文件保存位置（{status}）");
+        let status = if crate::history::history_path_is_custom() {
+            crate::tr!("已自定义")
+        } else {
+            crate::tr!("默认")
+        };
+        let title = crate::trf!("历史文件保存位置（{status}）", status = status);
         let ctl = row_label(p, area, &title, Some(&hp), 128.0);
         let b1 = R::new(ctl.right() - 52.0, ctl.cy() - 15.0, 52.0, 30.0);
-        button(p, ui, b1, "更改", false, Act::ChangeHistoryPath);
+        button(p, ui, b1, crate::tr!("更改"), false, Act::ChangeHistoryPath);
         let b2 = R::new(b1.x - 64.0, ctl.cy() - 15.0, 56.0, 30.0);
-        button(p, ui, b2, "默认", false, Act::ResetHistoryPath);
+        button(p, ui, b2, crate::tr!("默认"), false, Act::ResetHistoryPath);
         row_rule(p, card, area);
     }
     {
         // 设置文件
         let area = row_area(card, card.y + layout::ROW_H);
         let sp = crate::paths::settings_file().display().to_string();
-        let status = if crate::paths::custom_settings_file().is_some() { "已自定义" } else { "默认" };
-        let title = format!("设置文件保存位置（{status}）");
+        let status = if crate::paths::custom_settings_file().is_some() {
+            crate::tr!("已自定义")
+        } else {
+            crate::tr!("默认")
+        };
+        let title = crate::trf!("设置文件保存位置（{status}）", status = status);
         let ctl = row_label(p, area, &title, Some(&sp), 128.0);
         let b1 = R::new(ctl.right() - 52.0, ctl.cy() - 15.0, 52.0, 30.0);
-        button(p, ui, b1, "更改", false, Act::ChangeSettingsPath);
+        button(
+            p,
+            ui,
+            b1,
+            crate::tr!("更改"),
+            false,
+            Act::ChangeSettingsPath,
+        );
         let b2 = R::new(b1.x - 64.0, ctl.cy() - 15.0, 56.0, 30.0);
-        button(p, ui, b2, "默认", false, Act::ResetSettingsPath);
+        button(p, ui, b2, crate::tr!("默认"), false, Act::ResetSettingsPath);
     }
     c.y = card.bottom();
 
     // ---- 外观 ----
-    c.h2(p, "外观", false);
+    c.h2(p, crate::tr!("外观"), false);
     let card = c.card(p, layout::ROW_H);
     {
         let area = row_area(card, card.y);
-        let ctl = row_label(p, area, "配色", Some("跟随系统或手动选择"), 210.0);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("配色"),
+            Some(crate::tr!("跟随系统或手动选择")),
+            210.0,
+        );
         let sel = ui.theme_pref.min(2) as usize;
         segmented(
             p,
             ui,
             R::new(ctl.x, ctl.cy() - 15.0, 210.0, 30.0),
-            &["跟随系统", "浅色", "深色"],
+            &[
+                crate::tr!("跟随系统"),
+                crate::tr!("浅色"),
+                crate::tr!("深色"),
+            ],
             sel,
             |i| Act::SetTheme(i as u8),
         );
@@ -2435,7 +2619,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
 
     // ---- 关于 ----
 
-    c.h2(p, "关于", false);
+    c.h2(p, crate::tr!("关于"), false);
     let card = c.card(p, layout::ROW_H * 3.0);
     {
         // 版本：值右对齐，版本号来自 Cargo.toml（不再手写常量）
@@ -2443,8 +2627,10 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         row_label(
             p,
             area,
-            "版本",
-            Some("R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具"),
+            crate::tr!("版本"),
+            Some(crate::tr!(
+                "R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具"
+            )),
             96.0,
         );
         p.text(
@@ -2465,12 +2651,12 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             card.w - 36.0,
             layout::ROW_H,
         );
-        let ctl = row_label(p, area, "开源仓库", Some(REPO_URL), 64.0);
+        let ctl = row_label(p, area, crate::tr!("开源仓库"), Some(REPO_URL), 64.0);
         button(
             p,
             ui,
             R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
-            "打开",
+            crate::tr!("打开"),
             false,
             Act::OpenRepo,
         );
@@ -2489,7 +2675,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             p,
             ui,
             R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
-            "打开",
+            crate::tr!("打开"),
             false,
             Act::OpenStore,
         );
@@ -2500,7 +2686,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     // ---- 诊断 ----
     // 放在页面最下面：平时不需要看，出问题时才知道要找它。
 
-    c.h2(p, "诊断", false);
+    c.h2(p, crate::tr!("诊断"), false);
     let dcard = c.card(p, layout::ROW_H * 2.0);
     let mut dy = dcard.y;
     {
@@ -2508,8 +2694,8 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
         let _ = row_label(
             p,
             area,
-            "诊断日志",
-            Some("点这一行打开日志文件夹，出问题时把日志发给作者"),
+            crate::tr!("诊断日志"),
+            Some(crate::tr!("点这一行打开日志文件夹，出问题时把日志发给作者")),
             40.0,
         );
         ui.hot(area, Act::OpenLogFolder);
@@ -2518,10 +2704,9 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     }
     {
         let area = row_area(dcard, dy);
-        let _ = row_label(p, area, "版本", Some(d.version), 40.0);
+        let _ = row_label(p, area, crate::tr!("版本"), Some(d.version), 40.0);
     }
     c.y = dcard.bottom();
-
 }
 
 /// 绘制「关闭窗口」确认模态对话框。
@@ -2531,14 +2716,14 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
     p.rect(R::new(0.0, 0.0, win_w, win_h), 0x7500_0000);
 
     // 居中卡片
-    let w = 420.0;
+    let w = if crate::i18n::english() { 500.0 } else { 420.0 };
     let h = 240.0;
     let r = R::new((win_w - w) / 2.0, (win_h - h) / 2.0, w, h);
     p.card(r, 12.0, t.card, t.border);
 
     // 标题与副标题
     p.text(
-        "关闭应用",
+        crate::tr!("关闭应用"),
         R::new(r.x + 24.0, r.y + 20.0, w - 48.0, 24.0),
         16.0,
         true,
@@ -2546,7 +2731,7 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
         Align::Left,
     );
     p.text(
-        "请选择点击关闭按钮时的操作：",
+        crate::tr!("请选择点击关闭按钮时的操作："),
         R::new(r.x + 24.0, r.y + 48.0, w - 48.0, 20.0),
         12.5,
         false,
@@ -2562,7 +2747,7 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
         p.circle(opt1.x + 10.0, opt1.cy(), 4.0, t.accent);
     }
     p.text(
-        "最小化到系统托盘（在后台继续运行）",
+        crate::tr!("最小化到系统托盘（在后台继续运行）"),
         R::new(opt1.x + 26.0, opt1.y + 4.0, opt1.w - 26.0, 24.0),
         13.0,
         false,
@@ -2579,7 +2764,7 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
         p.circle(opt2.x + 10.0, opt2.cy(), 4.0, t.accent);
     }
     p.text(
-        "直接退出程序",
+        crate::tr!("直接退出程序"),
         R::new(opt2.x + 26.0, opt2.y + 4.0, opt2.w - 26.0, 24.0),
         13.0,
         false,
@@ -2590,9 +2775,13 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
     // 复选框：记住我的选择
     let cb_r = R::new(r.x + 24.0, r.y + 154.0, w - 48.0, 24.0);
-    p.checkbox(R::new(cb_r.x + 2.0, cb_r.cy() - 8.0, 16.0, 16.0), ui.close_remember, true);
+    p.checkbox(
+        R::new(cb_r.x + 2.0, cb_r.cy() - 8.0, 16.0, 16.0),
+        ui.close_remember,
+        true,
+    );
     p.text(
-        "记住我的选择，下次不再提示",
+        crate::tr!("记住我的选择，下次不再提示"),
         R::new(cb_r.x + 26.0, cb_r.y, cb_r.w - 26.0, 24.0),
         12.5,
         false,
@@ -2611,12 +2800,26 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
     // 取消按钮
     p.round(cancel_r, 6.0, t.card);
     p.round_stroke(cancel_r, 6.0, t.border, 1.0);
-    p.text("取消", cancel_r, 13.0, false, t.text, Align::Center);
+    p.text(
+        crate::tr!("取消"),
+        cancel_r,
+        13.0,
+        false,
+        t.text,
+        Align::Center,
+    );
     ui.dialog_hot(cancel_r, Act::CancelCloseDialog);
 
     // 确定按钮
     p.round(confirm_r, 6.0, t.accent);
-    p.text("确定", confirm_r, 13.0, true, 0xFFFF_FFFF, Align::Center);
+    p.text(
+        crate::tr!("确定"),
+        confirm_r,
+        13.0,
+        true,
+        0xFFFF_FFFF,
+        Align::Center,
+    );
     ui.dialog_hot(confirm_r, Act::ConfirmCloseDialog);
 }
 
@@ -2624,6 +2827,125 @@ pub fn draw_close_dialog(p: &mut Painter, ui: &mut Ui, win_w: f32, win_h: f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn english_pages_keep_language_controls_and_navigation_usable() {
+        use crate::i18n::{with_language, Language};
+        use crate::ui::canvas::{draw_frame, PaintArgs};
+        use crate::ui::gfx::{save_bmp, Canvas, Fonts};
+        with_language(Language::English, || {
+            let readings = crate::mock::parse("mouse|ROG HARPE ACE|78|0");
+            let estimate = crate::history::Estimate::default();
+            let cfg = crate::settings::Settings {
+                language: Language::English,
+                ..Default::default()
+            };
+            let state = crate::proto::State {
+                power: 78,
+                enc: [7, 15, 31, 63],
+                buttons: crate::proto::BUTTON_SRC,
+                ..Default::default()
+            };
+            let data = Data {
+                selected: Some(&readings[0]),
+                state: Some(&state),
+                ident: None,
+                link_mode: "Wireless24G",
+                status: String::new(),
+                plot: None,
+                estimate: &estimate,
+                rows: 0,
+                cfg: &cfg,
+                autostart_text: "Disabled",
+                autostart_on: false,
+                version: "test",
+                readings: &readings,
+            };
+            let mut canvas = Canvas::new();
+            let mut fonts = Fonts::new("Microsoft YaHei UI").unwrap();
+            let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scratch/i18n");
+            std::fs::create_dir_all(&out).unwrap();
+            for (width, height) in [(1100, 760), (720, 520)] {
+                let args = PaintArgs {
+                    pixel_w: width,
+                    pixel_h: height,
+                    view_w: width as f32,
+                    view_h: height as f32,
+                    scale: 1.0,
+                    hwnd: std::ptr::null_mut(),
+                };
+                for page in Page::ALL {
+                    let mut ui = Ui::default();
+                    ui.select_device(&readings[0].key);
+                    ui.page = page;
+                    let mem = draw_frame(
+                        &mut canvas,
+                        &mut fonts,
+                        &mut ui,
+                        &args,
+                        &crate::ui::theme::LIGHT,
+                        &data,
+                    );
+                    assert_ne!(mem, 0);
+                    save_bmp(
+                        out.join(format!("en-{page:?}-{width}.bmp"))
+                            .to_str()
+                            .unwrap(),
+                        mem,
+                        width,
+                        height,
+                    );
+                    if page == Page::Settings {
+                        let language = ui
+                            .hots
+                            .iter()
+                            .find(|h| h.act == Act::OpenDrop(Drop::Language))
+                            .unwrap()
+                            .rect;
+                        assert!(language.bottom() < height as f32);
+                        ui.set_open_drop(Some(Drop::Language));
+                        draw_frame(
+                            &mut canvas,
+                            &mut fonts,
+                            &mut ui,
+                            &args,
+                            &crate::ui::theme::LIGHT,
+                            &data,
+                        );
+                        for index in 0..3 {
+                            let r = ui
+                                .hots
+                                .iter()
+                                .find(|h| h.act == Act::PickDrop(Drop::Language, index))
+                                .unwrap()
+                                .rect;
+                            assert_eq!(
+                                ui.hit(r.cx(), r.cy(), 0.0),
+                                Some(Act::PickDrop(Drop::Language, index))
+                            );
+                        }
+                    }
+                    if page == Page::Battery {
+                        let tabs: Vec<_> = ui
+                            .hots
+                            .iter()
+                            .filter(|h| {
+                                matches!(
+                                    h.act,
+                                    Act::Nav(Page::Battery | Page::Perf | Page::Light | Page::Keys)
+                                )
+                            })
+                            .collect();
+                        assert_eq!(tabs.len(), 4);
+                        for pair in tabs.windows(2) {
+                            assert!(pair[0].rect.right() < pair[1].rect.x);
+                        }
+                        assert!(tabs.last().unwrap().rect.right() < width as f32);
+                    }
+                }
+            }
+        });
+    }
+
     #[test]
     fn compact_header_and_dropdown_remain_aligned_after_resize_and_scroll() {
         use crate::ui::canvas::{draw_frame, PaintArgs};

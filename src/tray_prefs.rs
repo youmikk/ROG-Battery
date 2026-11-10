@@ -23,12 +23,12 @@ impl TrayKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Auto => "自动识别",
-            Self::Mouse => "鼠标",
-            Self::Keyboard => "键盘",
-            Self::Headset => "耳机",
-            Self::Gamepad => "手柄",
-            Self::Generic => "通用",
+            Self::Auto => crate::tr!("自动识别"),
+            Self::Mouse => crate::tr!("鼠标"),
+            Self::Keyboard => crate::tr!("键盘"),
+            Self::Headset => crate::tr!("耳机"),
+            Self::Gamepad => crate::tr!("手柄"),
+            Self::Generic => crate::tr!("通用"),
         }
     }
 
@@ -58,9 +58,9 @@ impl TrayContent {
     pub const ALL: [Self; 3] = [Self::Combined, Self::Number, Self::Icon];
     pub fn label(self) -> &'static str {
         match self {
-            Self::Combined => "图标＋电量",
-            Self::Number => "仅电量数字",
-            Self::Icon => "仅设备图标",
+            Self::Combined => crate::tr!("图标＋电量"),
+            Self::Number => crate::tr!("仅电量数字"),
+            Self::Icon => crate::tr!("仅设备图标"),
         }
     }
 }

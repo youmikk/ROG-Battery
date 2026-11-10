@@ -58,18 +58,18 @@ impl LampInfo {
     /// `LampArrayKind` 的显示名。规范只定义了几个值，其余按「其他」处理。
     pub fn kind_name(self) -> &'static str {
         match self.kind {
-            0 => "未定义",
-            1 => "键盘",
-            2 => "鼠标",
-            3 => "游戏手柄",
-            4 => "麦克风",
-            5 => "鼠标垫",
-            6 => "机箱",
-            7 => "耳机",
-            8 => "音箱",
-            9 => "显示器",
-            10 => "机箱内灯带",
-            _ => "其他",
+            0 => crate::tr!("未定义"),
+            1 => crate::tr!("键盘"),
+            2 => crate::tr!("鼠标"),
+            3 => crate::tr!("游戏手柄"),
+            4 => crate::tr!("麦克风"),
+            5 => crate::tr!("鼠标垫"),
+            6 => crate::tr!("机箱"),
+            7 => crate::tr!("耳机"),
+            8 => crate::tr!("音箱"),
+            9 => crate::tr!("显示器"),
+            10 => crate::tr!("机箱内灯带"),
+            _ => crate::tr!("其他"),
         }
     }
 }
@@ -160,14 +160,21 @@ pub fn shell_open(target: &str) -> Result<(), String> {
     if code > 32 {
         Ok(())
     } else {
-        Err(format!("系统拒绝打开（返回 {code}）：{target}"))
+        Err(crate::trf!(
+            "系统拒绝打开（返回 {code}）：{target}",
+            code = code,
+            target = target
+        ))
     }
 }
 
 /// 打开 `ms-settings:personalization-lighting`。
 pub fn open_settings() -> Result<(), String> {
     shell_open("ms-settings:personalization-lighting").map_err(|e| {
-        format!("打不开系统设置页（{e}），可手动打开 设置 → 个性化 → 动态光效")
+        crate::trf!(
+            "打不开系统设置页（{e}），可手动打开 设置 → 个性化 → 动态光效",
+            e = e
+        )
     })
 }
 

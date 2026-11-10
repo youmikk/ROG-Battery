@@ -110,6 +110,7 @@ pub enum Drop {
     CloseMode,
     TrayKind,
     TrayContent,
+    Language,
 }
 
 /// [`Drop::Palette`] 里代表「灯光颜色」的槽位值。

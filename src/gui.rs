@@ -167,27 +167,38 @@ impl Cmd {
     /// 结果行 / 提示里用的中文短名。
     pub(crate) fn label(&self) -> String {
         match self {
-            Cmd::Poll(hz) => format!("回报率 {hz} Hz"),
-            Cmd::Dpi { stage, dpi, .. } => format!("DPI 档 {stage} → {dpi}"),
-            Cmd::Stage(s) => format!("当前档位 {s}"),
-            Cmd::Debounce(c) => format!("去抖 {c}"),
-            Cmd::Snap(v) => format!("角度吸附 {v}"),
-            Cmd::Tuning(v) => format!("角度微调 {v}"),
-            Cmd::Lod(v) => format!("抬起距离 {}", proto::lod_name(*v)),
-            Cmd::Light { mode, .. } => format!("灯光 {}", proto::light_mode_name(*mode)),
-            Cmd::Button { slot, dst, .. } => format!("按键槽 {slot} → 0x{dst:04X}"),
-            Cmd::Sleep(c) => format!("自动休眠 {}", proto::sleep_mode_name(*c)),
-            Cmd::LowBatt(p) => format!("低电量阈值 {p}%"),
-            Cmd::FullEffect(v) => format!("充满效果 {}", if *v != 0 { "开" } else { "关" }),
+            Cmd::Poll(hz) => crate::trf!("回报率 {hz} Hz", hz = hz),
+            Cmd::Dpi { stage, dpi, .. } => {
+                crate::trf!("DPI 档 {stage} → {dpi}", dpi = dpi, stage = stage)
+            }
+            Cmd::Stage(s) => crate::trf!("当前档位 {s}", s = s),
+            Cmd::Debounce(c) => crate::trf!("去抖 {c}", c = c),
+            Cmd::Snap(v) => crate::trf!("角度吸附 {v}", v = v),
+            Cmd::Tuning(v) => crate::trf!("角度微调 {v}", v = v),
+            Cmd::Lod(v) => crate::trf!("抬起距离 {}", proto::lod_name(*v)),
+            Cmd::Light { mode, .. } => crate::trf!("灯光 {}", crate::i18n::translate(&proto::light_mode_name(*mode))),
+            Cmd::Button { slot, dst, .. } => {
+                crate::trf!("按键槽 {slot} → 0x{dst:04X}", dst = dst, slot = slot)
+            }
+            Cmd::Sleep(c) => crate::trf!("自动休眠 {}", crate::i18n::translate(&proto::sleep_mode_name(*c))),
+            Cmd::LowBatt(p) => crate::trf!("低电量阈值 {p}%", p = p),
+            Cmd::FullEffect(v) => crate::trf!(
+                "充满效果 {}",
+                if *v != 0 {
+                    crate::tr!("开")
+                } else {
+                    crate::tr!("关")
+                }
+            ),
             Cmd::AutoStart(on) => {
                 if *on {
-                    "开机自启开启".to_string()
+                    crate::tr!("开机自启开启").to_string()
                 } else {
-                    "开机自启关闭".to_string()
+                    crate::tr!("开机自启关闭").to_string()
                 }
             }
-            Cmd::Backup(_) => "导出配置".to_string(),
-            Cmd::Restore(_) => "还原配置".to_string(),
+            Cmd::Backup(_) => crate::tr!("导出配置").to_string(),
+            Cmd::Restore(_) => crate::tr!("还原配置").to_string(),
         }
     }
 }
@@ -210,26 +221,26 @@ impl CmdResult {
     fn toast(&self) -> String {
         match (&self.ok, &self.err) {
             (Some(m), _) => {
-                if m == "已生效" {
-                    format!("✔ {}已生效", self.label)
+                if m == "已生效" || m == "Applied" {
+                    crate::trf!("✔ {}已生效", self.label)
                 } else {
-                    format!("✔ {}：{m}", self.label)
+                    crate::trf!("✔ {}：{m}", self.label, m = m)
                 }
             }
             (None, Some(m)) => {
                 let base = if m.contains("错误码 5") || m.contains("Win32 错误码 5") {
-                    format!("✘ {}失败：权限不足 (错误 5)", self.label)
+                    crate::trf!("✘ {}失败：权限不足 (错误 5)", self.label)
                 } else if m.starts_with("无法写入") || m.starts_with("打开") {
-                    format!("✘ {}：{m}", self.label)
+                    crate::trf!("✘ {}：{m}", self.label, m = m)
                 } else {
-                    format!("✘ {}失败：{m}", self.label)
+                    crate::trf!("✘ {}失败：{m}", self.label, m = m)
                 };
                 // `hint` 以前只写不读 —— 后台线程辛苦查出的「请确认接收器已插好」
                 // 从来没到过用户眼前。失败时补在后面，成功时无关。
                 if self.hint.is_empty() {
                     base
                 } else {
-                    format!("{base}；{}", self.hint)
+                    crate::trf!("{base}；{}", self.hint, base = base)
                 }
             }
             (None, None) => format!("✔ {}", self.label),
@@ -606,10 +617,10 @@ impl Shared {
     }
 
     fn autostart_text(&self) -> String {
-        format!(
+        crate::trf!(
             "{}（{}）",
             auto_state_short(self.autostart.0),
-            self.autostart.1.short()
+            crate::i18n::translate(self.autostart.1.short())
         )
     }
 
@@ -632,8 +643,8 @@ impl Shared {
     /// 不知道是该动鼠标还是该查线缆。
     fn error_text(&self) -> String {
         match &self.status {
-            Status::Error(e) => format!("读取设备失败：{e}"),
-            Status::Busy => "正在写设备 ……".to_string(),
+            Status::Error(e) => crate::trf!("读取设备失败：{e}", e = e),
+            Status::Busy => crate::tr!("正在写设备 ……").to_string(),
             _ => String::new(),
         }
     }
@@ -862,15 +873,15 @@ impl TrayCtl {
                         r.name,
                         r.level,
                         if !r.connected {
-                            "（上次电量，未连接）"
+                            crate::tr!("（上次电量，未连接）")
                         } else if r.charging {
-                            "（充电中）"
+                            crate::tr!("（充电中）")
                         } else {
                             ""
                         }
                     )
                 })
-                .unwrap_or_else(|| "R Battery · 打开设备页面".to_string());
+                .unwrap_or_else(|| crate::tr!("R Battery · 打开设备页面").to_string());
             let signature = format!(
                 "{:?}:{pref:?}:{content:?}:{}:{}:{tip}",
                 reading,
@@ -1023,9 +1034,10 @@ impl<'a> UiEnv<'a> {
         f(&mut snapshot);
         if let Err(e) = settings::save(&snapshot) {
             drop(shared);
-            self.say(format!("✘ 保存设置失败：{e}"));
+            self.say(crate::trf!("✘ 保存设置失败：{e}", e = e));
         } else {
             shared.cfg = snapshot;
+            crate::i18n::apply(shared.cfg.language);
         }
     }
 
@@ -1035,7 +1047,9 @@ impl<'a> UiEnv<'a> {
         if !ok {
             // 以前这里是什么都不说就返回 false —— 用户点了一下，
             // 界面上完全没有变化，只会以为功能坏了。现在至少给一句话。
-            self.say("✘ 操作排不进去了（前面的还没写完），稍等一下再试");
+            self.say(crate::tr!(
+                "✘ 操作排不进去了（前面的还没写完），稍等一下再试"
+            ));
         }
         ok
     }
@@ -1056,7 +1070,7 @@ fn handle_act(a: Act, env: &UiEnv) {
     // 控件照常响应点击（有按压反馈），但不进队列、不改任何状态。
     // 以前是整页锁死不登记命中，点了毫无反应，用户只会以为界面坏了。
     if a.needs_device() && env.canvas.with_ui(|u| u.locked) {
-        env.say("✘ 读不到设备：插好接收器，或动一下设备再试");
+        env.say(crate::tr!("✘ 读不到设备：插好接收器，或动一下设备再试"));
         return;
     }
 
@@ -1196,7 +1210,7 @@ fn handle_act(a: Act, env: &UiEnv) {
                 // 用户会以为能输入，敲字却毫无反应。
                 env.canvas.with_ui_mut(|u| u.focus = None);
                 env.canvas.repaint_now();
-                env.say("✘ 读不到设备：插好接收器，或动一下设备再试");
+                env.say(crate::tr!("✘ 读不到设备：插好接收器，或动一下设备再试"));
                 return;
             }
             let init = edit_initial(e, st.as_ref());
@@ -1252,26 +1266,26 @@ fn handle_act(a: Act, env: &UiEnv) {
         // 重新探测 LampArray。这里会真的枚举 HID（约几十毫秒），
         // 但只在用户点按钮时发生，不是每帧，也不会在绘制路径上。
         Act::RefreshLighting => match crate::dynlight::refresh() {
-            Some(l) => env.say(format!(
+            Some(l) => env.say(crate::trf!(
                 "✔ 已检测到灯效设备（{} 个灯 · {}）",
                 l.lamp_count,
                 l.kind_name()
             )),
-            None => env.say("✘ 未检测到 HID LampArray 灯效设备"),
+            None => env.say(crate::tr!("✘ 未检测到 HID LampArray 灯效设备")),
         },
 
         Act::ClearHistory => {
             let p = crate::history::history_path();
-            let q = format!(
+            let q = crate::trf!(
                 "确定清空历史记录？\n\n{}\n\n清空后续航估算会重新积累样本。",
                 p.display()
             );
-            if !ask_confirm("清空历史记录", &q) {
+            if !ask_confirm(crate::tr!("清空历史记录"), &q) {
                 return;
             }
             if p.exists() {
                 if let Err(e) = std::fs::remove_file(&p) {
-                    env.say(format!("✘ 删除失败：{e}"));
+                    env.say(crate::trf!("✘ 删除失败：{e}", e = e));
                     return;
                 }
             }
@@ -1281,7 +1295,7 @@ fn handle_act(a: Act, env: &UiEnv) {
                 s.plot = None;
                 s.estimate = crate::history::Estimate::default();
             }
-            env.say("✔ 历史记录已清空");
+            env.say(crate::tr!("✔ 历史记录已清空"));
         }
 
         Act::OpenRepo => open_url(env, "https://github.com/youmikk/ROG-Battery"),
@@ -1344,7 +1358,7 @@ fn pick_palette(env: &UiEnv, slot: u8, idx: usize) {
         // 就只能猜（以前猜 800），猜错就是把用户那一档的 DPI 一起改掉 ——
         // 用户点的是颜色，结果灵敏度变了，这是最糟的一种「顺手改坏」。
         let Some(st) = env.state() else {
-            env.say("✘ 读不到设备，动一下设备再选颜色");
+            env.say(crate::tr!("✘ 读不到设备，动一下设备再选颜色"));
             return;
         };
         let dpi = st.dpi(i);
@@ -1399,6 +1413,13 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
     };
 
     match d {
+        Drop::Language => {
+            if let Some(language) = crate::i18n::Language::ALL.get(code) {
+                env.set_cfg(|cfg| cfg.language = *language);
+                env.canvas.with_ui_mut(|ui| ui.clear_status());
+                env.canvas.repaint_now();
+            }
+        }
         Drop::TrayKind | Drop::TrayContent => {
             if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
                 env.set_cfg(|c| {
@@ -1454,16 +1475,16 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
                 .interval_ms
                 .store((code as u64).saturating_mul(1000), Ordering::Relaxed);
             env.signal.request_refresh();
-            env.say(format!("✔ 刷新间隔改为 {code} 秒"));
+            env.say(crate::trf!("✔ 刷新间隔改为 {code} 秒", code = code));
         }
         Drop::CacheTtl => {
             env.set_cfg(|c| c.cache_ttl_sec = code as u64);
-            env.say(format!(
+            env.say(crate::trf!(
                 "✔ 缓存有效期改为 {}",
                 if code == 0 {
-                    "每次都重读".to_string()
+                    crate::tr!("每次都重读").to_string()
                 } else {
-                    format!("{code} 秒")
+                    crate::trf!("{code} 秒", code = code)
                 }
             ));
         }
@@ -1472,14 +1493,10 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
             let slot = (slot as usize) & 7;
             // 绑成 `0000` 以后鼠标上那个键就彻底失效了，必须二次确认。
             let confirmed = if dst == 0 {
-                let name = proto::BUTTON_NAME[slot];
+                let name = crate::i18n::translate(proto::BUTTON_NAME[slot]);
                 ask_confirm(
-                    "把按键绑成「无功能」",
-                    &format!(
-                        "{name} 将被绑成 0000（无功能）。\n\n\
-                         绑好以后这个键在鼠标上就再也按不出任何作用，\
-                         要恢复必须重新写一遍完整映射。\n\n确定继续？"
-                    ),
+                    crate::tr!("把按键绑成「无功能」"),
+                    &crate::trf!("{name} 将被绑成 0000（无功能）。\n\n绑好以后这个键在鼠标上就再也按不出任何作用，要恢复必须重新写一遍完整映射。\n\n确定继续？" , name = name),
                 )
             } else {
                 true
@@ -1516,11 +1533,11 @@ fn apply_edit(env: &UiEnv, e: Edit) {
         Edit::LowWarn => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
             let Some(v) = txt.as_deref().and_then(parse_num) else {
-                env.say("✘ 请输入 0–100 的整数");
+                env.say(crate::tr!("✘ 请输入 0–100 的整数"));
                 return;
             };
             if !(0..=100).contains(&v) {
-                env.say("✘ 低电量阈值必须在 0–100 之间");
+                env.say(crate::tr!("✘ 低电量阈值必须在 0–100 之间"));
                 return;
             }
             drop_draft(env, e);
@@ -1542,14 +1559,14 @@ fn apply_edit(env: &UiEnv, e: Edit) {
                 _ => None,
             };
             if st.is_none() && (typed_dpi.is_none() || typed_rgb.is_none()) {
-                env.say("✘ 读不到设备，动一下设备再改");
+                env.say(crate::tr!("✘ 读不到设备，动一下设备再改"));
                 return;
             }
 
             let dpi = match typed_dpi {
                 Some(v) if (proto::DPI_MIN as i64..=proto::DPI_MAX as i64).contains(&v) => v as i32,
                 Some(_) => {
-                    env.say(format!(
+                    env.say(crate::trf!(
                         "✘ DPI 必须在 {}–{} 之间（步进 {}）",
                         proto::DPI_MIN,
                         proto::DPI_MAX,
@@ -1595,7 +1612,7 @@ fn apply_edit(env: &UiEnv, e: Edit) {
                     }
                 },
                 _ => {
-                    env.say("✘ 请输入形如 ff1929 的颜色");
+                    env.say(crate::tr!("✘ 请输入形如 ff1929 的颜色"));
                     return;
                 }
             };
@@ -1648,15 +1665,19 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
             if !on {
                 env.window.set_visible(true);
             }
-            env.say(format!(
+            env.say(crate::trf!(
                 "✔ 托盘图标已{}",
-                if on { "开启" } else { "关闭" }
+                if on {
+                    crate::tr!("开启")
+                } else {
+                    crate::tr!("关闭")
+                }
             ));
         }
         Pref::AutoStart => {
             let on = lock_shared(env.shared).autostart_on();
             if !env.submit(Cmd::AutoStart(!on)) {
-                env.say("✘ 后台正在执行别的操作，这次开机自启没有提交");
+                env.say(crate::tr!("✘ 后台正在执行别的操作，这次开机自启没有提交"));
             }
         }
         Pref::FullEffect => {
@@ -1677,26 +1698,29 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
 fn pick_backup_file(env: &UiEnv, save: bool) {
     let mut fd = nwg::FileDialog::default();
     let (title, action) = if save {
-        ("选择备份保存位置", nwg::FileDialogAction::Save)
+        (crate::tr!("选择备份保存位置"), nwg::FileDialogAction::Save)
     } else {
-        ("选择要还原的备份文件", nwg::FileDialogAction::Open)
+        (
+            crate::tr!("选择要还原的备份文件"),
+            nwg::FileDialogAction::Open,
+        )
     };
     let folder = crate::paths::backup_dir().to_string_lossy().into_owned();
     if let Err(e) = nwg::FileDialog::builder()
         .title(title)
         .action(action)
-        .filters("rog-mouse-ctl 备份(*.txt)|所有文件(*.*)")
+        .filters(crate::tr!("rog-mouse-ctl 备份(*.txt)|所有文件(*.*)"))
         .default_folder(folder)
         .build(&mut fd)
     {
-        env.say(format!("✘ 打开文件对话框失败：{e}"));
+        env.say(crate::trf!("✘ 打开文件对话框失败：{e}", e = e));
         return;
     }
     if !fd.run(Some(env.window)) {
         return;
     }
     let Ok(item) = fd.get_selected_item() else {
-        env.say("✘ 没拿到选中的文件");
+        env.say(crate::tr!("✘ 没拿到选中的文件"));
         return;
     };
     let path = PathBuf::from(item);
@@ -1706,7 +1730,7 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
         Cmd::Restore(path)
     };
     if !env.submit(cmd) {
-        env.say("✘ 后台正在执行别的操作，请稍后再试");
+        env.say(crate::tr!("✘ 后台正在执行别的操作，请稍后再试"));
     }
 }
 
@@ -1715,14 +1739,14 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
 fn open_in_explorer(env: &UiEnv, dir: &std::path::Path) {
     let _ = crate::paths::ensure_dir(dir);
     if let Err(e) = crate::dynlight::shell_open(&dir.to_string_lossy()) {
-        env.say(format!("✘ 打不开文件夹：{e}"));
+        env.say(crate::trf!("✘ 打不开文件夹：{e}", e = e));
     }
 }
 
 /// 用默认浏览器打开一个 http(s) 链接（「关于」里的仓库 / 商店页）。
 fn open_url(env: &UiEnv, url: &str) {
     if let Err(e) = crate::dynlight::shell_open(url) {
-        env.say(format!("✘ 打不开链接：{e}"));
+        env.say(crate::trf!("✘ 打不开链接：{e}", e = e));
     }
 }
 
@@ -1736,8 +1760,8 @@ enum SavePathKind {
 impl SavePathKind {
     fn label(self) -> &'static str {
         match self {
-            SavePathKind::History => "历史文件",
-            SavePathKind::Settings => "设置文件",
+            SavePathKind::History => crate::tr!("历史文件"),
+            SavePathKind::Settings => crate::tr!("设置文件"),
         }
     }
     fn current(self) -> std::path::PathBuf {
@@ -1748,8 +1772,8 @@ impl SavePathKind {
     }
     fn filters(self) -> &'static str {
         match self {
-            SavePathKind::History => "历史记录(*.tsv)|所有文件(*.*)",
-            SavePathKind::Settings => "配置文件(*.ini)|所有文件(*.*)",
+            SavePathKind::History => crate::tr!("历史记录(*.tsv)|所有文件(*.*)"),
+            SavePathKind::Settings => crate::tr!("配置文件(*.ini)|所有文件(*.*)"),
         }
     }
 }
@@ -1763,25 +1787,25 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     if let Err(e) = nwg::FileDialog::builder()
-        .title(format!("选择{}的保存位置", kind.label()))
+        .title(crate::trf!("选择{}的保存位置", kind.label()))
         .action(nwg::FileDialogAction::Save)
         .filters(kind.filters())
         .default_folder(default_folder)
         .build(&mut fd)
     {
-        env.say(format!("✘ 打开文件对话框失败：{e}"));
+        env.say(crate::trf!("✘ 打开文件对话框失败：{e}", e = e));
         return;
     }
     if !fd.run(Some(env.window)) {
         return;
     }
     let Ok(item) = fd.get_selected_item() else {
-        env.say("✘ 没拿到选中的路径");
+        env.say(crate::tr!("✘ 没拿到选中的路径"));
         return;
     };
     let new_path = std::path::PathBuf::from(item);
     if new_path == old {
-        env.say("位置没变");
+        env.say(crate::tr!("位置没变"));
         return;
     }
     // 旧文件有内容、新位置还是空的 → 搬过去，别让用户丢历史/配置。
@@ -1804,7 +1828,11 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
     };
     match res {
         Ok(()) => {
-            env.say(format!("✔ {}已改到 {}", kind.label(), new_path.display()));
+            env.say(crate::trf!(
+                "✔ {}已改到 {}",
+                kind.label(),
+                new_path.display()
+            ));
             env.signal.request_refresh();
             env.canvas.repaint_now();
         }
@@ -1820,7 +1848,7 @@ fn reset_custom_path(env: &UiEnv, kind: SavePathKind) {
     };
     match res {
         Ok(()) => {
-            env.say(format!("✔ {}已恢复默认位置", kind.label()));
+            env.say(crate::trf!("✔ {}已恢复默认位置", kind.label()));
             env.signal.request_refresh();
             env.canvas.repaint_now();
         }
@@ -1909,7 +1937,7 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
             .values()
             .next()
             .cloned()
-            .unwrap_or_else(|| "没有任何帧有应答".to_string());
+            .unwrap_or_else(|| crate::tr!("没有任何帧有应答").to_string());
         // 三态：接收器在、设备不应答 = 休眠（动一下就能唤醒）；接收器都不在 =
         // 真错误（要用户去查线和口）。两件事用一句话说会把人引向错误方向。
         let link = crate::linkstate::classify(0, snap.identity.dongle_sn.as_str());
@@ -1925,7 +1953,11 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
             if let Status::Error(ref text) = s.status {
                 write_diagnostics(
                     text,
-                    if snap.identity.dongle_sn.trim().is_empty() { "" } else { "2.4G 接收器" },
+                    if snap.identity.dongle_sn.trim().is_empty() {
+                        ""
+                    } else {
+                        crate::tr!("2.4G 接收器")
+                    },
                     crate::device::family_of(&snap.identity.model_name).noun(),
                     s.frames,
                     s.elapsed_ms,
@@ -2044,12 +2076,12 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
 fn auto_state_short(s: crate::autostart::AutoStartState) -> &'static str {
     use crate::autostart::AutoStartState as S;
     match s {
-        S::Disabled => "未启用",
-        S::DisabledByUser => "已被用户关闭",
-        S::Enabled => "已启用",
-        S::DisabledByPolicy => "组策略禁止",
-        S::EnabledByPolicy => "组策略启用",
-        S::Unknown => "状态未知",
+        S::Disabled => crate::tr!("未启用"),
+        S::DisabledByUser => crate::tr!("已被用户关闭"),
+        S::Enabled => crate::tr!("已启用"),
+        S::DisabledByPolicy => crate::tr!("组策略禁止"),
+        S::EnabledByPolicy => crate::tr!("组策略启用"),
+        S::Unknown => crate::tr!("状态未知"),
     }
 }
 
@@ -2062,32 +2094,36 @@ pub(crate) fn autostart_hint(
     use crate::autostart::{AutoStartPath as P, AutoStartState as S};
 
     let where_ = match path {
-        P::WinRt => "系统「设置 → 应用 → 启动」",
-        P::Registry => "系统「设置 → 应用 → 启动」或任务管理器「启动」页",
-        P::Unknown => "系统「设置 → 应用 → 启动」",
+        P::WinRt => crate::tr!("系统「设置 → 应用 → 启动」"),
+        P::Registry => crate::tr!("系统「设置 → 应用 → 启动」或任务管理器「启动」页"),
+        P::Unknown => crate::tr!("系统「设置 → 应用 → 启动」"),
     };
 
     if requested_on {
         match state {
             S::Enabled | S::EnabledByPolicy => {
-                format!("已开启开机自启（{}）。", state.describe())
+                crate::trf!("已开启开机自启（{}）。" , crate::i18n::translate(state.describe()))
             }
-            S::DisabledByUser => format!(
-                "系统记着你之前拒绝过自启，程序再请求会被静默忽略。\
-                 请到 {where_} 手动把「{WINDOW_TITLE}」打开。"
-            ),
+            S::DisabledByUser => crate::trf!("系统记着你之前拒绝过自启，程序再请求会被静默忽略。请到 {where_} 手动把「{WINDOW_TITLE}」打开。" , WINDOW_TITLE = WINDOW_TITLE, where_ = where_),
             S::DisabledByPolicy => {
-                "组策略禁止了开机自启，本程序无法绕过。请联系管理员。".to_string()
+                crate::tr!("组策略禁止了开机自启，本程序无法绕过。请联系管理员。").to_string()
             }
-            S::Disabled => format!("系统没有接受这次请求，请到 {where_} 手动打开。"),
-            S::Unknown => format!("读不到自启状态，请到 {where_} 确认。"),
+            S::Disabled => crate::trf!("系统没有接受这次请求，请到 {where_} 手动打开。" , where_ = where_),
+            S::Unknown => crate::trf!("读不到自启状态，请到 {where_} 确认。" , where_ = where_),
         }
     } else {
         match state {
             S::Enabled | S::EnabledByPolicy => {
-                format!("没能关掉（{}），请到 {where_} 手动关闭。", state.describe())
+                crate::trf!(
+                    "没能关掉（{}），请到 {where_} 手动关闭。",
+                    crate::i18n::translate(state.describe()),
+                    where_ = where_
+                )
             }
-            _ => format!("已关闭开机自启（{}）。", state.describe()),
+            _ => crate::trf!(
+                "已关闭开机自启（{}）。",
+                crate::i18n::translate(state.describe())
+            ),
         }
     }
 }
@@ -2100,12 +2136,12 @@ pub(crate) fn autostart_hint(
 #[cfg(test)]
 fn conn_text(s: &Shared) -> &'static str {
     match s.link_mode.as_str() {
-        "Wired" => "有线",
-        "Wireless24G" => "2.4G 无线",
+        "Wired" => crate::tr!("有线"),
+        "Wireless24G" => crate::tr!("2.4G 无线"),
         _ => match s.ident.as_ref() {
-            Some(i) if i.dongle_sn.trim().is_empty() => "有线",
-            Some(_) => "2.4G 无线",
-            None => "连接未知",
+            Some(i) if i.dongle_sn.trim().is_empty() => crate::tr!("有线"),
+            Some(_) => crate::tr!("2.4G 无线"),
+            None => crate::tr!("连接未知"),
         },
     }
 }
@@ -2138,12 +2174,16 @@ fn tray_tip(q: Option<Quick>, status: &Status) -> String {
         (Some(q), _) => format!(
             "{}%  {}",
             q.level,
-            if q.charging { "充电中" } else { "使用中" }
+            if q.charging {
+                crate::tr!("充电中")
+            } else {
+                crate::tr!("使用中")
+            }
         ),
-        (None, Status::Asleep) => "休眠中".to_string(),
-        (None, Status::Error(_)) => "读取出错".to_string(),
-        (None, Status::Busy) => "正在写设备".to_string(),
-        (None, _) => "尚未读取".to_string(),
+        (None, Status::Asleep) => crate::tr!("休眠中").to_string(),
+        (None, Status::Error(_)) => crate::tr!("读取出错").to_string(),
+        (None, Status::Busy) => crate::tr!("正在写设备").to_string(),
+        (None, _) => crate::tr!("尚未读取").to_string(),
     }
 }
 
@@ -2203,9 +2243,9 @@ fn ask_confirm(title: &str, text: &str) -> bool {
 
 /// 启动 GUI。返回时进程就要退出了。
 pub fn run(start_hidden: bool) -> Result<(), String> {
-    nwg::init().map_err(|e| format!("nwg 初始化失败：{e}"))?;
-
     let cfg = settings::load();
+    crate::i18n::apply(cfg.language);
+    nwg::init().map_err(|e| crate::trf!("nwg 初始化失败：{e}", e = e))?;
     Settings::write_default_if_missing();
     // 盘上写的配色和界面默认值必须一开始就一致，否则首帧是浅色、
     // 用户一拖窗口就变成深色。`system` 在这里按系统深浅色换算成具体配色。
@@ -2234,12 +2274,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         // 初始化完、dispatch 前再 ShowWindow。
         .flags(nwg::WindowFlags::MAIN_WINDOW)
         .build(&mut window)
-        .map_err(|e| format!("建主窗口失败：{e}"))?;
+        .map_err(|e| crate::trf!("建主窗口失败：{e}", e = e))?;
 
     let hwnd = window
         .handle
         .hwnd()
-        .ok_or_else(|| "主窗口没有句柄".to_string())? as crate::win32::Handle;
+        .ok_or_else(|| crate::tr!("主窗口没有句柄").to_string())?
+        as crate::win32::Handle;
 
     // 深色标题栏要和界面配色一起决定，否则浅色界面配深色标题栏很割裂。
     crate::dwm::set_dark_titlebar(hwnd, mode == crate::ui::theme::Mode::Dark);
@@ -2269,47 +2310,51 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         const ID_NCACTIVATE: usize = 0x10003;
         const ID_NCPAINT: usize = 0x10004;
         // handler_id 必须 > 0xFFFF，否则 nwg 直接 panic（那是它自己保留的区间）
-        let nccalcs = nwg::bind_raw_event_handler(&window.handle, ID_NCCALCSIZE, |_h, msg, wp, _lp| {
-            const WM_NCCALCSIZE: u32 = 0x0083;
-            if msg == WM_NCCALCSIZE {
-                // 返回 0 = 客户区铺满整个窗口矩形，标题栏视觉上消失，
-                // 但 DWM 的圆角/投影/动画照旧
-                return crate::ui::frame::on_nccalcsize(wp).map(|r| r as isize);
-            }
-            None
-        })
-        .map_err(|e| format!("绑定客户区重算子类失败：{e}"))?;
+        let nccalcs =
+            nwg::bind_raw_event_handler(&window.handle, ID_NCCALCSIZE, |_h, msg, wp, _lp| {
+                const WM_NCCALCSIZE: u32 = 0x0083;
+                if msg == WM_NCCALCSIZE {
+                    // 返回 0 = 客户区铺满整个窗口矩形，标题栏视觉上消失，
+                    // 但 DWM 的圆角/投影/动画照旧
+                    return crate::ui::frame::on_nccalcsize(wp).map(|r| r as isize);
+                }
+                None
+            })
+            .map_err(|e| crate::trf!("绑定客户区重算子类失败：{e}", e = e))?;
 
-        let minmax = nwg::bind_raw_event_handler(&window.handle, ID_MINMAXINFO, |h, msg, _wp, lp| {
-            const WM_GETMINMAXINFO: u32 = 0x0024;
-            if msg == WM_GETMINMAXINFO {
-                // nwg 的 `h` 是 winapi 的 `HWND`，我们自己的签名用 `*mut c_void`
-                // —— 两者都是指针，`as` 转一下就对了。
-                crate::ui::frame::on_getminmaxinfo(h as crate::win32::Handle, lp);
-            }
-            None
-        })
-        .map_err(|e| format!("绑定最大化尺寸子类失败：{e}"))?;
+        let minmax =
+            nwg::bind_raw_event_handler(&window.handle, ID_MINMAXINFO, |h, msg, _wp, lp| {
+                const WM_GETMINMAXINFO: u32 = 0x0024;
+                if msg == WM_GETMINMAXINFO {
+                    // nwg 的 `h` 是 winapi 的 `HWND`，我们自己的签名用 `*mut c_void`
+                    // —— 两者都是指针，`as` 转一下就对了。
+                    crate::ui::frame::on_getminmaxinfo(h as crate::win32::Handle, lp);
+                }
+                None
+            })
+            .map_err(|e| crate::trf!("绑定最大化尺寸子类失败：{e}", e = e))?;
 
-        let ncact = nwg::bind_raw_event_handler(&window.handle, ID_NCACTIVATE, |_h, msg, _wp, _lp| {
-            const WM_NCACTIVATE: u32 = 0x0086;
-            if msg == WM_NCACTIVATE {
-                // 返回 Some(1) 阻止 DefWindowProcW 绘制系统默认非客户区（经典蓝条标题栏）
-                return Some(1);
-            }
-            None
-        })
-        .map_err(|e| format!("绑定非客户区激活子类失败：{e}"))?;
+        let ncact =
+            nwg::bind_raw_event_handler(&window.handle, ID_NCACTIVATE, |_h, msg, _wp, _lp| {
+                const WM_NCACTIVATE: u32 = 0x0086;
+                if msg == WM_NCACTIVATE {
+                    // 返回 Some(1) 阻止 DefWindowProcW 绘制系统默认非客户区（经典蓝条标题栏）
+                    return Some(1);
+                }
+                None
+            })
+            .map_err(|e| crate::trf!("绑定非客户区激活子类失败：{e}", e = e))?;
 
-        let ncpaint = nwg::bind_raw_event_handler(&window.handle, ID_NCPAINT, |_h, msg, _wp, _lp| {
-            const WM_NCPAINT: u32 = 0x0085;
-            if msg == WM_NCPAINT {
-                // 返回 Some(0) 阻止系统绘制默认外边框
-                return Some(0);
-            }
-            None
-        })
-        .map_err(|e| format!("绑定非客户区绘制子类失败：{e}"))?;
+        let ncpaint =
+            nwg::bind_raw_event_handler(&window.handle, ID_NCPAINT, |_h, msg, _wp, _lp| {
+                const WM_NCPAINT: u32 = 0x0085;
+                if msg == WM_NCPAINT {
+                    // 返回 Some(0) 阻止系统绘制默认外边框
+                    return Some(0);
+                }
+                None
+            })
+            .map_err(|e| crate::trf!("绑定非客户区绘制子类失败：{e}", e = e))?;
 
         (nccalcs, minmax, ncact, ncpaint)
     };
@@ -2328,14 +2373,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let mut msg_window = nwg::MessageWindow::default();
     nwg::MessageWindow::builder()
         .build(&mut msg_window)
-        .map_err(|e| format!("建消息窗口失败：{e}"))?;
+        .map_err(|e| crate::trf!("建消息窗口失败：{e}", e = e))?;
 
     let mut menu = nwg::Menu::default();
     nwg::Menu::builder()
         .popup(true)
         .parent(&msg_window)
         .build(&mut menu)
-        .map_err(|e| format!("建托盘菜单失败：{e}"))?;
+        .map_err(|e| crate::trf!("建托盘菜单失败：{e}", e = e))?;
 
     // Menu 没有 append()，每个 MenuItem 都要显式 parent。
     //
@@ -2343,10 +2388,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 「显示主窗口 / 立即刷新」两个菜单项就没有存在意义了。
     let mut mi_quit = nwg::MenuItem::default();
     nwg::MenuItem::builder()
-        .text("退出")
+        .text(crate::tr!("退出"))
         .parent(&menu)
         .build(&mut mi_quit)
-        .map_err(|e| format!("菜单项：{e}"))?;
+        .map_err(|e| crate::trf!("菜单项：{e}", e = e))?;
 
     // 托盘图标自己管（见 `TrayCtl` 注释：nwg 不暴露 guidItem，做不到跨版本固定）。
     // 图标在消息循环起来之后再添加 —— 那时 `msg_window` 才能收回调消息。
@@ -2365,7 +2410,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     nwg::Notice::builder()
         .parent(&window)
         .build(&mut notice)
-        .map_err(|e| format!("建通知通道失败：{e}"))?;
+        .map_err(|e| crate::trf!("建通知通道失败：{e}", e = e))?;
 
     // ── 共享状态 ────────────────────────────────────────────
     let shared = Arc::new(Mutex::new(Shared::new(cfg.clone())));
@@ -2394,7 +2439,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let damage: Rc<dyn Fn()> = Rc::new(move || sender_d.notice());
     let (cw, ch) = window.size();
     let canvas = Canvas::create(hwnd, 0, 0, cw as i32, ch as i32, scale, damage)
-        .map_err(|e| format!("建自绘内容区失败：{e}"))?;
+        .map_err(|e| crate::trf!("建自绘内容区失败：{e}", e = e))?;
     // 句柄先留一份：`canvas` 后面会被 move 进事件闭包，但「显示窗口前先画
     // 首帧」那一步在闭包外，只能靠这个裸句柄。
     let canvas_hwnd = canvas.hwnd();
@@ -2662,15 +2707,24 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 不用 nwg 的 `OnResize`：它不把 `WM_SIZE(SIZE_MINIMIZED)` 转成该事件 ——
     // 实测最小化后回调根本不触发（那时 `IsIconic` 已经是 1，分支永远走不到）。
     let canvas_min = canvas_e.clone();
+    let shared_language = Arc::clone(&shared);
     // 第二个参数是**处理器 id**（nwg 要求 > 0xFFFF），要过滤的消息在回调里判。
-    let min_handler = nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
-        // SIZE_MINIMIZED = 1
-        if msg == 0x0005 && wp as usize == 1 {
-            canvas_min.release_render_memory();
-        }
-        None
-    })
-    .map_err(|e| format!("绑 WM_SIZE 处理器失败：{e}"))?;
+    let min_handler =
+        nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
+            // SIZE_MINIMIZED = 1
+            if msg == 0x0005 && wp as usize == 1 {
+                canvas_min.release_render_memory();
+            }
+            if msg == 0x001A {
+                let cfg = lock_shared(&shared_language).cfg.clone();
+                if crate::i18n::apply(cfg.language) {
+                    canvas_min.invalidate();
+                    sender.notice();
+                }
+            }
+            None
+        })
+        .map_err(|e| crate::trf!("绑 WM_SIZE 处理器失败：{e}", e = e))?;
 
     let wh = window.handle.clone();
     let handler = nwg::full_bind_event_handler(&wh, move |evt, evt_data, _handle| {
@@ -2765,8 +2819,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     tray.sync(&s.readings, &s.cfg);
                     if let Some(q) = s.quick {
                         if low_battery_alert(q.level, q.charging, &mut s.low_alert_armed) {
-                            canvas
-                                .with_ui_mut(|u| u.set_status("设备电量低，建议充电".to_string()));
+                            canvas.with_ui_mut(|u| {
+                                u.set_status(crate::tr!("设备电量低，建议充电").to_string())
+                            });
                         }
                     }
                 }
@@ -2799,6 +2854,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             match (lp as u32) & 0xFFFF {
                 // WM_RBUTTONUP：弹菜单（现在只剩「退出」）。
                 0x0205 => {
+                    if let Some((parent, id)) = mi_quit.handle.hmenu_item() {
+                        let text = crate::win32::to_wide(crate::tr!("退出"));
+                        crate::win32::ModifyMenuW(
+                            parent as win32::Handle,
+                            id,
+                            0,
+                            id as usize,
+                            text.as_ptr(),
+                        );
+                    }
                     let (x, y) = nwg::GlobalCursor::position();
                     menu.popup(x, y);
                 }
@@ -2826,7 +2891,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             Some(0)
         })
     }
-    .map_err(|e| format!("绑托盘回调失败：{e}"))?;
+    .map_err(|e| crate::trf!("绑托盘回调失败：{e}", e = e))?;
 
     // ── 菜单事件处理器 ──────────────────────────────────────
     let signal_m = Arc::clone(&signal);

@@ -39,6 +39,56 @@ pub struct Estimate {
 }
 
 impl Estimate {
+    pub fn localized_short_text(&self) -> String {
+        if !crate::i18n::english() {
+            return self.short_text();
+        }
+        if !self.known {
+            return crate::i18n::translate(if self.text == "已充满" {
+                "已充满"
+            } else {
+                "估算中…"
+            })
+            .into();
+        }
+        let d = crate::i18n::duration(self.hours);
+        if self.percent_per_hour > 0.0 {
+            crate::trf!("约 {d}后充满", d = d)
+        } else {
+            crate::trf!("约 {d}", d = d)
+        }
+    }
+
+    pub fn localized_text(&self) -> String {
+        if !crate::i18n::english() {
+            return self.text.clone();
+        }
+        if self.known {
+            let dur = if self.hours >= COARSE_HOURS {
+                crate::tr!("10 天以上").to_string()
+            } else {
+                crate::i18n::duration(self.hours)
+            };
+            return if self.percent_per_hour > 0.0 {
+                crate::trf!("预计 {dur} 后充满", dur = dur)
+            } else {
+                crate::trf!("预计还能用 {dur}", dur = dur)
+            };
+        }
+        let translated = crate::i18n::translate(&self.text);
+        if translated != self.text {
+            return translated.into();
+        }
+        if let Some((head, reason)) = self.text.split_once('：') {
+            return format!(
+                "{}: {}",
+                crate::i18n::translate(head),
+                crate::i18n::translate(reason)
+            );
+        }
+        translated.into()
+    }
+
     /// 环下方那行短结论。`text` 是给「明细」用的整句（"预计还能用 3 小时 12 分钟"），
     /// 环下面那格横向只有 ~150px，放整句会挤，所以另出一版紧凑文案。
     pub fn short_text(&self) -> String {

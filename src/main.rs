@@ -25,6 +25,7 @@ mod dwm;
 mod dynlight;
 mod gui;
 mod hid;
+mod i18n;
 mod device;
 mod diagnostics;
 mod history;
@@ -301,7 +302,7 @@ fn run_gui(start_hidden: bool) -> ExitCode {
                 dir.join("gui.log"),
                 format!("{} GUI 启动失败：{e}\n", settings::timestamp_for_humans()),
             );
-            let text = win32::to_wide(&format!("图形界面启动失败：\n\n{e}"));
+            let text = win32::to_wide(&crate::trf!("图形界面启动失败：\n\n{e}", e = e));
             let caption = win32::to_wide("rog-mouse-ctl");
             // MB_OK(0) | MB_ICONERROR(0x10)
             unsafe {

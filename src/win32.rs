@@ -709,9 +709,15 @@ extern "system" {    /// 查找顶层窗口（单实例检测用）。
     pub fn SendMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> isize;
     /// 取系统度量（`SM_CXSMICON = 49`），按托盘实际尺寸绘制。
     pub fn GetSystemMetrics(index: i32) -> i32;
+    pub fn ModifyMenuW(menu: Handle, item: u32, flags: u32, new_id: usize, text: *const u16) -> i32;
 
     /// 窗口是否处于最小化。最小化后不再重绘，可据此回收渲染内存。
     pub fn IsIconic(hwnd: Handle) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn GetUserDefaultUILanguage() -> u16;
 }
 
 /// `LoadImageW` 的图标类型。

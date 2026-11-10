@@ -35,6 +35,7 @@ pub struct Settings {
     /// ② `settings.rs` 不该依赖 UI 模块 —— CLI 子命令也要能读设置，
     /// 而 UI 模块会链 gdiplus，把 CLI 拖进多余依赖。
     pub theme: String,
+    pub language: crate::i18n::Language,
 }
 
 impl Default for Settings {
@@ -49,6 +50,7 @@ impl Default for Settings {
             tray_enabled: true,
             close_mode: "ask".to_string(),
             theme: "system".to_string(),
+            language: crate::i18n::Language::System,
         }
     }
 }
@@ -73,6 +75,10 @@ impl Settings {
             };
             let v = v.trim();
             match k.trim() {
+                "language" => match crate::i18n::Language::parse(v) {
+                    Some(language) => s.language = language,
+                    None => warnings.push(format!("language={v} 只认 system/zh-CN/en，已忽略")),
+                },
                 "cache_ttl_sec" => match v.parse::<u64>() {
                     Ok(n) => s.cache_ttl_sec = n,
                     Err(_) => warnings.push(format!("cache_ttl_sec={v} 不是非负整数，已忽略")),
@@ -161,6 +167,8 @@ impl Settings {
         s.push_str("# 界面配色：system（默认，跟随系统深浅色）/ light（浅色）/ dark（深色）。\n");
         s.push_str("# 程序里也能切换，切换后这里会被回写。\n");
         s.push_str(&format!("theme={}\n", self.theme));
+        s.push_str("# Language: system / zh-CN / en.\n");
+        s.push_str(&format!("language={}\n", self.language.code()));
         for (key, pref) in &self.device_tray {
             s.push_str(&format!("device_tray.{key}={}\n", pref.text()));
         }
@@ -303,6 +311,23 @@ pub fn format_unix_local(unix: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn language_defaults_to_system_and_roundtrips_all_choices() {
+        use crate::i18n::Language;
+        assert_eq!(Settings::default().language, Language::System);
+        assert_eq!(Settings::parse("theme=dark").language, Language::System);
+        let (invalid, warnings) = Settings::parse_collect("language=invalid");
+        assert_eq!(invalid.language, Language::System);
+        assert_eq!(warnings.len(), 1);
+        for language in Language::ALL {
+            let cfg = Settings {
+                language,
+                ..Default::default()
+            };
+            assert_eq!(Settings::parse(&cfg.to_text()).language, language);
+        }
+    }
+
+    #[test]
     fn device_tray_settings_roundtrip_independently() {
         use crate::tray_prefs::{DeviceTray, TrayContent, TrayKind};
         let a = "0123456789abcdef".to_string();
@@ -413,6 +438,7 @@ mod tests {
             tray_enabled: false,
             close_mode: "quit".to_string(),
             theme: "dark".to_string(),
+            language: crate::i18n::Language::English,
         };
         let back = Settings::parse(&s.to_text());
         assert_eq!(back.cache_ttl_sec, 45);
@@ -420,6 +446,7 @@ mod tests {
         assert!(!back.tray_enabled);
         assert_eq!(back.close_mode, "quit");
         assert_eq!(back.theme, "dark", "配色没有往返成功");
+        assert_eq!(back.language, crate::i18n::Language::English);
     }
 
     #[test]
