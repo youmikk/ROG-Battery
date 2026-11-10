@@ -6,7 +6,7 @@ macro_rules! tr {
     ("固定显示这台设备的电量") => { if $crate::i18n::english() { "Keep this device’s battery in the tray" } else { "固定显示这台设备的电量" } };
     ("已在托盘显示") => { if $crate::i18n::english() { "Shown in tray" } else { "已在托盘显示" } };
     ("设为托盘显示设备") => { if $crate::i18n::english() { "Show in tray" } else { "设为托盘显示设备" } };
-    ("设备图标") => { if $crate::i18n::english() { "Device icon" } else { "设备图标" } };
+    ("设备类型") => { if $crate::i18n::english() { "Device type" } else { "设备类型" } };
     ("单击数字查看全部设备") => { if $crate::i18n::english() { "Click the number to view all devices" } else { "单击数字查看全部设备" } };
     ("正在刷新…") => { if $crate::i18n::english() { "Refreshing…" } else { "正在刷新…" } };
     ("已更新") => { if $crate::i18n::english() { "Updated" } else { "已更新" } };

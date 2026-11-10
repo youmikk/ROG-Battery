@@ -844,7 +844,7 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
     } else {
         crate::tr!("手动选择优先于自动识别").to_string()
     };
-    let ctl = row_label(p, area, crate::tr!("设备图标"), Some(&help), 150.0);
+    let ctl = row_label(p, area, crate::tr!("设备类型"), Some(&help), 150.0);
     drop_button(
         p,
         ui,

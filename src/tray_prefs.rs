@@ -28,7 +28,7 @@ impl TrayKind {
             Self::Keyboard => crate::tr!("键盘"),
             Self::Headset => crate::tr!("耳机"),
             Self::Gamepad => crate::tr!("手柄"),
-            Self::Generic => crate::tr!("通用"),
+            Self::Generic => crate::tr!("其他"),
         }
     }
 
