@@ -1,5 +1,5 @@
 //! 自绘改名弹窗；仅文字编辑交给系统处理输入法和剪贴板。
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use native_windows_gui as nwg;
@@ -20,6 +20,7 @@ struct Controls {
     _font: nwg::Font,
     key: RefCell<Option<String>>,
     requests: RefCell<Vec<Request>>,
+    pending: Cell<bool>,
 }
 
 pub struct Dialog {
@@ -219,6 +220,7 @@ impl Dialog {
             _font: font,
             key: RefCell::new(None),
             requests: RefCell::new(Vec::new()),
+            pending: Cell::new(false),
         });
         let parent = controls.window.handle.hwnd().unwrap() as crate::win32::Handle;
         let input_handler = nwg::bind_raw_event_handler(
@@ -253,24 +255,40 @@ impl Dialog {
                         }
                         c.window.set_visible(false);
                         *c.key.borrow_mut() = None;
+                        c.requests.borrow_mut().clear();
+                        c.pending.set(false);
                     }
                     E::OnButtonClick if handle == c.cancel.handle || handle == c.close.handle => {
                         c.window.set_visible(false);
                         *c.key.borrow_mut() = None;
+                        c.requests.borrow_mut().clear();
+                        c.pending.set(false);
                     }
                     E::OnKeyEnter | E::OnButtonClick
                         if event == E::OnKeyEnter
                             || handle == c.save.handle
                             || handle == c.reset.handle =>
                     {
-                        if let Some(key) = c.key.borrow().clone() {
+                        if !c.pending.replace(true) {
+                            let Some(key) = c.key.borrow().clone() else {
+                                c.pending.set(false);
+                                return;
+                            };
                             let name = if handle == c.reset.handle {
                                 String::new()
                             } else {
                                 c.input.text()
                             };
                             c.requests.borrow_mut().push(Request { key, name });
-                            notice.notice();
+                            let sender = notice;
+                            if let Err(error) = std::thread::Builder::new()
+                                .name("device-name-save".to_string())
+                                .spawn(move || sender.notice())
+                            {
+                                c.pending.set(false);
+                                *c.error.borrow_mut() = error.to_string();
+                                c.window.invalidate();
+                            }
                         }
                     }
                     _ => {}
@@ -438,6 +456,7 @@ impl Dialog {
         *self.colors.borrow_mut() = Colors::new(dark);
         *c.key.borrow_mut() = Some(key.to_string());
         c.requests.borrow_mut().clear();
+        c.pending.set(false);
         c.window.set_text(crate::tr!("编辑名称"));
         c.error.borrow_mut().clear();
         c.save.set_text(crate::tr!("保存名称"));
@@ -480,6 +499,7 @@ impl Dialog {
     }
 
     pub fn finish(&self, error: Option<&str>) {
+        self.controls.pending.set(false);
         if let Some(error) = error {
             *self.controls.error.borrow_mut() = error.to_string();
             self.controls.window.invalidate();

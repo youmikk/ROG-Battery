@@ -10,13 +10,12 @@
 
 [下载绿色版](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [更新日志](CHANGELOG.md)
 
-## 1.4.0
+## 1.4.1
 
+- 修复修改设备名称并保存后程序可能闪退的问题。
+- 诊断日志新增设备型号、VID/PID、接收器信息、操作结果和崩溃位置。
 - 中文和英文即时切换，默认跟随 Windows 显示语言。
 - 设备卡片首页；只有一台设备时直接进入详情页。
-- 单击数字托盘打开设备电量面板，双击打开主窗口。
-- 自定义设备名称、设备类型和托盘显示设备。
-- 统一标题栏、设备设置与改名窗口的样式。
 
 ## 使用
 

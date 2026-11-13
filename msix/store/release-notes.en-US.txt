@@ -1,3 +1,7 @@
+Fixes
+- Fixed a crash that could occur after saving a custom device name.
+- Diagnostic logs now include the device model, VID/PID, receiver details, operation results, and crash location.
+
 New
 - Chinese and English language options, with Windows display language detection by default.
 - Device overview and direct access to details when only one device is detected.

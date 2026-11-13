@@ -6,13 +6,12 @@ A lightweight battery monitor and mouse settings utility for ROG peripherals on 
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
-## Version 1.4.0
+## Version 1.4.1
 
+- Fixed a crash that could occur after saving a custom device name.
+- Diagnostic logs now include the device model, VID/PID, receiver details, operation results, and crash location.
 - Chinese and English interfaces, with an option to follow the Windows display language.
 - A device overview that opens device details directly when only one device is detected.
-- A battery panel on a single click of the numeric tray icon; a double click opens the main window.
-- Custom device names, device types, and selection of the device shown in the tray.
-- Consistent title bar controls, device preferences, and rename dialog.
 
 ## Getting started
 

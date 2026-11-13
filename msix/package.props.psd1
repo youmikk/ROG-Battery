@@ -1,4 +1,4 @@
-﻿# Keep the Store identity unchanged so existing installations can be upgraded.
+# Keep the Store identity unchanged so existing installations can be upgraded.
 @{
     IdentityName = 'Sonder.RBattery'
     Publisher = 'CN=1307ADA3-FCC0-4C75-81A2-9CC947003BD7'
@@ -6,7 +6,7 @@
     DisplayName = 'R Battery'
     ShortName = 'R Battery'
     Description = 'ROG peripheral battery monitor and mouse settings utility.'
-    Version = '1.4.0.0'
+    Version = '1.4.1.0'
     Executable = 'rog-mouse-ctl.exe'
     StartupTaskId = 'RogBatteryAutoStart'
 

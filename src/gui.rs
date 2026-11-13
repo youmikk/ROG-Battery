@@ -234,11 +234,76 @@ struct DeviceSnapshot {
     full_at: std::time::Instant,
 }
 
+fn diagnostic_link(link: &hid::Link) -> crate::diagnostics::DeviceInfo {
+    let receiver = (link.mode == "Wireless24G").then(|| {
+        link.all_interfaces
+            .iter()
+            .find(|iface| crate::devices::find_dongle(iface.product_id).is_some())
+            .unwrap_or(&link.iface)
+    });
+    crate::diagnostics::DeviceInfo {
+        model: link.iface.product.clone(),
+        key: link.device_key(),
+        link_mode: link.mode.clone(),
+        wired_pid: 0,
+        wireless_pid: 0,
+        receiver_name: receiver
+            .map(|iface| {
+                crate::devices::find_dongle(iface.product_id)
+                    .map(|dongle| dongle.name_zh.to_string())
+                    .unwrap_or_else(|| iface.product.clone())
+            })
+            .unwrap_or_default(),
+        receiver_vendor_id: receiver.map(|iface| iface.vendor_id).unwrap_or_default(),
+        receiver_product_id: receiver.map(|iface| iface.product_id).unwrap_or_default(),
+        receiver_serial: String::new(),
+        receiver_mac: String::new(),
+        receiver_firmware: String::new(),
+    }
+}
+
+fn diagnostic_device(record: &DeviceSnapshot) -> crate::diagnostics::DeviceInfo {
+    let mut info = record
+        .link
+        .as_ref()
+        .map(diagnostic_link)
+        .unwrap_or_default();
+    info.model = record.ident.display_name();
+    info.key = record.reading.key.clone();
+    info.wired_pid = record.ident.wired_pid;
+    info.wireless_pid = record.ident.wireless_pid;
+    info.receiver_serial = record.ident.dongle_sn.clone();
+    info.receiver_mac = record.ident.dongle_mac.clone();
+    info.receiver_firmware = record.ident.dongle_firmware.clone();
+    info
+}
+
+fn diagnostic_facts<'a>(
+    operation: &'a str,
+    status: &'a str,
+    family: &'a str,
+    frames: usize,
+    elapsed_ms: u128,
+    device: Option<&'a crate::diagnostics::DeviceInfo>,
+) -> crate::diagnostics::Facts<'a> {
+    crate::diagnostics::Facts {
+        version: APP_VERSION,
+        operation,
+        status,
+        family,
+        frames,
+        elapsed_ms,
+        history_rows: crate::history::read_rows().len(),
+        device,
+    }
+}
+
 fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
     let links = crate::win32::HidApi::load().and_then(|api| hid::open_links(&api));
     let links = match links {
         Ok(links) => links,
         Err(e) => {
+            crate::diagnostics::event_once("link_enumeration_failed", &e);
             let mut s = lock_shared(shared);
             for device in s.devices.values_mut() {
                 device.reading.connected = false;
@@ -289,7 +354,19 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                     snapshot::fetch_light(&mut dev, link.report_id, &link.mode)
                 }
             }
-            Err(_) => continue,
+            Err(error) => {
+                let device = diagnostic_link(&link);
+                let facts = diagnostic_facts(
+                    "device_open_failed",
+                    &error,
+                    crate::device::DeviceFamily::Unknown.noun(),
+                    0,
+                    0,
+                    Some(&device),
+                );
+                crate::diagnostics::record_device_once(&facts);
+                continue;
+            }
         };
         let is_connected = out.snapshot.frames.contains_key("12:07:00");
         let mut ident = if needs_full {
@@ -380,6 +457,18 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                     .unwrap_or_else(std::time::Instant::now)
             },
         };
+        if needs_full && !record.ident.model_name.trim().is_empty() {
+            let device = diagnostic_device(&record);
+            let facts = diagnostic_facts(
+                "device_identified",
+                "设备已识别",
+                family.noun(),
+                out.frames_read,
+                out.elapsed.as_millis(),
+                Some(&device),
+            );
+            crate::diagnostics::record_device_once(&facts);
+        }
         {
             let mut s = lock_shared(shared);
             if outcome_is_stale(generation, s.write_gen) {
@@ -1847,22 +1936,22 @@ fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
 }
 
 /// 出错时追加一段诊断日志（`<设置目录>/diagnostics.log`）。
-///
-/// 只在「接收器都不在」时写：休眠是正常状态，不该反复覆盖文件。
-fn write_diagnostics(status: &str, link_mode: &str, family: &str, frames: usize, elapsed_ms: u128) {
-    let Some(dir) = crate::paths::settings_file().parent().map(|d| d.to_path_buf()) else {
-        return;
-    };
-    let f = crate::diagnostics::Facts {
-        version: env!("CARGO_PKG_VERSION"),
+fn write_diagnostics(
+    status: &str,
+    family: &str,
+    frames: usize,
+    elapsed_ms: u128,
+    device: Option<&crate::diagnostics::DeviceInfo>,
+) {
+    let facts = diagnostic_facts(
+        "device_read_failed",
         status,
-        link_mode,
         family,
         frames,
         elapsed_ms,
-        history_rows: crate::history::read_rows().len(),
-    };
-    let _ = crate::diagnostics::append(&dir.join("diagnostics.log"), &f);
+        device,
+    );
+    let _ = crate::diagnostics::append(&crate::diagnostics::log_path(), &facts);
 }
 
 fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option<Quick> {
@@ -1894,16 +1983,17 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         // 真读不到设备时落一份诊断文本，用户能直接把事实贴过来。
         if matches!(link, crate::linkstate::LinkState::Absent) {
             if let Status::Error(ref text) = s.status {
+                let device = s
+                    .primary_key
+                    .as_ref()
+                    .and_then(|key| s.devices.get(key))
+                    .map(diagnostic_device);
                 write_diagnostics(
                     text,
-                    if snap.identity.dongle_sn.trim().is_empty() {
-                        ""
-                    } else {
-                        crate::tr!("2.4G 接收器")
-                    },
                     crate::device::family_of(&snap.identity.model_name).noun(),
                     s.frames,
                     s.elapsed_ms,
+                    device.as_ref(),
                 );
             }
         }
@@ -2137,6 +2227,7 @@ fn ask_confirm(title: &str, text: &str) -> bool {
 
 /// 启动 GUI。返回时进程就要退出了。
 pub fn run(start_hidden: bool) -> Result<(), String> {
+    crate::diagnostics::install_panic_hook(APP_VERSION);
     let cfg = settings::load();
     crate::i18n::apply(cfg.language);
     nwg::init().map_err(|e| crate::trf!("nwg 初始化失败：{e}", e = e))?;
@@ -2655,6 +2746,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
             E::OnNotice => {
                 for request in name_dialog.take_requests() {
+                    crate::diagnostics::event(
+                        "device_rename_requested",
+                        &format!(
+                            "key={} name_chars={}",
+                            request.key,
+                            request.name.chars().count()
+                        ),
+                    );
                     let mut s = lock_shared(&shared_e);
                     let key = s
                         .key_aliases
@@ -2669,6 +2768,15 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     if result.is_ok() {
                         s.cfg = cfg;
                         s.sort_readings();
+                        crate::diagnostics::event(
+                            "device_rename_saved",
+                            &format!("key={key}"),
+                        );
+                    } else if let Err(error) = &result {
+                        crate::diagnostics::event(
+                            "device_rename_failed",
+                            &format!("key={key} error={error}"),
+                        );
                     }
                     drop(s);
                     name_dialog.finish(result.as_ref().err().map(String::as_str));
