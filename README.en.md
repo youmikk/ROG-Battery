@@ -10,6 +10,7 @@ A lightweight battery monitor and mouse settings utility for ROG peripherals on 
 
 - Fixed a crash that could occur after saving a custom device name.
 - Diagnostic logs now include the device model, VID/PID, receiver details, operation results, and crash location.
+- Fixed the tray battery level not recovering automatically after the mouse wakes from sleep.
 - Chinese and English interfaces, with an option to follow the Windows display language.
 - A device overview that opens device details directly when only one device is detected.
 

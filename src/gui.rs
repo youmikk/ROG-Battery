@@ -694,6 +694,7 @@ struct Signal {
     poke: Mutex<u64>,
     cv: Condvar,
     interval_ms: AtomicU64,
+    wake_probe: AtomicBool,
     shutdown: AtomicBool,
     /// 最近一次用户活动触发的补读时刻（节流用）。
     last_activity: Mutex<Option<std::time::Instant>>,
@@ -706,6 +707,7 @@ impl Signal {
             last_activity: Mutex::new(None),
             cv: Condvar::new(),
             interval_ms: AtomicU64::new(interval_sec.saturating_mul(1000)),
+            wake_probe: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
         }
     }
@@ -745,9 +747,18 @@ impl Signal {
         self.cv.notify_all();
     }
 
+    fn set_wake_probe(&self, active: bool) {
+        self.wake_probe.store(active, Ordering::Relaxed);
+    }
+
     /// 等到「有新工作」或「过了一个间隔」。返回 `false` = 该退出了。
     fn wait_for_work(&self, seen: &mut u64) -> bool {
-        let interval = self.interval_ms.load(Ordering::Relaxed).max(1000);
+        let configured = self.interval_ms.load(Ordering::Relaxed).max(1000);
+        let interval = if self.wake_probe.load(Ordering::Relaxed) {
+            configured.min(WAKE_PROBE_INTERVAL_MS)
+        } else {
+            configured
+        };
         let mut n = lock_poke(&self.poke);
         if *n == *seen {
             let (g, _) = self
@@ -763,6 +774,9 @@ impl Signal {
         true
     }
 }
+
+/// 休眠时缩短轮询间隔，让鼠标移动唤醒后能自动恢复托盘电量。
+const WAKE_PROBE_INTERVAL_MS: u64 = 3_000;
 
 fn lock_poke(m: &Mutex<u64>) -> std::sync::MutexGuard<'_, u64> {
     match m.lock() {
@@ -2649,6 +2663,12 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     };
                     lock_shared(&shared_t).estimate = est;
                 }
+
+                let wake_probe = {
+                    let s = lock_shared(&shared_t);
+                    matches!(s.status, Status::Asleep)
+                };
+                signal_t.set_wake_probe(wake_probe);
 
                 sender_t.notice();
             }

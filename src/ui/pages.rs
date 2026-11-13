@@ -2674,15 +2674,7 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
     let mut dy = dcard.y;
     {
         let area = row_area(dcard, dy);
-        let _ = row_label(
-            p,
-            area,
-            crate::tr!("诊断日志"),
-            Some(crate::tr!(
-                "点这一行打开日志文件夹；日志包含设备型号、VID/PID、接收器信息、操作结果和崩溃位置"
-            )),
-            40.0,
-        );
+        let _ = row_label(p, area, crate::tr!("诊断日志"), None, 40.0);
         ui.hot(area, Act::OpenLogFolder);
         row_rule(p, dcard, area);
         dy += layout::ROW_H;
