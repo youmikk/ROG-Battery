@@ -32,4 +32,5 @@ pub struct Data<'a> {
     pub version: &'a str,
     /// 首页设备卡片墙使用的读数列表。
     pub readings: &'a [crate::device::DeviceReading],
+    pub audio: &'a crate::audio::Snapshot,
 }

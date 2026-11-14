@@ -2,8 +2,17 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("常规") => { if $crate::i18n::english() { "General" } else { "常规" } };
+    ("电量与托盘") => { if $crate::i18n::english() { "Battery & tray" } else { "电量与托盘" } };
+    ("数据与存储") => { if $crate::i18n::english() { "Data & storage" } else { "数据与存储" } };
+    ("启动与窗口") => { if $crate::i18n::english() { "Startup & window" } else { "启动与窗口" } };
+    ("电量读取") => { if $crate::i18n::english() { "Battery polling" } else { "电量读取" } };
+    ("托盘与通知") => { if $crate::i18n::english() { "Tray & notifications" } else { "托盘与通知" } };
     ("设备偏好") => { if $crate::i18n::english() { "Device preferences" } else { "设备偏好" } };
     ("设备名称") => { if $crate::i18n::english() { "Device name" } else { "设备名称" } };
+    ("音量") => { if $crate::i18n::english() { "Volume" } else { "音量" } };
+    ("已静音") => { if $crate::i18n::english() { "Muted" } else { "已静音" } };
+    ("已开启") => { if $crate::i18n::english() { "On" } else { "已开启" } };
     ("编辑名称") => { if $crate::i18n::english() { "Edit name" } else { "编辑名称" } };
     ("保存名称") => { if $crate::i18n::english() { "Save name" } else { "保存名称" } };
     ("恢复原名") => { if $crate::i18n::english() { "Reset name" } else { "恢复原名" } };
@@ -160,11 +169,9 @@ macro_rules! tr {
     ("键盘") => { if $crate::i18n::english() { "Keyboard" } else { "键盘" } };
     ("耳机") => { if $crate::i18n::english() { "Headset" } else { "耳机" } };
     ("扬声器") => { if $crate::i18n::english() { "Speaker" } else { "扬声器" } };
-    ("选择当前 DPI 档位") => { if $crate::i18n::english() { "Select the current DPI stage" } else { "选择当前 DPI 档位" } };
     ("正在读取 DPI 档位…") => { if $crate::i18n::english() { "Reading DPI stages…" } else { "正在读取 DPI 档位…" } };
-    ("完整设备页") => { if $crate::i18n::english() { "Full device page" } else { "完整设备页" } };
     ("未检测到对应音频设备") => { if $crate::i18n::english() { "No matching audio device found" } else { "未检测到对应音频设备" } };
-    ("打开 Windows 声音设置") => { if $crate::i18n::english() { "Open Windows sound settings" } else { "打开 Windows 声音设置" } };
+    ("声音设置") => { if $crate::i18n::english() { "Sound settings" } else { "声音设置" } };
     ("手柄") => { if $crate::i18n::english() { "Gamepad" } else { "手柄" } };
     ("通用") => { if $crate::i18n::english() { "Generic" } else { "通用" } };
     ("仅电量数字") => { if $crate::i18n::english() { "Battery number only" } else { "仅电量数字" } };
@@ -396,6 +403,15 @@ macro_rules! trf {
 pub(super) fn lookup(language: super::Language, text: &str) -> &str {
     if language != super::Language::English { return text; }
     match text {
+        "常规" => "General",
+        "电量与托盘" => "Battery & tray",
+        "数据与存储" => "Data & storage",
+        "启动与窗口" => "Startup & window",
+        "电量读取" => "Battery polling",
+        "托盘与通知" => "Tray & notifications",
+        "音量" => "Volume",
+        "已静音" => "Muted",
+        "已开启" => "On",
         "有线" => "Wired",
         "2.4G 无线" => "2.4 GHz wireless",
         "常用预设" => "Presets",
@@ -537,11 +553,9 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "键盘" => "Keyboard",
         "耳机" => "Headset",
         "扬声器" => "Speaker",
-        "选择当前 DPI 档位" => "Select the current DPI stage",
         "正在读取 DPI 档位…" => "Reading DPI stages…",
-        "完整设备页" => "Full device page",
         "未检测到对应音频设备" => "No matching audio device found",
-        "打开 Windows 声音设置" => "Open Windows sound settings",
+        "声音设置" => "Sound settings",
         "手柄" => "Gamepad",
         "通用" => "Generic",
         "仅电量数字" => "Battery number only",

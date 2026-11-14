@@ -9,12 +9,12 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-if (-not $Version) {
-    $props = Import-PowerShellDataFile (Join-Path $here 'package.props.psd1')
-    $Version = $props.Version
-}
+$props = Import-PowerShellDataFile (Join-Path $here 'package.props.psd1')
+$source = & (Join-Path (Split-Path $here -Parent) 'tools/check-release.ps1') -SourceOnly
+if (-not $Version) { $Version = $source.StoreVersion }
+if ($Version -ne $source.StoreVersion) { throw 'Upload version does not match the source version.' }
 
-$pkgName = "Sonder.RBattery_${Version}_x64"
+$pkgName = "$($props.IdentityName)_${Version}_x64"
 $msix = Join-Path $here "AppPackages\$pkgName.msix"
 if (-not (Test-Path $msix)) {
     throw "找不到 $msix —— 先跑 build-msix.ps1 -Version $Version"

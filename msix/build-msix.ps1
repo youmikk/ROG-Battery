@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string] $Version,
+    [string] $MakeAppxPath,
     [switch] $Sign,
     [string] $CertPath,
     [string] $CertPassword,
@@ -53,6 +54,7 @@ if (-not (Test-Path $propsPath)) {
     throw "找不到参数文件 $propsPath —— msix 目录不完整，重新检查打包资产。"
 }
 $props = Import-PowerShellDataFile -Path $propsPath
+if ($MakeAppxPath) { $props.MakeAppxPath = $MakeAppxPath }
 
 foreach ($pair in @(
         @{ Env = 'MSSTORE_PACKAGE_IDENTITY_NAME'; Key = 'IdentityName' }
@@ -67,6 +69,10 @@ foreach ($pair in @(
 }
 
 if ($Version) { $props.Version = $Version }
+$sourceVersion = & (Join-Path $repo 'tools/check-release.ps1') -SourceOnly
+if ($props.Version -ne $sourceVersion.StoreVersion) {
+    throw "Package version $($props.Version) does not match source version $($sourceVersion.StoreVersion)."
+}
 
 if ($props.Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     throw "Version 必须是 4 段数字，例如 1.0.0.0（现在是 '$($props.Version)'）。用 -Version 1.0.1.0 指定。"
@@ -164,6 +170,7 @@ if (-not (Test-Path $exe)) {
 "@
 }
 $exeSize = (Get-Item $exe).Length
+$verifiedExe = & (Join-Path $repo 'tools/check-release.ps1') -Executable $exe
 if ($exeSize -eq 0) {
     throw "$exe 是 0 字节 —— 编译产物损坏，重新跑 cargo build --release。"
 }
@@ -176,7 +183,8 @@ New-Item -ItemType Directory -Path (Join-Path $stage 'Assets') | Out-Null
 
 Copy-Item $exe (Join-Path $stage $exeName)
 $stagedExeSize = (Get-Item (Join-Path $stage $exeName)).Length
-if ($stagedExeSize -ne $exeSize) {
+if ($stagedExeSize -ne $exeSize -or
+    (Get-FileHash -LiteralPath (Join-Path $stage $exeName) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $verifiedExe.Sha256) {
     throw "拷贝 exe 到 stage 后大小不一致（源 $exeSize / 目标 $stagedExeSize），磁盘可能有问题。"
 }
 
@@ -429,6 +437,8 @@ if ($Verify) {
     if (Test-Path $unpackedExe) {
         $uexeSize = (Get-Item $unpackedExe).Length
         Add-Check "exe（$exeName）" ($uexeSize -eq $exeSize) ("{0:N0} bytes / 源 {1:N0}" -f $uexeSize, $exeSize)
+        $unpackedHash = (Get-FileHash -LiteralPath $unpackedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+        Add-Check 'exe SHA256 matches verified build' ($unpackedHash -eq $verifiedExe.Sha256) $unpackedHash
     } else {
         Add-Check "exe（$exeName）" $false 'MISSING'
     }

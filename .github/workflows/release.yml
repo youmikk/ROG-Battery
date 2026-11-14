@@ -26,6 +26,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: 装 MSYS2 / mingw64 gcc
         uses: msys2/setup-msys2@v2
@@ -47,58 +49,31 @@ jobs:
       - name: 算版本号
         id: ver
         shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
         run: |
-          $tag = "${{ inputs.tag }}".Trim()
-          if (-not $tag) { $tag = "${{ github.ref_name }}" }
-          if ($tag -match '^v\d') {
-            $ver = $tag -replace '^v', ''
-            $src = "tag $tag"
-          } else {
-            $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-            $src = 'Cargo.toml'
-            $tag = ''
-          }
+          $tag = ([string]$env:REQUESTED_TAG).Trim()
+          if (-not $tag -and $env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
+          $verified = ./tools/check-release.ps1 -Tag $tag -SourceOnly
+          $ver = $verified.Version
           "version=$ver" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
-          Write-Host "版本号 = $ver（来源：$src）"
+          Write-Host "版本号 = $ver；标签 = $tag"
+
+      - name: 回归测试
+        run: cargo test --release --locked
 
       - name: cargo build --release
         env:
           ROG_BUILD_VERSION: ${{ steps.ver.outputs.version }}
         run: cargo build --release --locked
 
-      - name: 校验二进制自报版本 == tag 版本
+      - name: 校验源码、标签、二进制与 PE 子系统
         shell: pwsh
         env:
-          EXPECT: ${{ steps.ver.outputs.version }}
+          RELEASE_TAG: ${{ steps.ver.outputs.tag }}
         run: |
-          $exe = Join-Path (Get-Location) 'target\release\rog-mouse-ctl.exe'
-          $outFile = Join-Path $env:RUNNER_TEMP 'ver.txt'
-          $errFile = Join-Path $env:RUNNER_TEMP 'ver.err.txt'
-          $proc = Start-Process -FilePath $exe -ArgumentList 'version' -WindowStyle Hidden -Wait -PassThru `
-            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
-          $got = if (Test-Path $outFile) { (Get-Content $outFile -Raw).Trim() } else { '' }
-          $expect = $env:EXPECT
-          "二进制自报 = '$got'    期望版本 = '$expect'    exit = $($proc.ExitCode)"
-          if (-not $got -and (Test-Path $errFile)) {
-            "stderr: " + (Get-Content $errFile -Raw)
-          }
-          if ($got -ne $expect) {
-            throw "版本号不一致：二进制说 '$got'，期望 '$expect' —— 检查 build.rs 的 ROG_APP_VERSION 有没有被 ROG_BUILD_VERSION 覆盖"
-          }
-
-      - name: 校验 PE 子系统必须是 GUI（防黑框回归）
-        shell: pwsh
-        run: |
-          $exe = 'target\release\rog-mouse-ctl.exe'
-          $b = [System.IO.File]::ReadAllBytes((Resolve-Path $exe))
-          $pe = [BitConverter]::ToInt32($b, 0x3C)
-          $sub = [BitConverter]::ToUInt16($b, $pe + 0x18 + 0x44)
-          "size      = {0:N0} B" -f $b.Length
-          "subsystem = $sub  (2 = WINDOWS_GUI, 3 = WINDOWS_CUI)"
-          if ($sub -ne 2) {
-            throw "子系统不是 GUI（$sub）—— 启动会闪黑框，需要的是 GUI 子系统"
-          }
+          ./tools/check-release.ps1 -Tag $env:RELEASE_TAG | Format-List
 
       - name: 汇总产物 + 算 sha256
         shell: pwsh
@@ -121,9 +96,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.ver.outputs.tag }}
         run: |
-          $tag = "${{ inputs.tag }}".Trim()
-          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          $tag = $env:RELEASE_TAG
           $ver = $tag -replace '^v', ''
           $changelog = Get-Content CHANGELOG.md -Raw -Encoding utf8
           $section = [regex]::Match($changelog, '(?ms)^## ' + [regex]::Escape($ver) + '\r?\n(.*?)(?=^## |\z)')
@@ -132,12 +107,11 @@ jobs:
           [IO.File]::WriteAllText($notes, $section.Groups[1].Value.Trim(), [Text.UTF8Encoding]::new($false))
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
-            "Release $tag 已存在，只覆盖附件"
-            gh release upload $tag dist\rog-mouse-ctl.exe dist\rog-mouse-ctl.exe.sha256 --clobber
+            throw "Release $tag already exists. Published assets must not be overwritten."
           } else {
             "Release $tag 不存在，新建"
             gh release create $tag dist\rog-mouse-ctl.exe dist\rog-mouse-ctl.exe.sha256 `
-              --title "R Battery $ver" --notes-file $notes
+              --verify-tag --title "R Battery $ver" --notes-file $notes
           }
           if ($LASTEXITCODE -ne 0) { throw "Release publishing failed" }
           gh release view $tag --json tagName,assets | Out-File -FilePath release-info.json -Encoding utf8

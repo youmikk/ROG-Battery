@@ -1,29 +1,15 @@
 New
-- Switch between known DPI stages directly from the tray mouse panel.
-- Control speaker or headset volume, mute the microphone, and open Windows sound settings from the tray.
-- Microsoft Store builds now send a Windows low battery notification below 20%.
+- Switch DPI stages from the tray mouse panel.
+- Adjust volume, mute the microphone, and open Windows sound settings from the tray or headset details.
+- Drag devices to reorder the list; the order is saved.
 
 Improvements
-- Low battery state is tracked independently for each device.
+- Tray window height follows expanding and collapsing device panels.
+- Settings are grouped into General, Battery & tray, Data & storage, and About.
+- Improved alignment, text clarity, and synchronization of audio controls.
 
 Fixes
-- Fixed a crash that could occur after saving a custom device name.
-- Diagnostic logs now include the device model, VID/PID, receiver details, operation results, and crash location.
-- Fixed the tray battery level not recovering automatically after the mouse wakes from sleep.
-
-New
-- Chinese and English language options, with Windows display language detection by default.
-- Device overview and direct access to details when only one device is detected.
-- A tray battery panel on single click and the main window on double click.
-- Custom device names and types, with consistent display throughout the app.
-- Selection of the device whose battery level appears in the tray.
-
-Improvements
-- A single numeric tray icon with refined text size, spacing, and alignment.
-- Simpler navigation and consistent window controls and device preferences.
-- A rename dialog that matches the app theme.
-
-Fixes
-- Fixed lingering hover backgrounds on title bar buttons.
-- Fixed navigation and control alignment.
-- Fixed inconsistent device types after a manual selection.
+- Fixed a possible crash after reordering devices.
+- Fixed occasional unintended main-window activation on a single tray click.
+- Fixed pauses, trails, and leftover controls during panel animation.
+- Fixed clipped headset selection text.

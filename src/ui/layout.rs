@@ -19,6 +19,8 @@ pub const CONTENT_TOP: f32 = super::titlebar::TITLE_H;
 pub const PAGE_PAD_X: f32 = 40.0;
 /// 内容区顶部内边距（CSS `padding-top: 6px`）。
 pub const PAGE_PAD_TOP: f32 = 6.0;
+/// 设置页标题和分类固定在内容上方。
+pub const SETTINGS_BODY_TOP: f32 = CONTENT_TOP + PAGE_PAD_TOP + 108.0;
 /// 内容区底部额外留白（CSS `padding-bottom: 240px`）。
 ///
 /// 网页里这个值是为了「滚到底时最后一个区块能到顶部」。桌面窗口不需要

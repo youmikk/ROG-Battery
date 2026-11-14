@@ -225,6 +225,22 @@ fn low_battery_alert(level: u8, charging: bool, armed: &mut bool) -> bool {
     true
 }
 
+fn persist_device_order(shared: &Arc<Mutex<Shared>>, order: Vec<String>) {
+    let mut shared = lock_shared(shared);
+    let mut cfg = shared.cfg.clone();
+    cfg.set_device_order(order);
+    match settings::save(&cfg) {
+        Ok(()) => {
+            shared.cfg = cfg;
+            shared.sort_readings();
+        }
+        Err(error) => crate::diagnostics::event(
+            "device_order_save_failed",
+            &format!("error={error}"),
+        ),
+    }
+}
+
 #[derive(Clone)]
 struct DeviceSnapshot {
     reading: crate::device::DeviceReading,
@@ -567,11 +583,18 @@ impl Shared {
     fn sort_readings(&mut self) {
         let cfg = &self.cfg;
         self.readings.sort_by(|a, b| {
-            (cfg.device_kind(a).order(), cfg.device_name(a), &a.key).cmp(&(
-                cfg.device_kind(b).order(),
-                cfg.device_name(b),
-                &b.key,
-            ))
+            (
+                cfg.device_order_index(&a.key).unwrap_or(usize::MAX),
+                cfg.device_kind(a).order(),
+                cfg.device_name(a),
+                &a.key,
+            )
+                .cmp(&(
+                    cfg.device_order_index(&b.key).unwrap_or(usize::MAX),
+                    cfg.device_kind(b).order(),
+                    cfg.device_name(b),
+                    &b.key,
+                ))
         });
     }
 
@@ -830,6 +853,48 @@ fn join_bounded(h: std::thread::JoinHandle<()>, budget: Duration) {
 /// 托盘图标回调消息号。`WM_APP + 100`，避开 nwg 自己用的那些。
 const TRAY_CALLBACK_MSG: u32 = 0x8000 + 100;
 
+#[derive(Clone, Copy, Default)]
+struct TrayClicks {
+    pending: Option<(u32, bool)>,
+    pressed_was_open: Option<bool>,
+    suppress_release: bool,
+}
+
+impl TrayClicks {
+    fn press(&mut self, was_open: bool) {
+        self.pressed_was_open = Some(was_open);
+        self.suppress_release = false;
+    }
+
+    fn release(&mut self, timestamp: u32, was_open: bool) -> bool {
+        if self.suppress_release || self.pending.is_some() {
+            return false;
+        }
+        self.pending = Some((timestamp, self.pressed_was_open.take().unwrap_or(was_open)));
+        true
+    }
+
+    fn double_click(&mut self, timestamp: u32, interval: u32) -> bool {
+        if self.suppress_release {
+            return false;
+        }
+        let valid = self.pending.take().is_some_and(|(first, _)| {
+            timestamp.wrapping_sub(first) <= interval
+        });
+        self.pressed_was_open = None;
+        self.suppress_release = valid;
+        valid
+    }
+
+    fn finish_single(&mut self) -> Option<bool> {
+        self.pending.take().map(|(_, was_open)| was_open)
+    }
+
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// 自己管的托盘图标。
 ///
 /// 为什么不用 nwg 的 `TrayNotification`：它不暴露 `guidItem`，而托盘图标的
@@ -1034,6 +1099,7 @@ impl std::ops::Drop for TrayCtl {
 /// 打成一个结构而不是给 `handle_act` 传七个参数：这条链上每加一个能力
 /// （比如新加一个「打开日志」按钮要 `ShellExecute`），改签名会波及每一处调用。
 struct UiEnv<'a> {
+    audio: &'a crate::audio::Controls,
     canvas: &'a Canvas,
     shared: &'a Arc<Mutex<Shared>>,
     signal: &'a Signal,
@@ -1139,6 +1205,20 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.signal.request_refresh();
             env.canvas.repaint_now();
         }
+        Act::ReorderDevice(from, to) => {
+            let mut order = lock_shared(env.shared)
+                .readings
+                .iter()
+                .map(|reading| reading.key.clone())
+                .collect::<Vec<_>>();
+            if from < order.len() && to < order.len() && from != to {
+                let key = order.remove(from);
+                order.insert(to, key);
+                persist_device_order(env.shared, order);
+                env.canvas.with_ui_mut(|ui| ui.device_drag = None);
+                env.canvas.repaint_now();
+            }
+        }
         Act::ToggleDeviceTray => {
             if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
                 let reading = lock_shared(env.shared)
@@ -1176,6 +1256,11 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.canvas.repaint_now();
         }
 
+        Act::SettingsSection(section) => {
+            env.canvas.with_ui_mut(|ui| ui.select_settings_section(section));
+            env.canvas.repaint_now();
+        }
+
         Act::SelectCloseChoice(c) => {
             env.canvas.with_ui_mut(|u| u.close_choice = c);
             env.canvas.repaint_now();
@@ -1207,6 +1292,7 @@ fn handle_act(a: Act, env: &UiEnv) {
 
             if choice == crate::ui::widget::CloseChoice::Minimize {
                 env.window.set_visible(false);
+                env.audio.set_active(1, false);
                 // 藏起来了，把位图和字体还回去；恢复后首帧自动重建。
                 env.canvas.release_render_memory();
             } else {
@@ -1278,10 +1364,32 @@ fn handle_act(a: Act, env: &UiEnv) {
             // 拖拽中只改「这一帧显示什么」，**不写设备**。
             // 写一轮设备几十毫秒，拖一次会积压几十条命令，滑块会慢半拍。
             env.canvas.with_ui_mut(|u| u.set_live_frac(s, frac));
+            if s == Slide::AudioVolume {
+                let slot = env.canvas.with_ui(|u| u.audio_slot);
+                env.audio.set_volume(slot, (frac.clamp(0.0, 1.0) * 100.0).round() as u8);
+            }
             env.canvas.repaint_now();
         }
 
         Act::CommitSlide(s) => commit_slide(env, s),
+
+        Act::SelectAudio(slot) => {
+            env.canvas.with_ui_mut(|u| {
+                u.audio_slot = slot;
+                u.clear_live_frac(Slide::AudioVolume);
+            });
+            env.audio.refresh();
+            env.canvas.repaint_now();
+        }
+        Act::ToggleMicrophone => {
+            env.audio.toggle_microphone();
+            env.canvas.repaint_now();
+        }
+        Act::OpenSoundSettings => {
+            if let Err(error) = crate::audio::open_sound_settings() {
+                env.say(format!("✘ {error}"));
+            }
+        }
 
         // `on_press` 只把它写进 `pressed_slide`，不需要额外处理。
 
@@ -1712,6 +1820,10 @@ fn commit_slide(env: &UiEnv, s: Slide) {
             let v = (raw / 5).clamp(-4, 4) * 5;
             env.canvas.with_ui_mut(|u| u.clear_live_frac(s));
             env.submit(Cmd::Tuning(v));
+        }
+        Slide::AudioVolume => {
+            env.canvas.with_ui_mut(|u| u.clear_live_frac(s));
+            env.canvas.repaint_now();
         }
     }
 }
@@ -2447,7 +2559,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let shared = Arc::new(Mutex::new(Shared::new(cfg.clone())));
     let signal = Arc::new(Signal::new(cfg.refresh_interval_sec));
     let sender = notice.sender();
-    let popup = Rc::new(crate::ui::tray_popup::Popup::new(&window, sender)?);
+    let audio = crate::audio::Controls::new(move || sender.notice());
+    let popup = Rc::new(crate::ui::tray_popup::Popup::new(sender, audio.clone())?);
     let name_dialog = crate::ui::device_name::Dialog::new(&window, sender)?;
 
     {
@@ -2484,6 +2597,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     {
         let shared_p = Arc::clone(&shared);
+        let audio_p = audio.clone();
         canvas.set_painter(Box::new(move |inner, fonts, ui, args| {
             // 只在锁里拷一份数据，**不在锁里画** —— 画一帧要几毫秒，
             // 握着锁会让后台线程写结果时多等这段。
@@ -2549,6 +2663,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     .unwrap_or_default();
             }
             let empty_estimate = crate::history::Estimate::default();
+            let audio = audio_p.snapshot();
             let data = crate::ui::viewdata::Data {
                 selected,
                 state: state.as_ref(),
@@ -2570,6 +2685,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 native_notifications_supported: crate::notifications::supported(),
                 version: APP_VERSION,
                 readings: &readings,
+                audio: &audio,
             };
             canvas::draw_frame(inner, fonts, ui, args, &theme, &data)
         }));
@@ -2729,6 +2845,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     let canvas_min = canvas_e.clone();
     let shared_language = Arc::clone(&shared);
+    let audio_min = audio.clone();
     let tray_broadcast = Arc::clone(&tray_tb);
     // 第二个参数是**处理器 id**（nwg 要求 > 0xFFFF），要过滤的消息在回调里判。
     let min_handler =
@@ -2740,6 +2857,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             // SIZE_MINIMIZED = 1
             if msg == 0x0005 && wp as usize == 1 {
                 canvas_min.release_render_memory();
+                audio_min.set_active(1, false);
+            }
+            if (msg == 0x0005 && wp as usize != 1) || (msg == 0x0018 && wp != 0) {
+                sender.notice();
             }
             if msg == 0x001A {
                 let cfg = lock_shared(&shared_language).cfg.clone();
@@ -2780,6 +2901,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         d.close(false);
                     }
                     window.set_visible(false);
+                    audio.set_active(1, false);
                     // 同上：收进托盘后不再重绘，渲染内存全部归还。
                     canvas_e.release_render_memory();
                 } else {
@@ -2859,7 +2981,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                                 popup_events.hide();
                             }
                         }
-                        Action::Settings | Action::Main | Action::Device(_) => {
+                        Action::ReorderDevices(order) => {
+                            persist_device_order(&shared_e, order);
+                        }
+                        Action::Settings | Action::Main => {
                             popup_events.hide();
                             match action {
                                 Action::Settings => canvas.with_ui_mut(|u| {
@@ -2870,13 +2995,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                                     u.page = Page::Home;
                                     u.initial_route_done = true;
                                 }),
-                                Action::Device(key) => {
-                                    canvas.with_ui_mut(|u| u.select_device(&key));
-                                    let mut s = lock_shared(&shared_e);
-                                    s.active_key = Some(key);
-                                    s.want_full = true;
-                                    signal_e.request_refresh();
-                                }
                                 _ => {}
                             }
                             unsafe {
@@ -2901,7 +3019,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     let on_battery = canvas.with_ui(|u| u.page == crate::ui::widget::Page::Battery);
                     let charging = on_battery && s.quick.map(|q| q.charging).unwrap_or(false);
                     let toast_active = canvas.with_ui(|u| !u.status.is_empty());
-                    charging || toast_active
+                    let dragging_device = canvas.with_ui(|u| u.device_drag.is_some());
+                    charging || toast_active || dragging_device
                 };
                 canvas.set_animating(want_anim);
 
@@ -2909,6 +3028,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 let acts = canvas.take_acts();
                 if !acts.is_empty() {
                     let env = UiEnv {
+                        audio: &audio,
                         canvas: &canvas,
                         shared: &shared_e,
                         signal: &signal_e,
@@ -2922,6 +3042,15 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     // 用户在动界面：顺手补读一次，读数不该停在几分钟前。
                     signal_e.note_activity();
                 }
+
+                let audio_active = window.visible() && unsafe { crate::win32::IsIconic(hwnd) } == 0 && canvas.with_ui(|ui| {
+                    let shared = lock_shared(&shared_e);
+                    ui.page == Page::Battery && shared.readings.iter().any(|r| {
+                        Some(&r.key) == ui.selected_device.as_ref()
+                            && shared.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Headset
+                    })
+                });
+                audio.set_active(1, audio_active);
 
                 // ② 后台回报的命令结果
                 let result = { lock_shared(&shared_e).last.take() };
@@ -3001,21 +3130,24 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 通道已经不参与，所以这里用裸处理器。
     let shared_tray = Arc::clone(&shared);
     const CLICK_TIMER: usize = 87;
-    let pending_click = Cell::new(false);
-    let suppress_release = Cell::new(false);
-    let click_was_open = Cell::new(false);
+    let clicks = Cell::new(TrayClicks::default());
     let anchor = Cell::new(win32::Rect::default());
     let tray_handler = unsafe {
         nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |h, msg, wp, lp| {
             let message_hwnd = h as win32::Handle;
             if taskbar_created != 0 && msg == taskbar_created {
+                clicks.set(TrayClicks::default());
+                win32::KillTimer(message_hwnd, CLICK_TIMER);
                 tray_tb.re_add();
                 return Some(0);
             }
             if msg == 0x0113 && wp == CLICK_TIMER {
                 win32::KillTimer(message_hwnd, CLICK_TIMER);
-                if pending_click.replace(false) {
-                    if click_was_open.get() {
+                let mut click = clicks.get();
+                let was_open = click.finish_single();
+                clicks.set(click);
+                if let Some(was_open) = was_open {
+                    if was_open {
                         popup_tray.hide();
                     } else {
                         let (readings, cfg, dpi, generation) = {
@@ -3042,6 +3174,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 return Some(0);
             }
             let event = (lp as u32) & 0xffff;
+            let timestamp = win32::GetMessageTime() as u32;
             let icon_rect = tray_tb
                 .entries
                 .borrow()
@@ -3056,7 +3189,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             });
             match event {
                 0x0205 | 0x007b => {
-                    pending_click.set(false);
+                    let mut click = clicks.get();
+                    click.cancel();
+                    clicks.set(click);
                     win32::KillTimer(message_hwnd, CLICK_TIMER);
                     popup_tray.hide();
                     if let Some((parent, id)) = mi_quit.handle.hmenu_item() {
@@ -3072,31 +3207,44 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     menu.popup(x, y);
                 }
                 0x0201 => {
-                    suppress_release.set(false);
-                    click_was_open.set(popup_tray.was_open());
+                    let mut click = clicks.get();
+                    click.press(popup_tray.was_open());
+                    clicks.set(click);
                     anchor.set(current);
                 }
                 0x0203 => {
-                    pending_click.set(false);
-                    suppress_release.set(true);
+                    let mut click = clicks.get();
+                    let double = click.double_click(timestamp, win32::GetDoubleClickTime());
+                    if !double && !click.suppress_release {
+                        click.press(popup_tray.was_open());
+                        anchor.set(current);
+                    }
+                    clicks.set(click);
                     win32::KillTimer(message_hwnd, CLICK_TIMER);
-                    popup_tray.hide();
-                    canvas_tray.with_ui_mut(|u| {
-                        u.page = Page::Home;
-                        u.initial_route_done = true;
-                    });
-                    win32::ShowWindow(hwnd, 9);
-                    win32::SetForegroundWindow(hwnd);
-                    canvas_tray.repaint_now();
+                    if double {
+                        popup_tray.hide();
+                        canvas_tray.with_ui_mut(|u| {
+                            u.page = Page::Home;
+                            u.initial_route_done = true;
+                        });
+                        win32::ShowWindow(hwnd, 9);
+                        win32::SetForegroundWindow(hwnd);
+                        canvas_tray.repaint_now();
+                    }
                 }
                 0x0202 | 0x0400 => {
-                    if !suppress_release.get() && !pending_click.replace(true) {
+                    let mut click = clicks.get();
+                    let single = click.release(timestamp, popup_tray.was_open());
+                    clicks.set(click);
+                    if single {
                         anchor.set(current);
                         win32::SetTimer(message_hwnd, CLICK_TIMER, win32::GetDoubleClickTime(), 0);
                     }
                 }
                 0x0401 => {
-                    pending_click.set(false);
+                    let mut click = clicks.get();
+                    click.cancel();
+                    clicks.set(click);
                     win32::KillTimer(message_hwnd, CLICK_TIMER);
                     if popup_tray.was_open() {
                         popup_tray.hide();
@@ -3175,4 +3323,80 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // （GUID 或退回的编号）删除，也会释放图标句柄。
     tray_exit.set_visibility(false);
     Ok(())
+}
+
+#[cfg(test)]
+mod tray_click_tests {
+    use super::TrayClicks;
+
+    #[test]
+    fn single_click_and_duplicate_select_only_toggle_popup_once() {
+        let mut clicks = TrayClicks::default();
+        clicks.press(false);
+        assert!(clicks.release(1000, false));
+        assert!(!clicks.release(1001, false));
+        assert_eq!(clicks.finish_single(), Some(false));
+        assert_eq!(clicks.finish_single(), None);
+        assert!(!clicks.double_click(1200, 500));
+    }
+
+    #[test]
+    fn double_notification_without_first_local_click_falls_back_to_single() {
+        let mut clicks = TrayClicks::default();
+        assert!(!clicks.double_click(1000, 500));
+        clicks.press(false);
+        assert!(clicks.release(1010, false));
+        assert_eq!(clicks.finish_single(), Some(false));
+    }
+
+    #[test]
+    fn genuine_double_click_consumes_pending_single_and_trailing_releases() {
+        let mut clicks = TrayClicks::default();
+        clicks.press(false);
+        assert!(clicks.release(1000, false));
+        assert!(clicks.double_click(1100, 500));
+        assert!(!clicks.double_click(1101, 500));
+        assert!(!clicks.release(1110, false));
+        assert_eq!(clicks.finish_single(), None);
+    }
+
+    #[test]
+    fn double_click_does_not_reopen_popup_on_release() {
+        let mut clicks = TrayClicks::default();
+        clicks.press(false);
+        assert!(clicks.release(1000, false));
+        assert!(clicks.double_click(1100, 500));
+        assert_eq!(clicks.finish_single(), None);
+        assert!(!clicks.release(1110, false));
+        assert!(!clicks.release(1111, false));
+        clicks.press(false);
+        assert!(clicks.release(1300, false));
+        assert_eq!(clicks.finish_single(), Some(false));
+    }
+
+    #[test]
+    fn expired_click_and_cancelled_click_cannot_open_main_window() {
+        let mut clicks = TrayClicks::default();
+        assert!(clicks.release(1000, false));
+        assert!(!clicks.double_click(1600, 500));
+        assert!(clicks.release(1700, false));
+        clicks.cancel();
+        assert!(!clicks.double_click(1750, 500));
+        assert_eq!(clicks.finish_single(), None);
+    }
+
+    #[test]
+    fn popup_open_state_is_captured_before_deactivation() {
+        let mut clicks = TrayClicks::default();
+        clicks.press(true);
+        assert!(clicks.release(1000, false));
+        assert_eq!(clicks.finish_single(), Some(true));
+    }
+
+    #[test]
+    fn system_message_timestamp_wrap_keeps_double_click_valid() {
+        let mut clicks = TrayClicks::default();
+        assert!(clicks.release(u32::MAX - 20, false));
+        assert!(clicks.double_click(20, 500));
+    }
 }

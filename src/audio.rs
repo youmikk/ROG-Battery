@@ -18,7 +18,7 @@ use winapi::um::propidl::{PropVariantClear, PROPVARIANT};
 use winapi::um::propsys::IPropertyStore;
 use winapi::Interface;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Endpoint {
     pub id: String,
     pub name: String,
@@ -26,12 +26,174 @@ pub struct Endpoint {
     pub muted: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub speaker: Option<Endpoint>,
     pub headset: Option<Endpoint>,
     pub microphone: Option<Endpoint>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Slot {
+    #[default]
+    Speaker,
+    Headset,
+}
+
+impl Snapshot {
+    pub fn output(&self, slot: Slot) -> Option<&Endpoint> {
+        match slot {
+            Slot::Speaker => self.speaker.as_ref(),
+            Slot::Headset => self.headset.as_ref(),
+        }
+    }
+
+    fn output_mut(&mut self, slot: Slot) -> Option<&mut Endpoint> {
+        match slot {
+            Slot::Speaker => self.speaker.as_mut(),
+            Slot::Headset => self.headset.as_mut(),
+        }
+    }
+}
+
+enum Request {
+    Refresh,
+    Volume(String, u8),
+    Mute(String),
+}
+
+#[derive(Default)]
+struct CachedAudio {
+    snapshot: Snapshot,
+    revision: u64,
+}
+
+/// 两个窗口共用音频状态；COM 读取和写入只在工作线程执行。
+#[derive(Clone)]
+pub struct Controls {
+    cache: std::sync::Arc<std::sync::Mutex<CachedAudio>>,
+    active: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    sender: std::sync::mpsc::Sender<Request>,
+}
+
+impl Controls {
+    pub fn new(notify: impl Fn() + Send + 'static) -> Self {
+        use std::sync::{atomic::Ordering, mpsc, Arc, Mutex};
+        let cache = Arc::new(Mutex::new(CachedAudio::default()));
+        let active = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let (sender, receiver) = mpsc::channel();
+        let worker_cache = Arc::clone(&cache);
+        let worker_active = Arc::clone(&active);
+        std::thread::spawn(move || loop {
+            let request = match receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(request) => request,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if worker_active.load(Ordering::Relaxed) == 0 {
+                        continue;
+                    }
+                    Request::Refresh
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            let mut requests = vec![request];
+            let cache = worker_cache.lock().unwrap_or_else(|e| e.into_inner());
+            for request in receiver.try_iter() {
+                queue_request(&mut requests, request);
+            }
+            let revision = cache.revision;
+            drop(cache);
+            let mut error = None;
+            for request in requests {
+                let result = match request {
+                    Request::Refresh => Ok(()),
+                    Request::Volume(id, percent) => set_volume(&id, percent),
+                    Request::Mute(id) => toggle_mute(&id).map(|_| ()),
+                };
+                if let Err(value) = result {
+                    error = Some(value);
+                }
+            }
+            let mut fresh = snapshot();
+            if error.is_some() {
+                fresh.error = error;
+            }
+            let mut cache = worker_cache.lock().unwrap_or_else(|e| e.into_inner());
+            // 拖动期间的新值不能被较早开始的读取覆盖。
+            if cache.revision == revision && cache.snapshot != fresh {
+                cache.snapshot = fresh;
+                drop(cache);
+                notify();
+            }
+        });
+        Self { cache, active, sender }
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).snapshot.clone()
+    }
+
+    pub fn set_active(&self, window: u8, on: bool) {
+        use std::sync::atomic::Ordering;
+        let previous = if on {
+            self.active.fetch_or(window, Ordering::Relaxed)
+        } else {
+            self.active.fetch_and(!window, Ordering::Relaxed)
+        };
+        if on && previous & window == 0 {
+            self.refresh();
+        }
+    }
+
+    pub fn refresh(&self) {
+        let _ = self.sender.send(Request::Refresh);
+    }
+
+    pub fn set_volume(&self, slot: Slot, percent: u8) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(endpoint) = cache.snapshot.output_mut(slot) else { return };
+        let percent = percent.min(100);
+        if endpoint.volume == percent {
+            return;
+        }
+        endpoint.volume = percent;
+        let id = endpoint.id.clone();
+        cache.snapshot.error = None;
+        cache.revision = cache.revision.wrapping_add(1);
+        let _ = self.sender.send(Request::Volume(id, percent));
+    }
+
+    pub fn toggle_microphone(&self) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(endpoint) = cache.snapshot.microphone.as_mut() else { return };
+        endpoint.muted = !endpoint.muted;
+        let id = endpoint.id.clone();
+        cache.snapshot.error = None;
+        cache.revision = cache.revision.wrapping_add(1);
+        let _ = self.sender.send(Request::Mute(id));
+    }
+
+    pub fn toggle_output(&self, slot: Slot) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(endpoint) = cache.snapshot.output_mut(slot) else { return };
+        endpoint.muted = !endpoint.muted;
+        let id = endpoint.id.clone();
+        cache.snapshot.error = None;
+        cache.revision = cache.revision.wrapping_add(1);
+        let _ = self.sender.send(Request::Mute(id));
+    }
+}
+
+fn queue_request(requests: &mut Vec<Request>, request: Request) {
+    // 连续拖动只保留同一端点的最新音量，麦克风切换保持原顺序。
+    if let (Some(Request::Volume(previous, _)), Request::Volume(next, _)) =
+        (requests.last(), &request)
+    {
+        if previous == next {
+            requests.pop();
+        }
+    }
+    requests.push(request);
 }
 
 struct ComGuard {
@@ -326,4 +488,35 @@ pub fn toggle_mute(id: &str) -> Result<bool, String> {
 
 pub fn open_sound_settings() -> Result<(), String> {
     crate::dynlight::shell_open("ms-settings:sound")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn volume_drag_keeps_latest_value_for_each_endpoint() {
+        let mut requests = Vec::new();
+        for (id, volume) in [("speaker", 20), ("speaker", 21), ("speaker", 22),
+            ("headset", 60), ("headset", 61)] {
+            queue_request(&mut requests, Request::Volume(id.to_string(), volume));
+        }
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(&requests[0], Request::Volume(id, 22) if id == "speaker"));
+        assert!(matches!(&requests[1], Request::Volume(id, 61) if id == "headset"));
+    }
+
+    #[test]
+    fn volume_drag_preserves_microphone_toggles_and_order() {
+        let mut requests = vec![Request::Volume("speaker".to_string(), 20)];
+        queue_request(&mut requests, Request::Mute("mic".to_string()));
+        queue_request(&mut requests, Request::Volume("speaker".to_string(), 30));
+        queue_request(&mut requests, Request::Volume("speaker".to_string(), 40));
+        queue_request(&mut requests, Request::Mute("mic".to_string()));
+        assert_eq!(requests.len(), 4);
+        assert!(matches!(&requests[0], Request::Volume(_, 20)));
+        assert!(matches!(&requests[1], Request::Mute(id) if id == "mic"));
+        assert!(matches!(&requests[2], Request::Volume(_, 40)));
+        assert!(matches!(&requests[3], Request::Mute(id) if id == "mic"));
+    }
 }

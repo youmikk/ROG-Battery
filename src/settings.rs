@@ -6,6 +6,8 @@ use crate::paths;
 pub struct Settings {
     pub device_tray: std::collections::BTreeMap<String, crate::tray_prefs::DeviceTray>,
     pub device_names: std::collections::BTreeMap<String, String>,
+    /// 用户拖拽后的设备顺序。未知或已移除的设备会被忽略。
+    pub device_order: Vec<String>,
     pub tray_device: Option<String>,
     pub tray_device_name: String,
     /// 快照缓存有效期（秒）。0 表示每次都重读设备。
@@ -36,6 +38,7 @@ impl Default for Settings {
         Settings {
             device_tray: Default::default(),
             device_names: Default::default(),
+            device_order: Vec::new(),
             tray_device: None,
             tray_device_name: String::new(),
             cache_ttl_sec: crate::snapshot::DEFAULT_TTL_SEC,
@@ -78,6 +81,19 @@ impl Settings {
                     }
                 }
                 "tray_device_name" => s.tray_device_name = v.to_string(),
+                "device_order" => {
+                    let mut seen = std::collections::BTreeSet::new();
+                    s.device_order = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| {
+                            id.len() == 16
+                                && id.bytes().all(|b| b.is_ascii_hexdigit())
+                                && seen.insert(id.to_ascii_lowercase())
+                        })
+                        .map(str::to_ascii_lowercase)
+                        .collect();
+                }
                 "language" => match crate::i18n::Language::parse(v) {
                     Some(language) => s.language = language,
                     None => warnings.push(format!("language={v} 只认 system/zh-CN/en，已忽略")),
@@ -197,6 +213,9 @@ impl Settings {
         for (key, name) in &self.device_names {
             s.push_str(&format!("device_name.{key}={name}\n"));
         }
+        if !self.device_order.is_empty() {
+            s.push_str(&format!("device_order={}\n", self.device_order.join(",")));
+        }
         s
     }
 
@@ -205,6 +224,23 @@ impl Settings {
             .get(&device.key)
             .map(String::as_str)
             .unwrap_or(&device.name)
+    }
+
+    pub fn device_order_index(&self, key: &str) -> Option<usize> {
+        self.device_order.iter().position(|candidate| candidate == key)
+    }
+
+    pub fn set_device_order(&mut self, keys: impl IntoIterator<Item = String>) {
+        let mut seen = std::collections::BTreeSet::new();
+        self.device_order = keys
+            .into_iter()
+            .map(|key| key.to_ascii_lowercase())
+            .filter(|key| {
+                key.len() == 16
+                    && key.bytes().all(|b| b.is_ascii_hexdigit())
+                    && seen.insert(key.clone())
+            })
+            .collect();
     }
 
     pub fn tray_name(&self) -> &str {

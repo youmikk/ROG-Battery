@@ -546,6 +546,7 @@ pub fn tray_rect(hwnd: Handle, id: TrayId) -> Option<Rect> {
 #[link(name = "user32")]
 extern "system" {
     pub fn GetDoubleClickTime() -> u32;
+    pub fn GetMessageTime() -> i32;
     pub fn SetTimer(hwnd: Handle, id: usize, elapse_ms: u32, proc: usize) -> usize;
     pub fn KillTimer(hwnd: Handle, id: usize) -> i32;
 }

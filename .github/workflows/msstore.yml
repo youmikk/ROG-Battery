@@ -57,11 +57,14 @@ jobs:
       - name: 算版本号
         id: ver
         shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           $tag = ''
           if ($env:GITHUB_REF -like 'refs/tags/*') { $tag = $env:GITHUB_REF -replace '^refs/tags/', '' }
 
-          $v = "${{ inputs.version }}".Trim()
+          $v = ([string]$env:REQUESTED_VERSION).Trim()
+          if ($v -and $v -notmatch '^\d+\.\d+\.\d+(\.0)?$') { throw 'Store versions must use X.Y.Z or X.Y.Z.0.' }
           $src = 'input'
           if (-not $v -and $tag) { $v = $tag -replace '^v', ''; $src = "tag $tag" }
           if (-not $v) {
@@ -74,12 +77,17 @@ jobs:
           $four = ($p[0..2] -join '.') + '.0'
 
           if ($four -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "版本号不合法：'$v' → $four" }
+          $verified = ./tools/check-release.ps1 -Tag $tag -SourceOnly
+          if ($four -ne $verified.StoreVersion) { throw 'MSIX version does not match the source version.' }
           if ($four -match '^0\.') { throw "版本号第一段不能为 0：$four（商店要求 >= 1.0.0.0）" }
 
           "version=$four" >> $env:GITHUB_OUTPUT
           "semver=" + ($p[0..2] -join '.') >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
           Write-Host "MSIX 版本 = $four（来源：$src）"
+
+      - name: 回归测试
+        run: cargo test --release --locked
 
       - name: cargo build --release
         env:

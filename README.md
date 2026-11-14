@@ -15,6 +15,10 @@
 - 托盘设备面板新增鼠标 DPI 档位快捷切换。
 - 点击耳机设备可直接调节扬声器或耳机音量，并静音麦克风。
 - 可一键打开 Windows 声音设置切换系统默认播放设备。
+- 主窗口的耳机详情页提供音量和麦克风控制，与托盘同步。
+- 设备列表支持拖动排序，并保存排列顺序。
+- 设置页按常规、电量与托盘、数据与存储、关于分类。
+- 优化托盘二级面板的展开、收起动画及文字清晰度，修复偶发误开主窗口的问题。
 - Microsoft Store 版本保留低电量系统通知，绿色版不提供。
 
 ## 使用
@@ -33,7 +37,7 @@
 
 ### 语言
 
-点击右上角齿轮，进入 **设置 → 语言**，可选「跟随系统」「简体中文」「English」，切换立即生效。
+点击右上角齿轮，进入 **设置 → 常规 → 语言**，可选「跟随系统」「简体中文」「English」，切换立即生效。
 
 “跟随系统”使用 Windows **显示语言**。仅把 English 移到 Windows“首选语言”列表首位，不一定会改变显示语言；这种情况下可直接在应用中选择 English。
 
@@ -155,14 +159,20 @@ cargo +stable-x86_64-pc-windows-gnu build --release --locked
 
 产物为 `target/release/rog-mouse-ctl.exe`。仓库已包含所需 Windows 导入库和图标资源，无需额外安装运行时。更新图标时可使用 `windres -O coff -I assets -i assets/app.rc -o assets/app.o` 重新生成资源。
 
-MSIX 打包需要 Windows SDK 中的 MakeAppx：
+本地发布验证会运行回归测试、构建绿色版，检查版本和 PE 子系统，并生成 SHA256 校验文件：
+
+```powershell
+powershell -File tools/build-release.ps1
+```
+
+绿色版产物集中在 `dist/版本号/`。推送源码和版本标签后，GitHub Actions 会构建并发布绿色版，同时打包 MSIX 和商店上传包、验证包内程序，并通过配置好的凭据提交 Microsoft Store。需要手动打 MSIX 时，安装 Windows SDK 后可运行：
 
 ```powershell
 powershell -File msix/build-msix.ps1 -Verify
 powershell -File msix/make-upload.ps1
 ```
 
-版本号由 `Cargo.toml` 管理，商店四段版本在 `msix/package.props.psd1` 中同步。`v*` 标签会触发绿色版发布和 MSIX 打包；配置商店凭据与产品 ID 后会提交 Microsoft Store。
+版本号由 `Cargo.toml` 管理，商店四段版本在 `msix/package.props.psd1` 中同步。发布前确认工作区干净，推送源码后创建对应的 `vX.Y.Z` 标签。标签、源码版本、程序自报版本和 MSIX 版本必须一致，否则流程会停止。标签会触发绿色版发布和 MSIX 打包；配置商店凭据与产品 ID 后会提交 Microsoft Store。
 
 ## 反馈与许可
 

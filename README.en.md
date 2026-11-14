@@ -10,6 +10,10 @@ A lightweight battery monitor and mouse settings utility for ROG peripherals on 
 
 - Switch between known DPI stages directly from the tray mouse panel.
 - Open a headset panel to adjust speaker or headset volume, mute the microphone, and open Windows sound settings.
+- Headset audio controls are also available in the main window and share their state with the tray.
+- Drag devices to reorder the list; the order is saved.
+- Settings are organized into General, Battery & tray, Data & storage, and About.
+- Smoother tray panel animations, clearer text, and a fix for occasional unintended main-window activation.
 - Microsoft Store builds retain the Windows low battery notification; portable builds do not.
 
 ## Getting started
@@ -28,7 +32,7 @@ In the tray device list, a mouse opens its known DPI stages, while a headset ope
 
 ### Switching to English
 
-Click the gear in the upper-right corner, then choose **Settings (设置) → Language (语言) → English**. The change takes effect immediately.
+Click the gear in the upper-right corner, then choose **Settings (设置) → General (常规) → Language (语言) → English**. The change takes effect immediately.
 
 The default is **Follow system**, which uses the Windows **display language**. Moving English to the top of the Windows Preferred languages list alone may not change the display language. You can always select English directly in the app.
 
@@ -91,14 +95,20 @@ cargo +stable-x86_64-pc-windows-gnu build --release --locked
 
 The executable is `target/release/rog-mouse-ctl.exe`. Required Windows import libraries and the icon resource are included. To rebuild the icon resource, run `windres -O coff -I assets -i assets/app.rc -o assets/app.o`.
 
-MSIX packaging requires MakeAppx from the Windows SDK:
+Local release validation runs regression tests, builds the portable executable, checks versions and the PE subsystem, and generates SHA256 checksums:
+
+```powershell
+powershell -File tools/build-release.ps1
+```
+
+Portable outputs are collected in `dist/version/`. Push the source and matching release tag to let GitHub Actions build and publish the portable version, package and validate MSIX, and submit it to Microsoft Store using the configured credentials. For manual MSIX packaging, install the Windows SDK and run:
 
 ```powershell
 powershell -File msix/build-msix.ps1 -Verify
 powershell -File msix/make-upload.ps1
 ```
 
-Keep the version in `Cargo.toml` aligned with the four-part Store version in `msix/package.props.psd1`. Pushing a `v*` tag triggers portable release and MSIX workflows. Store submission also requires the configured credentials and product ID.
+Keep the version in `Cargo.toml` aligned with the four-part Store version in `msix/package.props.psd1`. Publish from a clean working tree: push the source commit, then create the matching `vX.Y.Z` tag. The tag, source version, executable version, and package version must agree. Pushing a release tag triggers portable release and MSIX workflows. Store submission also requires the configured credentials and product ID.
 
 ## Feedback and license
 

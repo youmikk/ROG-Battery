@@ -698,6 +698,47 @@ impl<'a> Painter<'a> {
             && r.right() > self.clip.x
     }
 
+    /// 文字落在物理像素栅格上。GDI+ 在半个像素上栅格化时，
+    /// GridFit 会被迫做灰度抗锯齿，笔画越细越像“糊了一层”。
+    fn snap_scalar(&self, value: f32) -> f32 {
+        let scale = if self.scale > 0.01 { self.scale } else { 1.0 };
+        (value * scale).round() / scale
+    }
+
+    fn snapped_text_rect(&self, r: R) -> R {
+        let x = self.snap_scalar(r.x);
+        let y = self.snap_scalar(r.y);
+        let right = self.snap_scalar(r.right()).max(x + 1.0);
+        let bottom = self.snap_scalar(r.bottom()).max(y + 1.0);
+        R::new(x, y, right - x, bottom - y)
+    }
+
+    fn snapped_font_size(&self, size: f32) -> f32 {
+        self.snap_scalar(size).max(1.0)
+    }
+
+    /// 在矩形内临时裁剪绘制。
+    pub(crate) fn with_clip(&mut self, rect: R, draw: impl FnOnce(&mut Self)) {
+        let left = self.clip.x.max(rect.x);
+        let top = self.clip.y.max(rect.y);
+        let right = self.clip.right().min(rect.right());
+        let bottom = self.clip.bottom().min(rect.bottom());
+        if right <= left || bottom <= top {
+            return;
+        }
+        let old = self.clip;
+        let clipped = R::new(left, top, right - left, bottom - top);
+        self.clip = clipped;
+        unsafe {
+            GdipSetClipRect(self.g, clipped.x, clipped.y, clipped.w, clipped.h, 0);
+        }
+        draw(self);
+        self.clip = old;
+        unsafe {
+            GdipSetClipRect(self.g, old.x, old.y, old.w, old.h, 0);
+        }
+    }
+
     // ---- 基本图元 ----
 
     /// 实心矩形。走 GDI+ 而不是 GDI 的 `FillRect`，
@@ -1098,6 +1139,8 @@ impl<'a> Painter<'a> {
 
     /// 画一行字。矩形决定对齐范围，垂直居中。
     pub fn text(&mut self, s: &str, r: R, size: f32, bold: bool, color: u32, align: Align) {
+        let r = self.snapped_text_rect(r);
+        let size = self.snapped_font_size(size);
         if !self.visible(r) || s.is_empty() {
             return;
         }
@@ -1124,6 +1167,8 @@ impl<'a> Painter<'a> {
 
     /// 画多行文字，从矩形顶部开始排。
     pub fn text_wrap(&mut self, s: &str, r: R, size: f32, color: u32) {
+        let r = self.snapped_text_rect(r);
+        let size = self.snapped_font_size(size);
         if !self.visible(r) || s.is_empty() {
             return;
         }
@@ -1153,6 +1198,7 @@ impl<'a> Painter<'a> {
     /// 长文字量出来是多行高度、宽度被 4096 的版面宽截住，而 `text()` 实际画的是
     /// 一行带省略号。调用方拿这个数去判断「放不放得下」，结论自然是错的。
     pub fn measure(&mut self, s: &str, size: f32, bold: bool) -> (f32, f32) {
+        let size = self.snapped_font_size(size);
         let font = self.fonts.get(size, bold);
         if font.is_null() || s.is_empty() {
             return (0.0, 0.0);

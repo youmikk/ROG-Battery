@@ -12,6 +12,16 @@ pub enum Page {
     Settings,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[repr(usize)]
+pub enum SettingsSection {
+    #[default]
+    General = 0,
+    Battery = 1,
+    Data = 2,
+    About = 3,
+}
+
 impl Page {
 
 }
@@ -120,6 +130,7 @@ impl Edit {
 pub enum Slide {
     /// 角度微调（−20..20）。
     Tune = 0,
+    AudioVolume = 1,
 }
 
 impl Slide {
@@ -158,10 +169,12 @@ pub enum Pref {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Act {
     SelectDevice(usize),
+    ReorderDevice(usize, usize),
     RenameDevice,
     ToggleDeviceTray,
     /// 切页。
     Nav(Page),
+    SettingsSection(SettingsSection),
     /// 打开下拉菜单。
     OpenDrop(Drop),
     /// 在下拉弹层里选第 `index` 项。
@@ -177,6 +190,9 @@ pub enum Act {
     /// 拖动滑块到某个比例（0–1），拖拽过程中连续触发。
     SetSlide(Slide, f32),
     CommitSlide(Slide),
+    SelectAudio(crate::audio::Slot),
+    ToggleMicrophone,
+    OpenSoundSettings,
     ToggleAdv(u8),
     /// 指定配色偏好。设置页的「外观」分段控件用：
     /// 0 = 跟随系统，1 = 浅色，2 = 深色。
@@ -237,7 +253,7 @@ impl Act {
     /// 本地动作（切页、改本地设置）照常执行。
     pub fn needs_device(self) -> bool {
         match self {
-            Act::ApplyEdit(Edit::Dpi(_)) | Act::CommitSlide(_) => true,
+            Act::ApplyEdit(Edit::Dpi(_)) | Act::CommitSlide(Slide::Tune) => true,
             Act::Backup | Act::Restore | Act::RefreshLighting => true,
             Act::Toggle(p) => p.needs_device(),
             Act::PickDrop(d, _) => d.needs_device(),
@@ -309,9 +325,24 @@ pub struct Pointer {
     /// 逻辑像素、客户区坐标（**内容坐标要自己加滚动量**）。
     pub x: f32,
     pub y: f32,
+    pub press_x: f32,
+    pub press_y: f32,
     pub down: bool,
     /// 拖拽中的滑块。`Some` 时鼠标移动会持续产生 `SetSlide`。
     pub dragging: Option<Slide>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DeviceDrag {
+    pub source: usize,
+    pub target: usize,
+    pub previous_target: usize,
+    pub pointer_x: f32,
+    pub pointer_y: f32,
+    pub grab_dx: f32,
+    pub grab_dy: f32,
+    pub started_at: std::time::Instant,
+    pub target_changed_at: std::time::Instant,
 }
 
 /// 鼠标指针形状。canvas 按它去 `LoadCursorW`。
@@ -325,6 +356,9 @@ pub enum Cursor {
 /// 界面的瞬时状态（不进 `settings.ini`，程序关了就没）。
 pub struct Ui {
     pub page: Page,
+    pub settings_section: SettingsSection,
+    settings_scroll: [f32; 4],
+    settings_content_h: [f32; 4],
     pub selected_device: Option<String>,
     pub tray_device_keys: Vec<String>,
     pub device_keys: Vec<String>,
@@ -386,6 +420,7 @@ pub struct Ui {
     /// 本次按下命中的滑块。存下来是因为 `pressed` 里那个 `SetSlide(s, frac)`
     /// 的分量只在按下那一瞬间有意义，后面拖动时要的是「哪一条滑块」。
     pub pressed_slide: Option<Slide>,
+    pub device_drag: Option<DeviceDrag>,
     /// 滑块拖拽中的临时值（0.0–1.0），下标是 [`Slide`] 的 `as usize`。
     ///
     /// # 为什么需要这一层
@@ -393,7 +428,8 @@ pub struct Ui {
     /// 页面画滑块时读的是**设备状态**（`d.state`）。拖拽期间鼠标已经移开了，
     /// 写设备却要几十毫秒、读回还得再来一轮 —— 中间那几帧滑块会卡在原地不动，
     /// 松手才「跳」到新位置。`None` = 这一条没有正在拖，页面回落到设备值。
-    pub live: [Option<f32>; 1],
+    pub live: [Option<f32>; 2],
+    pub audio_slot: crate::audio::Slot,
     /// 状态栏文字（右下角/底部浮层）。
     pub status: String,
     /// 状态栏提示的触发时间（用于自动在 ~2s 后消失）。
@@ -429,6 +465,9 @@ impl Default for Ui {
     fn default() -> Self {
         Ui {
             page: Page::Home,
+            settings_section: SettingsSection::General,
+            settings_scroll: [0.0; 4],
+            settings_content_h: [0.0; 4],
             selected_device: None,
             tray_device_keys: Vec::new(),
             device_keys: Vec::new(),
@@ -453,7 +492,9 @@ impl Default for Ui {
             hover: None,
             pressed: None,
             pressed_slide: None,
-            live: [None; 1],
+            device_drag: None,
+            live: [None; 2],
+            audio_slot: crate::audio::Slot::Speaker,
             status: String::new(),
             status_time: None,
             anim_hint: false,
@@ -472,6 +513,11 @@ impl Default for Ui {
 impl Ui {
     pub fn sync_devices(&mut self, devices: &[crate::device::DeviceReading]) {
         self.device_keys = devices.iter().map(|d| d.key.clone()).collect();
+        if self.device_drag.is_some_and(|drag| {
+            drag.source >= devices.len() || drag.target >= devices.len()
+        }) {
+            self.device_drag = None;
+        }
         if !self.initial_route_done && !devices.is_empty() {
             self.initial_route_done = true;
             if self.page == Page::Home && devices.len() == 1 {
@@ -497,6 +543,19 @@ impl Ui {
         self.edits.clear();
         self.chart = None;
         self.live.fill(None);
+    }
+
+    pub fn select_settings_section(&mut self, section: SettingsSection) {
+        if self.settings_section == section {
+            return;
+        }
+        self.settings_scroll[self.settings_section as usize] = self.scroll_y(Page::Settings);
+        self.settings_section = section;
+        *self.scroll_mut(Page::Settings) = self.settings_scroll[section as usize];
+        self.content_h[Self::page_index(Page::Settings)] = self.settings_content_h[section as usize];
+        self.open_drop = None;
+        self.cancel_edit();
+        self.hover = None;
     }
     fn page_index(p: Page) -> usize {
         match p {
@@ -537,6 +596,9 @@ impl Ui {
     /// 绘制结束时报上这一页的内容总高度，滚轮要用它夹住。
     pub fn set_content_h(&mut self, p: Page, h: f32) {
         self.content_h[Self::page_index(p)] = h;
+        if p == Page::Settings {
+            self.settings_content_h[self.settings_section as usize] = h;
+        }
     }
 
     pub fn content_h(&self, p: Page) -> f32 {
@@ -822,8 +884,68 @@ impl Ui {
     pub fn cancel_press(&mut self) {
         self.pressed = None;
         self.pressed_slide = None;
+        self.device_drag = None;
         self.pointer.down = false;
         self.pointer.dragging = None;
+    }
+
+    pub fn activate_device_drag(&mut self, x: f32, y: f32, scroll: f32) -> bool {
+        if self.device_keys.len() < 2 {
+            return false;
+        }
+        let Some(Act::SelectDevice(source)) = self.pressed else {
+            return false;
+        };
+        if self.hit(x, y, scroll) != Some(Act::SelectDevice(source)) {
+            return false;
+        }
+        let Some(card) = self
+            .hots
+            .iter()
+            .rev()
+            .find(|hot| hot.act == Act::SelectDevice(source))
+            .map(|hot| hot.rect)
+        else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        self.device_drag = Some(DeviceDrag {
+            source,
+            target: source,
+            previous_target: source,
+            pointer_x: x,
+            pointer_y: y + scroll,
+            grab_dx: x - card.x,
+            grab_dy: y + scroll - card.y,
+            started_at: now,
+            target_changed_at: now,
+        });
+        self.pressed = None;
+        true
+    }
+
+    pub fn update_device_drag(&mut self, x: f32, y: f32, scroll: f32) -> bool {
+        let Some(mut drag) = self.device_drag else {
+            return false;
+        };
+        drag.pointer_x = x;
+        drag.pointer_y = y + scroll;
+        let target = match self.hit(x, y, scroll) {
+            Some(Act::SelectDevice(index)) => index,
+            _ => drag.target,
+        };
+        if target != drag.target {
+            drag.previous_target = drag.target;
+            drag.target = target;
+            drag.target_changed_at = std::time::Instant::now();
+        }
+        self.device_drag = Some(drag);
+        true
+    }
+
+    pub fn finish_device_drag(&mut self) -> Option<Act> {
+        let drag = self.device_drag.take()?;
+        (drag.source != drag.target).then_some(Act::ReorderDevice(drag.source, drag.target))
     }
 
     /// 客户区与非客户区共用悬停更新，避免跨区后留下旧高亮。

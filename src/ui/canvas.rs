@@ -32,7 +32,7 @@ use crate::ui::gfx::{self, Canvas as GfxCanvas, Fonts, Painter, R};
 use crate::ui::layout::Frame;
 use crate::ui::pages::{self, Data};
 use crate::ui::theme::Theme;
-use crate::ui::widget::{Act, Cursor, Slide, Ui};
+use crate::ui::widget::{Act, Cursor, Page, Slide, Ui};
 use crate::win32::{to_wide, Handle, PaintStruct, Rect};
 
 // ───────────────────────────── 常量 ─────────────────────────────
@@ -409,7 +409,17 @@ pub fn draw_frame(
         a.view_w,
         a.view_h,
         |p: &mut Painter| {
-            pages::page(p, ui, data, &frame);
+            if ui.page == Page::Settings {
+                let mut settings_frame = frame;
+                settings_frame.content.y = crate::ui::layout::SETTINGS_BODY_TOP;
+                settings_frame.content.h = (a.view_h - settings_frame.content.y).max(0.0);
+                settings_frame.viewport.y = settings_frame.content.y;
+                settings_frame.viewport.h = settings_frame.content.h;
+                p.with_clip(R::new(0.0, scroll + settings_frame.content.y, a.view_w,
+                    settings_frame.content.h), |p| pages::page(p, ui, data, &settings_frame));
+            } else {
+                pages::page(p, ui, data, &frame);
+            }
         },
     );
 
@@ -422,6 +432,9 @@ pub fn draw_frame(
         a.view_w,
         a.view_h,
         |p: &mut Painter| {
+            if ui.page == Page::Settings {
+                pages::settings_header(p, ui, data, &frame);
+            }
             crate::ui::titlebar::draw(p, a.view_w, theme);
             crate::ui::titlebar::draw_settings(p, ui, a.view_w);
             crate::ui::titlebar::draw_buttons(p, a.view_w, theme, is_max, hover_btn);
@@ -1044,6 +1057,34 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 ui.pointer.y = y;
                 if moved {
                     let (pw, _) = client_pixel_size(hwnd);
+                    if ui.device_drag.is_some() {
+                        let scroll = ui.scroll_y(ui.page);
+                        let changed = ui.update_device_drag(x, y, scroll);
+                        drop(ui);
+                        if changed {
+                            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+                            (c.damage)();
+                        }
+                        return 0;
+                    }
+                    if ui.pointer.down
+                        && matches!(ui.pressed, Some(Act::SelectDevice(_)))
+                        && ((x - ui.pointer.press_x).powi(2)
+                            + (y - ui.pointer.press_y).powi(2))
+                        .sqrt()
+                            > 4.0
+                    {
+                        let scroll = ui.scroll_y(ui.page);
+                        let started = ui.activate_device_drag(x, y, scroll);
+                        drop(ui);
+                        if started {
+                            c.anim_wanted.set(true);
+                            set_timer(hwnd, true);
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                            (c.damage)();
+                        }
+                        return 0;
+                    }
                     let hover_changed = ui.refresh_hover_at(x, y, pw as f32 / c.scale);
                     // 正在拖滑块时，先把「这一帧该显示的值」写进 `live`，
                     // 页面下一帧就按它画 —— 这是滑块跟手的**唯一**来源。
@@ -1125,6 +1166,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                     let mut ui = c.ui.borrow_mut();
                     ui.pointer.x = x;
                     ui.pointer.y = y;
+                    ui.pointer.press_x = x;
+                    ui.pointer.press_y = y;
                     ui.pointer.down = true;
                     scroll = ui.scroll_y(ui.page);
                     ui.on_press(x, y, scroll);
@@ -1156,19 +1199,23 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 let y = hi_word(lp) as f32 / c.scale;
                 let mut pushed: Option<Act> = None;
                 let dragging: Option<Slide>;
+                let device_reorder: Option<Act>;
                 {
                     let mut ui = c.ui.borrow_mut();
                     ui.pointer.x = x;
                     ui.pointer.y = y;
                     ui.pointer.down = false;
+                    device_reorder = ui.finish_device_drag();
                     dragging = ui.pointer.dragging.take();
-                    if dragging.is_none() {
+                    if dragging.is_none() && device_reorder.is_none() {
                         let scroll = ui.scroll_y(ui.page);
                         pushed = ui.on_release(x, y, scroll);
                     }
                     ui.pressed_slide = None;
                 }
-                if let Some(s) = dragging {
+                if let Some(action) = device_reorder {
+                    c.acts.borrow_mut().push(action);
+                } else if let Some(s) = dragging {
                     // 拖动结束：把最终值发给页面，并通知「这一拖结束了」
                     //（页面据此决定要不要落盘 —— 拖的过程中不能每次都写设备）
                     let frac = c.ui.borrow().fraction_at(s, x);
