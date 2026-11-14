@@ -2,6 +2,16 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("导出设备适配报告") => { if $crate::i18n::english() { "Export device compatibility report" } else { "导出设备适配报告" } };
+    ("设备适配") => { if $crate::i18n::english() { "Device compatibility" } else { "设备适配" } };
+    ("反馈品牌与型号") => { if $crate::i18n::english() { "Report brand and model" } else { "反馈品牌与型号" } };
+    ("设备适配报告") => { if $crate::i18n::english() { "Device report" } else { "设备适配报告" } };
+    ("导出") => { if $crate::i18n::english() { "Export" } else { "导出" } };
+    ("无法打开保存窗口") => { if $crate::i18n::english() { "Could not open the save dialog" } else { "无法打开保存窗口" } };
+    ("无法保存适配报告") => { if $crate::i18n::english() { "Could not save the device report" } else { "无法保存适配报告" } };
+    ("适配报告已保存") => { if $crate::i18n::english() { "Device report saved" } else { "适配报告已保存" } };
+    ("当前 DPI") => { if $crate::i18n::english() { "Current DPI" } else { "当前 DPI" } };
+    ("DPI 不在设备报告的可用范围内") => { if $crate::i18n::english() { "DPI is outside the range reported by this device" } else { "DPI 不在设备报告的可用范围内" } };
     ("常规") => { if $crate::i18n::english() { "General" } else { "常规" } };
     ("电量与托盘") => { if $crate::i18n::english() { "Battery & tray" } else { "电量与托盘" } };
     ("数据与存储") => { if $crate::i18n::english() { "Data & storage" } else { "数据与存储" } };

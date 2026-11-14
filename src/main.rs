@@ -12,12 +12,14 @@
 mod autostart;
 mod audio;
 mod backup;
+mod backends;
 mod chart;
 mod cli;
 mod commands;
 mod devices;
 mod dwm;
 mod dynlight;
+mod feedback;
 mod gui;
 mod hid;
 mod i18n;
@@ -43,6 +45,8 @@ const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依
 
 用法：
   rog-mouse-ctl version                       打印版本号（和 GitHub tag 一致）
+  rog-mouse-ctl devices                       多品牌只读设备与电量列表
+  rog-mouse-ctl device-report                 输出不含序列号与接口路径的适配报告
   rog-mouse-ctl info [--fresh]                读全部信息（一次读全，默认吃 30 秒缓存）
   rog-mouse-ctl backup [文件]                 备份全部 31 项设置（默认 %USERPROFILE%\Documents\rog-mouse-ctl\backups\）
   rog-mouse-ctl restore <文件> [--save]       从备份还原（能量块最后单独重写并断言）
@@ -156,6 +160,27 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let cmd = pos[0];
+    if cmd == "device-report" {
+        return match feedback::collect() {
+            Ok(report) => { print!("{report}"); ExitCode::SUCCESS }
+            Err(error) => { eprintln!("{error}"); ExitCode::FAILURE }
+        };
+    }
+    if cmd == "devices" {
+        return match backends::read_all(true) {
+            Ok(devices) => {
+                for device in devices {
+                    let battery = device.battery.as_ref().and_then(|battery| battery.percent)
+                        .map(|percent| format!("{percent}%")).unwrap_or_else(|| "unknown".into());
+                    println!("{}\t{}\t{}\t{}\tDPI={}", device.target.key,
+                        device.target.backend.name(), device.target.name, battery,
+                        device.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "unknown".into()));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => { eprintln!("{error}"); ExitCode::FAILURE }
+        };
+    }
 
     // 不需要设备的命令先处理掉（cache 相关）
     if cmd == "cache" {

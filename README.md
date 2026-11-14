@@ -176,6 +176,8 @@ powershell -File msix/make-upload.ps1
 
 ## 反馈与许可
 
+多品牌功能目前在独立开发分支验证，尚未包含在 1.4.3 正式版。开发分支提供 Logitech HID++ 2.0 与标准 HID 电量适配器，以及设备适配反馈和报告导出。具体能力与实机验证状态见[设备兼容性](COMPATIBILITY.md)。命令行 `devices` 可只读查看当前设备，`device-report` 输出用于适配的设备描述符报告。
+
 问题或兼容性反馈请提交 [GitHub issue](https://github.com/youmikk/ROG-Battery/issues)。提交日志前请检查并移除序列号、个人路径等内容。
 
 仓库暂未附 LICENSE 文件；补充之前版权归作者所有。如需用于其他项目，请先开 issue 说明。

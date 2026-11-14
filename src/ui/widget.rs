@@ -216,6 +216,8 @@ pub enum Act {
     ClearHistory,
     /// 设置页「关于」：打开开源仓库。
     OpenRepo,
+    DeviceFeedback,
+    ExportDeviceReport,
     /// 设置页「关于」：打开 Microsoft Store 产品页。
     OpenStore,
     /// 灯光页：打开 Windows「动态光效」设置页（`ms-settings:personalization-lighting`）。

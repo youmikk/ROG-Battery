@@ -836,6 +836,8 @@ pub type FnHidPGetCaps = unsafe extern "system" fn(*mut c_void, *mut HidpCaps) -
 pub type FnHidDGetProductString = unsafe extern "system" fn(Handle, *mut u16, u32) -> u8;
 pub type FnHidDGetSerialNumberString = unsafe extern "system" fn(Handle, *mut u16, u32) -> u8;
 pub type FnHidDGetFeature = unsafe extern "system" fn(Handle, *mut u8, u32) -> u8;
+pub type FnHidPGetValueCaps = unsafe extern "system" fn(u32, *mut winapi::shared::hidpi::HIDP_VALUE_CAPS, *mut u16, *mut c_void) -> i32;
+pub type FnHidPGetUsageValue = unsafe extern "system" fn(u32, u16, u16, u16, *mut u32, *mut c_void, *mut u8, u32) -> i32;
 
 /// hid.dll 的函数表。进程内只加载一次（见 [`HidApi::load`]）。
 ///
@@ -855,6 +857,8 @@ pub struct HidApi {
     pub get_product_string: FnHidDGetProductString,
     pub get_serial_number_string: FnHidDGetSerialNumberString,
     pub get_feature: FnHidDGetFeature,
+    pub get_value_caps: FnHidPGetValueCaps,
+    pub get_usage_value: FnHidPGetUsageValue,
 }
 
 // 表里只有模块句柄与函数指针，跨线程共享是安全的（hid.dll 的导出函数无状态）。
@@ -912,6 +916,8 @@ impl HidApi {
                     FnHidDGetSerialNumberString
                 ),
                 get_feature: take!("HidD_GetFeature", FnHidDGetFeature),
+                get_value_caps: take!("HidP_GetValueCaps", FnHidPGetValueCaps),
+                get_usage_value: take!("HidP_GetUsageValue", FnHidPGetUsageValue),
             })
         }
     }

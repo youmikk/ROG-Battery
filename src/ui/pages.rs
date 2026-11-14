@@ -20,6 +20,7 @@ pub use crate::ui::viewdata::Data;
 // ───────────────────────── 通用小工具 ─────────────────────────
 
 fn link_text(d: &Data) -> &'static str {
+    if let Some(basic) = d.basic { return basic.target.backend.name(); }
     match d.link_mode {
         "Wired" => crate::tr!("有线"),
         "Wireless24G" => crate::tr!("2.4G 无线"),
@@ -710,6 +711,9 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         .is_some_and(|r| d.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Mouse);
     let mut x = c.x;
     for (page, label) in tabs {
+        if let Some(basic) = d.basic {
+            if matches!(page, Page::Light | Page::Keys) || (page == Page::Perf && basic.dpi.current.is_none()) { continue; }
+        }
         if page != Page::Battery && !is_mouse {
             continue;
         }
@@ -827,6 +831,9 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
 
 /// 画当前页正文（内容坐标，滚动由 canvas 施加）。
 pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
+    if d.basic.is_some() && matches!(ui.page, Page::Light | Page::Keys) {
+        ui.page = Page::Battery;
+    }
     if matches!(ui.page, Page::Perf | Page::Light | Page::Keys)
         && d.selected
             .is_some_and(|r| d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse)
@@ -839,6 +846,7 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     // 的内容要么是本地设置、要么是只读展示，锁了反而没法用。
     // 占位状态（`State::default()`）也算读不到 —— 否则开关/下拉照常可点。
     ui.locked = !d.state.is_some_and(|s| !placeholder_state(s));
+    if let Some(basic) = d.basic { ui.locked = !basic.connected || !basic.dpi.writable; }
 
     let mut c = Cursor::new(f);
     if !matches!(ui.page, Page::Home | Page::Settings) {
@@ -1457,6 +1465,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         headset_audio(p, ui, d, c);
     }
     device_tray_settings(p, ui, d, c);
+    if d.basic.is_some() { return; }
     if selected
         .is_some_and(|r| d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse)
     {
@@ -2020,7 +2029,27 @@ fn known_state<'a>(d: &'a Data) -> Option<&'a crate::proto::State> {
     d.state.filter(|s| !placeholder_state(s))
 }
 
+fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot, c: &mut Cursor) {
+    c.h2(p, "DPI", true);
+    let card = c.card(p, layout::ROW_H);
+    let area = row_area(card, card.y);
+    let control = row_label(p, area, crate::tr!("当前 DPI"), None, 180.0);
+    let edit = Edit::Dpi(0);
+    let text = ui.edit_text(edit).map(str::to_string)
+        .or_else(|| basic.dpi.current.map(|dpi| dpi.to_string())).unwrap_or_else(|| "—".into());
+    let box_r = R::new(control.x, control.cy() - 15.0, 95.0, 30.0);
+    num_box(p, box_r, &text, ui.focus == Some(edit));
+    if basic.dpi.writable && basic.connected { ui.hot(box_r, Act::Focus(edit)); }
+    button(p, ui, R::new(control.right() - 65.0, control.cy() - 15.0, 65.0, 30.0),
+        crate::tr!("应用"), false, Act::ApplyEdit(edit));
+    c.y = card.bottom();
+}
+
 fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
+    if let Some(basic) = d.basic {
+        basic_dpi(p, ui, basic, c);
+        return;
+    }
     let t = p.t;
     let st = known_state(d);
     let cur = st.map(cur_stage);
@@ -2918,6 +2947,18 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let ctl = row_label(p, area, crate::tr!("诊断日志"), None, 64.0);
     button(p, ui, R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
         crate::tr!("打开"), false, Act::OpenLogFolder);
+    c.y = card.bottom();
+    c.h2(p, crate::tr!("设备适配"), false);
+    let card = c.card(p, layout::ROW_H * 2.0);
+    let area = row_area(card, card.y);
+    let control = row_label(p, area, crate::tr!("反馈品牌与型号"), Some("GitHub"), 96.0);
+    button(p, ui, R::new(control.x, control.cy() - 15.0, 96.0, 30.0),
+        crate::tr!("打开"), false, Act::DeviceFeedback);
+    row_rule(p, card, area);
+    let area = row_area(card, card.y + layout::ROW_H);
+    let control = row_label(p, area, crate::tr!("设备适配报告"), None, 96.0);
+    button(p, ui, R::new(control.x, control.cy() - 15.0, 96.0, 30.0),
+        crate::tr!("导出"), false, Act::ExportDeviceReport);
     c.y = card.bottom();
 }
 

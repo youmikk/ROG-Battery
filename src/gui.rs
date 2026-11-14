@@ -10,7 +10,7 @@ use std::time::Duration;
 use native_windows_gui as nwg;
 
 use crate::commands::{run_cmd, run_file_cmd};
-use crate::hid::{self, HidDevice};
+use crate::hid;
 use crate::proto;
 use crate::settings::{self, Settings};
 use crate::snapshot::{self, FetchOutcome};
@@ -78,6 +78,7 @@ enum Status {
 /// 编码成一个可以跨线程传递的值。
 #[derive(Clone)]
 pub(crate) enum Cmd {
+    BasicDpi { target: crate::backends::Target, dpi: u16 },
     Poll(i32),
     Dpi {
         stage: usize,
@@ -123,6 +124,7 @@ impl Cmd {
     /// 结果行 / 提示里用的中文短名。
     pub(crate) fn label(&self) -> String {
         match self {
+            Cmd::BasicDpi { dpi, .. } => format!("DPI {dpi}"),
             Cmd::Poll(hz) => crate::trf!("回报率 {hz} Hz", hz = hz),
             Cmd::Dpi { stage, dpi, .. } => {
                 crate::trf!("DPI 档 {stage} → {dpi}", dpi = dpi, stage = stage)
@@ -248,6 +250,7 @@ struct DeviceSnapshot {
     ident: proto::Identity,
     link: Option<hid::Link>,
     full_at: std::time::Instant,
+    basic: Option<crate::backends::Snapshot>,
 }
 
 fn diagnostic_link(link: &hid::Link) -> crate::diagnostics::DeviceInfo {
@@ -315,15 +318,18 @@ fn diagnostic_facts<'a>(
 }
 
 fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
+    let additional = crate::backends::read_additional(full).unwrap_or_default();
     let links = crate::win32::HidApi::load().and_then(|api| hid::open_links(&api));
     let links = match links {
         Ok(links) => links,
         Err(e) => {
             crate::diagnostics::event_once("link_enumeration_failed", &e);
             let mut s = lock_shared(shared);
+            if outcome_is_stale(generation, s.write_gen) { return None; }
             for device in s.devices.values_mut() {
                 device.reading.connected = false;
                 device.state = None;
+                if let Some(basic) = &mut device.basic { basic.connected = false; }
             }
             for reading in &mut s.readings {
                 reading.connected = false;
@@ -331,6 +337,8 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             s.quick = None;
             s.full = None;
             s.status = Status::Error(e);
+            merge_additional(&mut s, additional);
+            if s.readings.iter().any(|reading| reading.connected) { s.status = Status::Ok; }
             return None;
         }
     };
@@ -345,6 +353,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
     };
     for record in records.values_mut() {
         record.reading.connected = false;
+        if let Some(basic) = &mut record.basic { basic.connected = false; }
     }
     let mut sample = None;
     let mut seen = std::collections::BTreeSet::new();
@@ -362,14 +371,8 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                 && active
                     .as_ref()
                     .is_none_or(|k| previous.as_ref().is_some_and(|d| &d.reading.key == k)));
-        let out = match HidDevice::open(&link.iface) {
-            Ok(mut dev) => {
-                if needs_full {
-                    snapshot::fetch(&mut dev, &link.all_interfaces, link.report_id, &link.mode)
-                } else {
-                    snapshot::fetch_light(&mut dev, link.report_id, &link.mode)
-                }
-            }
+        let out = match crate::backends::rog::fetch(&link, needs_full) {
+            Ok(out) => out,
             Err(error) => {
                 let device = diagnostic_link(&link);
                 let facts = diagnostic_facts(
@@ -449,6 +452,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             previous.as_ref().map(|d| d.reading.level).unwrap_or(0)
         };
         let record = DeviceSnapshot {
+            basic: None,
             reading: crate::device::DeviceReading {
                 key: key.clone(),
                 name: if name.is_empty() {
@@ -506,13 +510,32 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         for d in records.values_mut() {
             if !d.reading.connected {
                 d.state = None;
+                if let Some(basic) = &mut d.basic { basic.connected = false; }
             }
         }
         s.readings = records.values().map(|d| d.reading.clone()).collect();
         s.sort_readings();
         s.devices = records;
+        merge_additional(&mut s, additional);
     }
     sample
+}
+
+fn merge_additional(shared: &mut Shared, snapshots: Vec<crate::backends::Snapshot>) {
+    for snapshot in snapshots {
+        let Some(level) = snapshot.battery.as_ref().and_then(|battery| battery.percent) else { continue; };
+        let key = snapshot.target.key.clone();
+        let reading = crate::device::DeviceReading {
+            key: key.clone(), name: snapshot.target.name.clone(), family: snapshot.target.family,
+            level, charging: snapshot.battery.as_ref().and_then(|battery| battery.charging).unwrap_or(false),
+            connected: snapshot.connected,
+        };
+        let ident = proto::Identity { model_name: snapshot.target.name.clone(), ..Default::default() };
+        shared.devices.insert(key, DeviceSnapshot { reading, ident, state: None, link: None,
+            full_at: std::time::Instant::now(), basic: Some(snapshot) });
+    }
+    shared.readings = shared.devices.values().map(|record| record.reading.clone()).collect();
+    shared.sort_readings();
 }
 
 struct Shared {
@@ -714,12 +737,22 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
         .devices
         .iter()
         .filter_map(|(key, device)| {
+            if let Some(basic) = &device.basic {
+                let choices = basic.dpi.quick_values();
+                if choices.is_empty() || !basic.dpi.writable { return None; }
+                let mut stages = [0; 4];
+                for (stage, value) in stages.iter_mut().zip(&choices) { *stage = i32::from(*value); }
+                let active = choices.iter().position(|value| Some(*value) == basic.dpi.current)
+                    .map(|index| index as u8 + 1).unwrap_or(0);
+                return Some((key.clone(), crate::ui::tray_popup::DpiState { stages, active, value_control: true }));
+            }
             let state = device.state.as_ref()?;
             Some((
                 key.clone(),
                 crate::ui::tray_popup::DpiState {
                     stages: [state.dpi(0), state.dpi(1), state.dpi(2), state.dpi(3)],
                     active: state.active_stage.clamp(1, 4),
+                    value_control: false,
                 },
             ))
         })
@@ -1109,6 +1142,10 @@ struct UiEnv<'a> {
 }
 
 impl<'a> UiEnv<'a> {
+    fn basic(&self) -> Option<crate::backends::Snapshot> {
+        let key = self.canvas.with_ui(|ui| ui.selected_device.clone())?;
+        lock_shared(self.shared).devices.get(&key)?.basic.clone()
+    }
     /// 在界面底部浮层显示一条提示，并立刻重画。
     fn say(&self, text: impl Into<String>) {
         let t = text.into();
@@ -1339,6 +1376,16 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::PickDrop(d, idx) => pick_drop(env, d, idx),
 
         Act::Focus(e) => {
+            if e == Edit::Dpi(0) {
+                if let Some(basic) = env.basic() {
+                    if basic.connected && basic.dpi.writable {
+                        let init = basic.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_default();
+                        env.canvas.with_ui_mut(|ui| ui.begin_edit(e, init));
+                        env.canvas.repaint_now();
+                    }
+                    return;
+                }
+            }
             // **这里必须自己建草稿**：`Ui::on_press` 命中 `Act::Focus` 时只设
             // `focus`，`edits` 里还是空的。不建草稿的话 `type_char` 找不到槽位
             // 直接返回 `false`，表现是「点进输入框后敲字没反应」。
@@ -1460,6 +1507,25 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
 
         Act::OpenRepo => open_url(env, "https://github.com/youmikk/ROG-Battery"),
+        Act::DeviceFeedback => open_url(env, &crate::feedback::issue_url()),
+        Act::ExportDeviceReport => {
+            let mut dialog = nwg::FileDialog::default();
+            if nwg::FileDialog::builder().title(crate::tr!("导出设备适配报告"))
+                .action(nwg::FileDialogAction::Save).filters("Text(*.txt)").build(&mut dialog).is_err() {
+                env.say(crate::tr!("无法打开保存窗口"));
+                return;
+            }
+            if dialog.run(Some(env.window)) {
+                if let Ok(path) = dialog.get_selected_item() {
+                    let result = crate::feedback::collect().and_then(|report|
+                        std::fs::write(PathBuf::from(path), report).map_err(|_| crate::tr!("无法保存适配报告").to_string()));
+                    match result {
+                        Ok(()) => env.say(crate::tr!("适配报告已保存")),
+                        Err(error) => env.say(error),
+                    }
+                }
+            }
+        }
 
         Act::OpenStore => open_url(env, "https://apps.microsoft.com/detail/9NRC8HCD4BZ7"),
     }
@@ -1700,6 +1766,17 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
 
 /// 「应用」按钮：读草稿 → 校验 → 提交。
 fn apply_edit(env: &UiEnv, e: Edit) {
+    if e == Edit::Dpi(0) {
+        if let Some(basic) = env.basic() {
+            let text = env.canvas.with_ui(|ui| ui.edit_text(e).map(str::to_string));
+            let dpi = text.as_deref().and_then(|text| text.trim().parse::<u16>().ok());
+            if let Some(dpi) = dpi.filter(|dpi| basic.connected && basic.dpi.writable && basic.dpi.values.contains(dpi)) {
+                env.submit(Cmd::BasicDpi { target: basic.target, dpi });
+                drop_draft(env, e);
+            } else { env.say(crate::tr!("DPI 不在设备报告的可用范围内")); }
+            return;
+        }
+    }
     let st = env.state();
 
     match e {
@@ -2226,6 +2303,10 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
         if s.pending.len() >= MAX_PENDING {
             return false;
         }
+        if !matches!(cmd, Cmd::AutoStart(_) | Cmd::BasicDpi { .. })
+            && s.active_key.as_ref().and_then(|key| s.devices.get(key)).is_some_and(|record| record.basic.is_some()) {
+            return false;
+        }
         let target = s
             .active_key
             .as_ref()
@@ -2686,6 +2767,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 version: APP_VERSION,
                 readings: &readings,
                 audio: &audio,
+                basic: record.as_ref().and_then(|record| record.basic.as_ref()),
             };
             canvas::draw_frame(inner, fonts, ui, args, &theme, &data)
         }));
@@ -2971,6 +3053,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             nwg::stop_thread_dispatch();
                         }
                         Action::SetDpiStage(key, stage) => {
+                            if lock_shared(&shared_e).devices.get(&key).is_some_and(|record| record.basic.is_some()) { continue; }
                             canvas.with_ui_mut(|ui| ui.select_device(&key));
                             {
                                 let mut shared = lock_shared(&shared_e);
@@ -2979,6 +3062,12 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             }
                             if !submit(&shared_e, &signal_e, Cmd::Stage(stage)) {
                                 popup_events.hide();
+                            }
+                        }
+                        Action::SetDpiValue(key, dpi) => {
+                            let basic = lock_shared(&shared_e).devices.get(&key).and_then(|record| record.basic.clone());
+                            if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.writable && basic.dpi.values.contains(&dpi)) {
+                                submit(&shared_e, &signal_e, Cmd::BasicDpi { target: basic.target, dpi });
                             }
                         }
                         Action::ReorderDevices(order) => {

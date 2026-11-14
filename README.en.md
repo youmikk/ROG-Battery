@@ -112,6 +112,8 @@ Keep the version in `Cargo.toml` aligned with the four-part Store version in `ms
 
 ## Feedback and license
 
+Multi-brand support is being validated on a separate development branch and is not part of the stable 1.4.3 release. The branch adds Logitech HID++ 2.0 and standard HID battery adapters, device feedback and report export. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status. The `devices` command reads device status; `device-report` exports descriptor information for compatibility investigation.
+
 Report problems or compatibility results in [GitHub issues](https://github.com/youmikk/ROG-Battery/issues). Remove serial numbers and personal file paths before sharing logs.
 
 This repository does not currently include a LICENSE file. Copyright remains with the author. Please open an issue before reusing the code in another project.

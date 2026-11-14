@@ -36,6 +36,7 @@ pub struct HidInterface {
     pub usage: u16,
     pub input_len: u16,
     pub output_len: u16,
+    pub feature_len: u16,
     pub product: String,
     pub serial: String,
 }
@@ -73,6 +74,13 @@ pub fn enumerate(hid: &HidApi) -> Result<Vec<HidInterface>, String> {
 }
 
 pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
+    let mut report = enumerate_all_report(hid)?;
+    report.interfaces.retain(|iface| iface.vendor_id == VID_ASUS);
+    Ok(report)
+}
+
+/// 只读描述符枚举，品牌协议决定后续可用的控制接口。
+pub fn enumerate_all_report(hid: &HidApi) -> Result<EnumerateReport, String> {
     let mut list = Vec::new();
     let mut skipped: Vec<Skipped> = Vec::new();
 
@@ -119,9 +127,6 @@ pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
             };
             match probe_interface(hid, &path) {
                 Ok(iface) => {
-                    if iface.vendor_id != VID_ASUS {
-                        continue;
-                    }
                     list.push(iface);
                 }
                 // 单个接口打不开（权限 / 被占用）不算致命，但要留下原因，
@@ -262,6 +267,7 @@ fn probe_interface(hid: &HidApi, path: &str) -> Result<HidInterface, String> {
             usage: caps.usage,
             input_len: caps.input_report_byte_length,
             output_len: caps.output_report_byte_length,
+            feature_len: caps.feature_report_byte_length,
             product: read_hid_string(hid, h, 0),
             serial: read_hid_string(hid, h, 1),
         })
@@ -326,6 +332,44 @@ pub struct HidDevice {
 }
 
 impl HidDevice {
+    /// 原样收发品牌协议帧；匹配必须包含设备索引、功能及事务标识。
+    pub fn transact(
+        &mut self,
+        packet: &[u8],
+        timeout_ms: u32,
+        mut matches: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        if !self.writable || packet.is_empty() || packet.len() > self.out_len as usize {
+            return None;
+        }
+        self.drain();
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(u64::from(timeout_ms));
+        let mut padded = vec![0; self.out_len as usize];
+        padded[..packet.len()].copy_from_slice(packet);
+        self.write_ov = Overlapped { h_event: self.write_event, ..Default::default() };
+        let mut written = 0;
+        let ok = unsafe {
+            WriteFile(self.write_handle, padded.as_ptr().cast(), padded.len() as u32,
+                &mut written, &mut self.write_ov)
+        };
+        if !self.finish_write(ok, written, timeout_ms) {
+            return None;
+        }
+        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+            if !self.start_read(self.in_len as usize) { return None; }
+            let frame = self.finish_read(left.as_millis().max(1) as u32)?;
+            if matches(&frame) { return Some(frame); }
+        }
+        None
+    }
+
+    /// 标准 Input report 的被动读取，不向键盘或鼠标发送私有命令。
+    pub fn read_report(&mut self, timeout_ms: u32) -> Option<Vec<u8>> {
+        if !self.start_read(self.in_len as usize) { return None; }
+        self.finish_read(timeout_ms)
+    }
+
     /// 打开指定路径的命令通道。写句柄开不了时自动降级为只读（`writable=false`）。
     pub fn open(iface: &HidInterface) -> Result<HidDevice, String> {
         let wide = to_wide(&iface.path);

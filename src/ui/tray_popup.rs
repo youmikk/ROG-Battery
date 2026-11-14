@@ -42,6 +42,7 @@ pub enum Action {
     ReorderDevices(Vec<String>),
     TogglePanel(String),
     SetDpiStage(String, u8),
+    SetDpiValue(String, u16),
     AudioSlot(AudioSlot),
     AudioSlider(AudioSlot),
     ToggleMicrophone,
@@ -54,6 +55,7 @@ pub use crate::audio::Slot as AudioSlot;
 pub struct DpiState {
     pub stages: [i32; 4],
     pub active: u8,
+    pub value_control: bool,
 }
 
 struct State {
@@ -1360,8 +1362,10 @@ fn draw_dpi(
     if let Some(dpi) = dpi {
         let segment = R::new(panel.x + 18.0, panel.y + 28.0, panel.w - 36.0, 40.0);
         p.round(segment, 9.0, t.bg_sunken);
-        let item_w = segment.w / 4.0;
+        let count = dpi.stages.iter().filter(|level| **level > 0).count().max(1);
+        let item_w = segment.w / count as f32;
         for (index, level) in dpi.stages.into_iter().enumerate() {
+            if level <= 0 { continue; }
             let r = R::new(
                 segment.x + index as f32 * item_w + 3.0,
                 segment.y + 3.0,
@@ -1384,7 +1388,8 @@ fn draw_dpi(
                 hits,
                 visible,
                 r,
-                Action::SetDpiStage(key.to_string(), (index + 1) as u8),
+                if dpi.value_control { Action::SetDpiValue(key.to_string(), level as u16) }
+                else { Action::SetDpiStage(key.to_string(), (index + 1) as u8) },
             );
         }
     } else {
