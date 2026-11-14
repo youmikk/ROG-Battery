@@ -34,6 +34,18 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn parsed_frame(&self, key: &str) -> bool {
+        self.frames.contains_key(key) && !self.failed.contains_key(key)
+    }
+
+    pub fn battery(&self) -> Option<crate::device::Battery> {
+        if !self.parsed_frame("12:07:00") || self.state.power > 100 { return None; }
+        Some(crate::device::Battery {
+            percent: Some(self.state.power), charging: Some(self.state.charging != 0),
+            voltage_mv: Some(self.state.voltage_mv), approximate: false, level: None,
+        })
+    }
+
     pub fn age(&self) -> Option<Duration> {
         self.taken.map(|t| t.elapsed())
     }
@@ -55,6 +67,26 @@ impl Snapshot {
 }
 
 // ==================== 抓取 ====================
+
+#[cfg(test)]
+mod battery_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_energy_frames_are_unknown_while_valid_zero_is_reported() {
+        let mut snapshot = Snapshot::default();
+        assert!(snapshot.battery().is_none());
+        snapshot.frames.insert("12:07:00".into(), vec![0x12, 7, 0]);
+        parse_all(&mut snapshot);
+        assert!(snapshot.battery().is_none());
+        snapshot.failed.clear();
+        snapshot.frames.insert("12:07:00".into(), vec![0x12, 7, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0]);
+        parse_all(&mut snapshot);
+        assert_eq!(snapshot.battery().unwrap().percent, Some(0));
+        snapshot.state.power = 255;
+        assert!(snapshot.battery().is_none());
+    }
+}
 
 /// 要读的帧清单 —— **这就是文档 §0 表里的 17 帧**。
 ///

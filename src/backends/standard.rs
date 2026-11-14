@@ -151,24 +151,84 @@ impl DeviceBackend for StandardHid {
         let descriptor = Descriptor::open(api, &target.interface)?;
         let mut percent = None;
         for cap in descriptor.battery_caps(2) {
-            let mut report = vec![0; usize::from(target.interface.feature_len)];
-            if report.is_empty() {
-                continue;
-            }
-            report[0] = cap.ReportID;
-            if unsafe {
-                (api.get_feature)(descriptor.handle, report.as_mut_ptr(), report.len() as u32)
-            } != 0
+            let started = std::time::Instant::now();
+            if let Some(mut report) =
+                crate::hid::query_report(&target.interface, cap.ReportID, true, 160)
             {
                 percent = descriptor.percent(2, &cap, &mut report);
+                trace::record(
+                    &target.interface,
+                    BackendId::StandardHid,
+                    "feature-report",
+                    0x0620,
+                    cap.ReportID,
+                    target.interface.feature_len as usize,
+                    report.len(),
+                    started,
+                    if percent.is_some() {
+                        trace::Outcome::Ok
+                    } else {
+                        trace::Outcome::InvalidData
+                    },
+                );
                 if percent.is_some() {
                     break;
                 }
+            } else {
+                trace::record(
+                    &target.interface,
+                    BackendId::StandardHid,
+                    "feature-report",
+                    0x0620,
+                    cap.ReportID,
+                    target.interface.feature_len as usize,
+                    0,
+                    started,
+                    trace::Outcome::NoReply,
+                );
             }
         }
         if percent.is_none() {
             let caps = descriptor.battery_caps(0);
-            if !caps.is_empty() {
+            for cap in &caps {
+                let started = std::time::Instant::now();
+                if let Some(mut report) =
+                    crate::hid::query_report(&target.interface, cap.ReportID, false, 160)
+                {
+                    percent = descriptor.percent(0, cap, &mut report);
+                    trace::record(
+                        &target.interface,
+                        BackendId::StandardHid,
+                        "input-report",
+                        0x0620,
+                        cap.ReportID,
+                        target.interface.input_len as usize,
+                        report.len(),
+                        started,
+                        if percent.is_some() {
+                            trace::Outcome::Ok
+                        } else {
+                            trace::Outcome::InvalidData
+                        },
+                    );
+                    if percent.is_some() {
+                        break;
+                    }
+                } else {
+                    trace::record(
+                        &target.interface,
+                        BackendId::StandardHid,
+                        "input-report",
+                        0x0620,
+                        cap.ReportID,
+                        target.interface.input_len as usize,
+                        0,
+                        started,
+                        trace::Outcome::NoReply,
+                    );
+                }
+            }
+            if percent.is_none() && !caps.is_empty() {
                 if let Ok(mut device) = crate::hid::HidDevice::open(&target.interface) {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(80);
                     while let Some(left) =
@@ -209,13 +269,14 @@ impl DeviceBackend for StandardHid {
         drop(cache);
         Ok(Snapshot {
             target: target.clone(),
-            connected: percent.is_some(),
+            connected: true,
             dpi: Dpi::default(),
-            battery: percent.map(|percent| Battery {
-                percent: Some(percent),
+            battery: Some(Battery {
+                percent,
                 charging: None,
                 voltage_mv: None,
                 approximate: false,
+                level: None,
             }),
         })
     }

@@ -1711,12 +1711,14 @@ fn draw_device_row(
     );
     let status = if !d.connected {
         crate::tr!("未连接")
-    } else if d.charging {
+    } else if d.is_charging() {
         crate::tr!("正在充电")
-    } else if d.level <= 20 {
+    } else if let Some(level) = d.coarse_level() {
+        crate::i18n::battery_level(level)
+    } else if d.is_low() {
         crate::tr!("电量偏低")
     } else {
-        crate::tr!("已连接")
+        if d.percent().is_some() { crate::tr!("已连接") } else { crate::tr!("电量未知") }
     };
     let mut meta = format!("{} · {status}", kind.label());
     if cfg.tray_device.as_ref() == Some(&d.key) {
@@ -1728,7 +1730,7 @@ fn draw_device_row(
         R::new(r.x + 67.0, r.y + 33.0, w - 188.0, 17.0),
         10.0,
         false,
-        if d.connected && d.level <= 20 && !d.charging {
+        if d.is_low() {
             t.red
         } else {
             t.text3
@@ -1737,16 +1739,12 @@ fn draw_device_row(
     );
     let color = if !d.connected {
         t.text3
-    } else if d.level <= 20 {
+    } else if d.is_low() {
         t.red
     } else {
         t.text
     };
-    let text = if d.connected {
-        d.level.to_string()
-    } else {
-        "—".into()
-    };
+    let text = d.percent().map(|level| level.to_string()).unwrap_or_else(|| "—".into());
     p.text(
         &text,
         R::new(w - 94.0, r.y, 49.0, r.h),
@@ -1755,7 +1753,7 @@ fn draw_device_row(
         color,
         Align::Right,
     );
-    if d.connected {
+    if d.percent().is_some() {
         p.text(
             "%",
             R::new(w - 45.0, r.y + 4.0, 13.0, r.h - 4.0),
@@ -1765,7 +1763,7 @@ fn draw_device_row(
             Align::Left,
         );
     }
-    if d.connected && d.charging {
+    if d.is_charging() {
         panel_icons::draw(
             p,
             Icon::Bolt,

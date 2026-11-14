@@ -153,6 +153,8 @@ extern "system" {
     pub fn ReadFile(h: Handle, buf: *mut c_void, to_read: u32, read: *mut u32, ov: *mut Overlapped) -> i32;
 
     pub fn WriteFile(h: Handle, buf: *const c_void, to_write: u32, written: *mut u32, ov: *mut Overlapped) -> i32;
+    pub fn DeviceIoControl(h: Handle, code: u32, input: *mut c_void, input_len: u32,
+        output: *mut c_void, output_len: u32, returned: *mut u32, ov: *mut Overlapped) -> i32;
 
     pub fn CloseHandle(h: Handle) -> i32;
     pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;

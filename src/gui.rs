@@ -228,6 +228,7 @@ fn low_battery_alert(level: u8, charging: bool, armed: &mut bool) -> bool {
 }
 
 fn persist_device_order(shared: &Arc<Mutex<Shared>>, order: Vec<String>) {
+    // 排列是用户偏好，与品牌读数分开保存。
     let mut shared = lock_shared(shared);
     let mut cfg = shared.cfg.clone();
     cfg.set_device_order(order);
@@ -241,6 +242,11 @@ fn persist_device_order(shared: &Arc<Mutex<Shared>>, order: Vec<String>) {
             &format!("error={error}"),
         ),
     }
+}
+
+fn low_battery_reading(reading: &crate::device::DeviceReading, armed: &mut bool) -> Option<u8> {
+    let percent = reading.percent()?;
+    low_battery_alert(percent, reading.is_charging(), armed).then_some(percent)
 }
 
 #[derive(Clone)]
@@ -318,7 +324,6 @@ fn diagnostic_facts<'a>(
 }
 
 fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
-    let additional = crate::backends::read_additional(full).unwrap_or_default();
     let links = crate::win32::HidApi::load().and_then(|api| hid::open_links(&api));
     let links = match links {
         Ok(links) => links,
@@ -327,25 +332,22 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             let mut s = lock_shared(shared);
             if outcome_is_stale(generation, s.write_gen) { return None; }
             for device in s.devices.values_mut() {
+                if device.basic.is_some() { continue; }
                 device.reading.connected = false;
                 device.state = None;
                 if let Some(basic) = &mut device.basic { basic.connected = false; }
             }
-            for reading in &mut s.readings {
-                reading.connected = false;
-            }
+            s.rebuild_readings();
             s.quick = None;
             s.full = None;
             s.status = Status::Error(e);
-            merge_additional(&mut s, additional);
-            if s.readings.iter().any(|reading| reading.connected) { s.status = Status::Ok; }
             return None;
         }
     };
     let (mut records, active, mut primary, ttl) = {
         let s = lock_shared(shared);
         (
-            s.devices.clone(),
+            s.devices.iter().filter(|(_, device)| device.basic.is_none()).map(|(key, device)| (key.clone(), device.clone())).collect::<BTreeMap<_, _>>(),
             s.active_key.clone(),
             s.primary_key.clone(),
             Duration::from_secs(s.cfg.cache_ttl_sec),
@@ -387,7 +389,8 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                 continue;
             }
         };
-        let is_connected = out.snapshot.frames.contains_key("12:07:00");
+        let battery = out.snapshot.battery();
+        let is_connected = battery.is_some();
         let mut ident = if needs_full {
             out.snapshot.identity.clone()
         } else {
@@ -446,11 +449,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             st.poll_code = out.snapshot.state.poll_code;
             st.active_stage = out.snapshot.state.active_stage;
         }
-        let level = if is_connected {
-            out.snapshot.state.power
-        } else {
-            previous.as_ref().map(|d| d.reading.level).unwrap_or(0)
-        };
+        let battery = battery.or_else(|| previous.as_ref().and_then(|d| d.reading.battery.clone()));
         let record = DeviceSnapshot {
             basic: None,
             reading: crate::device::DeviceReading {
@@ -461,8 +460,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                     name
                 },
                 family,
-                level,
-                charging: is_connected && out.snapshot.state.charging != 0,
+                battery,
                 connected: is_connected,
             },
             state: if is_connected { state } else { None },
@@ -513,33 +511,44 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                 if let Some(basic) = &mut d.basic { basic.connected = false; }
             }
         }
-        s.readings = records.values().map(|d| d.reading.clone()).collect();
-        s.sort_readings();
-        s.devices = records;
-        merge_additional(&mut s, additional);
+        s.replace_rog_records(records);
     }
     sample
 }
 
-fn merge_additional(shared: &mut Shared, snapshots: Vec<crate::backends::Snapshot>) {
+fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, snapshots: Vec<crate::backends::Snapshot>) {
+    for device in shared.devices.values_mut() {
+        if let Some(basic) = &mut device.basic {
+            if basic.target.backend == backend { basic.connected = false; device.reading.connected = false; }
+        }
+    }
     for snapshot in snapshots {
-        let Some(level) = snapshot.battery.as_ref().and_then(|battery| battery.percent) else { continue; };
+        if backend == crate::backends::BackendId::StandardHid && shared.devices.values().any(|device|
+            device.basic.as_ref().is_some_and(|other| other.target.backend == crate::backends::BackendId::Logitech
+                && other.connected && other.target.interface.path == snapshot.target.interface.path)) { continue; }
+        if backend == crate::backends::BackendId::Logitech {
+            shared.devices.retain(|_, device| !device.basic.as_ref().is_some_and(|other|
+                other.target.backend == crate::backends::BackendId::StandardHid && other.target.interface.path == snapshot.target.interface.path));
+        }
         let key = snapshot.target.key.clone();
         let reading = crate::device::DeviceReading {
             key: key.clone(), name: snapshot.target.name.clone(), family: snapshot.target.family,
-            level, charging: snapshot.battery.as_ref().and_then(|battery| battery.charging).unwrap_or(false),
+            battery: snapshot.battery.clone(),
             connected: snapshot.connected,
         };
         let ident = proto::Identity { model_name: snapshot.target.name.clone(), ..Default::default() };
         shared.devices.insert(key, DeviceSnapshot { reading, ident, state: None, link: None,
             full_at: std::time::Instant::now(), basic: Some(snapshot) });
     }
-    shared.readings = shared.devices.values().map(|record| record.reading.clone()).collect();
-    shared.sort_readings();
+    shared.rebuild_readings();
 }
 
 struct Shared {
     refresh_generation: u64,
+    completed_requests: BTreeMap<crate::backends::BackendId, u64>,
+    source_write_gen: BTreeMap<crate::backends::BackendId, u64>,
+    source_pending: BTreeMap<crate::backends::BackendId, VecDeque<Cmd>>,
+    source_busy: std::collections::BTreeSet<crate::backends::BackendId>,
     devices: std::collections::BTreeMap<String, DeviceSnapshot>,
     key_aliases: std::collections::BTreeMap<String, String>,
     active_key: Option<String>,
@@ -597,12 +606,40 @@ struct Shared {
     /// 疯狂拖滑块时堆几百条命令、松手后设备还在慢慢追。
     pending: VecDeque<(Cmd, Option<hid::Link>)>,
     /// 最近一条命令的结果，GUI 线程取走一次就清空。
-    last: Option<CmdResult>,
+    results: VecDeque<CmdResult>,
     /// 下一轮要不要读全量。
     want_full: bool,
 }
 
 impl Shared {
+    fn replace_rog_records(&mut self, records: BTreeMap<String, DeviceSnapshot>) {
+        self.devices.retain(|_, device| device.basic.is_some());
+        self.devices.extend(records);
+        self.rebuild_readings();
+    }
+
+    fn publish_additional(&mut self, backend: crate::backends::BackendId, snapshots: Vec<crate::backends::Snapshot>,
+        generation: u64, request: u64) -> bool {
+        if generation != *self.source_write_gen.get(&backend).unwrap_or(&0) { return false; }
+        merge_additional(self, backend, snapshots);
+        self.complete_refresh(backend, request);
+        true
+    }
+    fn rebuild_readings(&mut self) {
+        self.readings = self.devices.values().map(|device| device.reading.clone()).collect();
+        self.sort_readings();
+    }
+
+    fn complete_refresh(&mut self, backend: crate::backends::BackendId, request: u64) {
+        let completed = self.completed_requests.entry(backend).or_default();
+        *completed = (*completed).max(request);
+        self.refresh_generation = self.completed_requests.values().copied().min().unwrap_or(0);
+    }
+    fn complete_rog_refresh(&mut self, generation: u64, request: u64) -> bool {
+        if outcome_is_stale(generation, self.write_gen) { return false; }
+        self.complete_refresh(crate::backends::BackendId::Rog, request);
+        true
+    }
     fn sort_readings(&mut self) {
         let cfg = &self.cfg;
         self.readings.sort_by(|a, b| {
@@ -624,6 +661,11 @@ impl Shared {
     fn new(cfg: Settings) -> Shared {
         Shared {
             refresh_generation: 0,
+            completed_requests: std::iter::once(crate::backends::BackendId::Rog).chain(crate::backends::ADDITIONAL_BACKENDS)
+                .map(|backend| (backend, 0)).collect(),
+            source_write_gen: Default::default(),
+            source_pending: Default::default(),
+            source_busy: Default::default(),
             devices: Default::default(),
             key_aliases: Default::default(),
             active_key: None,
@@ -646,7 +688,7 @@ impl Shared {
             cfg,
             autostart: (crate::autostart::AutoStartState::Unknown, crate::autostart::AutoStartPath::Unknown),
             pending: VecDeque::new(),
-            last: None,
+            results: VecDeque::new(),
             want_full: false,
         }
     }
@@ -819,6 +861,8 @@ impl Signal {
         *n += 1;
         self.cv.notify_all();
     }
+
+    fn current_request(&self) -> u64 { *lock_poke(&self.poke) }
 
     fn set_wake_probe(&self, active: bool) {
         self.wake_probe.store(active, Ordering::Relaxed);
@@ -1012,12 +1056,14 @@ impl TrayCtl {
             let tip = reading
                 .map(|r| {
                     format!(
-                        "{} · {}%{}",
+                        "{} · {}{}",
                         cfg.device_name(r),
-                        r.level,
+                        r.battery.as_ref().and_then(|battery| battery.percent).map(|level| format!("{level}%"))
+                            .or_else(|| r.coarse_level().map(|level| crate::i18n::battery_level(level).to_string()))
+                            .unwrap_or_else(|| crate::tr!("电量未知").to_string()),
                         if !r.connected {
                             crate::tr!("（上次电量，未连接）")
-                        } else if r.charging {
+                        } else if r.is_charging() {
                             crate::tr!("（充电中）")
                         } else {
                             ""
@@ -1045,8 +1091,8 @@ impl TrayCtl {
             }
             let icon = if let Some(r) = reading {
                 crate::tray_icon::render_device(
-                    if r.connected { Some(r.level) } else { None },
-                    r.charging,
+                    r.percent(),
+                    r.is_charging(),
                     cfg.device_kind(r),
                     content,
                 )
@@ -2244,7 +2290,7 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         return None;
     }
 
-    let have_power = snap.frames.contains_key("12:07:00");
+    let have_power = snap.battery().is_some();
     if !have_power {
         // 保留上一轮的电量显示（比清成「—」更不吓人），但**不产生新采样**。
         s.frames = out.frames_read;
@@ -2298,6 +2344,21 @@ const MAX_PENDING: usize = 4;
 /// `Status::Busy` 只表示「后台正在写设备」。读快照期间**不再拒绝新命令**：
 /// 那时设备是空闲的，命令完全可以排队等这一轮读完。
 fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
+    if let Cmd::BasicDpi { target, .. } = &cmd {
+        let backend = target.backend;
+        if backend != crate::backends::BackendId::Rog {
+            let mut state = lock_shared(shared);
+            let queue = state.source_pending.entry(backend).or_default();
+            if queue.len() >= MAX_PENDING { return false; }
+            queue.push_back(cmd);
+            let generation = state.source_write_gen.entry(backend).or_default();
+            *generation = generation.wrapping_add(1);
+            state.source_busy.insert(backend);
+            drop(state);
+            signal.request_refresh();
+            return true;
+        }
+    }
     {
         let mut s = lock_shared(shared);
         if s.pending.len() >= MAX_PENDING {
@@ -2307,11 +2368,12 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
             && s.active_key.as_ref().and_then(|key| s.devices.get(key)).is_some_and(|record| record.basic.is_some()) {
             return false;
         }
-        let target = s
-            .active_key
-            .as_ref()
-            .and_then(|k| s.devices.get(k))
-            .and_then(|d| d.link.clone());
+        let target = match &cmd {
+            Cmd::BasicDpi { target, .. } => s.devices.values().find_map(|device|
+                device.link.as_ref().filter(|link| link.iface.path == target.interface.path
+                    && link.report_id == target.address).cloned()),
+            _ => s.active_key.as_ref().and_then(|k| s.devices.get(k)).and_then(|d| d.link.clone()),
+        };
         s.pending.push_back((cmd, target));
         s.status = Status::Busy;
         s.write_gen = s.write_gen.wrapping_add(1);
@@ -2692,7 +2754,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 autostart_text,
                 autostart_on,
                 rows_n,
-                err_text,
+                mut err_text,
             ) = {
                 let s = lock_shared(&shared_p);
                 (
@@ -2735,6 +2797,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 )
             };
             if let Some(record) = &record {
+                if let Some(basic) = &record.basic {
+                    err_text = if lock_shared(&shared_p).source_busy.contains(&basic.target.backend) {
+                        crate::tr!("正在写设备 ……").to_string()
+                    } else { String::new() };
+                }
                 state = record.state.clone();
                 ident = Some(record.ident.clone());
                 link_mode = record
@@ -2796,6 +2863,35 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         })
     };
 
+    // 每个品牌有独立的读取与写入队列，慢接口不会拖住 ROG 刷新。
+    let additional_threads = crate::backends::ADDITIONAL_BACKENDS.into_iter().map(|backend| {
+        let shared_t = Arc::clone(&shared);
+        let signal_t = Arc::clone(&signal);
+        let sender_t = sender;
+        std::thread::spawn(move || {
+            let mut seen = 0;
+            while signal_t.wait_for_work(&mut seen) {
+                for _ in 0..MAX_PENDING * 2 {
+                    let command = lock_shared(&shared_t).source_pending.get_mut(&backend).and_then(VecDeque::pop_front);
+                    let Some(command) = command else { break; };
+                    let result = run_cmd(&command, None);
+                    lock_shared(&shared_t).results.push_back(result);
+                    sender_t.notice();
+                }
+                let generation = {
+                    let mut state = lock_shared(&shared_t);
+                    if state.source_pending.get(&backend).is_none_or(VecDeque::is_empty) { state.source_busy.remove(&backend); }
+                    *state.source_write_gen.get(&backend).unwrap_or(&0)
+                };
+                let snapshots = crate::backends::read_backend(backend, true).unwrap_or_default();
+                let mut state = lock_shared(&shared_t);
+                state.publish_additional(backend, snapshots, generation, seen);
+                drop(state);
+                sender_t.notice();
+            }
+        })
+    }).collect::<Vec<_>>();
+
     // ── 主刷新线程 ──────────────────────────────────────────
     let refresh_thread = {
         let shared_t = Arc::clone(&shared);
@@ -2844,7 +2940,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     if matches!(cmd, Cmd::AutoStart(_)) {
                         s.autostart = crate::autostart::state();
                     }
-                    s.last = Some(res);
+                    s.results.push_back(res);
                     // 写完必须读一次全量：DPI / 灯光 / 按键都可能变了。
                     s.want_full = true;
                     drop(s);
@@ -2871,7 +2967,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     (full, s.write_gen)
                 };
                 let sample = refresh_devices(&shared_t, full, gen_at_read);
-                lock_shared(&shared_t).refresh_generation += 1;
+                lock_shared(&shared_t).complete_rog_refresh(gen_at_read, seen);
 
                 // ④ 记一条历史采样 + 重算续航估算。
                 //
@@ -3043,7 +3139,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     use crate::ui::tray_popup::Action;
                     match action {
                         Action::Refresh => {
-                            let generation = lock_shared(&shared_e).refresh_generation;
+                            let generation = signal_e.current_request();
                             popup_events.refresh_started(generation);
                             signal_e.request_refresh();
                         }
@@ -3142,7 +3238,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 audio.set_active(1, audio_active);
 
                 // ② 后台回报的命令结果
-                let result = { lock_shared(&shared_e).last.take() };
+                let result = { lock_shared(&shared_e).results.pop_front() };
                 if let Some(r) = result {
                     let text = r.toast();
                     canvas.with_ui_mut(|u| u.set_status(text));
@@ -3161,14 +3257,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     tray.sync(&s.readings, &s.cfg);
                     let mut low_alerts = Vec::new();
                     for reading in &readings {
-                        if !reading.connected || reading.level == 0 {
-                            continue;
-                        }
                         let key = reading.key.clone();
                         let name = s.cfg.device_name(reading).to_string();
                         let armed = s.low_alert_armed.entry(key.clone()).or_insert(true);
-                        if low_battery_alert(reading.level, reading.charging, armed) {
-                            low_alerts.push((key, name, reading.level));
+                        if let Some(level) = low_battery_reading(reading, armed) {
+                            low_alerts.push((key, name, level));
                         }
                     }
                     if !low_alerts.is_empty() {
@@ -3402,6 +3495,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     signal.request_quit();
     join_bounded(history_thread, Duration::from_millis(4000));
     join_bounded(refresh_thread, Duration::from_millis(4000));
+    for thread in additional_threads { join_bounded(thread, Duration::from_millis(500)); }
 
     nwg::unbind_event_handler(&handler);
     nwg::unbind_event_handler(&msg_handler);
@@ -3412,6 +3506,119 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // （GUID 或退回的编号）删除，也会释放图标句柄。
     tray_exit.set_visibility(false);
     Ok(())
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+    use crate::backends::{BackendId, Snapshot, Target};
+    use crate::device::{Battery, BatteryLevel, DeviceFamily, DeviceReading, Dpi};
+
+    fn snapshot(backend: BackendId, key: &str, percent: u8) -> Snapshot {
+        Snapshot { target: Target { key: key.into(), name: "Test mouse".into(), family: DeviceFamily::Mouse,
+            backend, address: 1, verified_identity: false, interface: hid::HidInterface {
+                path: key.into(), serial: String::new(), product: "Test mouse".into(),
+                vendor_id: 0, product_id: 0, usage_page: 1, usage: 2,
+                input_len: 20, output_len: 20, feature_len: 0,
+            } }, connected: true, dpi: Dpi::default(), battery: Some(Battery { percent: Some(percent),
+                charging: Some(false), voltage_mv: None, approximate: false, level: None }) }
+    }
+
+    #[test]
+    fn rog_refresh_preserves_concurrent_additional_reading() {
+        let mut shared = Shared::new(Settings::default());
+        shared.publish_additional(BackendId::Logitech, vec![snapshot(BackendId::Logitech, "logitech", 75)], 0, 1);
+        shared.replace_rog_records(BTreeMap::new());
+        assert_eq!(shared.readings.len(), 1);
+        assert_eq!(shared.readings[0].percent(), Some(75));
+    }
+
+    #[test]
+    fn writes_reject_only_their_own_backend_stale_readings() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let target = snapshot(BackendId::Logitech, "logitech", 75).target;
+        assert!(submit(&shared, &signal, Cmd::BasicDpi { target, dpi: 800 }));
+        let mut state = lock_shared(&shared);
+        assert_eq!(state.write_gen, 0);
+        assert!(!state.publish_additional(BackendId::Logitech, vec![snapshot(BackendId::Logitech, "logitech", 50)], 0, 1));
+        assert_eq!(state.completed_requests[&BackendId::Logitech], 0);
+        assert!(state.publish_additional(BackendId::StandardHid, vec![snapshot(BackendId::StandardHid, "standard", 70)], 0, 1));
+        assert!(state.publish_additional(BackendId::Logitech, vec![snapshot(BackendId::Logitech, "logitech", 75)], 1, 1));
+        assert_eq!(state.devices["logitech"].reading.percent(), Some(75));
+    }
+
+    #[test]
+    fn rog_basic_dpi_reaches_the_rog_command_queue() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let target = snapshot(BackendId::Rog, "rog", 75).target;
+        assert!(submit(&shared, &signal, Cmd::BasicDpi { target, dpi: 800 }));
+        let state = lock_shared(&shared);
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.write_gen, 1);
+        assert!(state.source_pending.is_empty());
+    }
+
+    #[test]
+    fn rog_read_started_before_a_write_cannot_complete_refresh() {
+        let mut state = Shared::new(Settings::default());
+        state.write_gen = 1;
+        assert!(!state.complete_rog_refresh(0, 2));
+        assert_eq!(state.completed_requests[&BackendId::Rog], 0);
+        assert!(state.complete_rog_refresh(1, 2));
+        assert_eq!(state.completed_requests[&BackendId::Rog], 2);
+    }
+
+    #[test]
+    fn refresh_finishes_only_after_all_backends_reach_requested_epoch() {
+        let mut shared = Shared::new(Settings::default());
+        shared.complete_refresh(BackendId::Rog, 3);
+        shared.complete_refresh(BackendId::Logitech, 3);
+        assert_eq!(shared.refresh_generation, 0);
+        shared.complete_refresh(BackendId::StandardHid, 2);
+        assert_eq!(shared.refresh_generation, 2);
+        shared.complete_refresh(BackendId::StandardHid, 3);
+        shared.complete_refresh(BackendId::Rog, 1);
+        assert_eq!(shared.refresh_generation, 3);
+    }
+
+    #[test]
+    fn refresh_signal_is_observed_by_multiple_subscribers() {
+        let signal = Arc::new(Signal::new(60));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let threads: Vec<_> = (0..2).map(|_| {
+            let signal = Arc::clone(&signal);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut seen = 0;
+                barrier.wait();
+                assert!(signal.wait_for_work(&mut seen));
+                seen
+            })
+        }).collect();
+        barrier.wait();
+        signal.request_refresh();
+        for thread in threads { assert_eq!(thread.join().unwrap(), 1); }
+    }
+
+    #[test]
+    fn unknown_and_coarse_battery_cannot_create_percentage_notifications() {
+        let mut reading = DeviceReading { connected: true, ..Default::default() };
+        let mut armed = true;
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+        reading.battery = Some(Battery { percent: None, charging: None, voltage_mv: None,
+            approximate: true, level: Some(BatteryLevel::Low) });
+        assert!(reading.is_low());
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+        assert!(armed);
+        reading.battery.as_mut().unwrap().percent = Some(0);
+        assert_eq!(low_battery_reading(&reading, &mut armed), Some(0));
+        assert!(!armed);
+        armed = true;
+        reading.connected = false;
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+    }
 }
 
 #[cfg(test)]

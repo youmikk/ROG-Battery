@@ -305,6 +305,46 @@ fn read_hid_string(hid: &HidApi, h: Handle, which: u8) -> String {
 }
 
 // ---------------- 打开的设备 ----------------
+/// 查询描述符公开的 Feature/Input report，使用零访问权限与可取消的 I/O。
+/// 不需要取得系统键盘/鼠标的输入流访问权限，也不会写 Output report。
+pub fn query_report(iface: &HidInterface, report_id: u8, feature: bool, timeout_ms: u32) -> Option<Vec<u8>> {
+    use winapi::shared::hidclass::{IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_INPUT_REPORT};
+    let length = if feature { iface.feature_len } else { iface.input_len } as usize;
+    if length == 0 { return None; }
+    let path = to_wide(&iface.path);
+    let handle = unsafe { CreateFileW(path.as_ptr(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        core::ptr::null_mut(), OPEN_EXISTING, FILE_FLAG_OVERLAPPED, core::ptr::null_mut()) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE { return None; }
+    let event = unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) };
+    if event.is_null() || event == INVALID_HANDLE_VALUE { unsafe { CloseHandle(handle); } return None; }
+    let mut report = vec![0u8; length];
+    report[0] = report_id;
+    let mut overlapped = Overlapped { h_event: event, ..Default::default() };
+    let mut returned = 0;
+    let result = (|| {
+        let ok = unsafe { DeviceIoControl(handle,
+            if feature { IOCTL_HID_GET_FEATURE } else { IOCTL_HID_GET_INPUT_REPORT },
+            report.as_mut_ptr().cast(), length as u32, report.as_mut_ptr().cast(), length as u32,
+            &mut returned, &mut overlapped) };
+        if ok == 0 {
+            if last_error() != ERROR_IO_PENDING { return None; }
+            if unsafe { WaitForSingleObject(event, timeout_ms) } != WAIT_OBJECT_0 {
+                // 缓冲区和 OVERLAPPED 必须活到取消完成，不能在内核仍持有时释放。
+                unsafe { CancelIoEx(handle, &mut overlapped); GetOverlappedResult(handle, &mut overlapped, &mut returned, 1); }
+                return None;
+            }
+            if unsafe { GetOverlappedResult(handle, &mut overlapped, &mut returned, 0) } == 0 { return None; }
+        }
+        if returned == 0 || report[0] != report_id { return None; }
+        if returned as usize > length { return None; }
+        let actual = (returned as usize + usize::from(report_id == 0)).min(length);
+        report.truncate(actual);
+        Some(report)
+    })();
+    unsafe { CloseHandle(event); CloseHandle(handle); }
+    result
+}
+
 /// 一个已打开的命令通道。持有两个句柄：同步写句柄 + overlapped 读句柄。
 pub struct HidDevice {
     /// 同步句柄，只用来 `WriteFile`

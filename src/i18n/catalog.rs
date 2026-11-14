@@ -2,6 +2,10 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("电量极低") => { if $crate::i18n::english() { "Critical battery" } else { "电量极低" } };
+    ("电量良好") => { if $crate::i18n::english() { "Battery good" } else { "电量良好" } };
+    ("电量充足") => { if $crate::i18n::english() { "Battery full" } else { "电量充足" } };
+    ("电量未知") => { if $crate::i18n::english() { "Battery unknown" } else { "电量未知" } };
     ("导出设备适配报告") => { if $crate::i18n::english() { "Export device compatibility report" } else { "导出设备适配报告" } };
     ("设备适配") => { if $crate::i18n::english() { "Device compatibility" } else { "设备适配" } };
     ("反馈品牌与型号") => { if $crate::i18n::english() { "Report brand and model" } else { "反馈品牌与型号" } };

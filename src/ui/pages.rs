@@ -1204,20 +1204,20 @@ fn home_device_card(
         t.text3,
         Align::Left,
     );
-    let color = ring_color(t, dev.connected, dev.charging, dev.level);
+    let color = ring_color(t, dev.connected, dev.is_charging(), dev.percent().unwrap_or(100));
     let cy = r.y + 83.0;
     p.ring(
         r.cx(),
         cy,
         48.0,
         5.0,
-        dev.level as f32 / 100.0,
+        dev.percent().unwrap_or(0) as f32 / 100.0,
         color,
         color,
         t.track,
     );
     p.text(
-        &format!("{}%", dev.level),
+        &dev.percent().map(|level| format!("{level}%")).unwrap_or_else(|| "—".into()),
         R::new(r.cx() - 46.0, cy - 21.0, 92.0, 35.0),
         29.0,
         false,
@@ -1226,13 +1226,15 @@ fn home_device_card(
     );
     p.text(
         if !dev.connected {
-            crate::tr!("上次电量")
-        } else if dev.charging {
+            crate::tr!("未连接")
+        } else if dev.is_charging() {
             crate::tr!("正在充电")
-        } else if dev.level <= 20 {
+        } else if let Some(level) = dev.coarse_level() {
+            crate::i18n::battery_level(level)
+        } else if dev.is_low() {
             crate::tr!("电量偏低")
         } else {
-            crate::tr!("使用中")
+            if dev.percent().is_some() { crate::tr!("使用中") } else { crate::tr!("电量未知") }
         },
         R::new(r.cx() - 45.0, cy + 16.0, 90.0, 16.0),
         10.0,
@@ -1370,12 +1372,10 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
 fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
     let selected = d.selected;
-    let level = selected
-        .map(|r| r.level)
-        .or_else(|| d.state.map(|s| s.power))
-        .unwrap_or(0);
+    let known_level = match selected { Some(reading) => reading.percent(), None => d.state.map(|state| state.power) };
+    let level = known_level.unwrap_or(0);
     let connected = selected.map(|r| r.connected).unwrap_or(d.state.is_some());
-    let charging = selected.map(|r| r.charging).unwrap_or(false);
+    let charging = selected.is_some_and(|r| r.is_charging());
     let hero = c.card(p, 175.0);
     let color = ring_color(t, connected, charging, level);
     let cx = hero.x + 84.0;
@@ -1391,7 +1391,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         t.track,
     );
     p.text(
-        &format!("{level}%"),
+        &known_level.map(|level| format!("{level}%")).unwrap_or_else(|| "—".into()),
         R::new(cx - 50.0, cy - 23.0, 100.0, 37.0),
         30.0,
         false,
@@ -1402,8 +1402,10 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         crate::tr!("未连接")
     } else if charging {
         crate::tr!("正在充电")
+    } else if let Some(level) = selected.and_then(|reading| reading.coarse_level()) {
+        crate::i18n::battery_level(level)
     } else {
-        crate::tr!("使用中")
+        if known_level.is_some() { crate::tr!("使用中") } else { crate::tr!("电量未知") }
     };
     p.text(
         status,

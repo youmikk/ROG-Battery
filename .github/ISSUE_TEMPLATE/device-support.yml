@@ -40,5 +40,5 @@ body:
     id: report
     attributes:
       label: 设备适配报告 / Device report
-      description: 可附上设置 → 关于导出的报告。此报告不包含序列号、接口路径、配置或原始日志。 / Attach the report exported from Settings → About. It excludes serial numbers, interface paths, settings and raw logs.
+      description: 可附上设置 → 关于导出的报告，含设备描述符和最近查询的长度、耗时、结果摘要，不含报文内容、序列号、接口路径、配置或原始日志。 / Attach the report exported from Settings → About. It includes descriptors and recent query lengths, durations and results, without payloads, serial numbers, interface paths, settings or raw logs.
       render: text

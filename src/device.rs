@@ -72,9 +72,81 @@ pub struct DeviceReading {
     pub key: String,
     pub name: String,
     pub family: DeviceFamily,
-    pub level: u8,
-    pub charging: bool,
+    pub battery: Option<Battery>,
     pub connected: bool,
+}
+
+impl DeviceReading {
+    pub fn percent(&self) -> Option<u8> {
+        self.connected
+            .then(|| self.battery.as_ref()?.percent)
+            .flatten()
+            .filter(|percent| *percent <= 100)
+    }
+
+    pub fn is_charging(&self) -> bool {
+        self.connected && self.battery.as_ref().and_then(|battery| battery.charging) == Some(true)
+    }
+
+    pub fn is_low(&self) -> bool {
+        self.connected
+            && !self.is_charging()
+            && (self.percent().is_some_and(|percent| percent <= 20)
+                || self
+                    .battery
+                    .as_ref()
+                    .and_then(|battery| battery.level)
+                    .is_some_and(|level| {
+                        matches!(level, BatteryLevel::Critical | BatteryLevel::Low)
+                    }))
+    }
+
+    pub fn coarse_level(&self) -> Option<BatteryLevel> {
+        self.connected
+            .then(|| self.battery.as_ref()?.level)
+            .flatten()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatteryLevel {
+    Critical,
+    Low,
+    Good,
+    Full,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Battery {
+    pub percent: Option<u8>,
+    pub charging: Option<bool>,
+    pub voltage_mv: Option<u16>,
+    pub approximate: bool,
+    pub level: Option<BatteryLevel>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Dpi {
+    pub current: Option<u16>,
+    pub values: Vec<u16>,
+    pub writable: bool,
+}
+
+impl Dpi {
+    pub fn quick_values(&self) -> Vec<u16> {
+        let mut values = Vec::new();
+        if let Some(current) = self.current {
+            values.push(current);
+        }
+        for value in [400, 800, 1600, 3200] {
+            if self.values.contains(&value) && !values.contains(&value) {
+                values.push(value);
+            }
+        }
+        values.truncate(4);
+        values.sort_unstable();
+        values
+    }
 }
 
 /// 设置只保存不透明标识，避免把设备序列号或接口路径写入配置。

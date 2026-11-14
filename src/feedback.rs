@@ -54,7 +54,9 @@ pub fn report(interfaces: &[crate::hid::HidInterface]) -> String {
 
 pub fn collect() -> Result<String, String> {
     let api = crate::win32::HidApi::load()?;
-    Ok(report(&crate::hid::enumerate_all_report(&api)?.interfaces))
+    let mut output = report(&crate::hid::enumerate_all_report(&api)?.interfaces);
+    output.push_str(&super::backends::trace::render());
+    Ok(output)
 }
 
 pub fn issue_url() -> String {
