@@ -26,6 +26,8 @@ pub struct Data<'a> {
     pub autostart_text: &'a str,
     /// 开机自启是否打开（开关状态，不能靠文案反推）。
     pub autostart_on: bool,
+    /// 当前是否为 MSIX 版，是否可显示 Windows 原生通知设置。
+    pub native_notifications_supported: bool,
     /// 版本号（侧栏底部）。
     pub version: &'a str,
     /// 首页设备卡片墙使用的读数列表。

@@ -521,7 +521,7 @@ struct Shared {
     /// 接收器掉线时会沿用上一次读数，界面上不标注就变成撒谎。
     last_ok_at: Option<std::time::Instant>,
     /// 低电量提醒的闸门：`true` = 还没提醒过。
-    low_alert_armed: bool,
+    low_alert_armed: std::collections::BTreeMap<String, bool>,
     /// 当前设备的族（鼠标/耳机/键盘），提示语按它说话。
     device_family: crate::device::DeviceFamily,
     /// 设备列表与当前详情独立更新。
@@ -587,7 +587,7 @@ impl Shared {
             link_mode: String::new(),
             quick: None,
             last_ok_at: None,
-            low_alert_armed: true,
+            low_alert_armed: Default::default(),
             device_family: crate::device::DeviceFamily::Unknown,
             readings: Vec::new(),
             write_gen: 0,
@@ -1720,6 +1720,21 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
                 }
             ));
         }
+        Pref::LowBatteryNotify => {
+            if !crate::notifications::supported() {
+                return;
+            }
+            let on = !env.cfg().notify_low_battery;
+            env.set_cfg(|c| c.notify_low_battery = on);
+            env.say(crate::trf!(
+                "✔ 低电量系统通知已{}",
+                if on {
+                    crate::tr!("开启")
+                } else {
+                    crate::tr!("关闭")
+                }
+            ));
+        }
         Pref::AutoStart => {
             let on = lock_shared(env.shared).autostart_on();
             if !env.submit(Cmd::AutoStart(!on)) {
@@ -2535,6 +2550,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 cfg: &cfg,
                 autostart_text: &autostart_text,
                 autostart_on,
+                native_notifications_supported: crate::notifications::supported(),
                 version: APP_VERSION,
                 readings: &readings,
             };
@@ -2896,16 +2912,42 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         }
                     }
                     tray.sync(&s.readings, &s.cfg);
-                    if let Some(q) = s.quick {
-                        if low_battery_alert(q.level, q.charging, &mut s.low_alert_armed) {
-                            canvas.with_ui_mut(|u| {
-                                u.set_status(crate::tr!("设备电量低，建议充电").to_string())
-                            });
+                    let mut low_alerts = Vec::new();
+                    for reading in &readings {
+                        if !reading.connected || reading.level == 0 {
+                            continue;
+                        }
+                        let key = reading.key.clone();
+                        let name = s.cfg.device_name(reading).to_string();
+                        let armed = s.low_alert_armed.entry(key.clone()).or_insert(true);
+                        if low_battery_alert(reading.level, reading.charging, armed) {
+                            low_alerts.push((key, name, reading.level));
                         }
                     }
+                    if !low_alerts.is_empty() {
+                        canvas.with_ui_mut(|u| {
+                            u.set_status(crate::tr!("设备电量低，建议充电").to_string())
+                        });
+                    }
+                    let notify_low = s.cfg.notify_low_battery;
                     let (readings, cfg, generation) =
                         (s.readings.clone(), s.cfg.clone(), s.refresh_generation);
                     drop(s);
+                    if notify_low && crate::notifications::supported() {
+                        for (key, name, level) in low_alerts {
+                            if let Err(error) = crate::notifications::show_low_battery(
+                                &key,
+                                &name,
+                                level,
+                                LOW_ALERT_PCT,
+                            ) {
+                                crate::diagnostics::event_once(
+                                    "low_battery_notification_failed",
+                                    &error,
+                                );
+                            }
+                        }
+                    }
                     popup_events.update(&readings, &cfg, generation);
                     if !cfg.tray_enabled {
                         popup_events.hide();

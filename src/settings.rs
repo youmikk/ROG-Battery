@@ -17,6 +17,8 @@ pub struct Settings {
     pub refresh_interval_sec: u64,
     /// 是否启用托盘图标。
     pub tray_enabled: bool,
+    /// MSIX 版是否启用 Windows 低电量通知。绿色版不显示也不调用。
+    pub notify_low_battery: bool,
     /// 窗口关闭时的行为："ask"（每次询问）、"minimize"（最小化到托盘）、"quit"（直接退出）。
     pub close_mode: String,
     /// 界面配色：`"light"` 或 `"dark"`。
@@ -42,6 +44,7 @@ impl Default for Settings {
             // 撞上超时（一次 MISS 要等满 1200ms），所以默认 60 秒。
             refresh_interval_sec: 60,
             tray_enabled: true,
+            notify_low_battery: true,
             close_mode: "ask".to_string(),
             theme: "system".to_string(),
             language: crate::i18n::Language::System,
@@ -95,6 +98,12 @@ impl Settings {
                     None => {
                         warnings.push(format!("tray_enabled={v} 不是布尔值（true/false），已忽略"))
                     }
+                },
+                "notify_low_battery" => match parse_bool(v) {
+                    Some(b) => s.notify_low_battery = b,
+                    None => warnings.push(format!(
+                        "notify_low_battery={v} 不是布尔值（true/false），已忽略"
+                    )),
                 },
                 "close_to_tray" => match parse_bool(v) {
                     Some(b) => legacy_close = Some(b),
@@ -163,6 +172,11 @@ impl Settings {
         s.push_str(&format!("refresh_interval_sec={}\n\n", self.refresh_interval_sec));
         s.push_str("# 是否启用托盘图标（true/false）。\n");
         s.push_str(&format!("tray_enabled={}\n\n", self.tray_enabled));
+        s.push_str("# Microsoft Store 版本是否启用 Windows 低电量通知（true/false）。\n");
+        s.push_str(&format!(
+            "notify_low_battery={}\n\n",
+            self.notify_low_battery
+        ));
         s.push_str("# 关闭窗口动作：ask=每次询问，minimize=最小化到系统托盘，quit=直接退出。\n");
         s.push_str(&format!("close_mode={}\n\n", self.close_mode));
         s.push_str("# 界面配色：system（默认，跟随系统深浅色）/ light（浅色）/ dark（深色）。\n");

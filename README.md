@@ -10,13 +10,13 @@
 
 [下载绿色版](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [更新日志](CHANGELOG.md)
 
-## 1.4.1
+## 1.4.2
 
+- Microsoft Store 版本新增低电量系统通知，绿色版不提供。
+- 设备低于 20% 时通过 Windows 发送一次通知，充电或恢复到 25% 以上后重新允许提醒。
+- 多设备分别记录低电量状态。
 - 修复修改设备名称并保存后程序可能闪退的问题。
-- 诊断日志新增设备型号、VID/PID、接收器信息、操作结果和崩溃位置。
 - 修复鼠标休眠唤醒后托盘电量不能自动恢复的问题。
-- 中文和英文即时切换，默认跟随 Windows 显示语言。
-- 设备卡片首页；只有一台设备时直接进入详情页。
 
 ## 使用
 

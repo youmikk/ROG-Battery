@@ -99,6 +99,8 @@ macro_rules! tr {
     ("设置") => { if $crate::i18n::english() { "Settings" } else { "设置" } };
     ("程序") => { if $crate::i18n::english() { "Application" } else { "程序" } };
     ("显示托盘图标") => { if $crate::i18n::english() { "Show tray icons" } else { "显示托盘图标" } };
+    ("低电量系统通知") => { if $crate::i18n::english() { "Low battery notifications" } else { "低电量系统通知" } };
+    ("低于 20% 时通过 Windows 通知提醒") => { if $crate::i18n::english() { "Notify through Windows below 20%" } else { "低于 20% 时通过 Windows 通知提醒" } };
     ("关闭后只能用窗口操作") => { if $crate::i18n::english() { "When off, use the application window" } else { "关闭后只能用窗口操作" } };
     ("关闭窗口动作") => { if $crate::i18n::english() { "When closing the window" } else { "关闭窗口动作" } };
     ("点击窗口右上角 × 按钮时的操作") => { if $crate::i18n::english() { "Action for the × button in the title bar" } else { "点击窗口右上角 × 按钮时的操作" } };
@@ -330,6 +332,7 @@ macro_rules! trf {
     ("{name} 将被绑成 0000（无功能）。\n\n绑好以后这个键在鼠标上就再也按不出任何作用，要恢复必须重新写一遍完整映射。\n\n确定继续？", $($args:tt)*) => { if $crate::i18n::english() { format!("{name} will be assigned 0000 (Disabled).\n\nThis button will stop working. Restoring it requires writing the full button mapping again.\n\nContinue?", $($args)*) } else { format!("{name} 将被绑成 0000（无功能）。\n\n绑好以后这个键在鼠标上就再也按不出任何作用，要恢复必须重新写一遍完整映射。\n\n确定继续？", $($args)*) } };
     ("✘ DPI 必须在 {}–{} 之间（步进 {}）", $($args:tt)*) => { if $crate::i18n::english() { format!("✘ DPI must be between {} and {} (step {})", $($args)*) } else { format!("✘ DPI 必须在 {}–{} 之间（步进 {}）", $($args)*) } };
     ("✔ 托盘图标已{}", $($args:tt)*) => { if $crate::i18n::english() { format!("✔ Tray icons {}", $($args)*) } else { format!("✔ 托盘图标已{}", $($args)*) } };
+    ("✔ 低电量系统通知已{}", $($args:tt)*) => { if $crate::i18n::english() { format!("✔ Low battery notifications {}", $($args)*) } else { format!("✔ 低电量系统通知已{}", $($args)*) } };
     ("✘ 打开文件对话框失败：{e}", $($args:tt)*) => { if $crate::i18n::english() { format!("✘ Could not open file dialog: {e}", $($args)*) } else { format!("✘ 打开文件对话框失败：{e}", $($args)*) } };
     ("✘ 打不开文件夹：{e}", $($args:tt)*) => { if $crate::i18n::english() { format!("✘ Could not open folder: {e}", $($args)*) } else { format!("✘ 打不开文件夹：{e}", $($args)*) } };
     ("✘ 打不开链接：{e}", $($args:tt)*) => { if $crate::i18n::english() { format!("✘ Could not open link: {e}", $($args)*) } else { format!("✘ 打不开链接：{e}", $($args)*) } };
@@ -467,6 +470,8 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "设置" => "Settings",
         "程序" => "Application",
         "显示托盘图标" => "Show tray icons",
+        "低电量系统通知" => "Low battery notifications",
+        "低于 20% 时通过 Windows 通知提醒" => "Notify through Windows below 20%",
         "关闭后只能用窗口操作" => "When off, use the application window",
         "关闭窗口动作" => "When closing the window",
         "点击窗口右上角 × 按钮时的操作" => "Action for the × button in the title bar",

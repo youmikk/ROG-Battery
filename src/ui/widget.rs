@@ -146,6 +146,7 @@ fn hover_same(a: Option<Act>, b: Option<Act>) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pref {
     TrayEnabled,
+    LowBatteryNotify,
     AutoStart,
     /// 电量页：充满效果开关（这个**是**写设备的）。
     FullEffect,

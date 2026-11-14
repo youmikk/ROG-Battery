@@ -2345,7 +2345,8 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
 
     // ---- 程序 ----
     c.h2(p, crate::tr!("程序"), true);
-    let card = c.card(p, layout::ROW_H * 6.0);
+    let program_rows = 6.0 + if d.native_notifications_supported { 1.0 } else { 0.0 };
+    let card = c.card(p, layout::ROW_H * program_rows);
     let mut y = card.y;
     {
         let area = row_area(card, y);
@@ -2399,6 +2400,21 @@ fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) 
             Drop::TrayDevice,
             d,
         );
+        row_rule(p, card, area);
+        y += layout::ROW_H;
+    }
+    if d.native_notifications_supported {
+        let area = row_area(card, y);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("低电量系统通知"),
+            Some(crate::tr!("低于 20% 时通过 Windows 通知提醒")),
+            40.0,
+        );
+        let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
+        p.switch(sw, d.cfg.notify_low_battery, true);
+        ui.hot(sw, Act::Toggle(Pref::LowBatteryNotify));
         row_rule(p, card, area);
         y += layout::ROW_H;
     }

@@ -1,3 +1,9 @@
+New
+- Microsoft Store builds now send a Windows low battery notification below 20%.
+
+Improvements
+- Low battery state is tracked independently for each device.
+
 Fixes
 - Fixed a crash that could occur after saving a custom device name.
 - Diagnostic logs now include the device model, VID/PID, receiver details, operation results, and crash location.

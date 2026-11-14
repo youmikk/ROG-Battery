@@ -138,6 +138,10 @@ fn package_identity() -> Option<bool> {
     }
 }
 
+pub fn is_packaged() -> bool {
+    package_identity() == Some(true)
+}
+
 /// 判定该走哪条自启路径。
 ///
 /// 包身份**查询失败**时返回 `Unknown`，让上层显示「无法判定运行形态」，

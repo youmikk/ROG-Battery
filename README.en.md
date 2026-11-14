@@ -6,13 +6,12 @@ A lightweight battery monitor and mouse settings utility for ROG peripherals on 
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
-## Version 1.4.1
+## Version 1.4.2
 
+- Microsoft Store builds now send a Windows low battery notification below 20%; portable builds do not.
+- Low battery state is tracked per device and re-arms after charging or returning above 25%.
 - Fixed a crash that could occur after saving a custom device name.
-- Diagnostic logs now include the device model, VID/PID, receiver details, operation results, and crash location.
 - Fixed the tray battery level not recovering automatically after the mouse wakes from sleep.
-- Chinese and English interfaces, with an option to follow the Windows display language.
-- A device overview that opens device details directly when only one device is detected.
 
 ## Getting started
 
