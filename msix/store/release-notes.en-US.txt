@@ -1,4 +1,6 @@
 New
+- Switch between known DPI stages directly from the tray mouse panel.
+- Control speaker or headset volume, mute the microphone, and open Windows sound settings from the tray.
 - Microsoft Store builds now send a Windows low battery notification below 20%.
 
 Improvements

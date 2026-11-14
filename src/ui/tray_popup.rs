@@ -1,5 +1,6 @@
 //! 托盘设备面板。窗口只绘制快照和派发动作，设备读取留在后台。
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -28,6 +29,33 @@ pub enum Action {
     Main,
     Quit,
     Device(String),
+    OpenDpi(String),
+    OpenAudio,
+    BackDevices,
+    SetDpiStage(String, u8),
+    AudioSlot(AudioSlot),
+    AudioSlider(AudioSlot),
+    ToggleMicrophone,
+    OpenSoundSettings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioSlot {
+    Speaker,
+    Headset,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DpiState {
+    pub stages: [i32; 4],
+    pub active: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum View {
+    Devices,
+    Dpi(String),
+    Audio,
 }
 
 struct State {
@@ -49,6 +77,12 @@ struct State {
     visible: bool,
     dismissed: Option<Instant>,
     anchor: Rect,
+    view: View,
+    dpi: BTreeMap<String, DpiState>,
+    audio: crate::audio::Snapshot,
+    audio_slot: AudioSlot,
+    audio_error: String,
+    audio_slider: R,
 }
 
 pub struct Popup {
@@ -111,6 +145,12 @@ impl Popup {
             visible: false,
             dismissed: None,
             anchor: Rect::default(),
+            view: View::Devices,
+            dpi: BTreeMap::new(),
+            audio: crate::audio::Snapshot::default(),
+            audio_slot: AudioSlot::Speaker,
+            audio_error: String::new(),
+            audio_slider: R::default(),
         }));
         let s = Rc::clone(&state);
         let handler = unsafe {
@@ -134,6 +174,19 @@ impl Popup {
                         let mut state = s.borrow_mut();
                         let (x, y) = point(lp, state.scale);
                         let hit = state.hits.iter().position(|(r, _)| r.contains(x, y));
+                        let slider = match state.pressed.as_ref() {
+                            Some(Action::AudioSlider(slot))
+                                if state.audio_slider.w > 0.0 =>
+                            {
+                                Some((
+                                    *slot,
+                                    ((x - state.audio_slider.x)
+                                        / state.audio_slider.w.max(1.0))
+                                        .clamp(0.0, 1.0),
+                                ))
+                            }
+                            _ => None,
+                        };
                         if state.hover != hit {
                             state.hover = hit;
                             InvalidateRect(hwnd, std::ptr::null(), 0);
@@ -145,6 +198,15 @@ impl Popup {
                             hover: 0,
                         };
                         TrackMouseEvent(&mut track);
+                        drop(state);
+                        if let Some((slot, fraction)) = slider {
+                            apply_local_action(
+                                &s,
+                                Action::AudioSlider(slot),
+                                Some(fraction),
+                            );
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        }
                         Some(0)
                     }
                     0x02a3 => {
@@ -167,21 +229,30 @@ impl Popup {
                         Some(0)
                     }
                     0x0202 => {
-                        let action = {
+                        let target = {
                             let mut state = s.borrow_mut();
                             let (x, y) = point(lp, state.scale);
                             let hit = state
                                 .hits
                                 .iter()
                                 .find(|(r, _)| r.contains(x, y))
-                                .map(|(_, a)| a.clone());
+                                .map(|(r, a)| (*r, a.clone()));
                             let pressed = state.pressed.take();
-                            hit.filter(|a| Some(a) == pressed.as_ref())
+                            hit.filter(|(_, a)| Some(a) == pressed.as_ref())
+                                .map(|(r, a)| (r, a, x))
                         };
                         ReleaseCapture();
-                        if let Some(action) = action {
-                            s.borrow_mut().acts.push(action);
-                            notice.notice();
+                        if let Some((rect, action, x)) = target {
+                            let local = apply_local_action(
+                                &s,
+                                action,
+                                Some((x - rect.x) / rect.w.max(1.0)),
+                            );
+                            if local {
+                                InvalidateRect(hwnd, std::ptr::null(), 0);
+                            } else {
+                                notice.notice();
+                            }
                         }
                         Some(0)
                     }
@@ -205,7 +276,22 @@ impl Popup {
                         Some(0)
                     }
                     0x0100 if wp == 0x1b => {
-                        hide(hwnd, &s, false);
+                        let back = {
+                            let mut state = s.borrow_mut();
+                            if state.view == View::Devices {
+                                false
+                            } else {
+                                state.view = View::Devices;
+                                state.hover = None;
+                                state.focus = None;
+                                true
+                            }
+                        };
+                        if back {
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        } else {
+                            hide(hwnd, &s, false);
+                        }
                         Some(0)
                     }
                     0x0100 if wp == 9 || wp == 0x28 || wp == 0x26 => {
@@ -222,14 +308,49 @@ impl Popup {
                         Some(0)
                     }
                     0x0100 if wp == 13 || wp == 32 => {
-                        let mut state = s.borrow_mut();
-                        if let Some(action) = state
-                            .focus
-                            .and_then(|i| state.hits.get(i))
-                            .map(|(_, a)| a.clone())
-                        {
-                            state.acts.push(action);
-                            notice.notice();
+                        let action = {
+                            let state = s.borrow();
+                            state
+                                .focus
+                                .and_then(|i| state.hits.get(i))
+                                .map(|(_, action)| action.clone())
+                        };
+                        if let Some(action) = action {
+                            if apply_local_action(&s, action, None) {
+                                InvalidateRect(hwnd, std::ptr::null(), 0);
+                            } else {
+                                notice.notice();
+                            }
+                        }
+                        Some(0)
+                    }
+                    0x0100 if wp == 0x25 || wp == 0x27 => {
+                        let action = {
+                            let state = s.borrow();
+                            state
+                                .focus
+                                .and_then(|i| state.hits.get(i))
+                                .map(|(_, action)| action.clone())
+                        };
+                        if let Some(Action::AudioSlider(slot)) = action {
+                            apply_audio_delta(&s, slot, if wp == 0x25 { -5 } else { 5 });
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        }
+                        Some(0)
+                    }
+                    0x0100 if wp == 0x4d => {
+                        let action = {
+                            let state = s.borrow();
+                            state
+                                .focus
+                                .and_then(|i| state.hits.get(i))
+                                .map(|(_, action)| action.clone())
+                        };
+                        if let Some(Action::AudioSlider(slot)) = action {
+                            if let Err(error) = toggle_audio_mute(&s, slot) {
+                                s.borrow_mut().audio_error = error;
+                            }
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
                         }
                         Some(0)
                     }
@@ -267,7 +388,13 @@ impl Popup {
     fn hwnd(&self) -> Handle {
         self.window.handle.hwnd().unwrap() as Handle
     }
-    pub fn update(&self, readings: &[DeviceReading], cfg: &Settings, generation: u64) {
+    pub fn update(
+        &self,
+        readings: &[DeviceReading],
+        cfg: &Settings,
+        dpi: &BTreeMap<String, DpiState>,
+        generation: u64,
+    ) {
         let mut state = self.state.borrow_mut();
         let resize = state.visible && state.readings.len() != readings.len();
         let anchor = state.anchor;
@@ -282,6 +409,12 @@ impl Popup {
         }
         state.readings = readings.to_vec();
         state.cfg = cfg.clone();
+        state.dpi = dpi.clone();
+        if let View::Dpi(key) = &state.view {
+            if !state.readings.iter().any(|reading| &reading.key == key) {
+                state.view = View::Devices;
+            }
+        }
         let max = state.readings.len().saturating_sub(state.visible_rows());
         state.offset = state.offset.min(max);
         if state
@@ -385,6 +518,138 @@ fn point(lp: isize, scale: f32) -> (f32, f32) {
         ((lp as u32 >> 16) as u16 as i16) as f32 / scale,
     )
 }
+
+fn endpoint(state: &State, slot: AudioSlot) -> Option<crate::audio::Endpoint> {
+    match slot {
+        AudioSlot::Speaker => state.audio.speaker.clone(),
+        AudioSlot::Headset => state.audio.headset.clone(),
+    }
+}
+
+fn endpoint_mut(
+    state: &mut State,
+    slot: AudioSlot,
+) -> Option<&mut crate::audio::Endpoint> {
+    match slot {
+        AudioSlot::Speaker => state.audio.speaker.as_mut(),
+        AudioSlot::Headset => state.audio.headset.as_mut(),
+    }
+}
+
+fn apply_audio_delta(state: &Rc<RefCell<State>>, slot: AudioSlot, delta: i16) {
+    let endpoint = endpoint(&state.borrow(), slot);
+    if let Some(endpoint) = endpoint {
+        let percent = (i16::from(endpoint.volume) + delta).clamp(0, 100) as u8;
+        match crate::audio::set_volume(&endpoint.id, percent) {
+            Ok(()) => {
+                let mut state = state.borrow_mut();
+                if let Some(value) = endpoint_mut(&mut state, slot) {
+                    value.volume = percent;
+                }
+                state.audio_error.clear();
+            }
+            Err(error) => state.borrow_mut().audio_error = error,
+        }
+    }
+}
+
+fn toggle_audio_mute(
+    state: &Rc<RefCell<State>>,
+    slot: AudioSlot,
+) -> Result<(), String> {
+    let endpoint = endpoint(&state.borrow(), slot)
+        .ok_or_else(|| crate::tr!("未检测到对应音频设备").to_string())?;
+    let muted = crate::audio::toggle_mute(&endpoint.id)?;
+    let mut state = state.borrow_mut();
+    if let Some(value) = endpoint_mut(&mut state, slot) {
+        value.muted = muted;
+    }
+    state.audio_error.clear();
+    Ok(())
+}
+
+fn apply_local_action(
+    state: &Rc<RefCell<State>>,
+    action: Action,
+    fraction: Option<f32>,
+) -> bool {
+    match action {
+        Action::BackDevices => {
+            let mut state = state.borrow_mut();
+            state.view = View::Devices;
+            state.hover = None;
+            state.focus = None;
+            true
+        }
+        Action::OpenDpi(key) => {
+            let mut state = state.borrow_mut();
+            state.view = View::Dpi(key);
+            state.hover = None;
+            state.focus = None;
+            true
+        }
+        Action::OpenAudio => {
+            let snapshot = crate::audio::snapshot();
+            let mut state = state.borrow_mut();
+            state.audio_error = snapshot.error.clone().unwrap_or_default();
+            state.audio = snapshot;
+            state.audio_slot = AudioSlot::Speaker;
+            state.view = View::Audio;
+            state.hover = None;
+            state.focus = None;
+            true
+        }
+        Action::AudioSlot(slot) => {
+            state.borrow_mut().audio_slot = slot;
+            true
+        }
+        Action::AudioSlider(slot) => {
+            let endpoint = endpoint(&state.borrow(), slot);
+            if let Some(endpoint) = endpoint {
+                let percent = fraction
+                    .map(|value| (value.clamp(0.0, 1.0) * 100.0).round() as u8)
+                    .unwrap_or(endpoint.volume);
+                match crate::audio::set_volume(&endpoint.id, percent) {
+                    Ok(()) => {
+                        let mut state = state.borrow_mut();
+                        if let Some(value) = endpoint_mut(&mut state, slot) {
+                            value.volume = percent;
+                        }
+                        state.audio_error.clear();
+                    }
+                    Err(error) => state.borrow_mut().audio_error = error,
+                }
+            }
+            true
+        }
+        Action::ToggleMicrophone => {
+            let microphone = state.borrow().audio.microphone.clone();
+            if let Some(microphone) = microphone {
+                match crate::audio::toggle_mute(&microphone.id) {
+                    Ok(muted) => {
+                        let mut state = state.borrow_mut();
+                        if let Some(value) = state.audio.microphone.as_mut() {
+                            value.muted = muted;
+                        }
+                        state.audio_error.clear();
+                    }
+                    Err(error) => state.borrow_mut().audio_error = error,
+                }
+            }
+            true
+        }
+        Action::OpenSoundSettings => {
+            if let Err(error) = crate::audio::open_sound_settings() {
+                state.borrow_mut().audio_error = error;
+            }
+            true
+        }
+        external => {
+            state.borrow_mut().acts.push(external);
+            false
+        }
+    }
+}
 fn hide(hwnd: Handle, state: &Rc<RefCell<State>>, deactivated: bool) {
     {
         let mut s = state.borrow_mut();
@@ -470,6 +735,12 @@ unsafe fn paint(hwnd: Handle, state: &mut State) {
         focus,
         refreshing,
         updated,
+        view,
+        dpi,
+        audio,
+        audio_slot,
+        audio_error,
+        audio_slider,
         scale,
         ..
     } = state;
@@ -485,10 +756,299 @@ unsafe fn paint(hwnd: Handle, state: &mut State) {
             hover.or(*focus),
             refreshing.map(|(_, t)| t.elapsed().as_secs_f32()),
             *updated,
+            view,
+            dpi,
+            audio,
+            *audio_slot,
+            audio_error,
+            audio_slider,
         )
     });
     gfx::blit(dc as isize, mem, w, h);
     EndPaint(hwnd, &ps);
+}
+
+fn draw_dpi(
+    p: &mut Painter,
+    w: f32,
+    h: f32,
+    list: R,
+    key: &str,
+    readings: &[DeviceReading],
+    cfg: &Settings,
+    dpi: Option<&DpiState>,
+    hits: &mut Vec<(R, Action)>,
+    hover: Option<usize>,
+) {
+    let t = *p.t;
+    let device = readings.iter().find(|reading| reading.key == key);
+    let name = device
+        .map(|device| cfg.device_name(device))
+        .unwrap_or(crate::tr!("设备详情"));
+    p.text(
+        name,
+        R::new(list.x + 18.0, list.y + 17.0, list.w - 36.0, 28.0),
+        15.0,
+        true,
+        t.text,
+        Align::Left,
+    );
+    p.text(
+        crate::tr!("选择当前 DPI 档位"),
+        R::new(list.x + 18.0, list.y + 47.0, list.w - 36.0, 20.0),
+        11.0,
+        false,
+        t.text3,
+        Align::Left,
+    );
+    if let Some(dpi) = dpi {
+        let segment = R::new(list.x + 18.0, list.y + 82.0, list.w - 36.0, 46.0);
+        p.round(segment, 10.0, t.bg_sunken);
+        let item_w = segment.w / 4.0;
+        for (index, level) in dpi.stages.into_iter().enumerate() {
+            let r = R::new(
+                segment.x + index as f32 * item_w + 3.0,
+                segment.y + 3.0,
+                item_w - 6.0,
+                segment.h - 6.0,
+            );
+            let active = dpi.active as usize == index + 1;
+            if active || hover == Some(hits.len()) {
+                p.round(
+                    r,
+                    8.0,
+                    if active { t.card } else { t.card_hover },
+                );
+            }
+            p.text(
+                &level.to_string(),
+                R::new(r.x, r.y - 2.0, r.w, r.h),
+                13.0,
+                active,
+                if active { t.text } else { t.text2 },
+                Align::Center,
+            );
+            if active {
+                p.round(
+                    R::new(r.cx() - 10.0, r.bottom() - 5.0, 20.0, 2.0),
+                    1.0,
+                    t.accent,
+                );
+            }
+            hits.push((r, Action::SetDpiStage(key.to_string(), (index + 1) as u8)));
+        }
+    } else {
+        p.text(
+            crate::tr!("正在读取 DPI 档位…"),
+            R::new(list.x + 18.0, list.y + 92.0, list.w - 36.0, 24.0),
+            12.0,
+            false,
+            t.text3,
+            Align::Center,
+        );
+    }
+    let footer_y = h - FOOTER;
+    let detail = R::new(w - 150.0, footer_y + 5.0, 118.0, 32.0);
+    p.text(
+        crate::tr!("完整设备页"),
+        detail,
+        11.0,
+        false,
+        if hover == Some(hits.len()) {
+            t.text
+        } else {
+            t.text2
+        },
+        Align::Center,
+    );
+    hits.push((detail, Action::Device(key.to_string())));
+}
+
+fn draw_audio(
+    p: &mut Painter,
+    w: f32,
+    h: f32,
+    list: R,
+    audio: &crate::audio::Snapshot,
+    slot: AudioSlot,
+    error: &str,
+    hits: &mut Vec<(R, Action)>,
+    hover: Option<usize>,
+    slider: &mut R,
+) {
+    let t = *p.t;
+    let tabs = R::new(list.x + 18.0, list.y + 18.0, list.w - 88.0, 40.0);
+    p.round(tabs, 9.0, t.bg_sunken);
+    let tab_w = tabs.w / 2.0;
+    for (index, (label, icon, target, available)) in [
+        (
+            crate::tr!("扬声器"),
+            Icon::Speaker,
+            AudioSlot::Speaker,
+            audio.speaker.is_some(),
+        ),
+        (
+            crate::tr!("耳机"),
+            Icon::Device(crate::tray_prefs::TrayKind::Headset),
+            AudioSlot::Headset,
+            audio.headset.is_some(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = R::new(
+            tabs.x + index as f32 * tab_w + 3.0,
+            tabs.y + 3.0,
+            tab_w - 6.0,
+            tabs.h - 6.0,
+        );
+        let active = slot == target && available;
+        if active || (available && hover == Some(hits.len())) {
+            p.round(r, 7.0, if active { t.card } else { t.card_hover });
+        }
+        panel_icons::draw(
+            p,
+            icon,
+            R::new(r.x + 11.0, r.cy() - 8.0, 16.0, 16.0),
+            if available { t.text2 } else { t.text3 },
+            0.0,
+        );
+        p.text(
+            label,
+            R::new(r.x + 31.0, r.y, r.w - 36.0, r.h),
+            11.5,
+            active,
+            if available { t.text } else { t.text3 },
+            Align::Left,
+        );
+        if active {
+            p.round(
+                R::new(r.cx() - 11.0, r.bottom() - 4.0, 22.0, 2.0),
+                1.0,
+                t.accent,
+            );
+        }
+        if available {
+            hits.push((r, Action::AudioSlot(target)));
+        }
+    }
+
+    let mic_rect = R::new(tabs.right() + 8.0, tabs.y, 44.0, tabs.h);
+    let microphone = audio.microphone.as_ref();
+    let muted = microphone.is_some_and(|value| value.muted);
+    if muted || hover == Some(hits.len()) {
+        p.round(
+            mic_rect,
+            9.0,
+            if muted { t.red_soft } else { t.card_hover },
+        );
+    } else {
+        p.round(mic_rect, 9.0, t.bg_sunken);
+    }
+    panel_icons::draw(
+        p,
+        Icon::Microphone,
+        R::new(mic_rect.x + 12.0, mic_rect.y + 10.0, 20.0, 20.0),
+        if muted {
+            t.red
+        } else if microphone.is_some() {
+            t.text2
+        } else {
+            t.text3
+        },
+        0.0,
+    );
+    if muted {
+        p.polyline(
+            &[
+                (mic_rect.x + 13.0, mic_rect.y + 12.0),
+                (mic_rect.x + 31.0, mic_rect.y + 30.0),
+            ],
+            t.red,
+            1.8,
+        );
+    }
+    if microphone.is_some() {
+        hits.push((mic_rect, Action::ToggleMicrophone));
+    }
+
+    let selected = match slot {
+        AudioSlot::Speaker => audio.speaker.as_ref(),
+        AudioSlot::Headset => audio.headset.as_ref(),
+    };
+    if let Some(endpoint) = selected {
+        p.text(
+            &endpoint.name,
+            R::new(list.x + 18.0, list.y + 72.0, list.w - 36.0, 20.0),
+            10.5,
+            false,
+            t.text3,
+            Align::Left,
+        );
+        let track = R::new(list.x + 48.0, list.y + 116.0, list.w - 128.0, 8.0);
+        *slider = track;
+        p.round(track, 4.0, t.bg_sunken);
+        let fill_w = track.w * endpoint.volume as f32 / 100.0;
+        if fill_w > 0.0 {
+            p.round(R::new(track.x, track.y, fill_w, track.h), 4.0, t.accent);
+        }
+        let knob_x = track.x + fill_w;
+        p.round(
+            R::new(knob_x - 7.0, track.cy() - 7.0, 14.0, 14.0),
+            7.0,
+            t.card,
+        );
+        p.round_stroke(
+            R::new(knob_x - 7.0, track.cy() - 7.0, 14.0, 14.0),
+            7.0,
+            t.accent,
+            2.0,
+        );
+        p.text(
+            &format!("{}%", if endpoint.muted { 0 } else { endpoint.volume }),
+            R::new(track.right() + 12.0, track.y - 10.0, 54.0, 30.0),
+            11.0,
+            false,
+            t.text2,
+            Align::Right,
+        );
+        hits.push((R::new(track.x, track.y - 10.0, track.w, 28.0), Action::AudioSlider(slot)));
+    } else {
+        p.text(
+            crate::tr!("未检测到对应音频设备"),
+            R::new(list.x + 18.0, list.y + 91.0, list.w - 36.0, 28.0),
+            12.0,
+            false,
+            t.text3,
+            Align::Center,
+        );
+    }
+    if !error.is_empty() {
+        p.text(
+            error,
+            R::new(list.x + 24.0, list.y + 150.0, list.w - 48.0, 34.0),
+            10.0,
+            false,
+            t.red,
+            Align::Center,
+        );
+    }
+    let footer_y = h - FOOTER;
+    let settings = R::new(w - 175.0, footer_y + 5.0, 150.0, 32.0);
+    p.text(
+        crate::tr!("打开 Windows 声音设置"),
+        settings,
+        10.5,
+        false,
+        if hover == Some(hits.len()) {
+            t.text
+        } else {
+            t.text2
+        },
+        Align::Center,
+    );
+    hits.push((settings, Action::OpenSoundSettings));
 }
 
 fn draw(
@@ -502,14 +1062,30 @@ fn draw(
     hover: Option<usize>,
     refreshing: Option<f32>,
     updated: bool,
+    view: &View,
+    dpi: &BTreeMap<String, DpiState>,
+    audio: &crate::audio::Snapshot,
+    audio_slot: AudioSlot,
+    audio_error: &str,
+    audio_slider: &mut R,
 ) {
     let t = *p.t;
     p.rect(R::new(0.0, 0.0, w, h), t.bg);
     p.round_stroke(R::new(0.5, 0.5, w - 1.0, h - 1.0), 11.0, t.border, 1.0);
-    p.image_rounded(gfx::app_icon_bitmap(), R::new(17.0, 16.0, 25.0, 25.0), 5.0);
+    let back_view = *view != View::Devices;
+    if back_view {
+        let back = R::new(12.0, 10.0, 35.0, 36.0);
+        if hover == Some(hits.len()) {
+            p.round(back.inset(2.0), 6.0, t.card_hover);
+        }
+        panel_icons::draw(p, Icon::Chevron, R::new(22.0, 19.0, 16.0, 16.0), t.text2, 180.0);
+        hits.push((R::new(11.0, 10.0, 176.0, 36.0), Action::BackDevices));
+    } else {
+        p.image_rounded(gfx::app_icon_bitmap(), R::new(17.0, 16.0, 25.0, 25.0), 5.0);
+    }
     p.text(
         "R Battery",
-        R::new(51.0, 13.0, 200.0, 32.0),
+        R::new(if back_view { 49.0 } else { 51.0 }, 13.0, 200.0, 32.0),
         14.0,
         true,
         t.text,
@@ -539,6 +1115,39 @@ fn draw(
     }
     let list = R::new(11.0, HEADER, w - 22.0, h - HEADER - FOOTER);
     p.card(list, 10.0, t.card, t.border);
+    match view {
+        View::Dpi(key) => {
+            draw_dpi(
+                p,
+                w,
+                h,
+                list,
+                key,
+                readings,
+                cfg,
+                dpi.get(key),
+                hits,
+                hover,
+            );
+            return;
+        }
+        View::Audio => {
+            draw_audio(
+                p,
+                w,
+                h,
+                list,
+                audio,
+                audio_slot,
+                audio_error,
+                hits,
+                hover,
+                audio_slider,
+            );
+            return;
+        }
+        View::Devices => {}
+    }
     if readings.is_empty() {
         p.text(
             crate::tr!("等待设备连接"),
@@ -652,7 +1261,14 @@ fn draw(
             t.text3,
             0.0,
         );
-        hits.push((r, Action::Device(d.key.clone())));
+        hits.push((
+            r,
+            match kind {
+                crate::tray_prefs::TrayKind::Mouse => Action::OpenDpi(d.key.clone()),
+                crate::tray_prefs::TrayKind::Headset => Action::OpenAudio,
+                _ => Action::Device(d.key.clone()),
+            },
+        ));
     }
     if readings.len() > count && count > 0 {
         let thumb = list.h * count as f32 / readings.len() as f32;

@@ -159,6 +159,12 @@ macro_rules! tr {
     ("鼠标") => { if $crate::i18n::english() { "Mouse" } else { "鼠标" } };
     ("键盘") => { if $crate::i18n::english() { "Keyboard" } else { "键盘" } };
     ("耳机") => { if $crate::i18n::english() { "Headset" } else { "耳机" } };
+    ("扬声器") => { if $crate::i18n::english() { "Speaker" } else { "扬声器" } };
+    ("选择当前 DPI 档位") => { if $crate::i18n::english() { "Select the current DPI stage" } else { "选择当前 DPI 档位" } };
+    ("正在读取 DPI 档位…") => { if $crate::i18n::english() { "Reading DPI stages…" } else { "正在读取 DPI 档位…" } };
+    ("完整设备页") => { if $crate::i18n::english() { "Full device page" } else { "完整设备页" } };
+    ("未检测到对应音频设备") => { if $crate::i18n::english() { "No matching audio device found" } else { "未检测到对应音频设备" } };
+    ("打开 Windows 声音设置") => { if $crate::i18n::english() { "Open Windows sound settings" } else { "打开 Windows 声音设置" } };
     ("手柄") => { if $crate::i18n::english() { "Gamepad" } else { "手柄" } };
     ("通用") => { if $crate::i18n::english() { "Generic" } else { "通用" } };
     ("仅电量数字") => { if $crate::i18n::english() { "Battery number only" } else { "仅电量数字" } };
@@ -530,6 +536,12 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "鼠标" => "Mouse",
         "键盘" => "Keyboard",
         "耳机" => "Headset",
+        "扬声器" => "Speaker",
+        "选择当前 DPI 档位" => "Select the current DPI stage",
+        "正在读取 DPI 档位…" => "Reading DPI stages…",
+        "完整设备页" => "Full device page",
+        "未检测到对应音频设备" => "No matching audio device found",
+        "打开 Windows 声音设置" => "Open Windows sound settings",
         "手柄" => "Gamepad",
         "通用" => "Generic",
         "仅电量数字" => "Battery number only",

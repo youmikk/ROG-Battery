@@ -1,6 +1,6 @@
 
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -684,6 +684,23 @@ impl Shared {
             _ => String::new(),
         }
     }
+}
+
+fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::DpiState> {
+    shared
+        .devices
+        .iter()
+        .filter_map(|(key, device)| {
+            let state = device.state.as_ref()?;
+            Some((
+                key.clone(),
+                crate::ui::tray_popup::DpiState {
+                    stages: [state.dpi(0), state.dpi(1), state.dpi(2), state.dpi(3)],
+                    active: state.active_stage.clamp(1, 4),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// 「有活了」的信号 + 关闭开关。
@@ -2831,6 +2848,17 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             signal_e.request_quit();
                             nwg::stop_thread_dispatch();
                         }
+                        Action::SetDpiStage(key, stage) => {
+                            canvas.with_ui_mut(|ui| ui.select_device(&key));
+                            {
+                                let mut shared = lock_shared(&shared_e);
+                                shared.active_key = Some(key);
+                                shared.want_full = true;
+                            }
+                            if !submit(&shared_e, &signal_e, Cmd::Stage(stage)) {
+                                popup_events.hide();
+                            }
+                        }
                         Action::Settings | Action::Main | Action::Device(_) => {
                             popup_events.hide();
                             match action {
@@ -2857,6 +2885,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             }
                             canvas.repaint_now();
                         }
+                        _ => {}
                     }
                 }
 
@@ -2930,8 +2959,12 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         });
                     }
                     let notify_low = s.cfg.notify_low_battery;
-                    let (readings, cfg, generation) =
-                        (s.readings.clone(), s.cfg.clone(), s.refresh_generation);
+                    let (readings, cfg, dpi, generation) = (
+                        s.readings.clone(),
+                        s.cfg.clone(),
+                        popup_dpi_states(&s),
+                        s.refresh_generation,
+                    );
                     drop(s);
                     if notify_low && crate::notifications::supported() {
                         for (key, name, level) in low_alerts {
@@ -2948,7 +2981,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             }
                         }
                     }
-                    popup_events.update(&readings, &cfg, generation);
+                    popup_events.update(&readings, &cfg, &dpi, generation);
                     if !cfg.tray_enabled {
                         popup_events.hide();
                     }
@@ -2985,11 +3018,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     if click_was_open.get() {
                         popup_tray.hide();
                     } else {
-                        let (readings, cfg, generation) = {
+                        let (readings, cfg, dpi, generation) = {
                             let s = lock_shared(&shared_tray);
-                            (s.readings.clone(), s.cfg.clone(), s.refresh_generation)
+                            (
+                                s.readings.clone(),
+                                s.cfg.clone(),
+                                popup_dpi_states(&s),
+                                s.refresh_generation,
+                            )
                         };
-                        popup_tray.update(&readings, &cfg, generation);
+                        popup_tray.update(&readings, &cfg, &dpi, generation);
                         if cfg.tray_enabled {
                             popup_tray.show(anchor.get());
                         }
@@ -3063,11 +3101,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     if popup_tray.was_open() {
                         popup_tray.hide();
                     } else {
-                        let (readings, cfg, generation) = {
+                        let (readings, cfg, dpi, generation) = {
                             let s = lock_shared(&shared_tray);
-                            (s.readings.clone(), s.cfg.clone(), s.refresh_generation)
+                            (
+                                s.readings.clone(),
+                                s.cfg.clone(),
+                                popup_dpi_states(&s),
+                                s.refresh_generation,
+                            )
                         };
-                        popup_tray.update(&readings, &cfg, generation);
+                        popup_tray.update(&readings, &cfg, &dpi, generation);
                         popup_tray.show(current);
                     }
                 }

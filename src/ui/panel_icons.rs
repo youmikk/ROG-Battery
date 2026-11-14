@@ -9,6 +9,8 @@ pub enum Icon {
     Settings,
     Bolt,
     Chevron,
+    Speaker,
+    Microphone,
 }
 
 pub fn draw(p: &mut Painter, icon: Icon, r: R, color: u32, rotation: f32) {
@@ -129,6 +131,19 @@ pub fn draw(p: &mut Painter, icon: Icon, r: R, color: u32, rotation: f32) {
             (13.5, 2.0),
         ]),
         Icon::Chevron => g.path(&[(9.0, 5.0), (16.0, 12.0), (9.0, 19.0)]),
+        Icon::Speaker => {
+            g.path(&[(4.0, 9.0), (8.0, 9.0), (13.0, 5.0), (13.0, 19.0), (8.0, 15.0), (4.0, 15.0), (4.0, 9.0)]);
+            g.path(&[(16.0, 9.0), (18.0, 12.0), (16.0, 15.0)]);
+            g.path(&[(19.0, 7.0), (21.5, 12.0), (19.0, 17.0)]);
+        }
+        Icon::Microphone => {
+            g.rounded(9.0, 3.0, 6.0, 12.0, 3.0);
+            g.path(&[(5.0, 11.0), (5.0, 13.0)]);
+            g.path(&[(19.0, 11.0), (19.0, 13.0)]);
+            g.path(&[(5.0, 13.0), (7.0, 16.0), (12.0, 17.0), (17.0, 16.0), (19.0, 13.0)]);
+            g.path(&[(12.0, 17.0), (12.0, 21.0)]);
+            g.path(&[(8.0, 21.0), (16.0, 21.0)]);
+        }
     }
 }
 

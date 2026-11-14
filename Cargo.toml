@@ -1,6 +1,6 @@
 [package]
 name = "rog-mouse-ctl"
-version = "1.4.2"
+version = "1.4.3"
 edition = "2021"
 description = "ROG peripheral battery monitor and mouse settings utility for Windows"
 
@@ -9,6 +9,10 @@ native-windows-gui = { version = "1.0.13", default-features = false, features = 
     "tabs", "tray-notification", "message-window", "cursor", "menu",
     "progress-bar", "trackbar", "combobox", "animation-timer", "notice",
     "image-decoder", "file-dialog",
+] }
+winapi = { version = "0.3.9", features = [
+    "combaseapi", "endpointvolume", "functiondiscoverykeys_devpkey",
+    "mmdeviceapi", "objbase", "propidl", "propsys", "winbase",
 ] }
 
 [[bin]]

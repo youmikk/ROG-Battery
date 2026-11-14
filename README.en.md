@@ -6,12 +6,11 @@ A lightweight battery monitor and mouse settings utility for ROG peripherals on 
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
-## Version 1.4.2
+## Version 1.4.3
 
-- Microsoft Store builds now send a Windows low battery notification below 20%; portable builds do not.
-- Low battery state is tracked per device and re-arms after charging or returning above 25%.
-- Fixed a crash that could occur after saving a custom device name.
-- Fixed the tray battery level not recovering automatically after the mouse wakes from sleep.
+- Switch between known DPI stages directly from the tray mouse panel.
+- Open a headset panel to adjust speaker or headset volume, mute the microphone, and open Windows sound settings.
+- Microsoft Store builds retain the Windows low battery notification; portable builds do not.
 
 ## Getting started
 
@@ -24,6 +23,8 @@ Click a device card to open its details. With multiple devices, return to the ov
 One numeric tray icon shows the selected device's battery level. Click it once to open a panel centered on the tray icon, with device battery levels, refresh, and settings. Double-click to open the main window, or right-click for the menu.
 
 Device preferences provide tray selection, device name, and device type, in that order. Names can be edited or restored. Types default to automatic detection and can be set to Mouse, Keyboard, Headset, Gamepad, or Other. Your choice applies throughout the main window and tray. Changing the type does not add hardware capabilities.
+
+In the tray device list, a mouse opens its known DPI stages, while a headset opens audio controls for speaker or headset volume, microphone mute, and Windows sound settings. Windows remains responsible for changing the default playback device; the app does not call undocumented interfaces.
 
 ### Switching to English
 
