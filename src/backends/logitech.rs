@@ -113,6 +113,20 @@ impl<C: Channel> Session<C> {
             );
             return Err("HID++ 设备无应答".into());
         };
+        let Some(payload) = hidpp_payload(&reply) else {
+            trace::record(
+                &self.interface,
+                BackendId::Logitech,
+                "query",
+                logical_feature,
+                function,
+                total,
+                reply.len(),
+                started,
+                trace::Outcome::InvalidData,
+            );
+            return Err("HID++ 回帧长度无效".into());
+        };
         if reply[2] == 0xff || reply[2] == 0x8f {
             self.last_protocol_error = Some((reply[2], reply.get(5).copied().unwrap_or(0)));
             trace::record(
@@ -126,9 +140,9 @@ impl<C: Channel> Session<C> {
                 started,
                 trace::Outcome::Rejected(u32::from(reply.get(5).copied().unwrap_or(0))),
             );
-            return Err(format!(
-                "HID++ 查询被拒绝：{:02x}",
-                reply.get(5).copied().unwrap_or(0)
+            return Err(crate::trf!(
+                "HID++ 查询被拒绝：{code:02x}",
+                code = reply.get(5).copied().unwrap_or(0)
             ));
         }
         trace::record(
@@ -142,7 +156,7 @@ impl<C: Channel> Session<C> {
             started,
             trace::Outcome::Ok,
         );
-        Ok(reply[4..].to_vec())
+        Ok(payload.to_vec())
     }
 
     fn feature(&mut self, id: u16) -> Result<Option<u8>, String> {
@@ -229,8 +243,7 @@ impl<C: Channel> Session<C> {
         if sensors.first() != Some(&1) {
             return Ok(Dpi::default());
         }
-        let list = self.request(index, 1, &[0])?;
-        let values = decode_dpi_list(list.get(1..).unwrap_or_default())?;
+        let values = self.dpi_list(index)?;
         let payload = self.request(index, 2, &[0])?;
         let current = decode_current_dpi(&payload);
         Ok(Dpi {
@@ -238,6 +251,23 @@ impl<C: Channel> Session<C> {
             writable: current.is_some() && !values.is_empty(),
             values,
         })
+    }
+
+    fn dpi_list(&mut self, index: u8) -> Result<Vec<u16>, String> {
+        let mut bytes = Vec::new();
+        for page in 0..=u8::MAX {
+            let payload = self.request(index, 1, &[0, 0, page])?;
+            if payload.first() != Some(&0) || payload.len() < 3 {
+                return Err("设备返回的 DPI 列表无效".into());
+            }
+            bytes.extend_from_slice(&payload[1..]);
+            match decode_dpi_list(&bytes) {
+                Ok(values) => return Ok(values),
+                Err(DpiListError::Incomplete) => (),
+                Err(error) => return Err(error.message().into()),
+            }
+        }
+        Err(DpiListError::Incomplete.message().into())
     }
 
     fn identify(&mut self, target: &mut Target) {
@@ -306,6 +336,7 @@ impl<C: Channel> Session<C> {
             register_reply_matches(reply, address, sub_id, low_register, echo)
         });
         let outcome = match reply.as_ref() {
+            Some(reply) if hidpp_payload(reply).is_none() => trace::Outcome::InvalidData,
             Some(reply) if reply[2] == sub_id => trace::Outcome::Ok,
             Some(reply) => trace::Outcome::Rejected(u32::from(reply[5])),
             None => trace::Outcome::NoReply,
@@ -322,8 +353,9 @@ impl<C: Channel> Session<C> {
             outcome,
         );
         match reply {
-            Some(reply) if reply[2] == sub_id => Ok(reply[4..].to_vec()),
-            Some(reply) => Err(format!("HID++ 查询被拒绝：{:02x}", reply[5])),
+            Some(reply) if hidpp_payload(&reply).is_none() => Err("HID++ 回帧长度无效".into()),
+            Some(reply) if reply[2] == sub_id => Ok(hidpp_payload(&reply).unwrap().to_vec()),
+            Some(reply) => Err(crate::trf!("HID++ 查询被拒绝：{code:02x}", code = reply[5])),
             None => Err("HID++ 设备无应答".into()),
         }
     }
@@ -433,6 +465,15 @@ fn reply_matches(reply: &[u8], address: u8, feature: u8, function: u8) -> bool {
     }
     (reply[2] == feature && reply[3] == function)
         || (matches!(reply[2], 0xff | 0x8f) && reply[3] == feature && reply[4] == function)
+}
+
+fn hidpp_payload(report: &[u8]) -> Option<&[u8]> {
+    let length = match report.first()? {
+        0x10 => 7,
+        0x11 => 20,
+        _ => return None,
+    };
+    report.get(4..length)
 }
 
 fn register_reply_matches(
@@ -575,7 +616,22 @@ fn decode_legacy_battery(register: u8, data: &[u8]) -> Option<Battery> {
     }
 }
 
-fn decode_dpi_list(data: &[u8]) -> Result<Vec<u16>, String> {
+#[derive(Debug, PartialEq, Eq)]
+enum DpiListError {
+    Incomplete,
+    Invalid(&'static str),
+}
+
+impl DpiListError {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Incomplete => "DPI 列表不完整",
+            Self::Invalid(message) => message,
+        }
+    }
+}
+
+fn decode_dpi_list(data: &[u8]) -> Result<Vec<u16>, DpiListError> {
     let mut words = data
         .chunks_exact(2)
         .map(|word| u16::from_be_bytes([word[0], word[1]]));
@@ -588,10 +644,12 @@ fn decode_dpi_list(data: &[u8]) -> Result<Vec<u16>, String> {
         }
         if word & 0xe000 == 0xe000 {
             let step = word & 0x1fff;
-            let previous = *values.last().ok_or("DPI 范围缺少起始值")?;
-            let end = words.next().ok_or("DPI 范围缺少终止值")?;
+            let previous = *values
+                .last()
+                .ok_or(DpiListError::Invalid("DPI 范围缺少起始值"))?;
+            let end = words.next().ok_or(DpiListError::Incomplete)?;
             if step == 0 || end <= previous || (end - previous) % step != 0 {
-                return Err("DPI 范围无效".into());
+                return Err(DpiListError::Invalid("DPI 范围无效"));
             }
             for value in
                 (u32::from(previous) + u32::from(step)..=u32::from(end)).step_by(step as usize)
@@ -602,11 +660,11 @@ fn decode_dpi_list(data: &[u8]) -> Result<Vec<u16>, String> {
             values.push(word);
         }
         if values.len() > 2048 {
-            return Err("DPI 范围过长".into());
+            return Err(DpiListError::Invalid("DPI 范围过长"));
         }
     }
     if !terminated {
-        return Err("DPI 列表不完整".into());
+        return Err(DpiListError::Incomplete);
     }
     values.sort_unstable();
     values.dedup();
@@ -656,6 +714,11 @@ mod tests {
     enum Reply {
         Data(Vec<u8>),
         Error(u8, u8),
+        SizedData {
+            report_id: u8,
+            length: usize,
+            payload: Vec<u8>,
+        },
     }
     struct Step {
         address: Option<u8>,
@@ -702,6 +765,15 @@ mod tests {
                 Reply::Data(data) => response[4..4 + data.len()].copy_from_slice(&data),
                 Reply::Error(kind, code) => {
                     response[2..6].copy_from_slice(&[kind, packet[2], packet[3], code]);
+                }
+                Reply::SizedData {
+                    report_id,
+                    length,
+                    payload,
+                } => {
+                    response.resize(length, 0);
+                    response[0] = report_id;
+                    response[4..4 + payload.len()].copy_from_slice(&payload);
                 }
             }
             assert!(
@@ -751,9 +823,136 @@ mod tests {
             ping(),
             data(0, 0, &[0x22, 1], &[2]),
             data(2, 0, &[], &[1]),
-            data(2, 1, &[0], &[0, 1, 0x90, 3, 0x20, 6, 0x40, 0, 0]),
+            data(2, 1, &[0, 0, 0], &[0, 1, 0x90, 3, 0x20, 6, 0x40, 0, 0]),
             data(2, 2, &[0], &[0, 3, 0x20, 3, 0x20]),
         ]
+    }
+
+    fn paged_dpi_queries(words: &[u16], current: u16, padded_first_page: bool) -> Vec<Step> {
+        let mut script = vec![ping(), data(0, 0, &[0x22, 1], &[2]), data(2, 0, &[], &[1])];
+        let bytes = words
+            .iter()
+            .flat_map(|word| word.to_be_bytes())
+            .collect::<Vec<_>>();
+        for (page, chunk) in bytes.chunks(15).enumerate() {
+            let mut payload = vec![0];
+            payload.extend_from_slice(chunk);
+            let mut step = data(2, 1, &[0, 0, page as u8], &payload);
+            if padded_first_page && page == 0 {
+                step.reply = Reply::SizedData {
+                    report_id: 0x11,
+                    length: 64,
+                    payload,
+                };
+            }
+            script.push(step);
+        }
+        let [hi, lo] = current.to_be_bytes();
+        script.push(data(2, 2, &[0], &[0, hi, lo, hi, lo]));
+        script
+    }
+
+    #[test]
+    fn paginated_dpi_list_ignores_transport_padding_and_reads_all_values() {
+        let values = [400, 800, 1200, 1600, 2000, 2400, 2800, 3200];
+        let mut words = values.to_vec();
+        words.push(0);
+        let (channel, steps) = channel(paged_dpi_queries(&words, 800, true));
+        let mut session = Session::from_channel(channel, &target()).unwrap();
+        let dpi = session.dpi().unwrap();
+        assert_eq!(dpi.values, values);
+        assert_eq!(dpi.current, Some(800));
+        assert!(dpi.writable);
+        assert!(!dpi.values.contains(&3072));
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dpi_range_marker_and_endpoint_can_cross_report_boundaries() {
+        let (channel, steps) = channel(paged_dpi_queries(
+            &[100, 200, 300, 400, 500, 600, 1000, 0xe032, 1500, 0],
+            1000,
+            false,
+        ));
+        let mut session = Session::from_channel(channel, &target()).unwrap();
+        let dpi = session.dpi().unwrap();
+        assert!(dpi.values.contains(&1050));
+        assert!(dpi.values.contains(&1500));
+        assert!(!dpi.values.contains(&800));
+        assert_eq!(dpi.current, Some(1000));
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn value_advertised_on_a_later_page_can_be_written_and_verified() {
+        let mut script = paged_dpi_queries(
+            &[400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 0],
+            800,
+            false,
+        );
+        script.extend([
+            data(2, 3, &[0, 0x0c, 0x80], &[]),
+            data(2, 2, &[0], &[0, 0x0c, 0x80, 3, 0x20]),
+        ]);
+        let (channel, steps) = channel(script);
+        Session::from_channel(channel, &target())
+            .unwrap()
+            .set_dpi(&target(), 3200)
+            .unwrap();
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unavailable_later_dpi_page_cannot_authorize_a_write_from_a_partial_list() {
+        let mut script = paged_dpi_queries(
+            &[400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 0],
+            800,
+            false,
+        );
+        script.truncate(4);
+        script.push(Step {
+            address: None,
+            feature: 2,
+            function: 1,
+            parameters: vec![0, 0, 1],
+            reply: Reply::Error(0xff, 2),
+        });
+        let (channel, steps) = channel(script);
+        assert!(Session::from_channel(channel, &target())
+            .unwrap()
+            .set_dpi(&target(), 800)
+            .is_err());
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unterminated_dpi_lists_stop_at_the_protocol_page_limit_without_writing() {
+        let mut script = vec![ping(), data(0, 0, &[0x22, 1], &[2]), data(2, 0, &[], &[1])];
+        let mut payload = vec![1; 16];
+        payload[0] = 0;
+        for page in 0..=u8::MAX {
+            script.push(data(2, 1, &[0, 0, page], &payload));
+        }
+        let (channel, steps) = channel(script);
+        let error = Session::from_channel(channel, &target())
+            .unwrap()
+            .set_dpi(&target(), 800)
+            .unwrap_err();
+        assert_eq!(error, "DPI 列表不完整");
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn truncated_long_report_cannot_complete_protocol_negotiation() {
+        let mut step = ping();
+        step.reply = Reply::SizedData {
+            report_id: 0x11,
+            length: 7,
+            payload: vec![2, 0, 0x5a],
+        };
+        let (channel, steps) = channel(vec![step]);
+        assert!(Session::from_channel(channel, &target()).is_err());
+        assert!(steps.lock().unwrap().is_empty());
     }
 
     #[test]

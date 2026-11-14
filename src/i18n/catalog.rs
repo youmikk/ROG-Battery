@@ -320,6 +320,7 @@ macro_rules! tr {
 
 #[macro_export]
 macro_rules! trf {
+    ("HID++ 查询被拒绝：{code:02x}", $($args:tt)*) => { if $crate::i18n::english() { format!("HID++ query rejected: {code:02x}", $($args)*) } else { format!("HID++ 查询被拒绝：{code:02x}", $($args)*) } };
     ("{} 台设备", $($args:tt)*) => { if $crate::i18n::english() { format!("{} devices", $($args)*) } else { format!("{} 台设备", $($args)*) } };
     ("应用当前纯色 ({hex_now})", $($args:tt)*) => { if $crate::i18n::english() { format!("Apply color ({hex_now})", $($args)*) } else { format!("应用当前纯色 ({hex_now})", $($args)*) } };
     ("自动识别为{}，可手动纠正", $($args:tt)*) => { if $crate::i18n::english() { format!("Detected as {}; change if needed", $($args)*) } else { format!("自动识别为{}，可手动纠正", $($args)*) } };
@@ -417,6 +418,28 @@ macro_rules! trf {
 pub(super) fn lookup(language: super::Language, text: &str) -> &str {
     if language != super::Language::English { return text; }
     match text {
+        "HID++ 设备无应答" => "The HID++ device did not respond",
+        "HID++ 回帧长度无效" => "The HID++ response length is invalid",
+        "HID++ 请求参数过长" => "The HID++ request is too long",
+        "此设备未确认支持 HID++" => "HID++ support could not be confirmed for this device",
+        "DPI 列表不完整" => "The DPI list is incomplete",
+        "设备返回的 DPI 列表无效" => "The device returned an invalid DPI list",
+        "DPI 范围缺少起始值" => "The DPI range is missing its starting value",
+        "DPI 范围无效" => "The DPI range is invalid",
+        "DPI 范围过长" => "The DPI range is too long",
+        "DPI 不在设备报告的可用范围内" => "DPI is outside the range reported by this device",
+        "设备标识已变化，请刷新后再试" => "The device identity has changed. Refresh and try again",
+        "未确认接收器中设备的唯一标识，不能写入 DPI" => "The receiver device identity could not be confirmed. DPI cannot be changed",
+        "设备不支持 DPI 设置" => "This device does not support DPI settings",
+        "设备不支持 DPI 写入" => "This device does not support DPI changes",
+        "此协议不提供通用 DPI 写入" => "This protocol does not provide generic DPI changes",
+        "无法读取当前 DPI" => "The current DPI could not be read",
+        "DPI 写入未确认，原值恢复也未确认" => "Neither the DPI change nor restoration of the original value could be verified",
+        "设备未确认新的 DPI，已恢复原值" => "The new DPI was not confirmed. The original value was restored",
+        "ROG 设备已断开" => "The ROG device is disconnected",
+        "无法确认所选设备，请刷新后再试" => "The selected device could not be confirmed. Refresh and try again",
+        "HID 描述符不可读取" => "The HID descriptor could not be read",
+        "HID 描述符不可解析" => "The HID descriptor could not be parsed",
         "常规" => "General",
         "电量与托盘" => "Battery & tray",
         "数据与存储" => "Data & storage",

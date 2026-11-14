@@ -20,6 +20,8 @@ The standard HID adapter reserves listed ROG devices and receivers for detailed 
 
 Each backend has its own polling thread and command queue, so a timeout or DPI write does not block polling for other brands. Coarse or missing battery readings remain coarse or unknown instead of becoming 0%. Logitech DPI writes validate advertised values and verify readback; failed writes attempt to restore and verify the original value.
 
+Adjustable DPI lists are read across the device's reported pages, including values and step ranges spanning report boundaries. Transport padding is excluded from parsing. Incomplete lists, invalid report lengths and failed subsequent queries do not authorize DPI writes from partial data.
+
 Settings → About → Device compatibility opens a GitHub form and exports factory model, VID/PID, usage, report lengths, and a summary of the last 128 protocol queries in the current session: feature identifiers, durations and results. The report excludes payloads, serial numbers, MAC addresses, interface paths, usernames, custom device names, DPI setting values and raw logs.
 
 Protocol references: [Solaar](https://github.com/pwr-Solaar/Solaar) and [USB HID Usage Tables](https://usb.org/document-library/hid-usage-tables-15). The implementation does not copy driver or open source project code.
