@@ -130,11 +130,17 @@ fn normalize_percent(value: u32, minimum: i32, maximum: i32) -> Option<u8> {
     Some(((u64::from(value - minimum as u32) * 100 + span / 2) / span) as u8)
 }
 
+fn reserved_by_rog(interface: &HidInterface) -> bool {
+    interface.vendor_id == crate::hid::VID_ASUS
+        && (crate::devices::find(interface.product_id).is_some()
+            || crate::devices::find_dongle(interface.product_id).is_some())
+}
+
 impl DeviceBackend for StandardHid {
     fn discover(&self, api: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         let mut targets = Vec::new();
         for interface in interfaces {
-            if interface.vendor_id == crate::hid::VID_ASUS {
+            if reserved_by_rog(interface) {
                 continue;
             }
             let Ok(descriptor) = Descriptor::open(api, interface) else {
@@ -285,6 +291,29 @@ impl DeviceBackend for StandardHid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn standard_fallback_skips_known_rog_devices_without_excluding_all_asus_devices() {
+        let mut interface = HidInterface {
+            path: "test".into(),
+            serial: String::new(),
+            product: String::new(),
+            vendor_id: crate::hid::VID_ASUS,
+            product_id: 0x1b65,
+            usage_page: 1,
+            usage: 2,
+            input_len: 20,
+            output_len: 20,
+            feature_len: 0,
+        };
+        assert!(reserved_by_rog(&interface));
+        interface.product_id = 0x1ace;
+        assert!(reserved_by_rog(&interface));
+        interface.product_id = 0xf0f0;
+        assert!(!reserved_by_rog(&interface));
+        interface.product_id = 0x1b65;
+        interface.vendor_id = 0x046d;
+        assert!(!reserved_by_rog(&interface));
+    }
     #[test]
     fn descriptor_range_and_null_values_are_respected() {
         assert_eq!(normalize_percent(127, 0, 255), Some(50));

@@ -522,13 +522,31 @@ fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, sn
             if basic.target.backend == backend { basic.connected = false; device.reading.connected = false; }
         }
     }
-    for snapshot in snapshots {
+    for mut snapshot in snapshots {
         if backend == crate::backends::BackendId::StandardHid && shared.devices.values().any(|device|
             device.basic.as_ref().is_some_and(|other| other.target.backend == crate::backends::BackendId::Logitech
                 && other.connected && other.target.interface.path == snapshot.target.interface.path)) { continue; }
         if backend == crate::backends::BackendId::Logitech {
             shared.devices.retain(|_, device| !device.basic.as_ref().is_some_and(|other|
                 other.target.backend == crate::backends::BackendId::StandardHid && other.target.interface.path == snapshot.target.interface.path));
+        }
+        let previous = shared.devices.values().filter_map(|device| device.basic.as_ref()).find(|other|
+            other.target.backend == backend && other.target.interface.path == snapshot.target.interface.path
+                && other.target.address == snapshot.target.address && other.target.key != snapshot.target.key)
+            .map(|other| other.target.clone());
+        if let Some(previous) = previous {
+            let link_key = crate::backends::Target::new(backend, &previous.interface, previous.address).key;
+            let had_identity = previous.verified_identity || previous.key != link_key;
+            if snapshot.target.verified_identity && !had_identity {
+                if shared.promote_device_key(&previous.key, &snapshot.target.key) { shared.device_keys_dirty = true; }
+                shared.devices.remove(&previous.key);
+            } else if !snapshot.target.verified_identity {
+                // 身份查询暂时失败仍沿用原卡片，但不能沿用之前的写入授权。
+                snapshot.target.key = previous.key;
+                if had_identity { snapshot.dpi.writable = false; }
+                if snapshot.target.family == crate::device::DeviceFamily::Unknown { snapshot.target.family = previous.family; }
+                if snapshot.target.name == snapshot.target.interface.product { snapshot.target.name = previous.name; }
+            }
         }
         let key = snapshot.target.key.clone();
         let reading = crate::device::DeviceReading {
@@ -544,6 +562,7 @@ fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, sn
 }
 
 struct Shared {
+    device_keys_dirty: bool,
     refresh_generation: u64,
     completed_requests: BTreeMap<crate::backends::BackendId, u64>,
     source_write_gen: BTreeMap<crate::backends::BackendId, u64>,
@@ -660,6 +679,7 @@ impl Shared {
 
     fn new(cfg: Settings) -> Shared {
         Shared {
+            device_keys_dirty: false,
             refresh_generation: 0,
             completed_requests: std::iter::once(crate::backends::BackendId::Rog).chain(crate::backends::ADDITIONAL_BACKENDS)
                 .map(|backend| (backend, 0)).collect(),
@@ -711,6 +731,11 @@ impl Shared {
             self.cfg.tray_device = Some(new.to_string());
         }
         let mut changed = tray_changed;
+        let mut order = self.cfg.device_order.clone();
+        for key in &mut order {
+            if key == old { *key = new.to_string(); changed = true; }
+        }
+        self.cfg.set_device_order(order);
         if !self.cfg.device_names.contains_key(new) {
             if let Some(name) = self.cfg.device_names.remove(old) {
                 self.cfg.device_names.insert(new.to_string(), name);
@@ -2886,6 +2911,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 let snapshots = crate::backends::read_backend(backend, true).unwrap_or_default();
                 let mut state = lock_shared(&shared_t);
                 state.publish_additional(backend, snapshots, generation, seen);
+                if state.device_keys_dirty {
+                    if settings::save(&state.cfg).is_ok() { state.device_keys_dirty = false; }
+                    else { tray_log("device identity preferences save failed"); }
+                }
                 drop(state);
                 sender_t.notice();
             }
@@ -3534,6 +3563,64 @@ mod backend_tests {
     }
 
     #[test]
+    fn additional_identity_promotion_preserves_name_type_tray_and_order() {
+        let mut shared = Shared::new(Settings::default());
+        let mut first = snapshot(BackendId::Logitech, "interface", 75);
+        first.target.key = Target::new(BackendId::Logitech, &first.target.interface, first.target.address).key;
+        let old = first.target.key.clone();
+        shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 1);
+        shared.active_key = Some(old.clone());
+        shared.primary_key = Some(old.clone());
+        shared.cfg.tray_device = Some(old.clone());
+        shared.cfg.device_names.insert(old.clone(), "Custom device".into());
+        shared.cfg.device_order = vec![old.clone()];
+        let pref = crate::tray_prefs::DeviceTray { kind: crate::tray_prefs::TrayKind::Generic,
+            ..Default::default() };
+        shared.cfg.device_tray.insert(old.clone(), pref);
+        let new = crate::device::stable_key("verified-unit");
+        first.target.key = new.clone();
+        first.target.verified_identity = true;
+        shared.publish_additional(BackendId::Logitech, vec![first], 0, 2);
+        assert!(!shared.devices.contains_key(&old));
+        assert_eq!(shared.key_aliases[&old], new);
+        assert_eq!(shared.active_key.as_ref(), Some(&new));
+        assert_eq!(shared.primary_key.as_ref(), Some(&new));
+        assert_eq!(shared.cfg.tray_device.as_ref(), Some(&new));
+        assert_eq!(shared.cfg.device_names[&new], "Custom device");
+        assert_eq!(shared.cfg.device_tray[&new], pref);
+        assert_eq!(shared.cfg.device_order, vec![new]);
+        assert!(shared.device_keys_dirty);
+    }
+
+    #[test]
+    fn missing_identity_keeps_card_without_authorizing_writes_or_inheriting_on_replacement() {
+        let mut shared = Shared::new(Settings::default());
+        let mut first = snapshot(BackendId::Logitech, "interface", 75);
+        let link_key = Target::new(BackendId::Logitech, &first.target.interface, first.target.address).key;
+        let old = crate::device::stable_key("first-unit");
+        first.target.key = old.clone();
+        first.target.verified_identity = true;
+        first.dpi.writable = true;
+        shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 1);
+        shared.cfg.device_names.insert(old.clone(), "Custom first device".into());
+        first.target.key = link_key;
+        first.target.verified_identity = false;
+        shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 2);
+        assert_eq!(shared.devices.len(), 1);
+        assert!(shared.devices[&old].reading.connected);
+        assert!(!shared.devices[&old].basic.as_ref().unwrap().dpi.writable);
+        let new = crate::device::stable_key("replacement-unit");
+        first.target.key = new.clone();
+        first.target.verified_identity = true;
+        shared.publish_additional(BackendId::Logitech, vec![first], 0, 3);
+        assert!(!shared.devices[&old].reading.connected);
+        assert!(shared.devices[&new].reading.connected);
+        assert!(!shared.cfg.device_names.contains_key(&new));
+        assert_eq!(shared.cfg.device_names[&old], "Custom first device");
+        assert!(!shared.device_keys_dirty);
+    }
+
+    #[test]
     fn writes_reject_only_their_own_backend_stale_readings() {
         let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
         let signal = Signal::new(60);
@@ -3612,6 +3699,8 @@ mod backend_tests {
         assert!(reading.is_low());
         assert_eq!(low_battery_reading(&reading, &mut armed), None);
         assert!(armed);
+        reading.battery.as_mut().unwrap().percent = Some(80);
+        assert!(!reading.is_low());
         reading.battery.as_mut().unwrap().percent = Some(0);
         assert_eq!(low_battery_reading(&reading, &mut armed), Some(0));
         assert!(!armed);

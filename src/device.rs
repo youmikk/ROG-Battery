@@ -91,14 +91,16 @@ impl DeviceReading {
     pub fn is_low(&self) -> bool {
         self.connected
             && !self.is_charging()
-            && (self.percent().is_some_and(|percent| percent <= 20)
-                || self
+            && match self.percent() {
+                Some(percent) => percent <= 20,
+                None => self
                     .battery
                     .as_ref()
                     .and_then(|battery| battery.level)
                     .is_some_and(|level| {
                         matches!(level, BatteryLevel::Critical | BatteryLevel::Low)
-                    }))
+                    }),
+            }
     }
 
     pub fn coarse_level(&self) -> Option<BatteryLevel> {

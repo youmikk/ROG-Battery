@@ -1,4 +1,4 @@
-//! HID++ 2.0：按 ROOT 查询功能索引，功能缺失时不猜测寄存器。
+//! HID++ 1.0 / 2.0：功能与寄存器按协议查询，缺失时不猜测写入方式。
 //! 协议参考：Solaar 的 HID++ 功能说明与 Logitech 公开协议。
 use super::*;
 use crate::hid::HidDevice;
@@ -184,52 +184,15 @@ impl<C: Channel> Session<C> {
     fn battery(&mut self) -> Result<Option<Battery>, String> {
         if self.legacy {
             for register in [0x0d, 0x07] {
-                let started = std::time::Instant::now();
-                let request = [0x10, self.address, 0x81, register, 0, 0, 0];
-                let address = self.address;
-                if let Some(reply) = self.device.transact(&request, 160, &mut |reply| {
-                    reply.len() >= 7
-                        && matches!(reply[0], 0x10 | 0x11)
-                        && reply[1] == address
-                        && ((reply[2] == 0x81 && reply[3] == register)
-                            || (reply[2] == 0x8f && reply[3] == 0x81 && reply[4] == register))
-                }) {
-                    trace::record(
-                        &self.interface,
-                        BackendId::Logitech,
-                        "read-register",
-                        register as u16,
-                        0x81,
-                        request.len(),
-                        reply.len(),
-                        started,
-                        if reply[2] == 0x81 {
-                            trace::Outcome::Ok
-                        } else {
-                            trace::Outcome::Rejected(reply[5] as u32)
-                        },
-                    );
-                    if reply[2] == 0x81 {
-                        if let Some(battery) = decode_legacy_battery(register, &reply[4..]) {
-                            return Ok(Some(battery));
-                        }
+                if let Ok(payload) = self.read_register(self.address, u16::from(register), &[]) {
+                    if let Some(battery) = decode_legacy_battery(register, &payload) {
+                        return Ok(Some(battery));
                     }
-                } else {
-                    trace::record(
-                        &self.interface,
-                        BackendId::Logitech,
-                        "read-register",
-                        register as u16,
-                        0x81,
-                        request.len(),
-                        0,
-                        started,
-                        trace::Outcome::NoReply,
-                    );
                 }
             }
             return Ok(None);
         }
+        let mut partial: Option<Battery> = None;
         for (id, function) in [
             (UNIFIED_BATTERY, 1),
             (BATTERY_STATUS, 0),
@@ -238,12 +201,21 @@ impl<C: Channel> Session<C> {
             if let Ok(Some(index)) = self.feature(id) {
                 if let Ok(payload) = self.request(index, function, &[]) {
                     if let Some(battery) = decode_battery(id, &payload) {
-                        return Ok(Some(battery));
+                        if battery.percent.is_some() {
+                            return Ok(Some(battery));
+                        }
+                        if let Some(known) = &mut partial {
+                            known.charging = known.charging.or(battery.charging);
+                            known.voltage_mv = known.voltage_mv.or(battery.voltage_mv);
+                            known.level = known.level.or(battery.level);
+                        } else {
+                            partial = Some(battery);
+                        }
                     }
                 }
             }
         }
-        Ok(None)
+        Ok(partial)
     }
 
     fn dpi(&mut self) -> Result<Dpi, String> {
@@ -270,6 +242,7 @@ impl<C: Channel> Session<C> {
 
     fn identify(&mut self, target: &mut Target) {
         if self.legacy {
+            self.identify_legacy(target);
             return;
         }
         let Ok(Some(index)) = self.feature(0x0005) else {
@@ -306,6 +279,84 @@ impl<C: Channel> Session<C> {
             let name = name.trim_matches(char::from(0)).trim();
             if !name.is_empty() && !name.chars().any(char::is_control) {
                 target.name = name.to_string();
+            }
+        }
+    }
+
+    fn read_register(
+        &mut self,
+        address: u8,
+        register: u16,
+        parameters: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        if parameters.len() > 3 {
+            return Err("HID++ 请求参数过长".into());
+        }
+        let sub_id = if register & 0x200 != 0 { 0x83 } else { 0x81 };
+        let low_register = register as u8;
+        let mut request = [0x10, address, sub_id, low_register, 0, 0, 0];
+        request[4..4 + parameters.len()].copy_from_slice(parameters);
+        let echo = if sub_id == 0x83 {
+            parameters.first().copied()
+        } else {
+            None
+        };
+        let started = std::time::Instant::now();
+        let reply = self.device.transact(&request, 160, &mut |reply| {
+            register_reply_matches(reply, address, sub_id, low_register, echo)
+        });
+        let outcome = match reply.as_ref() {
+            Some(reply) if reply[2] == sub_id => trace::Outcome::Ok,
+            Some(reply) => trace::Outcome::Rejected(u32::from(reply[5])),
+            None => trace::Outcome::NoReply,
+        };
+        trace::record(
+            &self.interface,
+            BackendId::Logitech,
+            "read-register",
+            register,
+            sub_id,
+            request.len(),
+            reply.as_ref().map_or(0, Vec::len),
+            started,
+            outcome,
+        );
+        match reply {
+            Some(reply) if reply[2] == sub_id => Ok(reply[4..].to_vec()),
+            Some(reply) => Err(format!("HID++ 查询被拒绝：{:02x}", reply[5])),
+            None => Err("HID++ 设备无应答".into()),
+        }
+    }
+
+    fn identify_legacy(&mut self, target: &mut Target) {
+        if !(1..=6).contains(&self.address)
+            || !(0xc500..=0xc5ff).contains(&target.interface.product_id)
+        {
+            return;
+        }
+        let slot = self.address - 1;
+        // 接收器信息由 0xFF 地址返回，子寄存器的回显用于排除其他槽位的迟到回帧。
+        let pairing = self.read_register(0xff, 0x2b5, &[0x20 + slot]).ok();
+        if let Some(kind) = pairing.as_ref().and_then(|reply| reply.get(7)) {
+            target.family = match kind & 0x0f {
+                1 | 3 => DeviceFamily::Keyboard,
+                2 | 8 | 9 => DeviceFamily::Mouse,
+                0x0b | 0x0c => DeviceFamily::Gamepad,
+                _ => target.family,
+            };
+        }
+        if let Ok(extended) = self.read_register(0xff, 0x2b5, &[0x30 + slot]) {
+            if let Some(key) = pairing
+                .as_ref()
+                .and_then(|pairing| legacy_identity_key(pairing, &extended))
+            {
+                target.key = key;
+                target.verified_identity = true;
+            }
+        }
+        if let Ok(reply) = self.read_register(0xff, 0x2b5, &[0x40 + slot]) {
+            if let Some(name) = decode_receiver_name(&reply) {
+                target.name = name;
             }
         }
     }
@@ -384,6 +435,50 @@ fn reply_matches(reply: &[u8], address: u8, feature: u8, function: u8) -> bool {
         || (matches!(reply[2], 0xff | 0x8f) && reply[3] == feature && reply[4] == function)
 }
 
+fn register_reply_matches(
+    reply: &[u8],
+    address: u8,
+    sub_id: u8,
+    register: u8,
+    echo: Option<u8>,
+) -> bool {
+    reply.len() >= 7
+        && matches!(reply[0], 0x10 | 0x11)
+        && reply[1] == address
+        && ((reply[2] == sub_id
+            && reply[3] == register
+            && echo.is_none_or(|echo| reply[4] == echo))
+            || (reply[2] == 0x8f && reply[3] == sub_id && reply[4] == register))
+}
+
+fn legacy_identity_key(pairing: &[u8], extended: &[u8]) -> Option<String> {
+    let product = pairing.get(3..5)?.try_into().ok().map(u16::from_be_bytes)?;
+    let serial = extended.get(1..5)?;
+    if product == 0
+        || product == 0xffff
+        || serial.iter().all(|byte| *byte == 0)
+        || serial.iter().all(|byte| *byte == 0xff)
+    {
+        return None;
+    }
+    let serial = serial
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(crate::device::stable_key(&format!(
+        "logitech-legacy:{product:04x}:{serial}"
+    )))
+}
+
+fn decode_receiver_name(data: &[u8]) -> Option<String> {
+    let length = usize::from(*data.get(1)?);
+    if length == 0 || length > 128 {
+        return None;
+    }
+    let name = std::str::from_utf8(data.get(2..2 + length)?).ok()?.trim();
+    (!name.is_empty() && !name.chars().any(char::is_control)).then(|| name.to_string())
+}
+
 fn decode_battery(feature: u16, data: &[u8]) -> Option<Battery> {
     if data.len() < 3 {
         return None;
@@ -397,19 +492,17 @@ fn decode_battery(feature: u16, data: &[u8]) -> Option<Battery> {
     };
     match feature {
         BATTERY_STATUS | UNIFIED_BATTERY => {
-            if data[0] > 100 {
+            if data[0] > 100 || matches!(status, 5 | 6) {
                 return None;
             }
             // HID++ 的 0 通常表示无法给出精确百分比，不能当作电池已耗尽。
-            let percent = (data[0] > 0)
-                .then_some(data[0])
-                .or_else(|| (status == 3).then_some(100));
+            let percent = (data[0] > 0).then_some(data[0]);
             Some(Battery {
                 percent,
                 charging,
                 voltage_mv: None,
                 approximate: percent.is_none(),
-                level: if feature == UNIFIED_BATTERY {
+                level: (if feature == UNIFIED_BATTERY {
                     match data[1] {
                         1 => Some(BatteryLevel::Critical),
                         2 => Some(BatteryLevel::Low),
@@ -419,7 +512,8 @@ fn decode_battery(feature: u16, data: &[u8]) -> Option<Battery> {
                     }
                 } else {
                     None
-                },
+                })
+                .or_else(|| (status == 3).then_some(BatteryLevel::Full)),
             })
         }
         BATTERY_VOLTAGE => Some(Battery {
@@ -564,6 +658,7 @@ mod tests {
         Error(u8, u8),
     }
     struct Step {
+        address: Option<u8>,
         feature: u8,
         function: u8,
         parameters: Vec<u8>,
@@ -588,7 +683,10 @@ mod tests {
                 .pop_front()
                 .expect("unexpected protocol request");
             assert_eq!(packet[2], step.feature);
-            let function = if packet[2] == 0x81 {
+            if let Some(address) = step.address {
+                assert_eq!(packet[1], address);
+            }
+            let function = if matches!(packet[2], 0x81 | 0x83) {
                 packet[3]
             } else {
                 packet[3] >> 4
@@ -616,6 +714,7 @@ mod tests {
 
     fn data(feature: u8, function: u8, parameters: &[u8], payload: &[u8]) -> Step {
         Step {
+            address: None,
             feature,
             function,
             parameters: parameters.to_vec(),
@@ -661,6 +760,7 @@ mod tests {
     fn legacy_negotiation_reads_battery_without_feature_queries_or_dpi_writes() {
         let (channel, steps) = channel(vec![
             Step {
+                address: None,
                 feature: 0,
                 function: 1,
                 parameters: vec![0, 0, 0x5a],
@@ -684,6 +784,7 @@ mod tests {
             data(0, 0, &[0x10, 4], &[1]),
             data(1, 1, &[], &[65, 4, 0]),
             Step {
+                address: None,
                 feature: 0,
                 function: 0,
                 parameters: vec![0, 3],
@@ -698,6 +799,163 @@ mod tests {
         assert_eq!(snapshot.battery.unwrap().percent, Some(65));
         assert!(snapshot.connected);
         assert!(!snapshot.target.verified_identity);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_receiver_metadata_identifies_the_selected_slot() {
+        let mut target = target();
+        target.address = 2;
+        target.interface.product_id = 0xc52b;
+        target.family = DeviceFamily::Unknown;
+        target.name = "Unifying Receiver".into();
+        let negotiation = Step {
+            address: Some(2),
+            feature: 0,
+            function: 1,
+            parameters: vec![0, 0, 0x5a],
+            reply: Reply::Error(0x8f, 1),
+        };
+        let mut battery = data(0x81, 0x0d, &[], &[42, 0, 0x30]);
+        battery.address = Some(2);
+        let mut pairing = data(0x83, 0xb5, &[0x21], &[0x21, 0, 0, 0x40, 0x08, 0, 0, 1]);
+        pairing.address = Some(0xff);
+        let mut extended = data(0x83, 0xb5, &[0x31], &[0x31, 0x12, 0x34, 0x56, 0x78]);
+        extended.address = Some(0xff);
+        let mut name = data(0x83, 0xb5, &[0x41], &[0x41, 4, b'K', b'8', b'1', b'0']);
+        name.address = Some(0xff);
+        let (channel, steps) = channel(vec![negotiation, battery, pairing, extended, name]);
+        let snapshot = Session::from_channel(channel, &target)
+            .unwrap()
+            .read_snapshot(&target, true)
+            .unwrap();
+        assert_eq!(snapshot.target.name, "K810");
+        assert_eq!(snapshot.target.family, DeviceFamily::Keyboard);
+        assert!(snapshot.target.verified_identity);
+        assert_eq!(
+            snapshot.target.key,
+            crate::device::stable_key("logitech-legacy:4008:12345678")
+        );
+        assert_eq!(snapshot.battery.unwrap().percent, Some(42));
+        assert!(!snapshot.dpi.writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_metadata_failures_preserve_successful_battery_reading() {
+        let mut target = target();
+        target.address = 1;
+        target.interface.product_id = 0xc52b;
+        target.family = DeviceFamily::Unknown;
+        let mut script = vec![
+            Step {
+                address: Some(1),
+                feature: 0,
+                function: 1,
+                parameters: vec![0, 0, 0x5a],
+                reply: Reply::Error(0x8f, 1),
+            },
+            data(0x81, 0x0d, &[], &[42, 0, 0x30]),
+        ];
+        for slot in [0x20, 0x30, 0x40] {
+            script.push(Step {
+                address: Some(0xff),
+                feature: 0x83,
+                function: 0xb5,
+                parameters: vec![slot],
+                reply: Reply::Error(0x8f, 2),
+            });
+        }
+        let (channel, steps) = channel(script);
+        let snapshot = Session::from_channel(channel, &target)
+            .unwrap()
+            .read_snapshot(&target, true)
+            .unwrap();
+        assert!(snapshot.connected);
+        assert_eq!(snapshot.battery.unwrap().percent, Some(42));
+        assert_eq!(snapshot.target.key, target.key);
+        assert!(!snapshot.target.verified_identity);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn receiver_metadata_rejects_other_slots_and_incomplete_identity() {
+        assert!(register_reply_matches(
+            &[0x11, 0xff, 0x83, 0xb5, 0x20, 0, 0],
+            0xff,
+            0x83,
+            0xb5,
+            Some(0x20)
+        ));
+        assert!(!register_reply_matches(
+            &[0x11, 0xff, 0x83, 0xb5, 0x21, 0, 0],
+            0xff,
+            0x83,
+            0xb5,
+            Some(0x20)
+        ));
+        assert!(!register_reply_matches(
+            &[0x11, 2, 0x83, 0xb5, 0x20, 0, 0],
+            0xff,
+            0x83,
+            0xb5,
+            Some(0x20)
+        ));
+        assert_eq!(
+            legacy_identity_key(&[0x20, 0, 0, 0x40, 8], &[0x30, 0, 0, 0, 0]),
+            None
+        );
+        assert_eq!(
+            legacy_identity_key(&[0x20, 0, 0, 0x40, 8], &[0x30, 0xff, 0xff, 0xff, 0xff]),
+            None
+        );
+        assert_eq!(decode_receiver_name(&[0x40, 4, b'K']), None);
+        assert_eq!(decode_receiver_name(&[0x40, 1, b'\n']), None);
+    }
+
+    #[test]
+    fn charge_status_without_percentage_is_coarse_and_invalid_batteries_are_rejected() {
+        let full = decode_battery(UNIFIED_BATTERY, &[0, 8, 3]).unwrap();
+        assert_eq!(full.percent, None);
+        assert_eq!(full.level, Some(BatteryLevel::Full));
+        assert!(full.approximate);
+        assert_eq!(
+            decode_battery(BATTERY_STATUS, &[0, 0, 3]).unwrap().percent,
+            None
+        );
+        assert_eq!(decode_battery(UNIFIED_BATTERY, &[45, 4, 5]), None);
+        assert_eq!(decode_battery(BATTERY_STATUS, &[45, 0, 6]), None);
+    }
+
+    #[test]
+    fn coarse_unified_reading_can_fall_back_to_exact_battery_feature() {
+        let (channel, steps) = channel(vec![
+            ping(),
+            data(0, 0, &[0x10, 4], &[1]),
+            data(1, 1, &[], &[0, 4, 0]),
+            data(0, 0, &[0x10, 0], &[2]),
+            data(2, 0, &[], &[75, 20, 0]),
+        ]);
+        let mut session = Session::from_channel(channel, &target()).unwrap();
+        let battery = session.battery().unwrap().unwrap();
+        assert_eq!(battery.percent, Some(75));
+        assert!(!battery.approximate);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn coarse_battery_is_retained_when_other_features_are_unavailable() {
+        let (channel, steps) = channel(vec![
+            ping(),
+            data(0, 0, &[0x10, 4], &[1]),
+            data(1, 1, &[], &[0, 2, 0]),
+            data(0, 0, &[0x10, 0], &[0]),
+            data(0, 0, &[0x10, 1], &[0]),
+        ]);
+        let mut session = Session::from_channel(channel, &target()).unwrap();
+        let battery = session.battery().unwrap().unwrap();
+        assert_eq!(battery.percent, None);
+        assert_eq!(battery.level, Some(BatteryLevel::Low));
         assert!(steps.lock().unwrap().is_empty());
     }
 
