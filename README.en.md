@@ -2,19 +2,19 @@
 
 [简体中文](README.md) | **English**
 
-A lightweight battery monitor and mouse settings utility for ROG peripherals on Windows. It communicates through Windows HID interfaces without Armoury Crate, runs as a single executable, and uses no background service or network connection.
+A lightweight peripheral battery monitor and mouse settings utility for Windows, with detailed ROG support and battery adapters for Logitech, Rapoo, VGN and standard HID. It communicates through Windows HID interfaces, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
-## Version 1.4.3
+## Version 1.4.4
 
-- Switch between known DPI stages directly from the tray mouse panel.
-- Open a headset panel to adjust speaker or headset volume, mute the microphone, and open Windows sound settings.
-- Headset audio controls are also available in the main window and share their state with the tray.
-- Drag devices to reorder the list; the order is saved.
-- Settings are organized into General, Battery & tray, Data & storage, and About.
-- Smoother tray panel animations, clearer text, and a fix for occasional unintended main-window activation.
-- Microsoft Store builds retain the Windows low battery notification; portable builds do not.
+- Adds Logitech HID++ 1.0 / 2.0 and standard HID battery queries, pending per-model hardware validation.
+- Supported Logitech mice expose their actual onboard DPI stages, including the fifth stage, for switching from the main window or tray.
+- Adds read-only Rapoo nRF54L battery and current DPI queries, with 77 official driver model entries pending hardware validation.
+- Adds VGN V98 Pro V3 battery queries; wired readings have been verified on hardware.
+- Adds a device compatibility feedback entry and sanitized reports for user-assisted testing.
+- Each backend polls and processes commands independently, retaining existing detailed ROG controls.
+- Fixes invalid battery readings, temporary identity query failures and paginated Logitech DPI lists.
 
 ## Getting started
 
@@ -41,7 +41,7 @@ The default is **Follow system**, which uses the Windows **display language**. M
 | Feature | Details |
 | --- | --- |
 | Battery | Battery level, charging state, device information, 48-hour history, and runtime estimates. |
-| Mouse performance | Four DPI stages, polling rate, debounce, angle snapping, angle tuning, and lift-off distance on supported models. |
+| Mouse performance | Four DPI stages, polling rate, debounce, angle snapping, angle tuning and lift-off distance on supported ROG models; numerical DPI control or actual onboard stage switching on supported Logitech models. |
 | Buttons | Button remapping, configuration export, and backup restoration on supported models. |
 | Lighting | Opens Windows Dynamic Lighting; Windows manages the effects. |
 | Settings | Theme, startup, close behavior, refresh interval, storage locations, and diagnostic logs. |
@@ -52,7 +52,7 @@ Capabilities depend on the model, firmware, and connection. Unsupported settings
 
 - Windows 10 version 1809 (build 17763) or later, x64.
 - Dynamic Lighting requires a supported Windows 11 version and compatible hardware.
-- A supported ROG USB HID device or wireless receiver. Bluetooth compatibility is not guaranteed.
+- A supported USB HID device or wireless receiver. Bluetooth support depends on the protocol exposed by the device.
 
 ROG HARPE ACE MINI has been verified over USB and through the ROG OMNI receiver. See the [model catalogue](README.md#支持的型号) for recognized mice, keyboards, controllers, and receivers. Inclusion in the catalogue does not mean every feature has been verified on that hardware. Headset battery support depends on its HID protocol; a device type label alone does not establish compatibility.
 
@@ -116,7 +116,7 @@ Keep the version in `Cargo.toml` aligned with the four-part Store version in `ms
 
 ## Feedback and license
 
-Multi-brand support is being validated on a separate development branch and is not part of the stable 1.4.3 release. The branch adds Logitech HID++ 1.0 / 2.0, standard HID, Rapoo nRF54L and VGN V98 Pro V3 battery adapters, with independent polling for each backend and existing ROG settings retained. The Rapoo catalogue now covers 77 model entries listed by the official driver. Supported Logitech mice in onboard mode expose their actual configured DPI stages, including the fifth stage, for switching from the main window or tray. Host mode retains validated numerical DPI controls; common-value buttons are not G HUB's configured stages. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status.
+Version 1.4.4 adds Logitech HID++ 1.0 / 2.0, standard HID, Rapoo nRF54L and VGN V98 Pro V3 battery adapters, with independent polling for each backend and existing ROG settings retained. The Rapoo catalogue covers 77 model entries listed by the official driver. Supported Logitech mice in onboard mode expose their actual configured DPI stages, including the fifth stage, for switching from the main window or tray. Host mode retains validated numerical DPI controls; common-value buttons are not G HUB's configured stages. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status.
 
 The `devices` command reads device status; `device-report` exports descriptors and the current process's query summary. `device-report --probe` runs read-only queries first and exports battery, charging status, current DPI, available onboard stages and communication results from the same process for user-assisted testing. Reports exclude payloads and unique device identifiers and are never uploaded automatically.
 

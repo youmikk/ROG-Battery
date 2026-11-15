@@ -1,8 +1,8 @@
 [package]
 name = "rog-mouse-ctl"
-version = "1.4.3"
+version = "1.4.4"
 edition = "2021"
-description = "ROG peripheral battery monitor and mouse settings utility for Windows"
+description = "Peripheral battery monitor and ROG mouse settings utility for Windows"
 
 [dependencies]
 native-windows-gui = { version = "1.0.13", default-features = false, features = [

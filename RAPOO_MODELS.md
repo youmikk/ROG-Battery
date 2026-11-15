@@ -1,8 +1,8 @@
 # 雷柏 nRF54L 型号表 / Rapoo nRF54L models
 
-本表为多品牌开发分支的协议覆盖清单，尚未逐型号实机验证。仅当设备提供 FF00:0002 控制集合与有效的 0x07 状态报告时读取电量及当前 DPI，不写入设备设置。型号属于官方 A HUB 的 VT_nrf54L 驱动，其他主控不能套用。
+本表为 1.4.4 的协议覆盖清单，尚未逐型号实机验证。仅当设备提供 FF00:0002 控制集合与有效的 0x07 状态报告时读取电量及当前 DPI，不写入设备设置。型号属于官方 A HUB 的 VT_nrf54L 驱动，其他主控不能套用。
 
-This is a protocol coverage list for the development branch, pending per-model hardware validation. Reads require the FF00:0002 control collection and a valid 0x07 status report. Battery and current DPI are read-only. Models are assigned to VT_nrf54L by the official A HUB driver; other controllers require their own protocols.
+This is a protocol coverage list for version 1.4.4, pending per-model hardware validation. Reads require the FF00:0002 control collection and a valid 0x07 status report. Battery and current DPI are read-only. Models are assigned to VT_nrf54L by the official A HUB driver; other controllers require their own protocols.
 
 VID: `24AE` · 77 model entries · 146 product IDs
 

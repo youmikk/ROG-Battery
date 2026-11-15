@@ -1,15 +1,18 @@
 New
-- Switch DPI stages from the tray mouse panel.
-- Adjust volume, mute the microphone, and open Windows sound settings from the tray or headset details.
-- Drag devices to reorder the list; the order is saved.
+- Added Logitech HID++ 1.0 / 2.0 and standard HID battery queries, pending per-model hardware validation.
+- Supported Logitech mice expose their actual onboard DPI stages, including the fifth stage, for switching from the main window or tray.
+- Added read-only Rapoo nRF54L battery and current DPI queries, with 77 official driver model entries pending hardware validation.
+- Added VGN V98 Pro V3 battery queries; wired readings have been verified on hardware.
+- Added a device compatibility feedback entry and sanitized reports for user-assisted testing.
 
 Improvements
-- Tray window height follows expanding and collapsing device panels.
-- Settings are grouped into General, Battery & tray, Data & storage, and About.
-- Improved alignment, text clarity, and synchronization of audio controls.
+- Each backend polls and processes commands independently, retaining existing detailed ROG controls.
+- Logitech receiver device names and types are queried; device preferences and order are preserved after identity is confirmed.
+- Coarse battery readings can fall back to an available feature that reports an exact percentage.
 
 Fixes
-- Fixed a possible crash after reordering devices.
-- Fixed occasional unintended main-window activation on a single tray click.
-- Fixed pauses, trails, and leftover controls during panel animation.
-- Fixed clipped headset selection text.
+- Fixed invalid battery replies being shown as 0%.
+- Fixed duplicate device cards after temporary identity query failures.
+- Fixed one backend's failure affecting other backends' readings.
+- Fixed missing values in paginated Logitech DPI lists.
+- Completed English translations for multi-brand device errors.

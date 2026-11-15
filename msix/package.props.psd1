@@ -5,8 +5,8 @@
     PublisherDisplayName = 'Sonder'
     DisplayName = 'R Battery'
     ShortName = 'R Battery'
-    Description = 'ROG peripheral battery monitor and mouse settings utility.'
-    Version = '1.4.3.0'
+    Description = 'Peripheral battery monitor and mouse settings utility.'
+    Version = '1.4.4.0'
     Executable = 'rog-mouse-ctl.exe'
     StartupTaskId = 'RogBatteryAutoStart'
 
