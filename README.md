@@ -165,7 +165,11 @@ cargo +stable-x86_64-pc-windows-gnu build --release --locked
 powershell -File tools/build-release.ps1
 ```
 
-绿色版产物集中在 `dist/版本号/`。推送源码和版本标签后，GitHub Actions 会构建并发布绿色版，同时打包 MSIX 和商店上传包、验证包内程序，并通过配置好的凭据提交 Microsoft Store。需要手动打 MSIX 时，安装 Windows SDK 后可运行：
+绿色版产物集中在 `dist/版本号/`。推送源码和版本标签后，GitHub Actions 会构建并发布绿色版，同时打包 MSIX 和商店上传包、验证包内程序，并通过配置好的凭据提交 Microsoft Store。
+
+开发分支可手动运行 GitHub Actions 生成测试包：绿色版工作流的 tag 留空；MSIX 工作流关闭「提交 Microsoft Store」。构建产物在对应运行的 Artifacts 中下载。正式版本标签仍按发布流程提交商店。
+
+需要手动打 MSIX 时，安装 Windows SDK 后可运行：
 
 ```powershell
 powershell -File msix/build-msix.ps1 -Verify

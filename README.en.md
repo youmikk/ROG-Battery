@@ -101,7 +101,11 @@ Local release validation runs regression tests, builds the portable executable, 
 powershell -File tools/build-release.ps1
 ```
 
-Portable outputs are collected in `dist/version/`. Push the source and matching release tag to let GitHub Actions build and publish the portable version, package and validate MSIX, and submit it to Microsoft Store using the configured credentials. For manual MSIX packaging, install the Windows SDK and run:
+Portable outputs are collected in `dist/version/`. Push the source and matching release tag to let GitHub Actions build and publish the portable version, package and validate MSIX, and submit it to Microsoft Store using the configured credentials.
+
+Development branches can use manual GitHub Actions runs to create test packages: leave the portable workflow's tag empty and disable "submit to Microsoft Store" in the MSIX workflow. Download build outputs from the run's Artifacts. Release tags retain the normal Store submission flow.
+
+For manual MSIX packaging, install the Windows SDK and run:
 
 ```powershell
 powershell -File msix/build-msix.ps1 -Verify

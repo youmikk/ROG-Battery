@@ -9,6 +9,11 @@ on:
         description: 'MSIX 版本号（四段，如 1.1.2.0）。留空则按 tag 推导'
         required: false
         default: ''
+      submit_to_store:
+        description: '打包完成后提交 Microsoft Store；开发分支测试请关闭'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -26,7 +31,7 @@ concurrency:
 
 jobs:
   msix:
-    name: 打包并提交 Microsoft Store
+    name: 打包 MSIX
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,7 +132,7 @@ jobs:
           if-no-files-found: error
 
       - name: 上传并提交到商店
-        if: vars.MSSTORE_PRODUCT_ID != ''
+        if: vars.MSSTORE_PRODUCT_ID != '' && (github.event_name == 'push' || inputs.submit_to_store == true)
         shell: pwsh
         env:
           AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
@@ -139,7 +144,7 @@ jobs:
           ./tools/msstore-publish.ps1 -ProductId '${{ vars.MSSTORE_PRODUCT_ID }}' -PackagePath $up.FullName
 
       - name: 商店提交状态
-        if: vars.MSSTORE_PRODUCT_ID != ''
+        if: vars.MSSTORE_PRODUCT_ID != '' && (github.event_name == 'push' || inputs.submit_to_store == true)
         shell: pwsh
         run: |
           Write-Host '包已提交，最终上架状态以 Partner Center 为准。'
