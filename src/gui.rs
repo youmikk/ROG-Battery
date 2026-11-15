@@ -524,9 +524,9 @@ fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, sn
     }
     for mut snapshot in snapshots {
         if backend == crate::backends::BackendId::StandardHid && shared.devices.values().any(|device|
-            device.basic.as_ref().is_some_and(|other| other.target.backend == crate::backends::BackendId::Logitech
+            device.basic.as_ref().is_some_and(|other| other.target.backend.precedes_standard()
                 && other.connected && other.target.interface.path == snapshot.target.interface.path)) { continue; }
-        if backend == crate::backends::BackendId::Logitech {
+        if backend.precedes_standard() {
             shared.devices.retain(|_, device| !device.basic.as_ref().is_some_and(|other|
                 other.target.backend == crate::backends::BackendId::StandardHid && other.target.interface.path == snapshot.target.interface.path));
         }
@@ -3662,6 +3662,8 @@ mod backend_tests {
         let mut shared = Shared::new(Settings::default());
         shared.complete_refresh(BackendId::Rog, 3);
         shared.complete_refresh(BackendId::Logitech, 3);
+        shared.complete_refresh(BackendId::Rapoo, 3);
+        shared.complete_refresh(BackendId::Vgn, 3);
         assert_eq!(shared.refresh_generation, 0);
         shared.complete_refresh(BackendId::StandardHid, 2);
         assert_eq!(shared.refresh_generation, 2);

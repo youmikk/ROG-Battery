@@ -1,8 +1,11 @@
 //! 品牌适配层。未知能力保留为空，不能从设备类型推断写入协议。
 pub mod logitech;
+mod feature;
+pub mod rapoo;
 pub mod rog;
 pub mod standard;
 pub mod trace;
+pub mod vgn;
 
 pub use crate::device::{Battery, BatteryLevel, Dpi};
 use crate::{device::DeviceFamily, hid::HidInterface, win32::HidApi};
@@ -11,18 +14,28 @@ use crate::{device::DeviceFamily, hid::HidInterface, win32::HidApi};
 pub enum BackendId {
     Rog,
     Logitech,
+    Rapoo,
+    Vgn,
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 2] = [BackendId::Logitech, BackendId::StandardHid];
+pub const ADDITIONAL_BACKENDS: [BackendId; 4] = [
+    BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::StandardHid,
+];
 
 impl BackendId {
     pub fn name(self) -> &'static str {
         match self {
             Self::Rog => "ROG",
             Self::Logitech => "Logitech HID++",
+            Self::Rapoo => "Rapoo nRF54L",
+            Self::Vgn => "VGN V98 Pro V3",
             Self::StandardHid => "Standard HID",
         }
+    }
+
+    pub fn precedes_standard(self) -> bool {
+        matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn)
     }
 }
 
@@ -114,7 +127,7 @@ fn merge_additional_results(
             {
                 continue;
             }
-            if backend == BackendId::Logitech {
+            if backend.precedes_standard() {
                 claimed.insert(snapshot.target.interface.path.clone());
             }
             snapshots.push(snapshot);
@@ -132,6 +145,8 @@ pub fn read_backend(backend: BackendId, detail: bool) -> Result<Vec<Snapshot>, S
     let provider: &dyn DeviceBackend = match backend {
         BackendId::Rog => &rog::Rog,
         BackendId::Logitech => &logitech::Logitech,
+        BackendId::Rapoo => &rapoo::Rapoo,
+        BackendId::Vgn => &vgn::Vgn,
         BackendId::StandardHid => &standard::StandardHid,
     };
     let mut snapshots = Vec::new();
@@ -220,16 +235,18 @@ mod tests {
 
     #[test]
     fn vendor_reading_has_priority_over_standard_reading_on_same_interface() {
-        let result = merge_additional_results([
-            (BackendId::Logitech, Ok(vec![reading(BackendId::Logitech)])),
-            (
-                BackendId::StandardHid,
-                Ok(vec![reading(BackendId::StandardHid)]),
-            ),
-        ])
-        .unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].target.backend, BackendId::Logitech);
+        for backend in [BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn] {
+            let result = merge_additional_results([
+                (backend, Ok(vec![reading(backend)])),
+                (
+                    BackendId::StandardHid,
+                    Ok(vec![reading(BackendId::StandardHid)]),
+                ),
+            ])
+            .unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].target.backend, backend);
+        }
     }
 
     #[test]

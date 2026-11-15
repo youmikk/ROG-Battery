@@ -47,6 +47,7 @@ const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依
   rog-mouse-ctl version                       打印版本号（和 GitHub tag 一致）
   rog-mouse-ctl devices                       多品牌只读设备与电量列表
   rog-mouse-ctl device-report                 输出不含序列号与接口路径的适配报告
+  rog-mouse-ctl device-report --probe         只读探测电量/DPI并导出同次运行的脱敏报告
   rog-mouse-ctl info [--fresh]                读全部信息（一次读全，默认吃 30 秒缓存）
   rog-mouse-ctl backup [文件]                 备份全部 31 项设置（默认 %USERPROFILE%\Documents\rog-mouse-ctl\backups\）
   rog-mouse-ctl restore <文件> [--save]       从备份还原（能量块最后单独重写并断言）
@@ -161,7 +162,7 @@ fn main() -> ExitCode {
     }
     let cmd = pos[0];
     if cmd == "device-report" {
-        return match feedback::collect() {
+        return match if args.iter().any(|arg| arg == "--probe") { feedback::collect_probe() } else { feedback::collect() } {
             Ok(report) => { print!("{report}"); ExitCode::SUCCESS }
             Err(error) => { eprintln!("{error}"); ExitCode::FAILURE }
         };

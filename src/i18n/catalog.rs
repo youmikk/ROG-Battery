@@ -2,6 +2,16 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("设备功能报告长度无效") => { $crate::i18n::translate("设备功能报告长度无效") };
+    ("无法打开设备功能接口") => { $crate::i18n::translate("无法打开设备功能接口") };
+    ("无法创建设备通信事件") => { $crate::i18n::translate("无法创建设备通信事件") };
+    ("设备功能报告传输失败") => { $crate::i18n::translate("设备功能报告传输失败") };
+    ("设备功能报告传输超时") => { $crate::i18n::translate("设备功能报告传输超时") };
+    ("此雷柏型号尚未适配") => { $crate::i18n::translate("此雷柏型号尚未适配") };
+    ("雷柏状态报告不可用，请唤醒设备后重试") => { $crate::i18n::translate("雷柏状态报告不可用，请唤醒设备后重试") };
+    ("此 VGN 型号尚未适配") => { $crate::i18n::translate("此 VGN 型号尚未适配") };
+    ("无法读取 VGN 电量") => { $crate::i18n::translate("无法读取 VGN 电量") };
+    ("VGN 电量响应无效") => { $crate::i18n::translate("VGN 电量响应无效") };
     ("电量极低") => { if $crate::i18n::english() { "Critical battery" } else { "电量极低" } };
     ("电量良好") => { if $crate::i18n::english() { "Battery good" } else { "电量良好" } };
     ("电量充足") => { if $crate::i18n::english() { "Battery full" } else { "电量充足" } };
@@ -418,6 +428,16 @@ macro_rules! trf {
 pub(super) fn lookup(language: super::Language, text: &str) -> &str {
     if language != super::Language::English { return text; }
     match text {
+        "设备功能报告长度无效" => "The device feature report length is invalid",
+        "无法打开设备功能接口" => "Could not open the device feature interface",
+        "无法创建设备通信事件" => "Could not create the device communication event",
+        "设备功能报告传输失败" => "The device feature report transfer failed",
+        "设备功能报告传输超时" => "The device feature report transfer timed out",
+        "此雷柏型号尚未适配" => "This Rapoo model is not supported yet",
+        "雷柏状态报告不可用，请唤醒设备后重试" => "The Rapoo status report is unavailable. Wake the device and try again",
+        "此 VGN 型号尚未适配" => "This VGN model is not supported yet",
+        "无法读取 VGN 电量" => "Could not read the VGN battery",
+        "VGN 电量响应无效" => "The VGN battery response is invalid",
         "HID++ 设备无应答" => "The HID++ device did not respond",
         "HID++ 回帧长度无效" => "The HID++ response length is invalid",
         "HID++ 请求参数过长" => "The HID++ request is too long",

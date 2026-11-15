@@ -112,7 +112,7 @@ Keep the version in `Cargo.toml` aligned with the four-part Store version in `ms
 
 ## Feedback and license
 
-Multi-brand support is being validated on a separate development branch and is not part of the stable 1.4.3 release. The branch adds Logitech HID++ 1.0 / 2.0 and standard HID battery adapters, with independent polling for each backend and existing ROG settings retained. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status. The `devices` command reads device status; `device-report` exports descriptors and a summary of recent query lengths, durations and results, without payloads or unique device identifiers.
+Multi-brand support is being validated on a separate development branch and is not part of the stable 1.4.3 release. The branch adds Logitech HID++ 1.0 / 2.0, standard HID, Rapoo VT1 / VT1 MAX and VGN V98 Pro V3 battery adapters, with independent polling for each backend and existing ROG settings retained. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status. The `devices` command reads device status; `device-report` exports descriptors and the current process's query summary. `device-report --probe` runs read-only queries first and exports battery, charging status, current DPI and communication results from the same process for user-assisted testing. Reports exclude payloads and unique device identifiers and are never uploaded automatically.
 
 Report problems or compatibility results in [GitHub issues](https://github.com/youmikk/ROG-Battery/issues). Remove serial numbers and personal file paths before sharing logs.
 

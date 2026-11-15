@@ -10,7 +10,8 @@ This table separates hardware verified support in the stable app from protocol i
 | Logitech HID++ 1.0 | Devices exposing battery registers 0x0D or 0x07 | Exact charge or coarse levels implemented | No writes yet | Development branch; hardware validation pending |
 | Logitech HID++ 2.0 | Devices exposing 0x1000 or 0x1004 | Protocol implemented | Read and verified writes when 0x2201 is available | Development branch; hardware validation pending |
 | Standard HID | Generic Device Controls / Battery Strength (06:20) in the descriptor | Read using descriptor limits | No standard DPI write operation | Development branch; hardware validation pending |
-| Rapoo | VT1 | Investigation pending | Investigation pending | Unverified |
+| Rapoo nRF54L | VT1 / VT1 MAX, USB / 2.4G | Status report reads implemented | Current DPI read-only; independent X/Y is not shown as one DPI | Development branch; hardware validation pending |
+| VGN Beiying | V98 Pro V3, USB / 2.4G | Wired feature and receiver status queries implemented | No DPI for keyboards | USB read verified; receiver and wake recovery validation pending |
 
 Voltage and coarse HID++ battery levels are not shown as exact percentages. Charging remains unknown when standard HID does not expose it.
 
@@ -22,6 +23,12 @@ Each backend has its own polling thread and command queue, so a timeout or DPI w
 
 Adjustable DPI lists are read across the device's reported pages, including values and step ranges spanning report boundaries. Transport padding is excluded from parsing. Incomplete lists, invalid report lengths and failed subsequent queries do not authorize DPI writes from partial data.
 
+Rapoo currently matches only the official web driver's VT1 `24AE:4615/1415` and VT1 MAX `24AE:4644/1444`, and reads status report `0x07`. Missing valid reports remain unknown and require a user wake test. EEPROM writes are not enabled; protocol inference is not hardware verification.
+
+VGN currently matches V98 Pro V3 `258A:024E/024F/027E/027F` and queries only the confirmed vendor control interface. Wired battery reads use feature report `0x09`; receivers use command `0x4A` in report `0x13`, with length and checksum validation. Unknown IDs and unrelated vendor collections are not probed with this protocol. A USB device returned valid 100% battery and charging status; other battery levels, receivers and wake recovery still need testing.
+
 Settings → About → Device compatibility opens a GitHub form and exports factory model, VID/PID, usage, report lengths, and a summary of the last 128 protocol queries in the current session: feature identifiers, durations and results. The report excludes payloads, serial numbers, MAC addresses, interface paths, usernames, custom device names, DPI setting values and raw logs.
 
-Protocol references: [Solaar](https://github.com/pwr-Solaar/Solaar) and [USB HID Usage Tables](https://usb.org/document-library/hid-usage-tables-15). The implementation does not copy driver or open source project code.
+For remote adaptation, run `rog-mouse-ctl device-report --probe` using a development build. It performs read-only queries and then generates a sanitized report from the same process, including the returned battery, charging status and current DPI. It changes no settings and uploads nothing. Users can compare readings with the official driver; DPI write tests are separate. Local hardware ownership is not required for user-assisted testing, although unknown private protocols may still need driver analysis or targeted communication captures.
+
+Protocol references: [Solaar](https://github.com/pwr-Solaar/Solaar), [USB HID Usage Tables](https://usb.org/document-library/hid-usage-tables-15), [Rapoo A HUB](https://hub.rapoo.cn/), [VGN web driver](https://drive.vgnlab.com.cn/) and [FerrisPulse protocol research](https://github.com/Ferris-echo/FerrisPulse). The implementation does not copy driver or open source project code.

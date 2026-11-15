@@ -59,6 +59,59 @@ pub fn collect() -> Result<String, String> {
     Ok(output)
 }
 
+/// 独立诊断进程先查询再导出，摘要与读数来自同一次运行。
+pub fn collect_probe() -> Result<String, String> {
+    let api = crate::win32::HidApi::load()?;
+    let interfaces = crate::hid::enumerate_all_report(&api)?.interfaces;
+    let mut output = report(&interfaces);
+    output.push_str("Read-only capability probe (no settings are changed)\n");
+    for backend in std::iter::once(super::backends::BackendId::Rog)
+        .chain(super::backends::ADDITIONAL_BACKENDS) {
+        let provider: &dyn super::backends::DeviceBackend = match backend {
+            super::backends::BackendId::Logitech => &super::backends::logitech::Logitech,
+            super::backends::BackendId::Rapoo => &super::backends::rapoo::Rapoo,
+            super::backends::BackendId::Vgn => &super::backends::vgn::Vgn,
+            super::backends::BackendId::StandardHid => &super::backends::standard::StandardHid,
+            super::backends::BackendId::Rog => &super::backends::rog::Rog,
+        };
+        let Ok(targets) = provider.discover(&api, &interfaces) else {
+            let _ = writeln!(output, "{}: discovery-failed", backend.name());
+            continue;
+        };
+        if targets.is_empty() {
+            let _ = writeln!(output, "{}: no-supported-interface", backend.name());
+        }
+        for target in targets.into_iter().take(64) {
+            let reading = provider.read(&api, &target, true);
+            append_probe_result(&mut output, &target, reading.as_ref().ok());
+        }
+    }
+    output.push('\n');
+    output.push_str(&super::backends::trace::render());
+    Ok(output)
+}
+
+fn append_probe_result(output: &mut String, target: &super::backends::Target,
+    reading: Option<&super::backends::Snapshot>) {
+    let _ = writeln!(output, "{} {:04X}:{:04X} result={}", target.backend.name(),
+        target.interface.vendor_id, target.interface.product_id,
+        match reading {
+            Some(reading) if reading.connected && (reading.battery.is_some() || reading.dpi.current.is_some()) => "ok",
+            Some(_) => "no-valid-reading",
+            None => "read-failed",
+        });
+    if let Some(reading) = reading {
+        let percent = reading.battery.as_ref().and_then(|battery| battery.percent)
+            .map(|percent| format!("{percent}%")).unwrap_or_else(|| "unknown".into());
+        let charging = match reading.battery.as_ref().and_then(|battery| battery.charging) {
+            Some(true) => "yes", Some(false) => "no", None => "unknown",
+        };
+        let dpi = reading.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "unknown".into());
+        let _ = writeln!(output, "Battery: {percent}; charging: {charging}; current DPI: {dpi}; DPI writable: {}",
+            reading.dpi.writable);
+    }
+}
+
 pub fn issue_url() -> String {
     // 开发分支的模板尚未合入默认分支，直接预填正文也能提交。
     "https://github.com/youmikk/ROG-Battery/issues/new?title=%5BDevice%5D&body=Brand%20%2F%20Model%3A%0AConnection%20%28USB%2C%202.4GHz%2C%20Bluetooth%29%3A%0AApp%20version%3A%0ABattery%20%2F%20DPI%20behavior%3A%0A%0AAttach%20the%20device%20report%20exported%20from%20Settings%20%E2%86%92%20About.%0A%E8%AF%B7%E5%A1%AB%E5%86%99%E5%93%81%E7%89%8C%E3%80%81%E5%9E%8B%E5%8F%B7%E3%80%81%E8%BF%9E%E6%8E%A5%E6%96%B9%E5%BC%8F%E5%92%8C%E9%97%AE%E9%A2%98%E8%A1%A8%E7%8E%B0%E3%80%82".to_string()
@@ -86,5 +139,29 @@ mod tests {
         assert!(!result.contains("private-device-serial"));
         assert!(result.contains("046D:C52B"));
         assert!(result.contains("Model: Test mouse\n"));
+    }
+
+    #[test]
+    fn probe_results_export_only_readings_and_protocol_identifiers() {
+        let interface = crate::hid::HidInterface { path: "private-path".into(),
+            serial: "private-serial".into(), product: "Factory model".into(),
+            vendor_id: 0x258a, product_id: 0x024e, usage_page: 0xff02, usage: 1,
+            input_len: 0, output_len: 0, feature_len: 520 };
+        let mut target = super::super::backends::Target::new(super::super::backends::BackendId::Vgn, &interface, 0);
+        target.name = "private-custom-name".into();
+        let snapshot = super::super::backends::Snapshot { target: target.clone(),
+            battery: Some(crate::device::Battery { percent: Some(75), charging: None,
+                voltage_mv: None, approximate: false, level: None }),
+            dpi: crate::device::Dpi::default(), connected: true };
+        let mut output = String::new();
+        append_probe_result(&mut output, &target, Some(&snapshot));
+        assert!(output.contains("Battery: 75%; charging: unknown"));
+        for private in ["private-path", "private-serial", "private-custom-name", &target.key] {
+            assert!(!output.contains(private));
+        }
+        let missing = super::super::backends::Snapshot { connected: false, battery: None, ..snapshot };
+        let mut output = String::new();
+        append_probe_result(&mut output, &target, Some(&missing));
+        assert!(output.contains("result=no-valid-reading"));
     }
 }

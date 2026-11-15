@@ -10,7 +10,8 @@
 | Logitech HID++ 1.0 | 提供 0x0D 或 0x07 电量寄存器的设备 | 精确电量或粗略等级已实现 | 暂不写入 | 开发分支，待实机验证 |
 | Logitech HID++ 2.0 | 提供 0x1000 或 0x1004 功能的设备 | 协议已实现 | 提供 0x2201 功能时读取、校验后写入 | 开发分支，待实机验证 |
 | 标准 HID | 描述符提供 Generic Device Controls / Battery Strength (06:20) 的设备 | 按描述符范围读取 | 此标准没有通用 DPI 写入 | 开发分支，待实机验证 |
-| 雷柏 | VT1 | 待研究 | 待研究 | 尚未验证 |
+| 雷柏 nRF54L | VT1 / VT1 MAX，USB / 2.4G | 状态报告读取已实现 | 当前 DPI 只读；独立 X/Y 暂不显示为单一 DPI | 开发分支，待实机验证 |
+| VGN 北应 | V98 Pro V3，USB / 2.4G | 有线功能报告和接收器状态查询已实现 | 键盘不提供 DPI | USB 实机读取通过；接收器及休眠恢复待验证 |
 
 HID++ 仅返回电压或粗略等级时，不会把它们作为精确百分比显示。标准 HID 不提供充电状态时，充电状态保持未知。
 
@@ -22,6 +23,12 @@ HID++ 1.0 接收器提供配对信息时，可读取各槽位的名称与设备�
 
 可调 DPI 列表按设备报告分段读取，支持跨回帧的数值和步进范围。报文的系统填充字节不参与解析；列表未读完整、传输长度无效或后续查询失败时，不根据部分列表写入 DPI。
 
+雷柏目前只匹配官方网页驱动中 VT1 的 `24AE:4615/1415` 和 VT1 MAX 的 `24AE:4644/1444`，读取 `0x07` 状态报告。没有有效报告时保持未知，需要用户唤醒设备验证。尚未接入 EEPROM 写入，不将协议推导标记为实机兼容。
+
+VGN 目前匹配 V98 Pro V3 的 `258A:024E/024F/027E/027F`，只查询已确认的厂商控制接口。有线 `0x09` 功能报告读取电量，接收器使用 `0x13` 报告的 `0x4A` 查询，并校验响应长度和校验和。未知 VID/PID 或其他厂商集合不尝试这套协议。USB 验证已读取有效的 100% 电量及充电状态；其他电量、接收器和休眠恢复仍需继续测试。
+
 新增适配反馈可在设置 → 关于 → 设备适配中打开 GitHub 表单，并导出报告。报告含出厂型号、VID/PID、Usage、报文长度，以及本次运行最近 128 次协议查询的功能编号、耗时和结果摘要。报告不含报文内容、序列号、MAC、接口路径、用户名、设备自定义名称、DPI 设置值或原始日志。
 
-协议资料：[Solaar](https://github.com/pwr-Solaar/Solaar)、[USB HID Usage Tables](https://usb.org/document-library/hid-usage-tables-15)。协议逻辑独立实现，未复制驱动或开源项目代码。
+远程适配时，可使用开发版执行 `rog-mouse-ctl device-report --probe`。此命令先进行只读查询，再生成同一次运行的脱敏报告，另外包含设备实际返回的电量、充电状态和当前 DPI。探测不修改设置，不上传报告。用户可对照官方驱动读数反馈结果；DPI 写入测试另行进行。没有本地设备也能通过用户测试推进适配，但完全未知的私有协议仍可能需要驱动分析或针对性的通信采集。
+
+协议资料：[Solaar](https://github.com/pwr-Solaar/Solaar)、[USB HID Usage Tables](https://usb.org/document-library/hid-usage-tables-15)、[雷柏 A HUB](https://hub.rapoo.cn/)、[VGN 网页驱动](https://drive.vgnlab.com.cn/)、[FerrisPulse 协议资料](https://github.com/Ferris-echo/FerrisPulse)。协议逻辑独立实现，未复制驱动或开源项目代码。
