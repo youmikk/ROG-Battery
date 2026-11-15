@@ -1,4 +1,4 @@
-//! VT1 / VT1 MAX（nRF54L）状态报告，只读电量及当前 DPI。
+//! nRF54L 鼠标状态报告，只读电量及当前 DPI。
 use super::*;
 use crate::hid::HidDevice;
 
@@ -6,10 +6,86 @@ pub struct Rapoo;
 const VID: u16 = 0x24ae;
 const STATUS_REPORT: u8 = 7;
 
+// 型号与协议归属：Rapoo AHUB 官方 VT_nrf54L 清单。
 fn model(pid: u16) -> Option<&'static str> {
     match pid {
+        0x464d => Some("Rapoo ESM612ACE"),
+        0x4681 => Some("Rapoo ESM612MAX"),
+        0x4631 => Some("Rapoo ESM612PRO"),
+        0x4637 => Some("Rapoo ESM622MAX"),
+        0x4632 => Some("Rapoo ESM622PRO"),
+        0x4633 => Some("Rapoo ESM652PRO"),
+        0x4640 => Some("Rapoo ESM672MAX"),
+        0x4635 => Some("Rapoo ESM672PRO"),
+        0x4610 | 0x1410 => Some("Rapoo VT0"),
+        0x46a1 | 0x14a1 => Some("Rapoo VT0 Air MAX"),
+        0x4620 | 0x1420 => Some("Rapoo VT0 MAX"),
+        0x464a | 0x144a => Some("Rapoo VT0 MAX MASTER"),
         0x4615 | 0x1415 => Some("Rapoo VT1"),
         0x4644 | 0x1444 => Some("Rapoo VT1 MAX"),
+        0x4b0a | 0x1b0a => Some("Rapoo VT1S MAX V2"),
+        0x466a | 0x146a => Some("Rapoo VT1S V2"),
+        0x4622 | 0x1422 => Some("Rapoo VT2"),
+        0x4b12 | 0x1b12 => Some("Rapoo VT2 Air MAX V2"),
+        0x4623 | 0x1423 => Some("Rapoo VT2 MAX"),
+        0x4675 | 0x1475 => Some("Rapoo VT2 MAX MASTER V2"),
+        0x4b09 | 0x1b09 => Some("Rapoo VT2 MAX V2"),
+        0x4668 | 0x1468 => Some("Rapoo VT2 V2"),
+        0x46a4 | 0x14a4 => Some("Rapoo VT2K MAX"),
+        0x4b13 | 0x1b13 => Some("Rapoo VT2S Air MAX V2"),
+        0x4676 | 0x1476 => Some("Rapoo VT2S MAX MASTER V2"),
+        0x4b04 | 0x1b04 => Some("Rapoo VT2S MAX V2"),
+        0x465d | 0x145d => Some("Rapoo VT2S V2"),
+        0x4612 | 0x1412 => Some("Rapoo VT3"),
+        0x4b0c | 0x1b0c => Some("Rapoo VT3 Air MAX V2"),
+        0x4617 | 0x1417 => Some("Rapoo VT3 MAX"),
+        0x466d | 0x146d => Some("Rapoo VT3 MAX MASTER V2"),
+        0x4b06 | 0x1b06 => Some("Rapoo VT3 MAX V2"),
+        0x46a5 | 0x14a5 => Some("Rapoo VT3 PRO V2"),
+        0x4662 | 0x1462 => Some("Rapoo VT3 V2"),
+        0x4611 | 0x1411 => Some("Rapoo VT3S"),
+        0x46a2 | 0x14a2 => Some("Rapoo VT3S Air Max"),
+        0x4b0d | 0x1b0d => Some("Rapoo VT3S Air MAX V2"),
+        0x4621 | 0x1421 => Some("Rapoo VT3S MAX"),
+        0x464b | 0x144b => Some("Rapoo VT3S MAX MASTER"),
+        0x466e | 0x146e => Some("Rapoo VT3S MAX MASTER V2"),
+        0x4b07 | 0x1b07 => Some("Rapoo VT3S MAX V2"),
+        0x46a6 | 0x14a6 => Some("Rapoo VT3S PRO V2"),
+        0x4664 | 0x1464 => Some("Rapoo VT3S V2"),
+        0x4b14 | 0x1b14 => Some("Rapoo VT4 Air MAX V2"),
+        0x4677 | 0x1477 => Some("Rapoo VT4 MAX MASTER V2"),
+        0x4b03 | 0x1b03 => Some("Rapoo VT4 MAX V2"),
+        0x465b | 0x145b => Some("Rapoo VT4 V2"),
+        0x4651 | 0x1451 => Some("Rapoo VT6"),
+        0x4652 | 0x1452 => Some("Rapoo VT6 MAX"),
+        0x4613 | 0x1413 => Some("Rapoo VT7"),
+        0x4b0e | 0x1b0e => Some("Rapoo VT7 Air MAX V2"),
+        0x4616 | 0x1416 => Some("Rapoo VT7 MAX"),
+        0x4670 | 0x1470 => Some("Rapoo VT7 MAX MASTER V2"),
+        0x4b05 | 0x1b05 => Some("Rapoo VT7 MAX V2"),
+        0x46a7 | 0x14a7 => Some("Rapoo VT7 PRO V2"),
+        0x4660 | 0x1460 => Some("Rapoo VT7 V2"),
+        0x4b0f | 0x1b0f => Some("Rapoo VT7S Air MAX V2"),
+        0x4671 | 0x1471 => Some("Rapoo VT7S MAX MASTER V2"),
+        0x4b02 | 0x1b02 => Some("Rapoo VT7S MAX V2"),
+        0x46a8 | 0x14a8 => Some("Rapoo VT7S PRO V2"),
+        0x4659 | 0x1459 => Some("Rapoo VT7S V2"),
+        0x4b15 | 0x1b15 => Some("Rapoo VT8 Air MAX V2"),
+        0x4678 | 0x1478 => Some("Rapoo VT8 MAX MASTER V2"),
+        0x4b0b | 0x1b0b => Some("Rapoo VT8 MAX V2"),
+        0x466c | 0x146c => Some("Rapoo VT8 V2"),
+        0x4614 | 0x1414 => Some("Rapoo VT9"),
+        0x4b10 | 0x1b10 => Some("Rapoo VT9 Air MAX V2"),
+        0x4618 | 0x1418 => Some("Rapoo VT9 MAX"),
+        0x4673 | 0x1473 => Some("Rapoo VT9 MAX MASTER V2"),
+        0x4b08 | 0x1b08 => Some("Rapoo VT9 MAX V2"),
+        0x46a9 | 0x14a9 => Some("Rapoo VT9 PRO V2"),
+        0x4666 | 0x1466 => Some("Rapoo VT9 V2"),
+        0x4b11 | 0x1b11 => Some("Rapoo VT9S Air MAX V2"),
+        0x4674 | 0x1474 => Some("Rapoo VT9S MAX MASTER V2"),
+        0x4b01 | 0x1b01 => Some("Rapoo VT9S MAX V2"),
+        0x46aa | 0x14aa => Some("Rapoo VT9S PRO V2"),
+        0x4653 | 0x1453 => Some("Rapoo VT9S V2"),
         _ => None,
     }
 }
@@ -52,6 +128,7 @@ fn parse_status(frame: &[u8]) -> Option<(Battery, Dpi)> {
             current,
             values: Vec::new(),
             writable: false,
+            ..Default::default()
         },
     ))
 }
@@ -141,6 +218,33 @@ impl DeviceBackend for Rapoo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expanded_catalog_requires_the_nrf54l_status_interface() {
+        let mut interface = HidInterface {
+            vendor_id: VID,
+            product_id: 0x4b01,
+            usage_page: 0xff00,
+            usage: 2,
+            input_len: 19,
+            output_len: 0,
+            feature_len: 0,
+            path: String::new(),
+            serial: String::new(),
+            product: String::new(),
+        };
+        assert_eq!(model(interface.product_id), Some("Rapoo VT9S MAX V2"));
+        assert!(is_control(&interface));
+        interface.product_id = 0x1b01;
+        assert!(is_control(&interface));
+        interface.usage = 14;
+        assert!(!is_control(&interface));
+        interface.usage = 2;
+        interface.product_id = 0x0001;
+        assert!(!is_control(&interface));
+        interface.product_id = 0x4b01;
+        interface.input_len = 8;
+        assert!(!is_control(&interface));
+    }
     fn report() -> Vec<u8> {
         vec![7, 0, 1, 0x20, 3, 0x20, 3, 1, 75, 0, 0, 0, 0]
     }

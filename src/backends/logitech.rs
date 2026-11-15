@@ -8,6 +8,7 @@ const BATTERY_STATUS: u16 = 0x1000;
 const UNIFIED_BATTERY: u16 = 0x1004;
 const BATTERY_VOLTAGE: u16 = 0x1001;
 const ADJUSTABLE_DPI: u16 = 0x2201;
+const ONBOARD_PROFILES: u16 = 0x8100;
 
 trait Channel {
     fn output_len(&self) -> u16;
@@ -250,7 +251,169 @@ impl<C: Channel> Session<C> {
             current,
             writable: current.is_some() && !values.is_empty(),
             values,
+            ..Default::default()
         })
+    }
+
+    fn onboard_dpi(&mut self) -> Result<Option<Dpi>, String> {
+        if self.legacy {
+            return Ok(None);
+        }
+        let Some(feature) = self.feature(ONBOARD_PROFILES)? else {
+            return Ok(None);
+        };
+        let mode = self.request(feature, 2, &[])?;
+        match mode.first() {
+            Some(2) => return Ok(None),
+            Some(1) => (),
+            _ => return Err("板载 DPI 配置无效".into()),
+        }
+        let descriptor = self.request(feature, 0, &[])?;
+        if descriptor.len() < 10
+            || descriptor[0] != 1
+            || !(1..=5).contains(&descriptor[1])
+            || !(1..=16).contains(&descriptor[3])
+            || descriptor[4] > 16
+        {
+            return Err("此板载配置格式尚未适配".into());
+        }
+        // 已知 1–5 格式的 DPI 区域及 CRC 使用相同的 256 字节布局。
+        let size = usize::from(u16::from_be_bytes([descriptor[7], descriptor[8]]));
+        if size != 256 {
+            return Err("此板载配置格式尚未适配".into());
+        }
+        let profile = self.onboard_profile(feature)?;
+        let slot = profile as u8;
+        let count = if profile >> 8 == 1 {
+            descriptor[4]
+        } else {
+            descriptor[3]
+        };
+        if profile >> 8 > 1 || slot == 0 || slot > count {
+            return Err("板载 DPI 配置无效".into());
+        }
+        let mut bytes = Vec::with_capacity(size);
+        for offset in (0..size).step_by(16) {
+            let address = (offset as u16).to_be_bytes();
+            let sector = profile.to_be_bytes();
+            let chunk =
+                self.request(feature, 5, &[sector[0], sector[1], address[0], address[1]])?;
+            if chunk.len() != 16 {
+                return Err("板载 DPI 配置无效".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if self.onboard_profile(feature)? != profile {
+            return Err("板载配置已变化，请刷新后重试".into());
+        }
+        let active = self
+            .request(feature, 11, &[])?
+            .first()
+            .copied()
+            .ok_or("板载 DPI 配置无效")?;
+        if self.request(feature, 2, &[])?.first() != Some(&1) {
+            return Err("板载配置已变化，请刷新后重试".into());
+        }
+        let stages = decode_onboard_stages(&bytes, active)?;
+        let current = stages
+            .iter()
+            .find(|stage| stage.index == active)
+            .map(|stage| stage.value);
+        Ok(Some(Dpi {
+            current,
+            stages,
+            active_stage: Some(active),
+            profile: Some(profile),
+            stage_writable: current.is_some(),
+            ..Default::default()
+        }))
+    }
+
+    fn onboard_profile(&mut self, feature: u8) -> Result<u16, String> {
+        let response = self.request(feature, 4, &[])?;
+        let bytes: [u8; 2] = response
+            .get(..2)
+            .ok_or("板载 DPI 配置无效")?
+            .try_into()
+            .unwrap();
+        Ok(u16::from_be_bytes(bytes))
+    }
+
+    fn dpi_with_stages(&mut self) -> Dpi {
+        match self.onboard_dpi() {
+            Ok(Some(dpi)) => dpi,
+            Ok(None) => self.dpi().unwrap_or_default(),
+            Err(_) => {
+                let mut dpi = self.dpi().unwrap_or_default();
+                // 板载模式/配置查询失败不能授权数值写入。
+                dpi.writable = false;
+                dpi
+            }
+        }
+    }
+
+    fn check_identity(&mut self, target: &Target) -> Result<(), String> {
+        if target.verified_identity && self.identity_key()?.as_ref() != Some(&target.key) {
+            return Err("设备标识已变化，请刷新后再试".into());
+        }
+        if (0xc500..=0xc5ff).contains(&target.interface.product_id) && !target.verified_identity {
+            return Err("未确认接收器中设备的唯一标识，不能写入 DPI".into());
+        }
+        Ok(())
+    }
+
+    fn set_stage(
+        &mut self,
+        target: &Target,
+        stage: crate::device::DpiStage,
+        profile: u16,
+    ) -> Result<(), String> {
+        self.check_identity(target)?;
+        let dpi = self.onboard_dpi()?.ok_or("设备不支持 DPI 档位切换")?;
+        if !dpi.stage_writable || dpi.profile != Some(profile) || !dpi.stages.contains(&stage) {
+            return Err("板载配置已变化，请刷新后重试".into());
+        }
+        let previous = dpi.active_stage.ok_or("板载 DPI 配置无效")?;
+        if previous == stage.index {
+            return Ok(());
+        }
+        let feature = self
+            .feature(ONBOARD_PROFILES)?
+            .ok_or("设备不支持 DPI 档位切换")?;
+        let _ = self.request(feature, 12, &[stage.index]);
+        // 不切换 G HUB/板载模式，不写入 Flash，也不切换整套配置。
+        if self.request(feature, 2, &[])?.first() != Some(&1)
+            || self.onboard_profile(feature)? != profile
+        {
+            return Err("板载配置已变化，请刷新后重试".into());
+        }
+        if self
+            .request(feature, 11, &[])
+            .ok()
+            .as_ref()
+            .and_then(|reply| reply.first())
+            == Some(&stage.index)
+        {
+            return Ok(());
+        }
+        let _ = self.request(feature, 12, &[previous]);
+        if self
+            .request(feature, 2, &[])
+            .ok()
+            .as_ref()
+            .and_then(|reply| reply.first())
+            != Some(&1)
+            || self.onboard_profile(feature).ok() != Some(profile)
+            || self
+                .request(feature, 11, &[])
+                .ok()
+                .as_ref()
+                .and_then(|reply| reply.first())
+                != Some(&previous)
+        {
+            return Err("DPI 写入未确认，原值恢复也未确认".into());
+        }
+        Err("设备未确认新的 DPI，已恢复原值".into())
     }
 
     fn dpi_list(&mut self, index: u8) -> Result<Vec<u16>, String> {
@@ -404,12 +567,13 @@ impl<C: Channel> Session<C> {
             self.identify(&mut target);
         }
         let mut dpi = if target.family == DeviceFamily::Mouse {
-            self.dpi().unwrap_or_default()
+            self.dpi_with_stages()
         } else {
             Dpi::default()
         };
         if (0xc500..=0xc5ff).contains(&target.interface.product_id) && !target.verified_identity {
             dpi.writable = false;
+            dpi.stage_writable = false;
         }
         Ok(Snapshot {
             target,
@@ -420,12 +584,7 @@ impl<C: Channel> Session<C> {
     }
 
     fn set_dpi(&mut self, target: &Target, dpi: u16) -> Result<(), String> {
-        if target.verified_identity && self.identity_key()?.as_ref() != Some(&target.key) {
-            return Err("设备标识已变化，请刷新后再试".into());
-        }
-        if (0xc500..=0xc5ff).contains(&target.interface.product_id) && !target.verified_identity {
-            return Err("未确认接收器中设备的唯一标识，不能写入 DPI".into());
-        }
+        self.check_identity(target)?;
         let supported = self.dpi()?;
         if !supported.writable || !supported.values.contains(&dpi) {
             return Err("DPI 不在设备报告的可用范围内".into());
@@ -434,6 +593,12 @@ impl<C: Channel> Session<C> {
         let previous = supported.current.ok_or("无法读取当前 DPI")?;
         if previous == dpi {
             return Ok(());
+        }
+        // 界面读完后模式可能被 G HUB 改变，写入前重新检查。
+        if let Some(feature) = self.feature(ONBOARD_PROFILES)? {
+            if self.request(feature, 2, &[])?.first() != Some(&2) {
+                return Err("板载模式请使用 DPI 档位切换".into());
+            }
         }
         let value = dpi.to_be_bytes();
         let _ = self.request(index, 3, &[0, value[0], value[1]]);
@@ -457,6 +622,44 @@ impl<C: Channel> Session<C> {
         }
         Err("设备未确认新的 DPI，已恢复原值".into())
     }
+}
+
+fn crc16(bytes: &[u8]) -> u16 {
+    bytes.iter().fold(0xffff, |mut crc, byte| {
+        crc ^= u16::from(*byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+        crc
+    })
+}
+
+fn decode_onboard_stages(bytes: &[u8], active: u8) -> Result<Vec<crate::device::DpiStage>, String> {
+    if bytes.len() != 256 || crc16(&bytes[..254]) != u16::from_be_bytes([bytes[254], bytes[255]]) {
+        return Err("板载 DPI 配置校验失败".into());
+    }
+    let mut stages = Vec::new();
+    for index in 0..5u8 {
+        let offset = 3 + usize::from(index) * 2;
+        let value = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+        if value == 0 || value == u16::MAX {
+            continue;
+        }
+        if value < 50 {
+            return Err("板载 DPI 配置无效".into());
+        }
+        stages.push(crate::device::DpiStage { index, value });
+    }
+    if !stages.iter().any(|stage| stage.index == active)
+        || !stages.iter().any(|stage| stage.index == bytes[1])
+    {
+        return Err("板载 DPI 配置无效".into());
+    }
+    Ok(stages)
 }
 
 fn reply_matches(reply: &[u8], address: u8, feature: u8, function: u8) -> bool {
@@ -691,6 +894,14 @@ impl DeviceBackend for Logitech {
                 targets.push(Target::new(BackendId::Logitech, interface, *address));
             }
         }
+        // 长报告集合放在后面：同一设备的短集合读数不能覆盖完整板载档位。
+        targets.sort_by_key(|target| {
+            let interface = &target.interface;
+            (
+                interface.output_len >= 20,
+                interface.usage_page == 0xff00 && interface.usage == 2,
+            )
+        });
         Ok(targets)
     }
 
@@ -700,6 +911,15 @@ impl DeviceBackend for Logitech {
 
     fn set_dpi(&self, _: &HidApi, target: &Target, dpi: u16) -> Result<(), String> {
         Session::open(target)?.set_dpi(target, dpi)
+    }
+    fn set_dpi_stage(
+        &self,
+        _: &HidApi,
+        target: &Target,
+        stage: crate::device::DpiStage,
+        profile: u16,
+    ) -> Result<(), String> {
+        Session::open(target)?.set_stage(target, stage, profile)
     }
 }
 
@@ -828,6 +1048,291 @@ mod tests {
         ]
     }
 
+    fn profile_bytes() -> Vec<u8> {
+        let mut bytes = vec![0xff; 256];
+        bytes[1] = 1;
+        for (index, value) in [400u16, 800, 0, 800, 3200].into_iter().enumerate() {
+            bytes[3 + 2 * index..5 + 2 * index].copy_from_slice(&value.to_le_bytes());
+        }
+        let crc = crc16(&bytes[..254]).to_be_bytes();
+        bytes[254..].copy_from_slice(&crc);
+        bytes
+    }
+
+    fn onboard_queries(bytes: &[u8], active: u8) -> Vec<Step> {
+        let mut script = vec![
+            ping(),
+            data(0, 0, &[0x81, 0], &[3]),
+            data(3, 2, &[], &[1]),
+            data(3, 0, &[], &[1, 3, 0, 5, 1, 6, 0, 1, 0, 0]),
+            data(3, 4, &[], &[0, 1]),
+        ];
+        for (index, chunk) in bytes.chunks(16).enumerate() {
+            script.push(data(3, 5, &[0, 1, 0, (index * 16) as u8], chunk));
+        }
+        script.extend([
+            data(3, 4, &[], &[0, 1]),
+            data(3, 11, &[], &[active]),
+            data(3, 2, &[], &[1]),
+        ]);
+        script
+    }
+
+    #[test]
+    fn onboard_crc_rejects_corruption_and_preserves_fifth_slot_and_duplicates() {
+        assert_eq!(crc16(b"123456789"), 0x29b1);
+        let mut bytes = profile_bytes();
+        let stages = decode_onboard_stages(&bytes, 4).unwrap();
+        assert_eq!(
+            stages
+                .iter()
+                .map(|stage| (stage.index, stage.value))
+                .collect::<Vec<_>>(),
+            vec![(0, 400), (1, 800), (3, 800), (4, 3200)]
+        );
+        assert!(decode_onboard_stages(&bytes, 2).is_err());
+        bytes[12] ^= 1;
+        assert!(decode_onboard_stages(&bytes, 4).is_err());
+    }
+
+    #[test]
+    fn onboard_stages_are_read_without_mode_profile_or_flash_writes() {
+        let (channel, steps) = channel(onboard_queries(&profile_bytes(), 4));
+        let dpi = Session::from_channel(channel, &target())
+            .unwrap()
+            .dpi_with_stages();
+        assert_eq!(dpi.current, Some(3200));
+        assert_eq!(dpi.active_stage, Some(4));
+        assert_eq!(dpi.profile, Some(1));
+        assert!(dpi.stage_writable);
+        assert!(!dpi.writable);
+        assert!(dpi.values.is_empty());
+        assert_eq!(dpi.stages.len(), 4);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn host_mode_uses_numeric_capability_without_switching_to_onboard() {
+        let mut script = vec![ping(), data(0, 0, &[0x81, 0], &[3]), data(3, 2, &[], &[2])];
+        script.extend(dpi_queries().into_iter().skip(1));
+        let (channel, steps) = channel(script);
+        let dpi = Session::from_channel(channel, &target())
+            .unwrap()
+            .dpi_with_stages();
+        assert_eq!(dpi.current, Some(800));
+        assert!(dpi.stages.is_empty());
+        assert!(dpi.writable);
+        assert!(!dpi.stage_writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_onboard_query_cannot_fall_back_to_numeric_write_permission() {
+        let mut script = vec![
+            ping(),
+            data(0, 0, &[0x81, 0], &[3]),
+            Step {
+                address: None,
+                feature: 3,
+                function: 2,
+                parameters: vec![],
+                reply: Reply::Error(0xff, 2),
+            },
+        ];
+        script.extend(dpi_queries().into_iter().skip(1));
+        let (channel, steps) = channel(script);
+        let dpi = Session::from_channel(channel, &target())
+            .unwrap()
+            .dpi_with_stages();
+        assert_eq!(dpi.current, Some(800));
+        assert!(!dpi.writable);
+        assert!(!dpi.stage_writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unsupported_profile_format_stops_before_reading_memory_or_writing() {
+        let (channel, steps) = channel(vec![
+            ping(),
+            data(0, 0, &[0x81, 0], &[3]),
+            data(3, 2, &[], &[1]),
+            data(3, 0, &[], &[1, 9, 0, 5, 1, 6, 0, 1, 0, 0]),
+        ]);
+        assert!(Session::from_channel(channel, &target())
+            .unwrap()
+            .onboard_dpi()
+            .is_err());
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn onboard_stage_switch_uses_function_twelve_and_verifies_the_actual_slot() {
+        let mut script = onboard_queries(&profile_bytes(), 1);
+        script.extend([
+            data(3, 12, &[4], &[]),
+            data(3, 2, &[], &[1]),
+            data(3, 4, &[], &[0, 1]),
+            data(3, 11, &[], &[4]),
+        ]);
+        let (channel, steps) = channel(script);
+        Session::from_channel(channel, &target())
+            .unwrap()
+            .set_stage(
+                &target(),
+                crate::device::DpiStage {
+                    index: 4,
+                    value: 3200,
+                },
+                1,
+            )
+            .unwrap();
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_stage_or_profile_and_corrupt_memory_cannot_authorize_a_write() {
+        for (stage, profile, corrupt) in [
+            (
+                crate::device::DpiStage {
+                    index: 4,
+                    value: 1600,
+                },
+                1,
+                false,
+            ),
+            (
+                crate::device::DpiStage {
+                    index: 4,
+                    value: 3200,
+                },
+                2,
+                false,
+            ),
+            (
+                crate::device::DpiStage {
+                    index: 2,
+                    value: 800,
+                },
+                1,
+                false,
+            ),
+            (
+                crate::device::DpiStage {
+                    index: 4,
+                    value: 3200,
+                },
+                1,
+                true,
+            ),
+        ] {
+            let mut bytes = profile_bytes();
+            if corrupt {
+                bytes[12] ^= 1;
+            }
+            let (channel, steps) = channel(onboard_queries(&bytes, 1));
+            assert!(Session::from_channel(channel, &target())
+                .unwrap()
+                .set_stage(&target(), stage, profile)
+                .is_err());
+            assert!(steps.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn unchanged_onboard_stage_does_not_write() {
+        let (channel, steps) = channel(onboard_queries(&profile_bytes(), 1));
+        Session::from_channel(channel, &target())
+            .unwrap()
+            .set_stage(
+                &target(),
+                crate::device::DpiStage {
+                    index: 1,
+                    value: 800,
+                },
+                1,
+            )
+            .unwrap();
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_onboard_readback_restores_and_verifies_original_stage() {
+        let mut script = onboard_queries(&profile_bytes(), 1);
+        script.extend([
+            data(3, 12, &[4], &[]),
+            data(3, 2, &[], &[1]),
+            data(3, 4, &[], &[0, 1]),
+            Step {
+                address: None,
+                feature: 3,
+                function: 11,
+                parameters: vec![],
+                reply: Reply::Error(0xff, 2),
+            },
+            data(3, 12, &[1], &[]),
+            data(3, 2, &[], &[1]),
+            data(3, 4, &[], &[0, 1]),
+            data(3, 11, &[], &[1]),
+        ]);
+        let (channel, steps) = channel(script);
+        assert_eq!(
+            Session::from_channel(channel, &target())
+                .unwrap()
+                .set_stage(
+                    &target(),
+                    crate::device::DpiStage {
+                        index: 4,
+                        value: 3200
+                    },
+                    1
+                )
+                .unwrap_err(),
+            "设备未确认新的 DPI，已恢复原值"
+        );
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn profile_change_after_write_never_restores_into_another_profile() {
+        let mut script = onboard_queries(&profile_bytes(), 1);
+        script.extend([
+            data(3, 12, &[4], &[]),
+            data(3, 2, &[], &[1]),
+            data(3, 4, &[], &[0, 2]),
+        ]);
+        let (channel, steps) = channel(script);
+        assert_eq!(
+            Session::from_channel(channel, &target())
+                .unwrap()
+                .set_stage(
+                    &target(),
+                    crate::device::DpiStage {
+                        index: 4,
+                        value: 3200
+                    },
+                    1
+                )
+                .unwrap_err(),
+            "板载配置已变化，请刷新后重试"
+        );
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn numeric_write_is_rejected_if_ghub_changed_the_mode_to_onboard() {
+        let mut script = dpi_queries();
+        script.extend([data(0, 0, &[0x81, 0], &[3]), data(3, 2, &[], &[1])]);
+        let (channel, steps) = channel(script);
+        assert_eq!(
+            Session::from_channel(channel, &target())
+                .unwrap()
+                .set_dpi(&target(), 1600)
+                .unwrap_err(),
+            "板载模式请使用 DPI 档位切换"
+        );
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
     fn paged_dpi_queries(words: &[u16], current: u16, padded_first_page: bool) -> Vec<Step> {
         let mut script = vec![ping(), data(0, 0, &[0x22, 1], &[2]), data(2, 0, &[], &[1])];
         let bytes = words
@@ -891,6 +1396,7 @@ mod tests {
             false,
         );
         script.extend([
+            data(0, 0, &[0x81, 0], &[0]),
             data(2, 3, &[0, 0x0c, 0x80], &[]),
             data(2, 2, &[0], &[0, 0x0c, 0x80, 3, 0x20]),
         ]);
@@ -989,6 +1495,7 @@ mod tests {
                 parameters: vec![0, 3],
                 reply: Reply::Error(0xff, 2),
             },
+            data(0, 0, &[0x81, 0], &[0]),
             data(0, 0, &[0x22, 1], &[0]),
         ]);
         let snapshot = Session::from_channel(channel, &target())
@@ -1178,6 +1685,7 @@ mod tests {
     fn failed_dpi_readback_restores_and_verifies_original_value() {
         let mut script = dpi_queries();
         script.extend([
+            data(0, 0, &[0x81, 0], &[0]),
             data(2, 3, &[0, 6, 0x40], &[]),
             data(2, 2, &[0], &[0, 3, 0x20, 3, 0x20]),
             data(2, 3, &[0, 3, 0x20], &[]),

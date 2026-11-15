@@ -185,6 +185,8 @@ pub enum Act {
     Focus(Edit),
     /// 应用某个输入框的值（输入框旁边的「应用」，或回车）。
     ApplyEdit(Edit),
+    BasicDpi(u16),
+    BasicDpiStage(crate::device::DpiStage, u16),
     /// 点一下开关。
     Toggle(Pref),
     /// 拖动滑块到某个比例（0–1），拖拽过程中连续触发。

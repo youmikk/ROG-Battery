@@ -43,6 +43,7 @@ pub enum Action {
     TogglePanel(String),
     SetDpiStage(String, u8),
     SetDpiValue(String, u16),
+    SetOnboardDpiStage(String, crate::device::DpiStage, u16),
     AudioSlot(AudioSlot),
     AudioSlider(AudioSlot),
     ToggleMicrophone,
@@ -53,8 +54,11 @@ pub use crate::audio::Slot as AudioSlot;
 
 #[derive(Clone, Debug, Default)]
 pub struct DpiState {
-    pub stages: [i32; 4],
-    pub active: u8,
+    pub stages: Vec<crate::device::DpiStage>,
+    pub active: Option<u8>,
+    pub current: Option<u16>,
+    pub profile: Option<u16>,
+    pub writable: bool,
     pub value_control: bool,
 }
 
@@ -1343,13 +1347,7 @@ fn draw_dpi(
         t.text2,
         Align::Left,
     );
-    let current = dpi
-        .map(|dpi| {
-            format!(
-                "{} DPI",
-                dpi.stages[(dpi.active.saturating_sub(1) as usize).min(3)]
-            )
-        })
+    let current = dpi.and_then(|dpi| dpi.current).map(|value| format!("{value} DPI"))
         .unwrap_or_else(|| "—".to_string());
     p.text(
         &current,
@@ -1362,39 +1360,37 @@ fn draw_dpi(
     if let Some(dpi) = dpi {
         let segment = R::new(panel.x + 18.0, panel.y + 28.0, panel.w - 36.0, 40.0);
         p.round(segment, 9.0, t.bg_sunken);
-        let count = dpi.stages.iter().filter(|level| **level > 0).count().max(1);
+        let count = dpi.stages.len().max(1);
         let item_w = segment.w / count as f32;
-        for (index, level) in dpi.stages.into_iter().enumerate() {
-            if level <= 0 { continue; }
+        for (index, stage) in dpi.stages.iter().enumerate() {
             let r = R::new(
                 segment.x + index as f32 * item_w + 3.0,
                 segment.y + 3.0,
                 item_w - 6.0,
                 segment.h - 6.0,
             );
-            let active = dpi.active as usize == index + 1;
-            if active || hover == Some(hits.len()) {
+            let active = dpi.active == Some(stage.index);
+            if active || (dpi.writable && hover == Some(hits.len())) {
                 p.round(r, 7.0, if active { t.accent_soft } else { t.card_hover });
             }
             p.text(
-                &level.to_string(),
+                &stage.value.to_string(),
                 R::new(r.x, r.y - 2.0, r.w, r.h),
                 12.0,
                 active,
-                if active { t.accent } else { t.text2 },
+                if active { t.accent } else if dpi.writable { t.text2 } else { t.text3 },
                 Align::Center,
             );
-            push_visible_hit(
-                hits,
-                visible,
-                r,
-                if dpi.value_control { Action::SetDpiValue(key.to_string(), level as u16) }
-                else { Action::SetDpiStage(key.to_string(), (index + 1) as u8) },
-            );
+            if dpi.writable {
+                let action = if dpi.value_control { Action::SetDpiValue(key.to_string(), stage.value) }
+                else if let Some(profile) = dpi.profile { Action::SetOnboardDpiStage(key.to_string(), *stage, profile) }
+                else { Action::SetDpiStage(key.to_string(), stage.index) };
+                push_visible_hit(hits, visible, r, action);
+            }
         }
     } else {
         p.text(
-            crate::tr!("正在读取 DPI 档位…"),
+            crate::tr!("暂未读取到 DPI 信息"),
             R::new(panel.x + 18.0, panel.y + 31.0, panel.w - 36.0, 30.0),
             11.0,
             false,

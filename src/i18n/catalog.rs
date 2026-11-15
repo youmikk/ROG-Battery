@@ -2,6 +2,7 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("暂未读取到 DPI 信息") => { $crate::i18n::translate("暂未读取到 DPI 信息") };
     ("设备功能报告长度无效") => { $crate::i18n::translate("设备功能报告长度无效") };
     ("无法打开设备功能接口") => { $crate::i18n::translate("无法打开设备功能接口") };
     ("无法创建设备通信事件") => { $crate::i18n::translate("无法创建设备通信事件") };
@@ -428,6 +429,13 @@ macro_rules! trf {
 pub(super) fn lookup(language: super::Language, text: &str) -> &str {
     if language != super::Language::English { return text; }
     match text {
+        "暂未读取到 DPI 信息" => "DPI information is unavailable",
+        "设备不支持 DPI 档位切换" => "This device does not support DPI stage switching",
+        "板载 DPI 配置无效" => "The onboard DPI configuration is invalid",
+        "此板载配置格式尚未适配" => "This onboard profile format is not supported yet",
+        "板载 DPI 配置校验失败" => "The onboard DPI configuration checksum is invalid",
+        "板载配置已变化，请刷新后重试" => "The onboard profile has changed. Refresh and try again",
+        "板载模式请使用 DPI 档位切换" => "Use DPI stage switching in onboard mode",
         "设备功能报告长度无效" => "The device feature report length is invalid",
         "无法打开设备功能接口" => "Could not open the device feature interface",
         "无法创建设备通信事件" => "Could not create the device communication event",

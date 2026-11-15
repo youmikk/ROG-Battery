@@ -93,6 +93,7 @@ impl DeviceBackend for Rog {
                     .map(|dpi| dpi as u16)
                     .collect(),
                 writable: target.verified_identity || link.mode == "Wired",
+                ..Default::default()
             }
         } else {
             Dpi::default()

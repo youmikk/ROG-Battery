@@ -2032,18 +2032,48 @@ fn known_state<'a>(d: &'a Data) -> Option<&'a crate::proto::State> {
 }
 
 fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot, c: &mut Cursor) {
-    c.h2(p, "DPI", true);
-    let card = c.card(p, layout::ROW_H);
+    let configured = !basic.dpi.stages.is_empty();
+    c.h2(p, if configured { crate::tr!("DPI 档位") } else { "DPI" }, true);
+    let choices: Vec<_> = if configured { basic.dpi.stages.clone() } else {
+        basic.dpi.quick_values().into_iter().enumerate().map(|(index, value)|
+            crate::device::DpiStage { index: index as u8, value }).collect()
+    };
+    let card = c.card(p, if choices.is_empty() { layout::ROW_H } else { 102.0 });
     let area = row_area(card, card.y);
     let control = row_label(p, area, crate::tr!("当前 DPI"), None, 180.0);
     let edit = Edit::Dpi(0);
-    let text = ui.edit_text(edit).map(str::to_string)
-        .or_else(|| basic.dpi.current.map(|dpi| dpi.to_string())).unwrap_or_else(|| "—".into());
-    let box_r = R::new(control.x, control.cy() - 15.0, 95.0, 30.0);
-    num_box(p, box_r, &text, ui.focus == Some(edit));
-    if basic.dpi.writable && basic.connected { ui.hot(box_r, Act::Focus(edit)); }
-    button(p, ui, R::new(control.right() - 65.0, control.cy() - 15.0, 65.0, 30.0),
-        crate::tr!("应用"), false, Act::ApplyEdit(edit));
+    if basic.dpi.writable && basic.connected {
+        let text = ui.edit_text(edit).map(str::to_string)
+            .or_else(|| basic.dpi.current.map(|dpi| dpi.to_string())).unwrap_or_else(|| "—".into());
+        let box_r = R::new(control.x, control.cy() - 15.0, 95.0, 30.0);
+        num_box(p, box_r, &text, ui.focus == Some(edit));
+        ui.hot(box_r, Act::Focus(edit));
+        button(p, ui, R::new(control.right() - 65.0, control.cy() - 15.0, 65.0, 30.0),
+            crate::tr!("应用"), false, Act::ApplyEdit(edit));
+    } else {
+        let text = basic.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "—".into());
+        p.text(&text, control, font::BODY, true, p.t.text, Align::Right);
+    }
+    if !choices.is_empty() {
+        let t = p.t;
+        let segment = R::new(card.x + 18.0, card.bottom() - 49.0, card.w - 36.0, 36.0);
+        p.round(segment, 9.0, t.bg_sunken);
+        let width = segment.w / choices.len() as f32;
+        let can_write = basic.connected && if configured { basic.dpi.stage_writable } else { basic.dpi.writable };
+        for (position, stage) in choices.iter().enumerate() {
+            let r = R::new(segment.x + position as f32 * width + 3.0, segment.y + 3.0, width - 6.0, segment.h - 6.0);
+            let active = if configured { basic.dpi.active_stage == Some(stage.index) }
+                else { basic.dpi.current == Some(stage.value) };
+            if active { p.round(r, 7.0, t.accent_soft); }
+            p.text(&stage.value.to_string(), r, 12.0, active,
+                if active { t.accent } else if can_write { t.text2 } else { t.text3 }, Align::Center);
+            if can_write {
+                if configured {
+                    if let Some(profile) = basic.dpi.profile { ui.hot(r, Act::BasicDpiStage(*stage, profile)); }
+                } else { ui.hot(r, Act::BasicDpi(stage.value)); }
+            }
+        }
+    }
     c.y = card.bottom();
 }
 

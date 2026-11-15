@@ -79,6 +79,7 @@ enum Status {
 #[derive(Clone)]
 pub(crate) enum Cmd {
     BasicDpi { target: crate::backends::Target, dpi: u16 },
+    BasicDpiStage { target: crate::backends::Target, stage: crate::device::DpiStage, profile: u16 },
     Poll(i32),
     Dpi {
         stage: usize,
@@ -125,6 +126,8 @@ impl Cmd {
     pub(crate) fn label(&self) -> String {
         match self {
             Cmd::BasicDpi { dpi, .. } => format!("DPI {dpi}"),
+            Cmd::BasicDpiStage { stage, .. } => crate::trf!("DPI 档 {stage} → {dpi}",
+                stage = usize::from(stage.index) + 1, dpi = stage.value),
             Cmd::Poll(hz) => crate::trf!("回报率 {hz} Hz", hz = hz),
             Cmd::Dpi { stage, dpi, .. } => {
                 crate::trf!("DPI 档 {stage} → {dpi}", dpi = dpi, stage = stage)
@@ -543,7 +546,7 @@ fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, sn
             } else if !snapshot.target.verified_identity {
                 // 身份查询暂时失败仍沿用原卡片，但不能沿用之前的写入授权。
                 snapshot.target.key = previous.key;
-                if had_identity { snapshot.dpi.writable = false; }
+                if had_identity { snapshot.dpi.writable = false; snapshot.dpi.stage_writable = false; }
                 if snapshot.target.family == crate::device::DeviceFamily::Unknown { snapshot.target.family = previous.family; }
                 if snapshot.target.name == snapshot.target.interface.product { snapshot.target.name = previous.name; }
             }
@@ -805,20 +808,30 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
         .iter()
         .filter_map(|(key, device)| {
             if let Some(basic) = &device.basic {
-                let choices = basic.dpi.quick_values();
-                if choices.is_empty() || !basic.dpi.writable { return None; }
-                let mut stages = [0; 4];
-                for (stage, value) in stages.iter_mut().zip(&choices) { *stage = i32::from(*value); }
-                let active = choices.iter().position(|value| Some(*value) == basic.dpi.current)
-                    .map(|index| index as u8 + 1).unwrap_or(0);
-                return Some((key.clone(), crate::ui::tray_popup::DpiState { stages, active, value_control: true }));
+                let configured = !basic.dpi.stages.is_empty();
+                let stages = if configured { basic.dpi.stages.clone() } else {
+                    basic.dpi.quick_values().into_iter().enumerate().map(|(index, value)|
+                        crate::device::DpiStage { index: index as u8, value }).collect()
+                };
+                if stages.is_empty() && basic.dpi.current.is_none() { return None; }
+                let active = if configured { basic.dpi.active_stage } else {
+                    stages.iter().find(|stage| Some(stage.value) == basic.dpi.current).map(|stage| stage.index)
+                };
+                return Some((key.clone(), crate::ui::tray_popup::DpiState { stages, active,
+                    current: basic.dpi.current, profile: basic.dpi.profile,
+                    value_control: !configured, writable: basic.connected &&
+                        if configured { basic.dpi.stage_writable } else { basic.dpi.writable } }));
             }
             let state = device.state.as_ref()?;
             Some((
                 key.clone(),
                 crate::ui::tray_popup::DpiState {
-                    stages: [state.dpi(0), state.dpi(1), state.dpi(2), state.dpi(3)],
-                    active: state.active_stage.clamp(1, 4),
+                    stages: (0..4).map(|index| crate::device::DpiStage {
+                        index: index as u8 + 1, value: state.dpi(index) as u16 }).collect(),
+                    current: Some(state.dpi(usize::from(state.active_stage.clamp(1, 4) - 1)) as u16),
+                    active: Some(state.active_stage.clamp(1, 4)),
+                    profile: None,
+                    writable: true,
                     value_control: false,
                 },
             ))
@@ -1477,6 +1490,20 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
 
         Act::ApplyEdit(e) => apply_edit(env, e),
+        Act::BasicDpi(value) => {
+            let basic = env.basic();
+            if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.writable && basic.dpi.values.contains(&value)) {
+                drop_draft(env, Edit::Dpi(0));
+                env.submit(Cmd::BasicDpi { target: basic.target, dpi: value });
+            }
+        }
+        Act::BasicDpiStage(stage, profile) => {
+            let basic = env.basic();
+            if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.stage_writable
+                && basic.dpi.profile == Some(profile) && basic.dpi.stages.contains(&stage)) {
+                env.submit(Cmd::BasicDpiStage { target: basic.target, stage, profile });
+            }
+        }
 
         Act::SetSlide(s, frac) => {
             // 拖拽中只改「这一帧显示什么」，**不写设备**。
@@ -2369,7 +2396,7 @@ const MAX_PENDING: usize = 4;
 /// `Status::Busy` 只表示「后台正在写设备」。读快照期间**不再拒绝新命令**：
 /// 那时设备是空闲的，命令完全可以排队等这一轮读完。
 fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
-    if let Cmd::BasicDpi { target, .. } = &cmd {
+    if let Cmd::BasicDpi { target, .. } | Cmd::BasicDpiStage { target, .. } = &cmd {
         let backend = target.backend;
         if backend != crate::backends::BackendId::Rog {
             let mut state = lock_shared(shared);
@@ -2389,12 +2416,12 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
         if s.pending.len() >= MAX_PENDING {
             return false;
         }
-        if !matches!(cmd, Cmd::AutoStart(_) | Cmd::BasicDpi { .. })
+        if !matches!(cmd, Cmd::AutoStart(_) | Cmd::BasicDpi { .. } | Cmd::BasicDpiStage { .. })
             && s.active_key.as_ref().and_then(|key| s.devices.get(key)).is_some_and(|record| record.basic.is_some()) {
             return false;
         }
         let target = match &cmd {
-            Cmd::BasicDpi { target, .. } => s.devices.values().find_map(|device|
+            Cmd::BasicDpi { target, .. } | Cmd::BasicDpiStage { target, .. } => s.devices.values().find_map(|device|
                 device.link.as_ref().filter(|link| link.iface.path == target.interface.path
                     && link.report_id == target.address).cloned()),
             _ => s.active_key.as_ref().and_then(|k| s.devices.get(k)).and_then(|d| d.link.clone()),
@@ -3195,6 +3222,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                                 submit(&shared_e, &signal_e, Cmd::BasicDpi { target: basic.target, dpi });
                             }
                         }
+                        Action::SetOnboardDpiStage(key, stage, profile) => {
+                            let basic = lock_shared(&shared_e).devices.get(&key).and_then(|record| record.basic.clone());
+                            if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.stage_writable
+                                && basic.dpi.profile == Some(profile) && basic.dpi.stages.contains(&stage)) {
+                                submit(&shared_e, &signal_e, Cmd::BasicDpiStage { target: basic.target, stage, profile });
+                            }
+                        }
                         Action::ReorderDevices(order) => {
                             persist_device_order(&shared_e, order);
                         }
@@ -3645,6 +3679,28 @@ mod backend_tests {
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.write_gen, 1);
         assert!(state.source_pending.is_empty());
+    }
+
+    #[test]
+    fn onboard_dpi_preserves_fifth_slot_and_uses_its_backend_queue() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let mut reading = snapshot(BackendId::Logitech, "logitech", 75);
+        let stage = crate::device::DpiStage { index: 4, value: 3200 };
+        reading.dpi = Dpi { current: Some(3200),
+            stages: vec![crate::device::DpiStage { index: 0, value: 800 }, stage],
+            active_stage: Some(4), profile: Some(1), stage_writable: true, ..Default::default() };
+        let target = reading.target.clone();
+        lock_shared(&shared).publish_additional(BackendId::Logitech, vec![reading], 0, 1);
+        let popup = popup_dpi_states(&lock_shared(&shared));
+        assert_eq!(popup["logitech"].stages[1], stage);
+        assert_eq!(popup["logitech"].active, Some(4));
+        assert!(!popup["logitech"].value_control);
+        assert!(submit(&shared, &signal, Cmd::BasicDpiStage { target, stage, profile: 1 }));
+        let state = lock_shared(&shared);
+        assert!(state.pending.is_empty());
+        assert_eq!(state.source_pending[&BackendId::Logitech].len(), 1);
+        assert_eq!(state.source_write_gen[&BackendId::Logitech], 1);
     }
 
     #[test]

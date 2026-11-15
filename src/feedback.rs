@@ -109,6 +109,13 @@ fn append_probe_result(output: &mut String, target: &super::backends::Target,
         let dpi = reading.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "unknown".into());
         let _ = writeln!(output, "Battery: {percent}; charging: {charging}; current DPI: {dpi}; DPI writable: {}",
             reading.dpi.writable);
+        if !reading.dpi.stages.is_empty() {
+            let stages = reading.dpi.stages.iter().map(|stage| format!("{}:{}", stage.index + 1, stage.value))
+                .collect::<Vec<_>>().join(", ");
+            let active = reading.dpi.active_stage.map(|index| (index + 1).to_string()).unwrap_or_else(|| "unknown".into());
+            let _ = writeln!(output, "Onboard DPI stages: {stages}; active stage: {active}; stage switching: {}",
+                reading.dpi.stage_writable);
+        }
     }
 }
 
@@ -152,10 +159,15 @@ mod tests {
         let snapshot = super::super::backends::Snapshot { target: target.clone(),
             battery: Some(crate::device::Battery { percent: Some(75), charging: None,
                 voltage_mv: None, approximate: false, level: None }),
-            dpi: crate::device::Dpi::default(), connected: true };
+            dpi: crate::device::Dpi { current: Some(800),
+                stages: vec![crate::device::DpiStage { index: 1, value: 800 },
+                    crate::device::DpiStage { index: 4, value: 3200 }],
+                active_stage: Some(1), profile: Some(1), stage_writable: true,
+                ..Default::default() }, connected: true };
         let mut output = String::new();
         append_probe_result(&mut output, &target, Some(&snapshot));
         assert!(output.contains("Battery: 75%; charging: unknown"));
+        assert!(output.contains("2:800, 5:3200"));
         for private in ["private-path", "private-serial", "private-custom-name", &target.key] {
             assert!(!output.contains(private));
         }

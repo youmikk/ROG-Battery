@@ -132,6 +132,17 @@ pub struct Dpi {
     pub current: Option<u16>,
     pub values: Vec<u16>,
     pub writable: bool,
+    pub stages: Vec<DpiStage>,
+    pub active_stage: Option<u8>,
+    pub profile: Option<u16>,
+    pub stage_writable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DpiStage {
+    /// 协议中的原始档位编号；禁用档位不会导致后续编号重排。
+    pub index: u8,
+    pub value: u16,
 }
 
 impl Dpi {

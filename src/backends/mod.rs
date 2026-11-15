@@ -92,6 +92,10 @@ pub trait DeviceBackend {
     fn set_dpi(&self, _api: &HidApi, _target: &Target, _dpi: u16) -> Result<(), String> {
         Err("设备不支持 DPI 写入".into())
     }
+    fn set_dpi_stage(&self, _api: &HidApi, _target: &Target,
+        _stage: crate::device::DpiStage, _profile: u16) -> Result<(), String> {
+        Err("设备不支持 DPI 档位切换".into())
+    }
 }
 
 /// 枚举/读取失败仅影响当前适配器，不能阻断其他品牌。
@@ -166,6 +170,14 @@ pub fn set_dpi(target: &Target, dpi: u16) -> Result<(), String> {
         BackendId::Rog => rog::Rog.set_dpi(&api, target, dpi),
         BackendId::Logitech => logitech::Logitech.set_dpi(&api, target, dpi),
         _ => Err("此协议不提供通用 DPI 写入".into()),
+    }
+}
+
+pub fn set_dpi_stage(target: &Target, stage: crate::device::DpiStage, profile: u16) -> Result<(), String> {
+    let api = HidApi::load()?;
+    match target.backend {
+        BackendId::Logitech => logitech::Logitech.set_dpi_stage(&api, target, stage, profile),
+        _ => Err("设备不支持 DPI 档位切换".into()),
     }
 }
 
