@@ -140,6 +140,7 @@ impl DeviceBackend for Vgn {
             battery: Some(battery),
             dpi: Dpi::default(),
             connected: true,
+            battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
         })
     }
 }

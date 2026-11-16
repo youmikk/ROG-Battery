@@ -1,18 +1,18 @@
 New
-- Added Logitech HID++ 1.0 / 2.0 and standard HID battery queries, pending per-model hardware validation.
-- Supported Logitech mice expose their actual onboard DPI stages, including the fifth stage, for switching from the main window or tray.
-- Added read-only Rapoo nRF54L battery and current DPI queries, with 77 official driver model entries pending hardware validation.
-- Added VGN V98 Pro V3 battery queries; wired readings have been verified on hardware.
-- Added a device compatibility feedback entry and sanitized reports for user-assisted testing.
+- Added battery, actual DPI stages and polling-rate capabilities for selected VGN, VXE and ATK mice.
+- Added Razer battery and settings support, with DPI stage editing, switching and rate controls on reviewed connections.
+- Added read-only battery, stage and rate queries for selected Lamzu and WLMouse devices.
+- Added ATK N9 V2 Ultimate and MCHOSE V9 Turbo+ headset battery queries.
+- Added extended Logitech DPI and polling-rate controls.
 
 Improvements
-- Each backend polls and processes commands independently, retaining existing detailed ROG controls.
-- Logitech receiver device names and types are queried; device preferences and order are preserved after identity is confirmed.
-- Coarse battery readings can fall back to an available feature that reports an exact percentage.
+- X/Y stage editing and rate options follow device capabilities; changes are verified by readback.
+- Improved battery caching, expiry and low-battery notification handling.
+- Backends poll independently and existing ROG controls are retained.
 
 Fixes
-- Fixed invalid battery replies being shown as 0%.
-- Fixed duplicate device cards after temporary identity query failures.
-- Fixed one backend's failure affecting other backends' readings.
-- Fixed missing values in paginated Logitech DPI lists.
-- Completed English translations for multi-brand device errors.
+- Fixed intermittently unknown Rapoo battery readings during continuous reports.
+- Fixed temporary query failures causing disconnected status or lost readings.
+- Fixed duplicate cards on devices with multiple interfaces and stale identity after replacement.
+
+New adapters require per-model hardware validation. Support depends on model, firmware and connection. Rapoo current DPI remains read-only; stage switching is not available yet.

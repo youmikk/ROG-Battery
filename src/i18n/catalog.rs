@@ -2,6 +2,11 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("当前") => { $crate::i18n::translate("当前") };
+    ("上次电量") => { $crate::i18n::translate("上次电量") };
+    ("等待状态回报") => { $crate::i18n::translate("等待状态回报") };
+    ("（上次电量，等待回报）") => { $crate::i18n::translate("（上次电量，等待回报）") };
+    ("（上次电量已过期）") => { $crate::i18n::translate("（上次电量已过期）") };
     ("暂未读取到 DPI 信息") => { $crate::i18n::translate("暂未读取到 DPI 信息") };
     ("设备功能报告长度无效") => { $crate::i18n::translate("设备功能报告长度无效") };
     ("无法打开设备功能接口") => { $crate::i18n::translate("无法打开设备功能接口") };
@@ -72,7 +77,6 @@ macro_rules! tr {
     ("设备") => { if $crate::i18n::english() { "Devices" } else { "设备" } };
     ("所有设备的电量，一眼就好。") => { if $crate::i18n::english() { "Battery levels at a glance." } else { "所有设备的电量，一眼就好。" } };
     ("连接设备后会自动显示。") => { if $crate::i18n::english() { "Devices appear here when connected." } else { "连接设备后会自动显示。" } };
-    ("上次电量") => { if $crate::i18n::english() { "Last reading" } else { "上次电量" } };
     ("正在充电") => { if $crate::i18n::english() { "Charging" } else { "正在充电" } };
     ("电量偏低") => { if $crate::i18n::english() { "Low battery" } else { "电量偏低" } };
     ("使用中") => { if $crate::i18n::english() { "In use" } else { "使用中" } };
@@ -456,6 +460,10 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "DPI 范围无效" => "The DPI range is invalid",
         "DPI 范围过长" => "The DPI range is too long",
         "DPI 不在设备报告的可用范围内" => "DPI is outside the range reported by this device",
+        "上次电量" => "Last battery reading",
+        "等待状态回报" => "Waiting for device status",
+        "（上次电量，等待回报）" => " (last reading, awaiting status)",
+        "（上次电量已过期）" => " (last reading expired)",
         "设备标识已变化，请刷新后再试" => "The device identity has changed. Refresh and try again",
         "未确认接收器中设备的唯一标识，不能写入 DPI" => "The receiver device identity could not be confirmed. DPI cannot be changed",
         "设备不支持 DPI 设置" => "This device does not support DPI settings",
@@ -496,7 +504,6 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "设备" => "Devices",
         "所有设备的电量，一眼就好。" => "Battery levels at a glance.",
         "连接设备后会自动显示。" => "Devices appear here when connected.",
-        "上次电量" => "Last reading",
         "正在充电" => "Charging",
         "电量偏低" => "Low battery",
         "使用中" => "In use",
@@ -517,6 +524,36 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "电量历史" => "Battery history",
         "近 48 小时" => "Last 48 hours",
         "充电" => "Charging",
+        "当前" => "Active",
+        "设备返回的回报率列表无效" => "Invalid polling rate list returned by the device",
+        "无法读取当前回报率" => "Could not read the current polling rate",
+        "当前模式不允许回报率写入" => "Polling rate writes are not available in the current mode",
+        "设备连接已变化，请刷新后重试" => "Device connection changed; refresh and try again",
+        "CompX 请求长度无效" => "Invalid CompX request length",
+        "CompX 设备无有效应答" => "No valid response from the CompX device",
+        "Razer 设备无有效应答" => "No valid response from the Razer device",
+        "设备无有效状态回报" => "No valid status report from the device",
+        "设备模式不允许设置，请刷新后重试" => "The current device mode does not allow changes. Refresh and try again.",
+        "设备拒绝设置，请刷新后检查" => "The device rejected the setting. Refresh to check its state.",
+        "CompX 传感器布局尚未确认" => "The CompX sensor layout has not been confirmed",
+        "CompX DPI 档位数无效" => "Invalid CompX DPI stage count",
+        "CompX 当前档位无效" => "Invalid active CompX DPI stage",
+        "CompX DPI 档位响应无效" => "Invalid CompX DPI stage response",
+        "CompX 控制接口无效" => "Invalid CompX control interface",
+        "设备身份已变化，请刷新后重试" => "Device identity changed; refresh and try again",
+        "此连接尚未确认设置写入协议" => "Settings writes have not been confirmed for this connection",
+        "设备档位或配置已变化，请刷新后重试" => "The device stage or profile changed; refresh and try again",
+        "设备档位已变化，请刷新后重试" => "The device stage changed; refresh and try again",
+        "设备配置已变化，请刷新后重试" => "The device profile changed; refresh and try again",
+        "设备配置已变化，请刷新后检查" => "The device profile changed; refresh and check the result",
+        "无法确认设备已保存设置，请刷新后检查" => "Could not confirm the saved setting; refresh and check the device",
+        "无法确认 DPI 档位切换" => "Could not confirm the DPI stage switch",
+        "回报率不在此连接的可用范围内" => "This polling rate is not supported by the current connection",
+        "回报率无效" => "Invalid polling rate",
+        "请分别设置 X/Y DPI" => "Set X and Y DPI separately",
+        "设备配置未知" => "Device profile unknown",
+        "设备不支持 DPI 档位编辑" => "This device does not support DPI stage editing",
+        "设备不支持回报率设置" => "This device does not support polling rate settings",
         "DPI 档位" => "DPI stages",
         "● 当前使用" => "● Active",
         "切换" => "Use",

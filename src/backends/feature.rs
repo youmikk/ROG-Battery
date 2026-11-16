@@ -13,7 +13,12 @@ pub(super) struct FeatureChannel {
 
 impl FeatureChannel {
     pub fn open(interface: &HidInterface) -> Result<Self, String> {
-        let length = usize::from(interface.feature_len);
+        Self::open_with_length(interface, usize::from(interface.feature_len))
+    }
+
+    /// Only a protocol with independently confirmed report size may use this for
+    /// an unadvertised control report (some Razer mouse collections).
+    pub(super) fn open_with_length(interface: &HidInterface, length: usize) -> Result<Self, String> {
         if !(2..=4096).contains(&length) {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
@@ -83,30 +88,35 @@ impl FeatureChannel {
         Ok(returned as usize)
     }
 
-    pub fn query(&mut self, packet: &[u8], timeout: u32) -> Result<Vec<u8>, String> {
+    pub fn send(&mut self, packet: &[u8], timeout: u32) -> Result<(), String> {
         if packet.len() > self.length || packet.is_empty() {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
-        let deadline = Instant::now() + Duration::from_millis(u64::from(timeout));
         let mut request = vec![0; self.length];
         request[..packet.len()].copy_from_slice(packet);
         self.transfer(SET_FEATURE, &mut request, timeout)?;
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| crate::tr!("设备功能报告传输超时"))?;
+        Ok(())
+    }
+
+    pub fn receive(&mut self, report_id: u8, timeout: u32) -> Result<Vec<u8>, String> {
         let mut response = vec![0; self.length];
-        response[0] = packet[0];
-        let length = self.transfer(
-            GET_FEATURE,
-            &mut response,
-            remaining.as_millis().max(1) as u32,
-        )?;
-        let length = length + usize::from(packet[0] == 0);
-        if length == 0 || length > self.length || response[0] != packet[0] {
+        response[0] = report_id;
+        let length = self.transfer(GET_FEATURE, &mut response, timeout)?;
+        let length = length + usize::from(report_id == 0);
+        if length == 0 || length > self.length || response[0] != report_id {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
         response.truncate(length);
         Ok(response)
+    }
+
+    pub fn query(&mut self, packet: &[u8], timeout: u32) -> Result<Vec<u8>, String> {
+        let deadline = Instant::now() + Duration::from_millis(u64::from(timeout));
+        self.send(packet, timeout)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| crate::tr!("设备功能报告传输超时"))?;
+        self.receive(packet[0], remaining.as_millis().max(1) as u32)
     }
 }
 

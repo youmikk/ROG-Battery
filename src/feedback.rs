@@ -71,6 +71,10 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Logitech => &super::backends::logitech::Logitech,
             super::backends::BackendId::Rapoo => &super::backends::rapoo::Rapoo,
             super::backends::BackendId::Vgn => &super::backends::vgn::Vgn,
+            super::backends::BackendId::CompX => &super::backends::compx::CompX,
+            super::backends::BackendId::Razer => &super::backends::razer::Razer,
+            super::backends::BackendId::PageCommand => &super::backends::page_command::PageCommand,
+            super::backends::BackendId::Headset => &super::backends::headset::Headset,
             super::backends::BackendId::StandardHid => &super::backends::standard::StandardHid,
             super::backends::BackendId::Rog => &super::backends::rog::Rog,
         };
@@ -96,7 +100,8 @@ fn append_probe_result(output: &mut String, target: &super::backends::Target,
     let _ = writeln!(output, "{} {:04X}:{:04X} result={}", target.backend.name(),
         target.interface.vendor_id, target.interface.product_id,
         match reading {
-            Some(reading) if reading.connected && (reading.battery.is_some() || reading.dpi.current.is_some()) => "ok",
+            Some(reading) if reading.connected && (reading.battery.is_some() || reading.dpi.current.is_some()
+                || reading.polling_rate.current.is_some()) => "ok",
             Some(_) => "no-valid-reading",
             None => "read-failed",
         });
@@ -109,8 +114,15 @@ fn append_probe_result(output: &mut String, target: &super::backends::Target,
         let dpi = reading.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "unknown".into());
         let _ = writeln!(output, "Battery: {percent}; charging: {charging}; current DPI: {dpi}; DPI writable: {}",
             reading.dpi.writable);
+        if let Some(y) = reading.dpi.current_y { let _ = writeln!(output, "Current DPI Y: {y}"); }
+        let rate = reading.polling_rate.current.map(|hz| hz.to_string()).unwrap_or_else(|| "unknown".into());
+        let _ = writeln!(output, "Polling rate: {rate} Hz; choices: {:?}; writable: {}",
+            reading.polling_rate.values, reading.polling_rate.writable);
         if !reading.dpi.stages.is_empty() {
-            let stages = reading.dpi.stages.iter().map(|stage| format!("{}:{}", stage.index + 1, stage.value))
+            let stages = reading.dpi.stages.iter().map(|stage| match reading.dpi.stage_y.get(&stage.index) {
+                Some(y) => format!("{}:X{}/Y{y}",stage.index + 1,stage.value),
+                None => format!("{}:{}",stage.index + 1,stage.value),
+            })
                 .collect::<Vec<_>>().join(", ");
             let active = reading.dpi.active_stage.map(|index| (index + 1).to_string()).unwrap_or_else(|| "unknown".into());
             let _ = writeln!(output, "Onboard DPI stages: {stages}; active stage: {active}; stage switching: {}",
@@ -163,7 +175,7 @@ mod tests {
                 stages: vec![crate::device::DpiStage { index: 1, value: 800 },
                     crate::device::DpiStage { index: 4, value: 3200 }],
                 active_stage: Some(1), profile: Some(1), stage_writable: true,
-                ..Default::default() }, connected: true };
+                ..Default::default() }, polling_rate: Default::default(), connected: true, battery_at: Some(std::time::Instant::now()) };
         let mut output = String::new();
         append_probe_result(&mut output, &target, Some(&snapshot));
         assert!(output.contains("Battery: 75%; charging: unknown"));

@@ -43,7 +43,7 @@ pub enum Action {
     TogglePanel(String),
     SetDpiStage(String, u8),
     SetDpiValue(String, u16),
-    SetOnboardDpiStage(String, crate::device::DpiStage, u16),
+    SetOnboardDpiStage(String, crate::device::DpiStage, crate::device::StageContext),
     AudioSlot(AudioSlot),
     AudioSlider(AudioSlot),
     ToggleMicrophone,
@@ -57,7 +57,7 @@ pub struct DpiState {
     pub stages: Vec<crate::device::DpiStage>,
     pub active: Option<u8>,
     pub current: Option<u16>,
-    pub profile: Option<u16>,
+    pub context: Option<crate::device::StageContext>,
     pub writable: bool,
     pub value_control: bool,
 }
@@ -1383,7 +1383,7 @@ fn draw_dpi(
             );
             if dpi.writable {
                 let action = if dpi.value_control { Action::SetDpiValue(key.to_string(), stage.value) }
-                else if let Some(profile) = dpi.profile { Action::SetOnboardDpiStage(key.to_string(), *stage, profile) }
+                else if let Some(context) = dpi.context { Action::SetOnboardDpiStage(key.to_string(), *stage, context) }
                 else { Action::SetDpiStage(key.to_string(), stage.index) };
                 push_visible_hit(hits, visible, r, action);
             }
@@ -1707,6 +1707,10 @@ fn draw_device_row(
     );
     let status = if !d.connected {
         crate::tr!("未连接")
+    } else if d.quality == crate::device::ReadingQuality::Cached {
+        crate::tr!("上次电量")
+    } else if d.quality == crate::device::ReadingQuality::Stale {
+        crate::tr!("等待状态回报")
     } else if d.is_charging() {
         crate::tr!("正在充电")
     } else if let Some(level) = d.coarse_level() {

@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md)
 
-轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并提供 Logitech、雷柏、VGN 和标准 HID 电量查询。通过 Windows HID 接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
+轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并逐步支持 Logitech、雷柏、VGN、VXE、ATK、Razer、Lamzu、WLMouse 和 MCHOSE 的部分设备及标准 HID 电量查询。通过 Windows HID 接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
 
 [![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#系统要求)
@@ -10,15 +10,17 @@
 
 [下载绿色版](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [更新日志](CHANGELOG.md)
 
-## 1.4.4
+各品牌只支持已接入协议的部分设备，并非全系兼容。新增鼠标及耳机适配已通过协议模拟测试，仍待逐型号实机验证；具体实现范围见[兼容性说明](COMPATIBILITY.md)。
 
-- 新增 Logitech HID++ 1.0 / 2.0 和标准 HID 电量查询，具体兼容性待逐型号实机验证。
-- 支持的罗技鼠标可读取实际板载 DPI 档位，并在主窗口或托盘点击切换，包括第五档。
-- 新增雷柏 nRF54L 电量与当前 DPI 只读查询，收录官方驱动中的 77 个型号项，待逐型号验证。
-- 新增 VGN V98 Pro V3 电量查询，有线读数已通过实机验证。
-- 新增设备适配反馈入口和脱敏报告，便于用户协助适配。
-- 各品牌独立刷新和处理命令，保留 ROG 现有深度设置。
-- 修复无效电量、临时身份查询失败及罗技 DPI 列表分段读取的问题。
+## 1.4.5
+
+- 新增部分 VGN / VXE / ATK 鼠标的电量、实际 X/Y DPI 档位和回报率功能。
+- 新增 Razer 电量与设置适配；已确认连接能力的型号可切换、编辑 DPI 档位和设置回报率。
+- 新增部分 Lamzu / WLMouse 设备的电量、档位和回报率只读查询。
+- 新增 ATK N9 V2 Ultimate、MCHOSE V9 Turbo+ 耳机电量查询。
+- 完善 Logitech 扩展 DPI 和回报率功能，写入后读取确认。
+- 修复雷柏持续回报时电量间歇显示未知的问题；雷柏 DPI 仍为只读。
+- 改善短暂读取失败、缓存过期和设备身份变化的处理，保留 ROG 现有深度设置。
 
 ## 使用
 
@@ -45,7 +47,7 @@
 | 功能 | 说明 |
 | --- | --- |
 | 电量 | 电量、充电状态、设备信息、最近 48 小时历史和续航估算。 |
-| 鼠标性能 | ROG 支持的型号可调整四档 DPI、回报率、去抖、角度吸附、角度微调和抬起距离；罗技支持的型号可调节 DPI 或切换实际板载档位。 |
+| 鼠标性能 | ROG 支持的型号保留 DPI、回报率、去抖等深度设置；其他鼠标按协议能力提供 DPI 数值调节、实际档位切换、X/Y 档位编辑和回报率。雷柏目前仅读取当前 DPI。 |
 | 按键 | 支持的型号可重映射按键、导出配置和恢复备份。 |
 | 灯光 | 提供 Windows 动态光效入口，灯效由系统管理。 |
 | 设置 | 明暗主题、开机自启、关闭行为、刷新间隔、存储位置及诊断日志。 |
@@ -179,7 +181,7 @@ powershell -File msix/make-upload.ps1
 
 ## 反馈与许可
 
-1.4.4 提供 Logitech HID++ 1.0 / 2.0、标准 HID、雷柏 nRF54L 和 VGN V98 Pro V3 电量适配器，各品牌独立读取，保留 ROG 深度设置。雷柏型号表收录官方驱动列出的 77 个型号项。罗技鼠标在支持的板载模式下可读取真实 DPI 档位，包括第五档，并从主窗口或托盘点击切换；软件模式仍可使用设备允许的数值调节，常用数值按钮不代表 G HUB 配置的档位。具体能力与实机验证状态见[设备兼容性](COMPATIBILITY.md)。
+各品牌独立读取，保留 ROG 深度设置。鼠标、键盘和耳机的支持范围分别核对，不能由品牌名称推断兼容性。罗技支持的板载模式保留实际档位，包括第五档；常用数值按钮不代表 G HUB 配置的档位。雷柏当前支持部分 nRF54L 鼠标的电量与当前 DPI 读取，尚不提供档位切换。具体能力与实机验证状态见[设备兼容性](COMPATIBILITY.md)。
 
 命令行 `devices` 可只读查看当前设备，`device-report` 输出设备描述符和当前运行的查询摘要。`device-report --probe` 先进行只读查询，再导出同次运行的电量、充电状态、当前 DPI、已读取的板载档位及通信结果，方便用户远程协助适配。报告不导出报文内容或设备唯一标识，也不自动上传。
 

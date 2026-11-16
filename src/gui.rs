@@ -79,7 +79,9 @@ enum Status {
 #[derive(Clone)]
 pub(crate) enum Cmd {
     BasicDpi { target: crate::backends::Target, dpi: u16 },
-    BasicDpiStage { target: crate::backends::Target, stage: crate::device::DpiStage, profile: u16 },
+    BasicDpiStage { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext },
+    BasicDpiEdit { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext, expected_y: u16, x: u16, y: u16 },
+    BasicPollingRate { target: crate::backends::Target, hz: u16 },
     Poll(i32),
     Dpi {
         stage: usize,
@@ -122,10 +124,19 @@ pub(crate) enum Cmd {
 }
 
 impl Cmd {
+    fn basic_target(&self) -> Option<&crate::backends::Target> {
+        match self {
+            Self::BasicDpi { target, .. } | Self::BasicDpiStage { target, .. }
+                | Self::BasicDpiEdit { target, .. } | Self::BasicPollingRate { target, .. } => Some(target),
+            _ => None,
+        }
+    }
     /// 结果行 / 提示里用的中文短名。
     pub(crate) fn label(&self) -> String {
         match self {
             Cmd::BasicDpi { dpi, .. } => format!("DPI {dpi}"),
+            Cmd::BasicPollingRate { hz, .. } => crate::trf!("回报率 {hz} Hz", hz = hz),
+            Cmd::BasicDpiEdit { stage, x, y, .. } => format!("DPI {} · X {x} / Y {y}", stage.index + 1),
             Cmd::BasicDpiStage { stage, .. } => crate::trf!("DPI 档 {stage} → {dpi}",
                 stage = usize::from(stage.index) + 1, dpi = stage.value),
             Cmd::Poll(hz) => crate::trf!("回报率 {hz} Hz", hz = hz),
@@ -248,6 +259,7 @@ fn persist_device_order(shared: &Arc<Mutex<Shared>>, order: Vec<String>) {
 }
 
 fn low_battery_reading(reading: &crate::device::DeviceReading, armed: &mut bool) -> Option<u8> {
+    if reading.quality != crate::device::ReadingQuality::Live { return None; }
     let percent = reading.percent()?;
     low_battery_alert(percent, reading.is_charging(), armed).then_some(percent)
 }
@@ -260,6 +272,7 @@ struct DeviceSnapshot {
     link: Option<hid::Link>,
     full_at: std::time::Instant,
     basic: Option<crate::backends::Snapshot>,
+    basic_status: Option<crate::backends::status::Status>,
 }
 
 fn diagnostic_link(link: &hid::Link) -> crate::diagnostics::DeviceInfo {
@@ -455,6 +468,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         let battery = battery.or_else(|| previous.as_ref().and_then(|d| d.reading.battery.clone()));
         let record = DeviceSnapshot {
             basic: None,
+            basic_status: None,
             reading: crate::device::DeviceReading {
                 key: key.clone(),
                 name: if name.is_empty() {
@@ -465,6 +479,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                 family,
                 battery,
                 connected: is_connected,
+                quality: crate::device::ReadingQuality::Live,
             },
             state: if is_connected { state } else { None },
             ident,
@@ -519,13 +534,26 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
     sample
 }
 
-fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, snapshots: Vec<crate::backends::Snapshot>) {
+fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll) {
+    merge_additional_at(shared, backend, poll, std::time::Instant::now());
+}
+
+fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll,
+    now: std::time::Instant) {
     for device in shared.devices.values_mut() {
         if let Some(basic) = &mut device.basic {
-            if basic.target.backend == backend { basic.connected = false; device.reading.connected = false; }
+            if basic.target.backend != backend { continue; }
+            let connection = poll.present_paths.as_ref().and_then(|paths|
+                (!paths.contains(&basic.target.interface.path)).then_some(false));
+            let status = device.basic_status.get_or_insert_with(Default::default);
+            status.observe(connection, None, now, backend.sample_lifetime());
+            basic.connected = status.connected;
+            basic.disable_writes();
+            device.reading.connected = status.connected;
+            device.reading.quality = status.quality;
         }
     }
-    for mut snapshot in snapshots {
+    for mut snapshot in poll.snapshots {
         if backend == crate::backends::BackendId::StandardHid && shared.devices.values().any(|device|
             device.basic.as_ref().is_some_and(|other| other.target.backend.precedes_standard()
                 && other.connected && other.target.interface.path == snapshot.target.interface.path)) { continue; }
@@ -533,10 +561,10 @@ fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, sn
             shared.devices.retain(|_, device| !device.basic.as_ref().is_some_and(|other|
                 other.target.backend == crate::backends::BackendId::StandardHid && other.target.interface.path == snapshot.target.interface.path));
         }
-        let previous = shared.devices.values().filter_map(|device| device.basic.as_ref()).find(|other|
-            other.target.backend == backend && other.target.interface.path == snapshot.target.interface.path
-                && other.target.address == snapshot.target.address && other.target.key != snapshot.target.key)
-            .map(|other| other.target.clone());
+        let previous = shared.devices.values().filter(|device| device.basic.as_ref().is_some_and(|other|
+            other.target.same_channel(&snapshot.target) && other.target.key != snapshot.target.key))
+            .max_by_key(|device| device.full_at)
+            .and_then(|device| device.basic.as_ref()).map(|other| other.target.clone());
         if let Some(previous) = previous {
             let link_key = crate::backends::Target::new(backend, &previous.interface, previous.address).key;
             let had_identity = previous.verified_identity || previous.key != link_key;
@@ -546,20 +574,39 @@ fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, sn
             } else if !snapshot.target.verified_identity {
                 // 身份查询暂时失败仍沿用原卡片，但不能沿用之前的写入授权。
                 snapshot.target.key = previous.key;
-                if had_identity { snapshot.dpi.writable = false; snapshot.dpi.stage_writable = false; }
+                if had_identity { snapshot.disable_writes(); }
                 if snapshot.target.family == crate::device::DeviceFamily::Unknown { snapshot.target.family = previous.family; }
                 if snapshot.target.name == snapshot.target.interface.product { snapshot.target.name = previous.name; }
+            } else if let Some(device) = shared.devices.get_mut(&previous.key) {
+                // 同一接收器槽位出现另一个已确认身份，旧设备不能继续显示在线。
+                if let Some(status) = &mut device.basic_status {
+                    status.observe(Some(false), None, now, backend.sample_lifetime());
+                }
+                device.reading.connected = false;
+                device.reading.quality = crate::device::ReadingQuality::Stale;
+                if let Some(basic) = &mut device.basic { basic.connected = false; }
             }
         }
         let key = snapshot.target.key.clone();
+        let previous = shared.devices.get(&key);
+        let mut status = previous.and_then(|device| device.basic_status.clone()).unwrap_or_default();
+        status.observe_sample(Some(snapshot.connected), snapshot.battery.as_ref(), snapshot.battery_at,
+            now, backend.sample_lifetime());
+        if snapshot.dpi.current.is_none() {
+            if let Some(previous) = previous.and_then(|device| device.basic.as_ref()) {
+                snapshot.dpi = previous.dpi.clone();
+                snapshot.dpi.disable_writes();
+            }
+        }
         let reading = crate::device::DeviceReading {
             key: key.clone(), name: snapshot.target.name.clone(), family: snapshot.target.family,
-            battery: snapshot.battery.clone(),
-            connected: snapshot.connected,
+            battery: status.battery.clone(),
+            connected: status.connected,
+            quality: status.quality,
         };
         let ident = proto::Identity { model_name: snapshot.target.name.clone(), ..Default::default() };
         shared.devices.insert(key, DeviceSnapshot { reading, ident, state: None, link: None,
-            full_at: std::time::Instant::now(), basic: Some(snapshot) });
+            full_at: now, basic: Some(snapshot), basic_status: Some(status) });
     }
     shared.rebuild_readings();
 }
@@ -634,16 +681,34 @@ struct Shared {
 }
 
 impl Shared {
+    fn expire_additional(&mut self) {
+        self.expire_additional_at(std::time::Instant::now());
+    }
+
+    fn expire_additional_at(&mut self, now: std::time::Instant) {
+        let mut changed = false;
+        for device in self.devices.values_mut() {
+            if let (Some(basic), Some(status)) = (&mut device.basic, &mut device.basic_status) {
+                if status.expire(now, basic.target.backend.sample_lifetime()) {
+                    device.reading.quality = status.quality;
+                    basic.disable_writes();
+                    changed = true;
+                }
+            }
+        }
+        if changed { self.rebuild_readings(); }
+    }
+
     fn replace_rog_records(&mut self, records: BTreeMap<String, DeviceSnapshot>) {
         self.devices.retain(|_, device| device.basic.is_some());
         self.devices.extend(records);
         self.rebuild_readings();
     }
 
-    fn publish_additional(&mut self, backend: crate::backends::BackendId, snapshots: Vec<crate::backends::Snapshot>,
+    fn publish_additional(&mut self, backend: crate::backends::BackendId, poll: impl Into<crate::backends::Poll>,
         generation: u64, request: u64) -> bool {
         if generation != *self.source_write_gen.get(&backend).unwrap_or(&0) { return false; }
-        merge_additional(self, backend, snapshots);
+        merge_additional(self, backend, poll.into());
         self.complete_refresh(backend, request);
         true
     }
@@ -818,7 +883,7 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
                     stages.iter().find(|stage| Some(stage.value) == basic.dpi.current).map(|stage| stage.index)
                 };
                 return Some((key.clone(), crate::ui::tray_popup::DpiState { stages, active,
-                    current: basic.dpi.current, profile: basic.dpi.profile,
+                    current: basic.dpi.current, context: basic.dpi.stage_context(),
                     value_control: !configured, writable: basic.connected &&
                         if configured { basic.dpi.stage_writable } else { basic.dpi.writable } }));
             }
@@ -830,7 +895,7 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
                         index: index as u8 + 1, value: state.dpi(index) as u16 }).collect(),
                     current: Some(state.dpi(usize::from(state.active_stage.clamp(1, 4) - 1)) as u16),
                     active: Some(state.active_stage.clamp(1, 4)),
-                    profile: None,
+                    context: None,
                     writable: true,
                     value_control: false,
                 },
@@ -908,12 +973,21 @@ impl Signal {
 
     /// 等到「有新工作」或「过了一个间隔」。返回 `false` = 该退出了。
     fn wait_for_work(&self, seen: &mut u64) -> bool {
+        self.wait_for_work_with_limit(seen, None)
+    }
+
+    fn work_interval_ms(&self, limit: Option<u64>) -> u64 {
         let configured = self.interval_ms.load(Ordering::Relaxed).max(1000);
         let interval = if self.wake_probe.load(Ordering::Relaxed) {
             configured.min(WAKE_PROBE_INTERVAL_MS)
         } else {
             configured
         };
+        limit.map_or(interval, |limit| interval.min(limit.max(1)))
+    }
+
+    fn wait_for_work_with_limit(&self, seen: &mut u64, limit: Option<u64>) -> bool {
+        let interval = self.work_interval_ms(limit);
         let mut n = lock_poke(&self.poke);
         if *n == *seen {
             let (g, _) = self
@@ -1101,6 +1175,10 @@ impl TrayCtl {
                             .unwrap_or_else(|| crate::tr!("电量未知").to_string()),
                         if !r.connected {
                             crate::tr!("（上次电量，未连接）")
+                        } else if r.quality == crate::device::ReadingQuality::Cached {
+                            crate::tr!("（上次电量，等待回报）")
+                        } else if r.quality == crate::device::ReadingQuality::Stale {
+                            crate::tr!("（上次电量已过期）")
                         } else if r.is_charging() {
                             crate::tr!("（充电中）")
                         } else {
@@ -1460,6 +1538,19 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::PickDrop(d, idx) => pick_drop(env, d, idx),
 
         Act::Focus(e) => {
+            if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
+                if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable) {
+                    if let Some(original) = crate::ui::widget::BasicDpiDraft::from_snapshot(&basic,index) {
+                        env.canvas.with_ui_mut(|u| {
+                            let original = u.basic_dpi_drafts.entry(index).or_insert(original).clone();
+                            let value = if matches!(e,Edit::BasicDpiX(_)) {original.stage.value} else {original.y};
+                            u.begin_edit(e,value.to_string());
+                        });
+                    }
+                }
+                env.canvas.repaint_now();
+                return;
+            }
             if e == Edit::Dpi(0) {
                 if let Some(basic) = env.basic() {
                     if basic.connected && basic.dpi.writable {
@@ -1497,11 +1588,17 @@ fn handle_act(a: Act, env: &UiEnv) {
                 env.submit(Cmd::BasicDpi { target: basic.target, dpi: value });
             }
         }
-        Act::BasicDpiStage(stage, profile) => {
+        Act::BasicDpiStage(stage, context) => {
             let basic = env.basic();
             if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.stage_writable
-                && basic.dpi.profile == Some(profile) && basic.dpi.stages.contains(&stage)) {
-                env.submit(Cmd::BasicDpiStage { target: basic.target, stage, profile });
+                && basic.dpi.stage_context() == Some(context) && basic.dpi.stages.contains(&stage)) {
+                env.submit(Cmd::BasicDpiStage { target: basic.target, stage, context });
+            }
+        }
+        Act::BasicPollingRate(hz) => {
+            if let Some(basic) = env.basic().filter(|b| b.connected && b.polling_rate.writable
+                && b.polling_rate.values.contains(&hz)) {
+                env.submit(Cmd::BasicPollingRate { target: basic.target, hz });
             }
         }
 
@@ -1864,6 +1961,33 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
 
 /// 「应用」按钮：读草稿 → 校验 → 提交。
 fn apply_edit(env: &UiEnv, e: Edit) {
+    if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
+        if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable) {
+            let current = crate::ui::widget::BasicDpiDraft::from_snapshot(&basic,index);
+            let original = env.canvas.with_ui(|u|u.basic_dpi_drafts.get(&index).cloned()).or_else(||current.clone());
+            if original != current {
+                drop_draft(env,Edit::BasicDpiX(index)); drop_draft(env,Edit::BasicDpiY(index));
+                env.canvas.with_ui_mut(|u| {u.basic_dpi_drafts.remove(&index);});
+                env.say(crate::i18n::translate("设备档位或配置已变化，请刷新后重试"));
+                return;
+            }
+            if let Some(original) = original {
+                let (stage,context,current_y) = (original.stage,original.context,original.y);
+                let draft = |edit, value: u16| env.canvas.with_ui(|u| u.edit_text(edit)
+                    .map(|s| s.trim().parse::<u16>().ok()).unwrap_or(Some(value)));
+                if let (Some(x),Some(y)) = (draft(Edit::BasicDpiX(index),stage.value),draft(Edit::BasicDpiY(index),current_y)) {
+                    if basic.dpi.values.contains(&x) && basic.dpi.values.contains(&y) {
+                        env.submit(Cmd::BasicDpiEdit { target: basic.target, stage, context, expected_y: current_y, x, y });
+                        drop_draft(env,Edit::BasicDpiX(index)); drop_draft(env,Edit::BasicDpiY(index));
+                        env.canvas.with_ui_mut(|u| {u.basic_dpi_drafts.remove(&index);});
+                        return;
+                    }
+                }
+            }
+        }
+        env.say(crate::tr!("DPI 不在设备报告的可用范围内"));
+        return;
+    }
     if e == Edit::Dpi(0) {
         if let Some(basic) = env.basic() {
             let text = env.canvas.with_ui(|ui| ui.edit_text(e).map(str::to_string));
@@ -1878,6 +2002,7 @@ fn apply_edit(env: &UiEnv, e: Edit) {
     let st = env.state();
 
     match e {
+        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) => return,
         Edit::LowWarn => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
             let Some(v) = txt.as_deref().and_then(parse_num) else {
@@ -2236,6 +2361,7 @@ fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
     let known = st.filter(|s| !crate::ui::pages::placeholder_state(s));
     let hex = |c: [u8; 3]| format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
     match e {
+        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) => String::new(),
         Edit::LowWarn => known.map(|s| s.low_warn.to_string()).unwrap_or_default(),
         Edit::Dpi(i) => known
             .map(|s| s.dpi((i as usize) & 3).to_string())
@@ -2396,7 +2522,7 @@ const MAX_PENDING: usize = 4;
 /// `Status::Busy` 只表示「后台正在写设备」。读快照期间**不再拒绝新命令**：
 /// 那时设备是空闲的，命令完全可以排队等这一轮读完。
 fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
-    if let Cmd::BasicDpi { target, .. } | Cmd::BasicDpiStage { target, .. } = &cmd {
+    if let Some(target) = cmd.basic_target() {
         let backend = target.backend;
         if backend != crate::backends::BackendId::Rog {
             let mut state = lock_shared(shared);
@@ -2416,15 +2542,15 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
         if s.pending.len() >= MAX_PENDING {
             return false;
         }
-        if !matches!(cmd, Cmd::AutoStart(_) | Cmd::BasicDpi { .. } | Cmd::BasicDpiStage { .. })
+        if !matches!(cmd, Cmd::AutoStart(_)) && cmd.basic_target().is_none()
             && s.active_key.as_ref().and_then(|key| s.devices.get(key)).is_some_and(|record| record.basic.is_some()) {
             return false;
         }
-        let target = match &cmd {
-            Cmd::BasicDpi { target, .. } | Cmd::BasicDpiStage { target, .. } => s.devices.values().find_map(|device|
+        let target = match cmd.basic_target() {
+            Some(target) => s.devices.values().find_map(|device|
                 device.link.as_ref().filter(|link| link.iface.path == target.interface.path
                     && link.report_id == target.address).cloned()),
-            _ => s.active_key.as_ref().and_then(|k| s.devices.get(k)).and_then(|d| d.link.clone()),
+            None => s.active_key.as_ref().and_then(|k| s.devices.get(k)).and_then(|d| d.link.clone()),
         };
         s.pending.push_back((cmd, target));
         s.status = Status::Busy;
@@ -2922,7 +3048,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         let sender_t = sender;
         std::thread::spawn(move || {
             let mut seen = 0;
-            while signal_t.wait_for_work(&mut seen) {
+            while signal_t.wait_for_work_with_limit(&mut seen, backend.publish_interval_limit_ms()) {
                 for _ in 0..MAX_PENDING * 2 {
                     let command = lock_shared(&shared_t).source_pending.get_mut(&backend).and_then(VecDeque::pop_front);
                     let Some(command) = command else { break; };
@@ -2935,7 +3061,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     if state.source_pending.get(&backend).is_none_or(VecDeque::is_empty) { state.source_busy.remove(&backend); }
                     *state.source_write_gen.get(&backend).unwrap_or(&0)
                 };
-                let snapshots = crate::backends::read_backend(backend, true).unwrap_or_default();
+                let snapshots = crate::backends::poll_backend(backend, true).unwrap_or_default();
                 let mut state = lock_shared(&shared_t);
                 state.publish_additional(backend, snapshots, generation, seen);
                 if state.device_keys_dirty {
@@ -3154,6 +3280,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             }
 
             E::OnNotice => {
+                lock_shared(&shared_e).expire_additional();
                 for request in name_dialog.take_requests() {
                     crate::diagnostics::event(
                         "device_rename_requested",
@@ -3222,11 +3349,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                                 submit(&shared_e, &signal_e, Cmd::BasicDpi { target: basic.target, dpi });
                             }
                         }
-                        Action::SetOnboardDpiStage(key, stage, profile) => {
+                        Action::SetOnboardDpiStage(key, stage, context) => {
                             let basic = lock_shared(&shared_e).devices.get(&key).and_then(|record| record.basic.clone());
                             if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.stage_writable
-                                && basic.dpi.profile == Some(profile) && basic.dpi.stages.contains(&stage)) {
-                                submit(&shared_e, &signal_e, Cmd::BasicDpiStage { target: basic.target, stage, profile });
+                                && basic.dpi.stage_context() == Some(context) && basic.dpi.stages.contains(&stage)) {
+                                submit(&shared_e, &signal_e, Cmd::BasicDpiStage { target: basic.target, stage, context });
                             }
                         }
                         Action::ReorderDevices(order) => {
@@ -3583,7 +3710,7 @@ mod backend_tests {
                 path: key.into(), serial: String::new(), product: "Test mouse".into(),
                 vendor_id: 0, product_id: 0, usage_page: 1, usage: 2,
                 input_len: 20, output_len: 20, feature_len: 0,
-            } }, connected: true, dpi: Dpi::default(), battery: Some(Battery { percent: Some(percent),
+            } }, connected: true, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(), dpi: Dpi::default(), battery: Some(Battery { percent: Some(percent),
                 charging: Some(false), voltage_mv: None, approximate: false, level: None }) }
     }
 
@@ -3594,6 +3721,198 @@ mod backend_tests {
         shared.replace_rog_records(BTreeMap::new());
         assert_eq!(shared.readings.len(), 1);
         assert_eq!(shared.readings[0].percent(), Some(75));
+    }
+
+    #[test]
+    fn compx_stage_edit_and_rate_share_their_backend_queue_and_stale_poll_guard() {
+        let shared=Arc::new(Mutex::new(Shared::new(Settings::default())));let signal=Signal::new(60);
+        let target=snapshot(BackendId::CompX,"compx",75).target;
+        let stage=crate::device::DpiStage {index:1,value:1600};
+        assert!(submit(&shared,&signal,Cmd::BasicDpiEdit {target:target.clone(),stage,context:crate::device::StageContext::Profile(0),expected_y:1600,x:800,y:1600}));
+        assert!(submit(&shared,&signal,Cmd::BasicPollingRate {target,hz:500}));
+        let mut state=lock_shared(&shared);
+        assert_eq!(state.source_pending[&BackendId::CompX].len(),2);
+        assert_eq!(state.source_write_gen[&BackendId::CompX],2);
+        assert!(!state.publish_additional(BackendId::CompX,vec![snapshot(BackendId::CompX,"compx",75)],1,1));
+        assert!(state.publish_additional(BackendId::Rapoo,vec![snapshot(BackendId::Rapoo,"rapoo",70)],0,1));
+    }
+    #[test]
+    fn dpi_draft_remembers_device_profile_and_both_original_axes() {
+        let mut reading=snapshot(BackendId::CompX,"compx",75);
+        reading.dpi.profile=Some(0);
+        reading.dpi.stages=vec![crate::device::DpiStage {index:1,value:800}];
+        reading.dpi.stage_y.insert(1,1600);
+        let original=crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1).unwrap();
+        reading.dpi.profile=Some(1);
+        assert_ne!(Some(original.clone()),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
+        reading.dpi.profile=Some(0);reading.dpi.stage_y.insert(1,800);
+        assert_ne!(Some(original.clone()),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
+        reading.dpi.stage_y.insert(1,1600);reading.target.key="replacement".into();
+        assert_ne!(Some(original),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
+    }
+    #[test]
+    fn razer_config_context_reaches_main_window_tray_and_its_own_worker() {
+        let mut reading=snapshot(BackendId::Razer,"razer",75);
+        let stage=crate::device::DpiStage {index:1,value:800};
+        reading.dpi.configuration_token=Some(0x1234);reading.dpi.stages=vec![stage];reading.dpi.stage_y.insert(1,1600);
+        reading.dpi.stage_writable=true;reading.dpi.stage_editable=true;
+        let draft=crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1).unwrap();
+        assert_eq!(draft.context,crate::device::StageContext::Configuration(0x1234));
+        let mut state=Shared::new(Settings::default());state.publish_additional(BackendId::Razer,vec![reading.clone()],0,1);
+        let popup=popup_dpi_states(&state);assert_eq!(popup["razer"].context,Some(draft.context));assert!(popup["razer"].writable);
+        reading.dpi.configuration_token=Some(0x5678);
+        assert_ne!(Some(draft.clone()),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
+        let shared=Arc::new(Mutex::new(state));let signal=Signal::new(60);
+        assert!(submit(&shared,&signal,Cmd::BasicDpiStage {target:reading.target.clone(),stage,context:draft.context}));
+        assert!(submit(&shared,&signal,Cmd::BasicDpiEdit {target:reading.target,stage,context:draft.context,expected_y:1600,x:1600,y:3200}));
+        let state=lock_shared(&shared);assert_eq!(state.source_pending[&BackendId::Razer].len(),2);
+        assert_eq!(state.source_write_gen[&BackendId::Razer],2);
+    }
+    #[test]
+    fn razer_first_serial_identity_promotes_preferences_from_the_discovery_key() {
+        let mut first=snapshot(BackendId::Razer,"temporary",75);
+        first.target=Target::new(BackendId::Razer,&first.target.interface,0);
+        let discovery_key=first.target.key.clone();
+        let mut shared=Shared::new(Settings::default());
+        shared.cfg.device_names.insert(discovery_key.clone(),"My mouse".into());
+        shared.publish_additional(BackendId::Razer,vec![first.clone()],0,1);
+        first.target.key="confirmed-unit".into();first.target.verified_identity=true;
+        shared.publish_additional(BackendId::Razer,vec![first],0,2);
+        assert!(!shared.devices.contains_key(&discovery_key));
+        assert_eq!(shared.cfg.device_names.get("confirmed-unit").map(String::as_str),Some("My mouse"));
+    }
+    #[test]
+    fn razer_sibling_fallback_preserves_preferences_and_latest_receiver_identity() {
+        let mut first = snapshot(BackendId::Razer, "temporary", 75);
+        first.target.interface.path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
+        first.target = Target::new(BackendId::Razer, &first.target.interface, 0);
+        let discovery_key = first.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        let now = std::time::Instant::now();
+        shared.cfg.device_names.insert(discovery_key.clone(), "Custom mouse".into());
+        merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now);
+        first.target.interface.path = first.target.interface.path.replace("col01", "col02").replace("0001#", "0002#");
+        first.target.key = "a-first-serial".into();
+        first.target.verified_identity = true;
+        merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now + Duration::from_secs(1));
+        assert_eq!(shared.devices.len(), 1);
+        assert_eq!(shared.cfg.device_names["a-first-serial"], "Custom mouse");
+        first.target.key = "z-replacement-serial".into();
+        merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now + Duration::from_secs(2));
+        assert!(!shared.devices["a-first-serial"].reading.connected);
+        first.target = Target::new(BackendId::Razer, &first.target.interface, 0);
+        first.target.interface.path = first.target.interface.path.replace("col02", "col01").replace("0002#", "0001#");
+        first.dpi.writable = true;
+        merge_additional_at(&mut shared, BackendId::Razer, vec![first].into(), now + Duration::from_secs(3));
+        assert_eq!(shared.devices.len(), 2);
+        assert!(!shared.devices["a-first-serial"].reading.connected);
+        assert!(shared.devices["z-replacement-serial"].reading.connected);
+        assert!(!shared.devices["z-replacement-serial"].basic.as_ref().unwrap().dpi.writable);
+        assert!(!shared.cfg.device_names.contains_key("z-replacement-serial"));
+    }
+    #[test]
+    fn partial_dpi_read_preserves_independent_live_rate_but_failed_poll_disables_all_writes() {
+        let mut shared=Shared::new(Settings::default());
+        let mut first=snapshot(BackendId::CompX,"compx",75);
+        first.dpi.current=Some(800);first.dpi.stage_editable=true;
+        first.polling_rate=crate::device::PollingRate {current:Some(1000),values:vec![500,1000],writable:true};
+        shared.publish_additional(BackendId::CompX,vec![first.clone()],0,1);
+        first.dpi=Dpi::default();first.polling_rate.current=Some(500);
+        shared.publish_additional(BackendId::CompX,vec![first],0,2);
+        let basic=shared.devices["compx"].basic.as_ref().unwrap();
+        assert_eq!(basic.dpi.current,Some(800));assert!(!basic.dpi.stage_editable);
+        assert_eq!(basic.polling_rate.current,Some(500));assert!(basic.polling_rate.writable);
+        shared.publish_additional(BackendId::CompX,crate::backends::Poll::default(),0,3);
+        let basic=shared.devices["compx"].basic.as_ref().unwrap();
+        assert!(!basic.dpi.stage_editable);assert!(!basic.polling_rate.writable);
+    }
+
+    #[test]
+    fn failed_poll_keeps_last_battery_and_card_but_never_write_permission() {
+        let mut shared = Shared::new(Settings::default());
+        let mut first = snapshot(BackendId::Logitech, "logitech", 75);
+        first.dpi.writable = true;
+        shared.publish_additional(BackendId::Logitech, vec![first], 0, 1);
+        let poll = crate::backends::Poll { snapshots: vec![],
+            present_paths: Some(["logitech".to_string()].into_iter().collect()) };
+        shared.publish_additional(BackendId::Logitech, poll, 0, 2);
+        let device = &shared.devices["logitech"];
+        assert!(device.reading.connected);
+        assert_eq!(device.reading.percent(), Some(75));
+        assert_eq!(device.reading.quality, crate::device::ReadingQuality::Cached);
+        assert!(!device.basic.as_ref().unwrap().dpi.writable);
+        assert!(!device.basic_status.as_ref().unwrap().connection_known);
+        shared.publish_additional(BackendId::Logitech, crate::backends::Poll::default(), 0, 3);
+        assert!(shared.devices["logitech"].reading.connected);
+        shared.publish_additional(BackendId::Logitech, crate::backends::Poll {
+            snapshots: vec![], present_paths: Some(Default::default()) }, 0, 4);
+        assert!(!shared.devices["logitech"].reading.connected);
+        assert_eq!(shared.devices["logitech"].reading.battery.as_ref().unwrap().percent, Some(75));
+    }
+
+    #[test]
+    fn partial_read_and_invalid_battery_do_not_erase_or_refresh_previous_valid_charge() {
+        let mut shared = Shared::new(Settings::default());
+        let first = snapshot(BackendId::Logitech, "logitech", 75);
+        shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 1);
+        let measured = shared.devices["logitech"].basic_status.as_ref().unwrap().measured_at;
+        let mut partial = first.clone(); partial.battery = None;
+        shared.publish_additional(BackendId::Logitech, vec![partial], 0, 2);
+        assert_eq!(shared.devices["logitech"].reading.percent(), Some(75));
+        let mut invalid = first;
+        invalid.battery.as_mut().unwrap().percent = Some(255);
+        shared.publish_additional(BackendId::Logitech, vec![invalid], 0, 3);
+        assert_eq!(shared.devices["logitech"].reading.percent(), Some(75));
+        assert_eq!(shared.devices["logitech"].basic_status.as_ref().unwrap().measured_at, measured);
+    }
+
+    #[test]
+    fn cached_low_battery_does_not_create_or_rearm_a_notification() {
+        let mut reading = DeviceReading { connected: true, quality: crate::device::ReadingQuality::Cached,
+            battery: snapshot(BackendId::Logitech, "logitech", 10).battery, ..Default::default() };
+        let mut armed = true;
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+        assert!(armed);
+        reading.quality = crate::device::ReadingQuality::Live;
+        assert_eq!(low_battery_reading(&reading, &mut armed), Some(10));
+        assert!(!armed);
+    }
+
+    #[test]
+    fn rapoo_reports_stay_visible_past_global_refresh_interval_and_recover_after_silence() {
+        let now = std::time::Instant::now();
+        let signal = Signal::new(60);
+        let interval_ms = signal.work_interval_ms(BackendId::Rapoo.publish_interval_limit_ms());
+        assert_eq!(interval_ms, 2000);
+        assert_eq!(signal.work_interval_ms(BackendId::Logitech.publish_interval_limit_ms()), 60000);
+        let mut shared = Shared::new(Settings::default());
+        let first = snapshot(BackendId::Rapoo, "rapoo", 75);
+        let mut measurement = now;
+        for second in 0..=150 {
+            let tick = now + Duration::from_secs(second);
+            let reporting = second <= 90 || second >= 111;
+            if reporting && second % 3 == 0 { measurement = tick; }
+            if second * 1000 % interval_ms == 0 {
+                let snapshots = if tick.duration_since(measurement) < BackendId::Rapoo.sample_lifetime() {
+                    let mut reading = first.clone(); reading.battery_at = Some(measurement);
+                    vec![reading]
+                } else { Vec::new() };
+                merge_additional_at(&mut shared, BackendId::Rapoo, crate::backends::Poll { snapshots,
+                    present_paths: Some(["rapoo".into()].into_iter().collect()) }, tick);
+            }
+            shared.expire_additional_at(tick);
+            let device = &shared.devices["rapoo"];
+            assert!(device.reading.connected);
+            if second <= 90 || second >= 112 {
+                assert_eq!(device.reading.percent(), Some(75), "battery lost at second {second}");
+            } else if (100..111).contains(&second) {
+                assert_eq!(device.reading.percent(), None);
+                assert_eq!(device.reading.battery.as_ref().unwrap().percent, Some(75));
+            }
+        }
+        signal.wake_probe.store(true, Ordering::Relaxed);
+        assert_eq!(signal.work_interval_ms(BackendId::Rapoo.publish_interval_limit_ms()), 2000);
+        assert_eq!(signal.work_interval_ms(None), WAKE_PROBE_INTERVAL_MS);
     }
 
     #[test]
@@ -3696,7 +4015,7 @@ mod backend_tests {
         assert_eq!(popup["logitech"].stages[1], stage);
         assert_eq!(popup["logitech"].active, Some(4));
         assert!(!popup["logitech"].value_control);
-        assert!(submit(&shared, &signal, Cmd::BasicDpiStage { target, stage, profile: 1 }));
+        assert!(submit(&shared, &signal, Cmd::BasicDpiStage { target, stage, context: crate::device::StageContext::Profile(1) }));
         let state = lock_shared(&shared);
         assert!(state.pending.is_empty());
         assert_eq!(state.source_pending[&BackendId::Logitech].len(), 1);
@@ -3720,6 +4039,10 @@ mod backend_tests {
         shared.complete_refresh(BackendId::Logitech, 3);
         shared.complete_refresh(BackendId::Rapoo, 3);
         shared.complete_refresh(BackendId::Vgn, 3);
+        shared.complete_refresh(BackendId::CompX, 3);
+        shared.complete_refresh(BackendId::Razer, 3);
+        shared.complete_refresh(BackendId::PageCommand, 3);
+        shared.complete_refresh(BackendId::Headset, 3);
         assert_eq!(shared.refresh_generation, 0);
         shared.complete_refresh(BackendId::StandardHid, 2);
         assert_eq!(shared.refresh_generation, 2);

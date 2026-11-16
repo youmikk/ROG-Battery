@@ -1,6 +1,6 @@
 [package]
 name = "rog-mouse-ctl"
-version = "1.4.4"
+version = "1.4.5"
 edition = "2021"
 description = "Peripheral battery monitor and ROG mouse settings utility for Windows"
 

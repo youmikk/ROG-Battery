@@ -2,7 +2,7 @@
 //!
 //! - 用 setupapi 枚举 HID 接口，取 `\\?\hid#...` 路径；
 //! - `CreateFile` 打开时**必须** `FILE_SHARE_READ | FILE_SHARE_WRITE`（Armoury Crate 可能同时开着）；
-//! - 写用 `WriteFile`（同步句柄），读用「overlapped 句柄 + 独立事件 + 超时」；
+//! - 读写使用 overlapped 句柄、独立事件及超时；部分协议使用控制端点 Output Report；
 //! - 应答定位：先找 `r[1]==cmd && r[2]==sub`，找不到再找 `r[0]==cmd && r[1]==sub`（后者要补一个 report id 到下标 0）。
 
 use crate::win32::*;
@@ -64,6 +64,7 @@ pub struct Skipped {
 /// 两者必须分开：「一个接口都没打开」和「根本没有 ASUS 设备」是两件事 ——
 /// 前者通常是 Armoury Crate 占着设备或权限不足，后者才是真的没插。
 /// 原来 `Err(_) => continue` 把两者糊成同一个「找不到设备」，用户完全没法排查。
+#[derive(Clone)]
 pub struct EnumerateReport {
     pub interfaces: Vec<HidInterface>,
     pub skipped: Vec<Skipped>,
@@ -345,9 +346,9 @@ pub fn query_report(iface: &HidInterface, report_id: u8, feature: bool, timeout_
     result
 }
 
-/// 一个已打开的命令通道。持有两个句柄：同步写句柄 + overlapped 读句柄。
+/// 一个已打开的命令通道。读写分别使用可取消的 overlapped 句柄。
 pub struct HidDevice {
-    /// 同步句柄，只用来 `WriteFile`
+    /// 写句柄，用于 WriteFile 或 HID Output Report 控制传输。
     write_handle: Handle,
     /// overlapped 读句柄
     read_handle: Handle,
@@ -377,6 +378,27 @@ impl HidDevice {
         &mut self,
         packet: &[u8],
         timeout_ms: u32,
+        matches: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        self.transact_output(packet, timeout_ms, false, matches)
+    }
+
+    /// 部分接收器只接受控制端点 SET_REPORT，不能使用 WriteFile 的中断 OUT。
+    /// 不在超时后自动重发到另一端点，避免重复执行已送达的设置命令。
+    pub fn transact_control_output(
+        &mut self,
+        packet: &[u8],
+        timeout_ms: u32,
+        matches: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        self.transact_output(packet, timeout_ms, true, matches)
+    }
+
+    fn transact_output(
+        &mut self,
+        packet: &[u8],
+        timeout_ms: u32,
+        control: bool,
         mut matches: impl FnMut(&[u8]) -> bool,
     ) -> Option<Vec<u8>> {
         if !self.writable || packet.is_empty() || packet.len() > self.out_len as usize {
@@ -390,10 +412,17 @@ impl HidDevice {
         self.write_ov = Overlapped { h_event: self.write_event, ..Default::default() };
         let mut written = 0;
         let ok = unsafe {
-            WriteFile(self.write_handle, padded.as_ptr().cast(), padded.len() as u32,
-                &mut written, &mut self.write_ov)
+            if control {
+                DeviceIoControl(self.write_handle, winapi::shared::hidclass::IOCTL_HID_SET_OUTPUT_REPORT,
+                    padded.as_mut_ptr().cast(), padded.len() as u32,
+                    core::ptr::null_mut(), 0, &mut written, &mut self.write_ov)
+            } else {
+                WriteFile(self.write_handle, padded.as_ptr().cast(), padded.len() as u32,
+                    &mut written, &mut self.write_ov)
+            }
         };
-        if !self.finish_write(ok, written, timeout_ms) {
+        // SET_OUTPUT_REPORT 成功可以返回零字节；WriteFile 仍要求实际写入。
+        if !self.finish_output(ok, written, timeout_ms, control) {
             return None;
         }
         while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
@@ -617,8 +646,12 @@ impl HidDevice {
     /// 写句柄是 overlapped 打开的，所以驱动卡住时能把控制权抢回来——以前用同步
     /// 句柄写，`WriteFile` 没有超时，设备一挂就把整个刷新线程钉死。
     fn finish_write(&mut self, ok: i32, written: u32, timeout_ms: u32) -> bool {
+        self.finish_output(ok, written, timeout_ms, false)
+    }
+
+    fn finish_output(&mut self, ok: i32, written: u32, timeout_ms: u32, control: bool) -> bool {
         if ok != 0 {
-            return written > 0;
+            return control || written > 0;
         }
         if last_error() != ERROR_IO_PENDING {
             return false;
@@ -634,7 +667,7 @@ impl HidDevice {
         }
         let mut xfer: u32 = 0;
         let done = unsafe { GetOverlappedResult(self.write_handle, &mut self.write_ov, &mut xfer, 0) };
-        done != 0 && xfer > 0
+        done != 0 && (control || xfer > 0)
     }
 
     /// 发一帧并等应答。`tail` 从 `pkt[3]` 开始写（可以为空）。

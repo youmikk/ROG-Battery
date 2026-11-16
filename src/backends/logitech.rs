@@ -8,7 +8,12 @@ const BATTERY_STATUS: u16 = 0x1000;
 const UNIFIED_BATTERY: u16 = 0x1004;
 const BATTERY_VOLTAGE: u16 = 0x1001;
 const ADJUSTABLE_DPI: u16 = 0x2201;
+const EXTENDED_DPI: u16 = 0x2202;
 const ONBOARD_PROFILES: u16 = 0x8100;
+const REPORT_RATE: u16 = 0x8060;
+const EXTENDED_REPORT_RATE: u16 = 0x8061;
+const REQUEST_TIMEOUT_MS: u32 = 600;
+const PING_TIMEOUT_MS: u32 = 1500;
 
 trait Channel {
     fn output_len(&self) -> u16;
@@ -44,6 +49,15 @@ struct Session<C = HidDevice> {
     features: std::collections::BTreeMap<u8, u16>,
 }
 
+struct RateInfo {
+    rate: crate::device::PollingRate,
+    feature: u8,
+    connection: Option<u8>,
+    raw: u8,
+    choices: Vec<(u8,u16)>,
+    mode_feature: Option<u8>,
+}
+
 impl Session<HidDevice> {
     fn open(target: &Target) -> Result<Self, String> {
         Self::from_channel(HidDevice::open(&target.interface)?, target)
@@ -51,6 +65,88 @@ impl Session<HidDevice> {
 }
 
 impl<C: Channel> Session<C> {
+    fn rate_connection(&mut self) -> Result<Option<u8>,String> {
+        if self.address != 0xff && (0xc500..=0xc5ff).contains(&self.interface.product_id) {
+            return Ok(Some(1));
+        }
+        let Some(feature) = self.feature(0x0003)? else { return Ok(None); };
+        let info = self.request(feature,0,&[])?;
+        if info.len() < 13 { return Ok(None); }
+        let mut offset = 7;
+        for flag in [1,2,4,8] {
+            if info[6] & flag == 0 { continue; }
+            let Some(bytes) = info.get(offset..offset+2) else { return Ok(None); };
+            offset += 2;
+            if u16::from_be_bytes([bytes[0],bytes[1]]) == self.interface.product_id {
+                return Ok(match flag { 8 => Some(0), 4 => Some(1), _ => None });
+            }
+        }
+        Ok(None)
+    }
+    fn rate_info(&mut self, target: &Target) -> Result<Option<RateInfo>,String> {
+        if self.legacy { return Ok(None); }
+        let extended = self.feature(EXTENDED_REPORT_RATE)?;
+        let (feature,connection,choices,raw) = if let Some(feature) = extended {
+            let Some(connection) = self.rate_connection()? else { return Ok(None); };
+            let list = self.request(feature,1,&[connection])?;
+            if list.len() < 2 { return Err("设备返回的回报率列表无效".into()); }
+            let mask = u16::from_be_bytes([list[0],list[1]]);
+            let choices = [125,250,500,1000,2000,4000,8000].into_iter().enumerate()
+                .filter_map(|(raw,hz)| (mask & (1 << raw) != 0).then_some((raw as u8,hz))).collect::<Vec<_>>();
+            let current = self.request(feature,2,&[connection])?;
+            let raw = *current.first().ok_or("无法读取当前回报率")?;
+            (feature,Some(connection),choices,raw)
+        } else if let Some(feature) = self.feature(REPORT_RATE)? {
+            let list = self.request(feature,0,&[])?;
+            let mask = *list.first().ok_or("设备返回的回报率列表无效")?;
+            let choices = (1..=8u8).filter_map(|ms| (mask & (1 << (ms-1)) != 0)
+                .then_some((ms,(1000 + u16::from(ms)/2) / u16::from(ms)))).collect::<Vec<_>>();
+            let current = self.request(feature,1,&[])?;
+            let raw = current.first().copied().filter(|ms| (1..=8).contains(ms)).ok_or("无法读取当前回报率")?;
+            (feature,None,choices,raw)
+        } else { return Ok(None); };
+        let current = if connection.is_some() {
+            [125,250,500,1000,2000,4000,8000].get(usize::from(raw)).copied()
+        } else { Some((1000 + u16::from(raw)/2) / u16::from(raw)) };
+        let (mode_feature,host_control) = match self.feature(ONBOARD_PROFILES) {
+            Ok(Some(feature)) => (Some(feature),self.request(feature,2,&[]).ok()
+                .is_some_and(|reply|reply.first() == Some(&2))),
+            Ok(None) => (None,true),
+            Err(_) => (None,false),
+        };
+        let identity = !((0xc500..=0xc5ff).contains(&target.interface.product_id) && !target.verified_identity);
+        let rate = crate::device::PollingRate { current,values:choices.iter().map(|(_,hz)| *hz).collect(),
+            writable: identity && host_control && current.is_some() && choices.iter().any(|(v,_)| *v == raw) };
+        Ok(Some(RateInfo { rate,feature,connection,raw,choices,mode_feature }))
+    }
+    fn set_rate(&mut self,target:&Target,hz:u16) -> Result<(),String> {
+        self.check_identity(target)?;
+        let info = self.rate_info(target)?.ok_or("设备不支持回报率设置")?;
+        if !info.rate.writable { return Err("当前模式不允许回报率写入".into()); }
+        let raw = info.choices.iter().find(|(_,v)| *v == hz).ok_or("回报率不在此连接的可用范围内")?.0;
+        if raw == info.raw { return Ok(()); }
+        self.check_identity(target)?;
+        if let Some(feature) = info.mode_feature {
+            if self.request(feature,2,&[])?.first() != Some(&2) { return Err("当前模式不允许回报率写入".into()); }
+        }
+        if info.connection.is_some() && self.rate_connection()? != info.connection {
+            return Err("设备连接已变化，请刷新后重试".into());
+        }
+        // Extended get-list/get-rate select a link; set-rate takes only the rate code.
+        let (function,parameters) = (if info.connection.is_some() {3} else {2},vec![raw]);
+        self.request(info.feature,function,&parameters)?;
+        self.check_identity(target)?;
+        if let Some(feature) = info.mode_feature {
+            if self.request(feature,2,&[])?.first() != Some(&2) { return Err("当前模式不允许回报率写入".into()); }
+        }
+        if info.connection.is_some() && self.rate_connection()? != info.connection {
+            return Err("设备连接已变化，请刷新后重试".into());
+        }
+        let parameters = info.connection.map(|v|vec![v]).unwrap_or_default();
+        let current = self.request(info.feature,if info.connection.is_some() {2} else {1},&parameters)?;
+        if current.first() != Some(&raw) { return Err("无法确认设备已保存设置，请刷新后检查".into()); }
+        Ok(())
+    }
     fn from_channel(device: C, target: &Target) -> Result<Self, String> {
         let mut session = Self {
             device,
@@ -97,7 +193,8 @@ impl<C: Channel> Session<C> {
         } else {
             self.features.get(&feature).copied().unwrap_or(0)
         };
-        let reply = self.device.transact(&frame, 160, &mut |reply| {
+        let timeout = if feature == 0 && function == 1 { PING_TIMEOUT_MS } else { REQUEST_TIMEOUT_MS };
+        let reply = self.device.transact(&frame, timeout, &mut |reply| {
             reply_matches(reply, address, feature, fn_sw)
         });
         let Some(reply) = reply else {
@@ -238,7 +335,7 @@ impl<C: Channel> Session<C> {
             return Ok(Dpi::default());
         }
         let Some(index) = self.feature(ADJUSTABLE_DPI)? else {
-            return Ok(Dpi::default());
+            return self.extended_dpi();
         };
         let sensors = self.request(index, 0, &[])?;
         if sensors.first() != Some(&1) {
@@ -253,6 +350,45 @@ impl<C: Channel> Session<C> {
             values,
             ..Default::default()
         })
+    }
+
+    fn extended_dpi(&mut self) -> Result<Dpi, String> {
+        let Some(index) = self.feature(EXTENDED_DPI)? else { return Ok(Dpi::default()); };
+        let count = self.request(index, 0, &[])?;
+        if count.first() != Some(&1) { return Ok(Dpi::default()); }
+        let info = self.request(index, 1, &[0])?;
+        if info.len() < 3 || info[0] != 0 { return Err("设备返回的 DPI 列表无效".into()); }
+        let separate_axes = info[2] & 1 != 0;
+        let mut values = self.extended_dpi_list(index, 0)?;
+        if separate_axes {
+            let y_values = self.extended_dpi_list(index, 1)?;
+            values.retain(|value| y_values.contains(value));
+        }
+        let payload = self.request(index, 5, &[0])?;
+        let (x, y) = decode_extended_dpi(&payload, separate_axes).ok_or("无法读取当前 DPI")?;
+        let writable = values.contains(&x) && y.is_none_or(|y| y == x);
+        Ok(Dpi { current: Some(x), current_y: y, values,
+            // 当前界面提供单值 DPI；不同轴值保持只读，防止无意覆盖 Y 轴。
+            writable, ..Default::default() })
+    }
+
+    fn extended_dpi_list(&mut self, index: u8, axis: u8) -> Result<Vec<u16>, String> {
+        let mut bytes = Vec::new();
+        for page in 0..=u8::MAX {
+            let payload = self.request(index, 2, &[0, axis, page])?;
+            if payload.len() < 5 || payload[..3] != [0, axis, page] {
+                return Err("设备返回的 DPI 列表无效".into());
+            }
+            // 长回报有 13 字节数据区，末尾奇数字节不构成一个 DPI 值。
+            let length = (payload.len() - 3) & !1;
+            bytes.extend_from_slice(&payload[3..3 + length]);
+            match decode_dpi_list(&bytes) {
+                Ok(values) => return Ok(values),
+                Err(DpiListError::Incomplete) => (),
+                Err(error) => return Err(error.message().into()),
+            }
+        }
+        Err(DpiListError::Incomplete.message().into())
     }
 
     fn onboard_dpi(&mut self) -> Result<Option<Dpi>, String> {
@@ -495,7 +631,7 @@ impl<C: Channel> Session<C> {
             None
         };
         let started = std::time::Instant::now();
-        let reply = self.device.transact(&request, 160, &mut |reply| {
+        let reply = self.device.transact(&request, REQUEST_TIMEOUT_MS, &mut |reply| {
             register_reply_matches(reply, address, sub_id, low_register, echo)
         });
         let outcome = match reply.as_ref() {
@@ -556,8 +692,9 @@ impl<C: Channel> Session<C> {
         }
     }
 
-    fn read_snapshot(mut self, target: &Target, detail: bool) -> Result<Snapshot, String> {
+    fn read_snapshot(&mut self, target: &Target, detail: bool) -> Result<Snapshot, String> {
         let battery = self.battery()?;
+        let battery_at = battery.as_ref().map(|_| std::time::Instant::now());
         let mut target = target.clone();
         if let Ok(Some(key)) = self.identity_key() {
             target.key = key;
@@ -578,6 +715,7 @@ impl<C: Channel> Session<C> {
         Ok(Snapshot {
             target,
             battery,
+            battery_at, polling_rate: Default::default(),
             dpi,
             connected: true,
         })
@@ -589,7 +727,7 @@ impl<C: Channel> Session<C> {
         if !supported.writable || !supported.values.contains(&dpi) {
             return Err("DPI 不在设备报告的可用范围内".into());
         }
-        let index = self.feature(ADJUSTABLE_DPI)?.ok_or("设备不支持 DPI 设置")?;
+        let legacy_index = self.feature(ADJUSTABLE_DPI)?;
         let previous = supported.current.ok_or("无法读取当前 DPI")?;
         if previous == dpi {
             return Ok(());
@@ -600,6 +738,8 @@ impl<C: Channel> Session<C> {
                 return Err("板载模式请使用 DPI 档位切换".into());
             }
         }
+        if legacy_index.is_none() { return self.set_extended_dpi(dpi, previous); }
+        let index = legacy_index.unwrap();
         let value = dpi.to_be_bytes();
         let _ = self.request(index, 3, &[0, value[0], value[1]]);
         if self
@@ -618,6 +758,32 @@ impl<C: Channel> Session<C> {
             .and_then(|payload| decode_current_dpi(&payload))
             != Some(previous)
         {
+            return Err("DPI 写入未确认，原值恢复也未确认".into());
+        }
+        Err("设备未确认新的 DPI，已恢复原值".into())
+    }
+
+    fn set_extended_dpi(&mut self, dpi: u16, previous: u16) -> Result<(), String> {
+        let index = self.feature(EXTENDED_DPI)?.ok_or("设备不支持 DPI 设置")?;
+        let info = self.request(index, 1, &[0])?;
+        if info.len() < 3 || info[0] != 0 { return Err("无法读取当前 DPI".into()); }
+        let separate_axes = info[2] & 1 != 0;
+        let original = self.request(index, 5, &[0])?;
+        let (x, y) = decode_extended_dpi(&original, separate_axes).ok_or("无法读取当前 DPI")?;
+        if x != previous || y.is_some_and(|y| y != x) { return Err("无法读取当前 DPI".into()); }
+        let lod = if info[2] & 2 != 0 { original[9] } else { 0 };
+        let parameters = |value: u16| {
+            let [hi, lo] = value.to_be_bytes();
+            [0, hi, lo, if separate_axes { hi } else { 0 },
+                if separate_axes { lo } else { 0 }, lod]
+        };
+        let confirmed = |reply: &[u8], expected: u16| decode_extended_dpi(reply, separate_axes)
+            .is_some_and(|(x, y)| x == expected && y.is_none_or(|y| y == expected)
+                && (info[2] & 2 == 0 || reply[9] == lod));
+        let _ = self.request(index, 6, &parameters(dpi));
+        if self.request(index, 5, &[0]).ok().is_some_and(|reply| confirmed(&reply, dpi)) { return Ok(()); }
+        let _ = self.request(index, 6, &parameters(previous));
+        if !self.request(index, 5, &[0]).ok().is_some_and(|reply| confirmed(&reply, previous)) {
             return Err("DPI 写入未确认，原值恢复也未确认".into());
         }
         Err("设备未确认新的 DPI，已恢复原值".into())
@@ -780,6 +946,18 @@ fn decode_current_dpi(data: &[u8]) -> Option<u16> {
     Some(if current == 0 { fallback } else { current }).filter(|value| *value > 0)
 }
 
+fn decode_extended_dpi(data: &[u8], separate_axes: bool) -> Option<(u16, Option<u16>)> {
+    if data.len() < 10 || data[0] != 0 { return None; }
+    let value = |start: usize| {
+        let current = u16::from_be_bytes([data[start], data[start + 1]]);
+        let fallback = u16::from_be_bytes([data[start + 2], data[start + 3]]);
+        if current == 0 { fallback } else { current }
+    };
+    let x = value(1);
+    let y = separate_axes.then(|| value(5));
+    (x >= 50 && y.is_none_or(|y| y >= 50)).then_some((x, y))
+}
+
 fn decode_legacy_battery(register: u8, data: &[u8]) -> Option<Battery> {
     if data.len() < 3 {
         return None;
@@ -877,7 +1055,7 @@ fn decode_dpi_list(data: &[u8]) -> Result<Vec<u16>, DpiListError> {
 impl DeviceBackend for Logitech {
     fn discover(&self, _: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         let mut targets = Vec::new();
-        for interface in interfaces {
+        for interface in preferred_interfaces(interfaces) {
             if interface.vendor_id != 0x046d
                 || interface.usage_page < 0xff00
                 || interface.output_len < 7
@@ -894,22 +1072,23 @@ impl DeviceBackend for Logitech {
                 targets.push(Target::new(BackendId::Logitech, interface, *address));
             }
         }
-        // 长报告集合放在后面：同一设备的短集合读数不能覆盖完整板载档位。
-        targets.sort_by_key(|target| {
-            let interface = &target.interface;
-            (
-                interface.output_len >= 20,
-                interface.usage_page == 0xff00 && interface.usage == 2,
-            )
-        });
         Ok(targets)
     }
 
     fn read(&self, _: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
-        Session::open(target)?.read_snapshot(target, detail)
+        let lock = super::channel::lock(&collection_group(&target.interface));
+        let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
+        let mut session = Session::open(target)?;
+        let mut snapshot = session.read_snapshot(target, detail)?;
+        if snapshot.target.family == DeviceFamily::Mouse {
+            snapshot.polling_rate = session.rate_info(&snapshot.target).ok().flatten().map(|info|info.rate).unwrap_or_default();
+        }
+        Ok(snapshot)
     }
 
     fn set_dpi(&self, _: &HidApi, target: &Target, dpi: u16) -> Result<(), String> {
+        let lock = super::channel::lock(&collection_group(&target.interface));
+        let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
         Session::open(target)?.set_dpi(target, dpi)
     }
     fn set_dpi_stage(
@@ -917,10 +1096,43 @@ impl DeviceBackend for Logitech {
         _: &HidApi,
         target: &Target,
         stage: crate::device::DpiStage,
-        profile: u16,
+        context: crate::device::StageContext,
     ) -> Result<(), String> {
-        Session::open(target)?.set_stage(target, stage, profile)
+        let lock = super::channel::lock(&collection_group(&target.interface));
+        let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
+        Session::open(target)?.set_stage(target, stage, context.profile()?)
     }
+    fn set_polling_rate(&self, _: &HidApi,target:&Target,hz:u16) -> Result<(),String> {
+        let lock = super::channel::lock(&collection_group(&target.interface));
+        let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
+        Session::open(target)?.set_rate(target,hz)
+    }
+}
+
+fn collection_group(interface: &HidInterface) -> String {
+    let path = interface.path.to_ascii_lowercase();
+    let mut parts: Vec<String> = path.split('#').map(str::to_string).collect();
+    if parts.len() < 4 { return path; }
+    parts[1] = parts[1].split('&').filter(|part| !part.starts_with("col"))
+        .collect::<Vec<_>>().join("&");
+    if let Some((instance, suffix)) = parts[2].rsplit_once('&') {
+        if suffix.len() == 4 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            parts[2] = instance.to_string();
+        }
+    }
+    parts.join("#")
+}
+
+fn preferred_interfaces(interfaces: &[HidInterface]) -> Vec<&HidInterface> {
+    let mut groups = std::collections::BTreeMap::new();
+    for interface in interfaces.iter().filter(|interface| interface.vendor_id == 0x046d
+        && interface.usage_page >= 0xff00 && interface.input_len >= 7 && interface.output_len >= 7) {
+        let rank = |interface: &HidInterface| (interface.input_len >= 20 && interface.output_len >= 20,
+            interface.usage_page == 0xff00 && interface.usage == 2);
+        let best = groups.entry(collection_group(interface)).or_insert(interface);
+        if rank(interface) > rank(best) { *best = interface; }
+    }
+    groups.into_values().collect()
 }
 
 #[cfg(test)]
@@ -1038,6 +1250,82 @@ mod tests {
         let steps = Arc::new(Mutex::new(steps.into()));
         (Transcript(Arc::clone(&steps)), steps)
     }
+    fn rate_queries() -> Vec<Step> {
+        vec![ping(),data(0,0,&[0x80,0x61],&[0]),data(0,0,&[0x80,0x60],&[2]),
+            data(2,0,&[],&[0x85]),data(2,1,&[],&[3]),data(0,0,&[0x81,0],&[0])]
+    }
+    #[test]
+    fn report_rate_bitmap_retains_non_power_of_two_intervals() {
+        let (channel,steps)=channel(rate_queries());
+        let info=Session::from_channel(channel,&target()).unwrap().rate_info(&target()).unwrap().unwrap();
+        assert_eq!(info.rate.current,Some(333));assert_eq!(info.rate.values,vec![1000,333,125]);
+        assert!(info.rate.writable);assert!(steps.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn report_rate_write_uses_advertised_raw_interval_and_requires_readback() {
+        let mut script=rate_queries();script.extend([data(2,2,&[8],&[]),data(2,1,&[],&[8])]);
+        let (channel,steps)=channel(script);
+        Session::from_channel(channel,&target()).unwrap().set_rate(&target(),125).unwrap();
+        assert!(steps.lock().unwrap().is_empty());
+        let mut script=rate_queries();script.extend([data(2,2,&[8],&[]),data(2,1,&[],&[3])]);
+        let (channel,steps)=self::channel(script);
+        assert!(Session::from_channel(channel,&target()).unwrap().set_rate(&target(),125).is_err());
+        assert!(steps.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn unsupported_report_rate_never_sends_a_write() {
+        let (channel,steps)=channel(rate_queries());
+        assert!(Session::from_channel(channel,&target()).unwrap().set_rate(&target(),8000).is_err());
+        assert!(steps.lock().unwrap().is_empty());
+    }
+    fn usb_rate_identity() -> Vec<u8> {
+        vec![1,1,2,3,4,0,8,0xc0,0x8b,0,0,0,0]
+    }
+    fn extended_rate_queries() -> Vec<Step> {
+        vec![ping(),data(0,0,&[0x80,0x61],&[2]),data(0,0,&[0,3],&[3]),
+            data(3,0,&[],&usb_rate_identity()),data(2,1,&[0],&[0,0x7f]),
+            data(2,2,&[0],&[3]),data(0,0,&[0x81,0],&[0])]
+    }
+    #[test]
+    fn extended_rate_selects_usb_capabilities_from_runtime_transport_identity() {
+        let (channel,steps)=channel(extended_rate_queries());
+        let info=Session::from_channel(channel,&target()).unwrap().rate_info(&target()).unwrap().unwrap();
+        assert_eq!(info.connection,Some(0));assert_eq!(info.rate.current,Some(1000));
+        assert_eq!(info.rate.values,vec![125,250,500,1000,2000,4000,8000]);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn extended_rate_write_takes_only_rate_code_then_verifies_the_same_link() {
+        let mut script=extended_rate_queries();script.extend([data(3,0,&[],&usb_rate_identity()),
+            data(2,3,&[6],&[]),data(3,0,&[],&usb_rate_identity()),data(2,2,&[0],&[6])]);
+        let (channel,steps)=channel(script);
+        Session::from_channel(channel,&target()).unwrap().set_rate(&target(),8000).unwrap();
+        assert!(steps.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn unknown_extended_rate_transport_is_not_treated_as_wired() {
+        let (channel,steps)=channel(vec![ping(),data(0,0,&[0x80,0x61],&[2]),
+            data(0,0,&[0,3],&[0])]);
+        assert!(Session::from_channel(channel,&target()).unwrap().rate_info(&target()).unwrap().is_none());
+        assert!(steps.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn onboard_mode_exposes_current_rate_without_enabling_live_writes() {
+        let mut script=rate_queries();script.pop();script.extend([data(0,0,&[0x81,0],&[4]),data(4,2,&[],&[1])]);
+        let (channel,steps)=channel(script);
+        let info=Session::from_channel(channel,&target()).unwrap().rate_info(&target()).unwrap().unwrap();
+        assert_eq!(info.rate.current,Some(333));assert!(!info.rate.writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn failed_mode_query_preserves_read_rate_without_write_permission() {
+        let mut script=rate_queries();script.pop();script.push(data(0,0,&[0x81,0],&[4]));
+        let mut failed=data(4,2,&[],&[]);failed.reply=Reply::Error(0xff,7);script.push(failed);
+        let (channel,steps)=channel(script);
+        let info=Session::from_channel(channel,&target()).unwrap().rate_info(&target()).unwrap().unwrap();
+        assert_eq!(info.rate.current,Some(333));assert!(!info.rate.writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
     fn dpi_queries() -> Vec<Step> {
         vec![
             ping(),
@@ -1046,6 +1334,75 @@ mod tests {
             data(2, 1, &[0, 0, 0], &[0, 1, 0x90, 3, 0x20, 6, 0x40, 0, 0]),
             data(2, 2, &[0], &[0, 3, 0x20, 3, 0x20]),
         ]
+    }
+
+    fn extended_queries(separate_axes: bool, x: u16, y: u16) -> Vec<Step> {
+        let flags = if separate_axes { 3 } else { 2 };
+        let mut script = vec![ping(), data(0, 0, &[0x22, 1], &[0]),
+            data(0, 0, &[0x22, 2], &[4]), data(4, 0, &[], &[1]),
+            data(4, 1, &[0], &[0, 0, flags]),
+            data(4, 2, &[0, 0, 0], &[0, 0, 0, 1, 0x90, 3, 0x20, 6, 0x40, 0, 0])];
+        if separate_axes { script.push(data(4, 2, &[0, 1, 0],
+            &[0, 1, 0, 1, 0x90, 3, 0x20, 6, 0x40, 0, 0])); }
+        let [xh, xl] = x.to_be_bytes();
+        let [yh, yl] = y.to_be_bytes();
+        script.push(data(4, 5, &[0], &[0, xh, xl, xh, xl, yh, yl, yh, yl, 2]));
+        script
+    }
+
+    #[test]
+    fn extended_dpi_reads_real_axes_and_never_calls_the_range_an_onboard_stage_list() {
+        let (channel, steps) = channel(extended_queries(true, 800, 1600));
+        let dpi = Session::from_channel(channel, &target()).unwrap().dpi().unwrap();
+        assert_eq!(dpi.current, Some(800));
+        assert_eq!(dpi.current_y, Some(1600));
+        assert_eq!(dpi.values, vec![400, 800, 1600]);
+        assert!(dpi.stages.is_empty());
+        assert!(!dpi.writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extended_dpi_write_preserves_lod_and_uses_zero_for_unsupported_y_axis() {
+        let mut script = extended_queries(false, 800, 0);
+        script.extend([data(0, 0, &[0x22, 1], &[0]), data(0, 0, &[0x81, 0], &[0]),
+            data(4, 1, &[0], &[0, 0, 2]), data(4, 5, &[0], &[0, 3, 0x20, 3, 0x20, 0, 0, 0, 0, 2]),
+            data(4, 6, &[0, 6, 0x40, 0, 0, 2], &[0]),
+            data(4, 5, &[0], &[0, 6, 0x40, 3, 0x20, 0, 0, 0, 0, 2])]);
+        let (channel, steps) = channel(script);
+        Session::from_channel(channel, &target()).unwrap().set_dpi(&target(), 1600).unwrap();
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extended_dpi_rejected_readback_restores_both_axes_and_original_lod() {
+        let mut script = extended_queries(true, 800, 800);
+        let original = [0, 3, 0x20, 3, 0x20, 3, 0x20, 3, 0x20, 2];
+        script.extend([data(0, 0, &[0x22, 1], &[0]), data(0, 0, &[0x81, 0], &[0]),
+            data(4, 1, &[0], &[0, 0, 3]), data(4, 5, &[0], &original),
+            data(4, 6, &[0, 6, 0x40, 6, 0x40, 2], &[0]), data(4, 5, &[0], &original),
+            data(4, 6, &[0, 3, 0x20, 3, 0x20, 2], &[0]), data(4, 5, &[0], &original)]);
+        let (channel, steps) = channel(script);
+        assert!(Session::from_channel(channel, &target()).unwrap().set_dpi(&target(), 1600)
+            .unwrap_err().contains("已恢复原值"));
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn long_collection_selection_does_not_merge_two_identical_receivers() {
+        let mut short = target().interface;
+        short.path = r"\\?\hid#vid_046d&pid_c547&mi_01&col01#8&abc&0&0000#{hid}".into();
+        short.input_len = 7; short.output_len = 7;
+        let mut long = short.clone();
+        long.path = r"\\?\hid#vid_046d&pid_c547&mi_01&col02#8&abc&0&0001#{hid}".into();
+        long.input_len = 20; long.output_len = 20; long.usage = 2;
+        let mut second = long.clone();
+        second.path = r"\\?\hid#vid_046d&pid_c547&mi_01&col02#8&def&0&0001#{hid}".into();
+        let interfaces = [short, long.clone(), second];
+        let chosen = preferred_interfaces(&interfaces);
+        assert_eq!(chosen.len(), 2);
+        assert!(chosen.iter().any(|interface| interface.path == long.path));
+        assert!(chosen.iter().all(|interface| interface.output_len == 20));
     }
 
     fn profile_bytes() -> Vec<u8> {
@@ -1497,6 +1854,7 @@ mod tests {
             },
             data(0, 0, &[0x81, 0], &[0]),
             data(0, 0, &[0x22, 1], &[0]),
+            data(0, 0, &[0x22, 2], &[0]),
         ]);
         let snapshot = Session::from_channel(channel, &target())
             .unwrap()

@@ -84,7 +84,7 @@ impl Edit {
     pub fn is_device(self) -> bool {
         matches!(
             self,
-            Edit::LowWarn | Edit::Dpi(_) | Edit::DpiColor(_) | Edit::LightColor
+            Edit::LowWarn | Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiColor(_) | Edit::LightColor
         )
     }
 }
@@ -93,6 +93,8 @@ impl Edit {
 pub enum Edit {
     /// 性能页：第 N 档 DPI 的数值（0–3）。
     Dpi(u8),
+    BasicDpiX(u8),
+    BasicDpiY(u8),
     /// 性能页：第 N 档 DPI 的颜色（0–3），6 位十六进制。
     DpiColor(u8),
     /// 电量页：低电量阈值（0–100）。
@@ -113,7 +115,7 @@ impl Edit {
     /// 最多几位。
     pub fn max_len(self) -> usize {
         match self {
-            Edit::Dpi(_) => 5,
+            Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_) => 5,
             Edit::DpiColor(_) | Edit::LightColor => 6,
             Edit::LowWarn => 3,
         }
@@ -186,7 +188,8 @@ pub enum Act {
     /// 应用某个输入框的值（输入框旁边的「应用」，或回车）。
     ApplyEdit(Edit),
     BasicDpi(u16),
-    BasicDpiStage(crate::device::DpiStage, u16),
+    BasicDpiStage(crate::device::DpiStage, crate::device::StageContext),
+    BasicPollingRate(u16),
     /// 点一下开关。
     Toggle(Pref),
     /// 拖动滑块到某个比例（0–1），拖拽过程中连续触发。
@@ -257,7 +260,7 @@ impl Act {
     /// 本地动作（切页、改本地设置）照常执行。
     pub fn needs_device(self) -> bool {
         match self {
-            Act::ApplyEdit(Edit::Dpi(_)) | Act::CommitSlide(Slide::Tune) => true,
+            Act::ApplyEdit(Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_)) | Act::CommitSlide(Slide::Tune) => true,
             Act::Backup | Act::Restore | Act::RefreshLighting => true,
             Act::Toggle(p) => p.needs_device(),
             Act::PickDrop(d, _) => d.needs_device(),
@@ -399,6 +402,7 @@ pub struct Ui {
     /// 用 `Vec` 而不是 `HashMap`：`Edit` 没实现 `Hash`，而这里最多十来个元素，
     /// 线性查找比哈希更快也更好读。
     pub edits: Vec<(Edit, String)>,
+    pub basic_dpi_drafts: std::collections::BTreeMap<u8, BasicDpiDraft>,
     /// 「草稿还是设备原值的副本、用户一个字符都没改过」的那个输入框。
     ///
     /// 有它才能做到**第一次敲键就替换掉预填值**：DPI 框点进去时草稿是
@@ -465,6 +469,22 @@ pub struct Ui {
     pub locked: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BasicDpiDraft {
+    pub device: String,
+    pub context: crate::device::StageContext,
+    pub stage: crate::device::DpiStage,
+    pub y: u16,
+}
+
+impl BasicDpiDraft {
+    pub fn from_snapshot(snapshot: &crate::backends::Snapshot, index: u8) -> Option<Self> {
+        Some(Self { device: snapshot.target.key.clone(), context: snapshot.dpi.stage_context()?,
+            stage: *snapshot.dpi.stages.iter().find(|stage|stage.index == index)?,
+            y: *snapshot.dpi.stage_y.get(&index)? })
+    }
+}
+
 impl Default for Ui {
     fn default() -> Self {
         Ui {
@@ -488,6 +508,7 @@ impl Default for Ui {
             drop_btn: None,
             focus: None,
             edits: Vec::new(),
+            basic_dpi_drafts: Default::default(),
             edit_fresh: None,
             hots: Vec::new(),
             chrome: Vec::new(),
@@ -545,6 +566,7 @@ impl Ui {
         self.open_drop = None;
         self.focus = None;
         self.edits.clear();
+        self.basic_dpi_drafts.clear();
         self.chart = None;
         self.live.fill(None);
     }
@@ -753,6 +775,12 @@ impl Ui {
     /// 丢掉某个输入框的草稿（提交成功 / 取消编辑后调用）。
     pub fn drop_edit(&mut self, e: Edit) {
         self.edits.retain(|(k, _)| *k != e);
+        if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
+            if !self.edits.iter().any(|(edit,_)|matches!(edit,
+                Edit::BasicDpiX(other) | Edit::BasicDpiY(other) if *other == index)) {
+                self.basic_dpi_drafts.remove(&index);
+            }
+        }
         if self.edit_fresh == Some(e) {
             self.edit_fresh = None;
         }

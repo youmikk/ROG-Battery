@@ -1,10 +1,107 @@
 //! nRF54L 鼠标状态报告，只读电量及当前 DPI。
 use super::*;
 use crate::hid::HidDevice;
+use std::{
+    collections::BTreeMap,
+    sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 pub struct Rapoo;
 const VID: u16 = 0x24ae;
 const STATUS_REPORT: u8 = 7;
+// VT1 实机会约每三秒上报一次。连接必须跨越刷新轮次保留，不能靠短暂打开碰回帧。
+const FIRST_REPORT_WAIT: Duration = Duration::from_secs(4);
+const SAMPLE_LIFETIME: Duration = Duration::from_secs(8);
+
+#[derive(Default)]
+struct StatusState {
+    sample: Option<(Instant, Option<(Battery, Dpi)>, usize)>,
+    failed: bool,
+}
+
+impl StatusState {
+    fn receive(&mut self, frame: &[u8], now: Instant) {
+        if frame.first() == Some(&STATUS_REPORT) {
+            if let Some(parsed) = parse_status(frame) {
+                self.sample = Some((now, Some(parsed), frame.len()));
+            } else if frame.len() >= 9 && frame[7] == 0 && frame[2] <= 6 {
+                // 完整的离线状态保留为状态证据；损坏报文不覆盖最后有效电量。
+                self.sample = Some((now, None, frame.len()));
+            }
+        }
+    }
+
+    fn recent(&self, now: Instant) -> Option<&(Instant, Option<(Battery, Dpi)>, usize)> {
+        (!self.failed).then(|| self.sample.as_ref())
+            .flatten().filter(|sample| now.saturating_duration_since(sample.0) < SAMPLE_LIFETIME)
+    }
+}
+
+#[derive(Default)]
+struct StatusReader {
+    state: Mutex<StatusState>,
+    changed: Condvar,
+    stop: AtomicBool,
+}
+
+static READERS: OnceLock<Mutex<BTreeMap<String, Arc<StatusReader>>>> = OnceLock::new();
+
+fn readers() -> &'static Mutex<BTreeMap<String, Arc<StatusReader>>> {
+    READERS.get_or_init(Default::default)
+}
+
+fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
+    let mut sessions = readers().lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(session) = sessions.get(&interface.path) {
+        if !session.state.lock().unwrap_or_else(|error| error.into_inner()).failed {
+            return Arc::clone(session);
+        }
+        session.stop.store(true, Ordering::Release);
+    }
+    let session = Arc::new(StatusReader::default());
+    sessions.insert(interface.path.clone(), Arc::clone(&session));
+    let worker = Arc::clone(&session);
+    let interface = interface.clone();
+    let spawned = std::thread::Builder::new().name("rapoo-status".into()).spawn(move || {
+        // HID 句柄只在拥有它的线程中使用；界面只读取经校验的采样。
+        let started = Instant::now();
+        let mut device = match HidDevice::open(&interface) {
+            Ok(device) => device,
+            Err(_) => {
+                worker.state.lock().unwrap_or_else(|error| error.into_inner()).failed = true;
+                worker.changed.notify_all();
+                trace::record(&interface, BackendId::Rapoo, "open-status", 0,
+                    STATUS_REPORT, 0, 0, started, trace::Outcome::NoReply);
+                return;
+            }
+        };
+        while !worker.stop.load(Ordering::Acquire) {
+            // 无回帧时继续等下一帧，超时不关闭接口，也不重置仍在有效期内的采样。
+            let read_started = Instant::now();
+            if let Some(frame) = device.read_report(400) {
+                if frame.first() == Some(&STATUS_REPORT) {
+                    trace::record(&interface, BackendId::Rapoo, "receive-status", 0,
+                        STATUS_REPORT, 0, frame.len(), read_started,
+                        if parse_status(&frame).is_some() { trace::Outcome::Ok } else { trace::Outcome::InvalidData });
+                }
+                let mut state = worker.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.receive(&frame, Instant::now());
+                worker.changed.notify_all();
+            } else if read_started.elapsed() < Duration::from_millis(100) {
+                // 拔出设备等立即失败不能形成忙循环；下一轮枚举会重建监听。
+                worker.state.lock().unwrap_or_else(|error| error.into_inner()).failed = true;
+                worker.changed.notify_all();
+                break;
+            }
+        }
+    });
+    if spawned.is_err() {
+        session.state.lock().unwrap_or_else(|error| error.into_inner()).failed = true;
+        session.changed.notify_all();
+    }
+    session
+}
 
 // 型号与协议归属：Rapoo AHUB 官方 VT_nrf54L 清单。
 fn model(pid: u16) -> Option<&'static str> {
@@ -135,6 +232,12 @@ fn parse_status(frame: &[u8]) -> Option<(Battery, Dpi)> {
 
 impl DeviceBackend for Rapoo {
     fn discover(&self, _: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
+        // 用完整接口路径隔离设备；拔出后停止旧监听，重连不沿用旧采样。
+        readers().lock().unwrap_or_else(|error| error.into_inner()).retain(|path, session| {
+            let present = interfaces.iter().any(|interface| is_control(interface) && &interface.path == path);
+            if !present { session.stop.store(true, Ordering::Release); }
+            present
+        });
         Ok(interfaces
             .iter()
             .filter(|interface| is_control(interface))
@@ -151,42 +254,14 @@ impl DeviceBackend for Rapoo {
         if !is_control(&target.interface) {
             return Err(crate::tr!("此雷柏型号尚未适配").into());
         }
-        let started = std::time::Instant::now();
-        let mut reply = crate::hid::query_report(&target.interface, STATUS_REPORT, false, 120);
-        if reply
-            .as_ref()
-            .and_then(|frame| parse_status(frame))
-            .is_none()
-        {
-            let mut device = match HidDevice::open(&target.interface) {
-                Ok(device) => device,
-                Err(error) => {
-                    trace::record(
-                        &target.interface,
-                        BackendId::Rapoo,
-                        "open-status",
-                        0,
-                        STATUS_REPORT,
-                        0,
-                        0,
-                        started,
-                        trace::Outcome::NoReply,
-                    );
-                    return Err(error);
-                }
-            };
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(180);
-            while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
-                let Some(frame) = device.read_report(remaining.as_millis().max(1) as u32) else {
-                    break;
-                };
-                if parse_status(&frame).is_some() {
-                    reply = Some(frame);
-                    break;
-                }
-            }
-        }
-        let parsed = reply.as_ref().and_then(|frame| parse_status(frame));
+        let started = Instant::now();
+        let session = status_reader(&target.interface);
+        let state = session.state.lock().unwrap_or_else(|error| error.into_inner());
+        let (state, _) = session.changed.wait_timeout_while(state, FIRST_REPORT_WAIT,
+            |state| !state.failed && state.recent(Instant::now()).is_none())
+            .unwrap_or_else(|error| error.into_inner());
+        let sample = state.recent(Instant::now());
+        let parsed = sample.and_then(|sample| sample.1.clone());
         trace::record(
             &target.interface,
             BackendId::Rapoo,
@@ -194,11 +269,11 @@ impl DeviceBackend for Rapoo {
             0,
             STATUS_REPORT,
             0,
-            reply.as_ref().map(Vec::len).unwrap_or(0),
+            sample.map(|sample| sample.2).unwrap_or(0),
             started,
             if parsed.is_some() {
                 trace::Outcome::Ok
-            } else if reply.is_some() {
+            } else if sample.is_some() {
                 trace::Outcome::InvalidData
             } else {
                 trace::Outcome::NoReply
@@ -211,6 +286,7 @@ impl DeviceBackend for Rapoo {
             battery: Some(battery),
             dpi,
             connected: true,
+            battery_at: sample.map(|sample| sample.0), polling_rate: Default::default(),
         })
     }
 }
@@ -280,5 +356,56 @@ mod tests {
         let mut frame = report();
         frame[5] = 0x40;
         assert_eq!(parse_status(&frame).unwrap().1.current, None);
+    }
+
+    #[test]
+    fn telemetry_remains_available_between_three_second_reports_then_expires() {
+        let started = Instant::now();
+        let mut state = StatusState::default();
+        state.receive(&report(), started);
+        assert_eq!(state.recent(started + Duration::from_secs(3)).unwrap().1.as_ref().unwrap().0.percent, Some(75));
+        state.receive(&report(), started + Duration::from_secs(3));
+        assert!(state.recent(started + Duration::from_secs(10)).is_some());
+        assert!(state.recent(started + Duration::from_secs(11)).is_none());
+    }
+
+    #[test]
+    fn offline_status_clears_the_previous_battery_and_next_report_recovers() {
+        let now = Instant::now();
+        let mut state = StatusState::default();
+        let mut frame = report();
+        state.receive(&frame, now);
+        frame[7] = 0;
+        state.receive(&frame, now);
+        assert!(state.recent(now).unwrap().1.is_none());
+        frame[7] = 1;
+        frame[8] = 70;
+        state.receive(&frame, now);
+        assert_eq!(state.recent(now).unwrap().1.as_ref().unwrap().0.percent, Some(70));
+        state.failed = true;
+        assert!(state.recent(now).is_none());
+    }
+
+    #[test]
+    fn unrelated_reports_cannot_clear_or_refresh_the_battery_sample() {
+        let now = Instant::now();
+        let mut state = StatusState::default();
+        state.receive(&report(), now);
+        state.receive(&[6, 1, 2, 3], now + Duration::from_secs(7));
+        assert!(state.recent(now + SAMPLE_LIFETIME).is_none());
+    }
+
+    #[test]
+    fn invalid_or_truncated_status_cannot_replace_or_extend_valid_battery() {
+        let now = Instant::now();
+        let mut state = StatusState::default();
+        state.receive(&report(), now);
+        let mut invalid = report(); invalid[8] = 255;
+        state.receive(&invalid, now + Duration::from_secs(3));
+        state.receive(&[7, 0, 0], now + Duration::from_secs(6));
+        let sample = state.recent(now + Duration::from_secs(7)).unwrap();
+        assert_eq!(sample.0, now);
+        assert_eq!(sample.1.as_ref().unwrap().0.percent, Some(75));
+        assert!(state.recent(now + SAMPLE_LIFETIME).is_none());
     }
 }

@@ -74,22 +74,34 @@ pub struct DeviceReading {
     pub family: DeviceFamily,
     pub battery: Option<Battery>,
     pub connected: bool,
+    pub quality: ReadingQuality,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReadingQuality {
+    #[default]
+    Live,
+    Cached,
+    Stale,
+    Unknown,
 }
 
 impl DeviceReading {
     pub fn percent(&self) -> Option<u8> {
-        self.connected
+        (self.connected && matches!(self.quality, ReadingQuality::Live | ReadingQuality::Cached))
             .then(|| self.battery.as_ref()?.percent)
             .flatten()
             .filter(|percent| *percent <= 100)
     }
 
     pub fn is_charging(&self) -> bool {
-        self.connected && self.battery.as_ref().and_then(|battery| battery.charging) == Some(true)
+        self.connected && self.quality == ReadingQuality::Live
+            && self.battery.as_ref().and_then(|battery| battery.charging) == Some(true)
     }
 
     pub fn is_low(&self) -> bool {
         self.connected
+            && self.quality == ReadingQuality::Live
             && !self.is_charging()
             && match self.percent() {
                 Some(percent) => percent <= 20,
@@ -104,7 +116,7 @@ impl DeviceReading {
     }
 
     pub fn coarse_level(&self) -> Option<BatteryLevel> {
-        self.connected
+        (self.connected && matches!(self.quality, ReadingQuality::Live | ReadingQuality::Cached))
             .then(|| self.battery.as_ref()?.level)
             .flatten()
     }
@@ -130,12 +142,24 @@ pub struct Battery {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Dpi {
     pub current: Option<u16>,
+    pub current_y: Option<u16>,
     pub values: Vec<u16>,
     pub writable: bool,
     pub stages: Vec<DpiStage>,
     pub active_stage: Option<u8>,
     pub profile: Option<u16>,
+    /// Fingerprint of the complete configuration when the protocol has no profile ID.
+    pub configuration_token: Option<u64>,
     pub stage_writable: bool,
+    pub stage_editable: bool,
+    pub stage_y: std::collections::BTreeMap<u8, u16>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PollingRate {
+    pub current: Option<u16>,
+    pub values: Vec<u16>,
+    pub writable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +169,31 @@ pub struct DpiStage {
     pub value: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageContext {
+    Profile(u16),
+    Configuration(u64),
+}
+
+impl StageContext {
+    pub fn profile(self) -> Result<u16, String> {
+        match self {
+            Self::Profile(profile) => Ok(profile),
+            _ => Err("设备配置已变化，请刷新后重试".into()),
+        }
+    }
+}
+
 impl Dpi {
+    pub fn stage_context(&self) -> Option<StageContext> {
+        self.configuration_token.map(StageContext::Configuration)
+            .or_else(|| self.profile.map(StageContext::Profile))
+    }
+    pub fn disable_writes(&mut self) {
+        self.writable = false;
+        self.stage_writable = false;
+        self.stage_editable = false;
+    }
     pub fn quick_values(&self) -> Vec<u16> {
         let mut values = Vec::new();
         if let Some(current) = self.current {

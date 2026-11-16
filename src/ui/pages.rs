@@ -712,7 +712,8 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let mut x = c.x;
     for (page, label) in tabs {
         if let Some(basic) = d.basic {
-            if matches!(page, Page::Light | Page::Keys) || (page == Page::Perf && basic.dpi.current.is_none()) { continue; }
+            if matches!(page, Page::Light | Page::Keys) || (page == Page::Perf
+                && basic.dpi.current.is_none() && basic.polling_rate.current.is_none()) { continue; }
         }
         if page != Page::Battery && !is_mouse {
             continue;
@@ -846,7 +847,8 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     // 的内容要么是本地设置、要么是只读展示，锁了反而没法用。
     // 占位状态（`State::default()`）也算读不到 —— 否则开关/下拉照常可点。
     ui.locked = !d.state.is_some_and(|s| !placeholder_state(s));
-    if let Some(basic) = d.basic { ui.locked = !basic.connected || !basic.dpi.writable; }
+    if let Some(basic) = d.basic { ui.locked = !basic.connected ||
+        !(basic.dpi.writable || basic.dpi.stage_writable || basic.dpi.stage_editable || basic.polling_rate.writable); }
 
     let mut c = Cursor::new(f);
     if !matches!(ui.page, Page::Home | Page::Settings) {
@@ -2032,6 +2034,35 @@ fn known_state<'a>(d: &'a Data) -> Option<&'a crate::proto::State> {
 }
 
 fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot, c: &mut Cursor) {
+    if !basic.dpi.stage_y.is_empty() && !basic.dpi.stages.is_empty() {
+        c.h2(p,crate::tr!("DPI 档位"),true);
+        let card = c.card(p,48.0 * basic.dpi.stages.len() as f32 + 12.0);
+        for (position,stage) in basic.dpi.stages.iter().enumerate() {
+            let row = R::new(card.x + 18.0,card.y + 6.0 + position as f32 * 48.0,card.w - 36.0,48.0);
+            let active = basic.dpi.active_stage == Some(stage.index);
+            p.text(&crate::trf!("档位 {}", position + 1),R::new(row.x,row.y,66.0,row.h),12.0,active,
+                if active {p.t.accent} else {p.t.text2},Align::Left);
+            for (column,edit,value,axis) in [(0,Edit::BasicDpiX(stage.index),Some(stage.value),"X"),
+                (1,Edit::BasicDpiY(stage.index),basic.dpi.stage_y.get(&stage.index).copied(),"Y")] {
+                let x = row.x + 70.0 + column as f32 * 106.0;
+                p.text(axis,R::new(x,row.y,14.0,row.h),11.5,false,p.t.text3,Align::Left);
+                let r = R::new(x + 18.0,row.cy()-15.0,80.0,30.0);
+                let text = ui.edit_text(edit).map(str::to_string).or_else(|| value.map(|v|v.to_string())).unwrap_or_else(||"—".into());
+                num_box(p,r,&text,ui.focus==Some(edit));
+                if basic.connected && basic.dpi.stage_editable { ui.hot(r,Act::Focus(edit)); }
+            }
+            if basic.connected && basic.dpi.stage_editable {
+                button(p,ui,R::new(row.right()-130.0,row.cy()-15.0,60.0,30.0),crate::tr!("应用"),false,
+                    Act::ApplyEdit(Edit::BasicDpiX(stage.index)));
+                if let Some(context) = basic.dpi.stage_context() {
+                    button(p,ui,R::new(row.right()-62.0,row.cy()-15.0,62.0,30.0),
+                        if active {crate::tr!("当前")} else {crate::tr!("切换")},active,Act::BasicDpiStage(*stage,context));
+                }
+            }
+        }
+        c.y = card.bottom();
+        return;
+    }
     let configured = !basic.dpi.stages.is_empty();
     c.h2(p, if configured { crate::tr!("DPI 档位") } else { "DPI" }, true);
     let choices: Vec<_> = if configured { basic.dpi.stages.clone() } else {
@@ -2051,7 +2082,9 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot, c:
         button(p, ui, R::new(control.right() - 65.0, control.cy() - 15.0, 65.0, 30.0),
             crate::tr!("应用"), false, Act::ApplyEdit(edit));
     } else {
-        let text = basic.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "—".into());
+        let text = basic.dpi.current.map(|dpi| match basic.dpi.current_y {
+            Some(y) if y != dpi => format!("X {dpi} / Y {y}"), _ => dpi.to_string()
+        }).unwrap_or_else(|| "—".into());
         p.text(&text, control, font::BODY, true, p.t.text, Align::Right);
     }
     if !choices.is_empty() {
@@ -2069,7 +2102,7 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot, c:
                 if active { t.accent } else if can_write { t.text2 } else { t.text3 }, Align::Center);
             if can_write {
                 if configured {
-                    if let Some(profile) = basic.dpi.profile { ui.hot(r, Act::BasicDpiStage(*stage, profile)); }
+                    if let Some(context) = basic.dpi.stage_context() { ui.hot(r, Act::BasicDpiStage(*stage, context)); }
                 } else { ui.hot(r, Act::BasicDpi(stage.value)); }
             }
         }
@@ -2080,6 +2113,26 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot, c:
 fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     if let Some(basic) = d.basic {
         basic_dpi(p, ui, basic, c);
+        if basic.polling_rate.current.is_some() || !basic.polling_rate.values.is_empty() {
+            c.h2(p,crate::tr!("回报率"),false);
+            let rate = &basic.polling_rate;
+            let card = c.card(p, if rate.values.is_empty() {layout::ROW_H} else {102.0});
+            let control = row_label(p,row_area(card,card.y),crate::tr!("回报率"),None,140.0);
+            let text = rate.current.map(|hz|format!("{hz} Hz")).unwrap_or_else(||"—".into());
+            p.text(&text,control,font::BODY,true,p.t.text,Align::Right);
+            if !rate.values.is_empty() {
+                let area = R::new(card.x + 18.0,card.bottom()-49.0,card.w-36.0,36.0);
+                let width = area.w / rate.values.len() as f32;
+                for (position,hz) in rate.values.iter().enumerate() {
+                    let r = R::new(area.x + position as f32 * width,area.y,width-5.0,area.h);
+                    let active = rate.current == Some(*hz);
+                    if basic.connected && rate.writable {
+                        button(p,ui,r,&hz.to_string(),active,Act::BasicPollingRate(*hz));
+                    } else { p.text(&hz.to_string(),r,12.0,active,p.t.text3,Align::Center); }
+                }
+            }
+            c.y = card.bottom();
+        }
         return;
     }
     let t = p.t;

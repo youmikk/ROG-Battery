@@ -2,19 +2,21 @@
 
 [简体中文](README.md) | **English**
 
-A lightweight peripheral battery monitor and mouse settings utility for Windows, with detailed ROG support and battery adapters for Logitech, Rapoo, VGN and standard HID. It communicates through Windows HID interfaces, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
+A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse and MCHOSE devices and standard HID battery queries. It communicates through Windows HID interfaces, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
-## Version 1.4.4
+Support covers selected devices with implemented protocols, not entire brands. New mouse and headset adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
-- Adds Logitech HID++ 1.0 / 2.0 and standard HID battery queries, pending per-model hardware validation.
-- Supported Logitech mice expose their actual onboard DPI stages, including the fifth stage, for switching from the main window or tray.
-- Adds read-only Rapoo nRF54L battery and current DPI queries, with 77 official driver model entries pending hardware validation.
-- Adds VGN V98 Pro V3 battery queries; wired readings have been verified on hardware.
-- Adds a device compatibility feedback entry and sanitized reports for user-assisted testing.
-- Each backend polls and processes commands independently, retaining existing detailed ROG controls.
-- Fixes invalid battery readings, temporary identity query failures and paginated Logitech DPI lists.
+## Version 1.4.5
+
+- Adds battery, actual X/Y DPI stages and polling-rate capabilities for selected VGN / VXE / ATK mice.
+- Adds Razer battery and settings support, with stage switching, editing and rate controls on reviewed connections.
+- Adds read-only battery, stage and rate queries for selected Lamzu / WLMouse devices.
+- Adds ATK N9 V2 Ultimate and MCHOSE V9 Turbo+ headset battery queries.
+- Extends Logitech DPI and polling-rate controls with readback verification.
+- Fixes intermittently unknown Rapoo battery readings during continuous reports; Rapoo DPI remains read-only.
+- Improves temporary read failures, cache expiry and identity changes while retaining existing ROG controls.
 
 ## Getting started
 
@@ -41,7 +43,7 @@ The default is **Follow system**, which uses the Windows **display language**. M
 | Feature | Details |
 | --- | --- |
 | Battery | Battery level, charging state, device information, 48-hour history, and runtime estimates. |
-| Mouse performance | Four DPI stages, polling rate, debounce, angle snapping, angle tuning and lift-off distance on supported ROG models; numerical DPI control or actual onboard stage switching on supported Logitech models. |
+| Mouse performance | Existing detailed ROG DPI, polling-rate, debounce and related settings; other mice expose numerical DPI, actual stage switching, X/Y stage editing and rates according to protocol capabilities. Rapoo currently provides read-only current DPI. |
 | Buttons | Button remapping, configuration export, and backup restoration on supported models. |
 | Lighting | Opens Windows Dynamic Lighting; Windows manages the effects. |
 | Settings | Theme, startup, close behavior, refresh interval, storage locations, and diagnostic logs. |
@@ -116,7 +118,7 @@ Keep the version in `Cargo.toml` aligned with the four-part Store version in `ms
 
 ## Feedback and license
 
-Version 1.4.4 adds Logitech HID++ 1.0 / 2.0, standard HID, Rapoo nRF54L and VGN V98 Pro V3 battery adapters, with independent polling for each backend and existing ROG settings retained. The Rapoo catalogue covers 77 model entries listed by the official driver. Supported Logitech mice in onboard mode expose their actual configured DPI stages, including the fifth stage, for switching from the main window or tray. Host mode retains validated numerical DPI controls; common-value buttons are not G HUB's configured stages. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status.
+Backends poll independently and existing ROG controls are retained. Mouse, keyboard and headset support is assessed separately; a brand name alone does not establish compatibility. Supported Logitech onboard modes retain actual stages, including the fifth stage; common-value buttons are not G HUB's configured stages. Rapoo currently reads battery and current DPI on selected nRF54L mice without stage switching. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status.
 
 The `devices` command reads device status; `device-report` exports descriptors and the current process's query summary. `device-report --probe` runs read-only queries first and exports battery, charging status, current DPI, available onboard stages and communication results from the same process for user-assisted testing. Reports exclude payloads and unique device identifiers and are never uploaded automatically.
 

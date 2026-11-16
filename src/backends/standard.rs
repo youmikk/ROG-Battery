@@ -263,19 +263,19 @@ impl DeviceBackend for StandardHid {
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let now = std::time::Instant::now();
         if let Some(percent) = percent {
-            cache.insert(target.key.clone(), (percent, std::time::Instant::now()));
-        } else {
-            percent = cache
-                .get(&target.key)
-                .filter(|(_, taken)| taken.elapsed().as_secs() <= 300)
-                .map(|(percent, _)| *percent);
+            cache.insert(target.key.clone(), (percent, now));
         }
-        cache.retain(|_, (_, taken)| taken.elapsed().as_secs() <= 300);
+        cache.retain(|_, (_, taken)| now.saturating_duration_since(*taken) < BackendId::StandardHid.sample_lifetime());
+        let sample = cache.get(&target.key).copied();
+        percent = sample.map(|(value,_)|value);
+        let battery_at = sample.map(|(_,measured)|measured);
         drop(cache);
         Ok(Snapshot {
             target: target.clone(),
             connected: true,
+            battery_at, polling_rate: Default::default(),
             dpi: Dpi::default(),
             battery: Some(Battery {
                 percent,

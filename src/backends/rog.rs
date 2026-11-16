@@ -101,6 +101,7 @@ impl DeviceBackend for Rog {
         Ok(Snapshot {
             target,
             connected,
+            battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
             dpi,
             battery: outcome.snapshot.battery(),
         })

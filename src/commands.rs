@@ -45,7 +45,9 @@ pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
     let label = cmd.label();
     let basic_result = match cmd {
         Cmd::BasicDpi { target, dpi } => Some(crate::backends::set_dpi(target, *dpi)),
-        Cmd::BasicDpiStage { target, stage, profile } => Some(crate::backends::set_dpi_stage(target, *stage, *profile)),
+        Cmd::BasicDpiStage { target, stage, context } => Some(crate::backends::set_dpi_stage(target, *stage, *context)),
+        Cmd::BasicDpiEdit { target, stage, context, expected_y, x, y } => Some(crate::backends::edit_dpi_stage(target, *stage, *context, *expected_y, *x, *y)),
+        Cmd::BasicPollingRate { target, hz } => Some(crate::backends::set_polling_rate(target, *hz)),
         _ => None,
     };
     if let Some(result) = basic_result {
@@ -150,7 +152,8 @@ pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
             // 上面已提前返回 / 由下面的文件分支处理。写这两支是为了让 match
             // 保持穷尽 —— 将来加新 `Cmd` 变体时编译器会在这里提醒。
             Cmd::AutoStart(_) => unreachable!("AutoStart 在 open_link 之前已分叉"),
-            Cmd::BasicDpi { .. } | Cmd::BasicDpiStage { .. } => unreachable!("BasicDpi 由品牌适配器处理"),
+            Cmd::BasicDpi { .. } | Cmd::BasicDpiStage { .. } | Cmd::BasicDpiEdit { .. }
+                | Cmd::BasicPollingRate { .. } => unreachable!("设备设置由品牌适配器处理"),
             Cmd::Backup(_) | Cmd::Restore(_) => unreachable!("文件命令单独处理"),
         }
     })();
