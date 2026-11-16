@@ -36,13 +36,14 @@ impl Status {
         }
         let valid = battery.filter(|battery| {
             battery.percent.is_none_or(|percent| percent <= 100)
+                && battery.estimated_percent.is_none_or(|percent| percent <= 100)
                 && (battery.percent.is_some() || battery.level.is_some()
-                    || battery.charging.is_some() || battery.voltage_mv.is_some())
+                    || battery.estimated_percent.is_some() || battery.charging.is_some() || battery.voltage_mv.is_some())
         });
         if connected == Some(true) {
             if let Some(battery) = valid {
                 // 只有电量字段本身的有效回报才能延长电量采样寿命。
-                if battery.percent.is_some() || battery.level.is_some() {
+                if battery.percent.is_some() || battery.level.is_some() || battery.estimated_percent.is_some() {
                     let measured = measured.unwrap_or(now).min(now);
                     if self.measured_at.is_none_or(|previous| measured > previous) {
                         self.measured_at = Some(measured);
@@ -69,7 +70,7 @@ mod tests {
     use super::*;
 
     fn battery(percent: u8) -> Battery {
-        Battery { percent: Some(percent), charging: Some(false), voltage_mv: None,
+        Battery { estimated_percent: None, percent: Some(percent), charging: Some(false), voltage_mv: None,
             approximate: false, level: None }
     }
 

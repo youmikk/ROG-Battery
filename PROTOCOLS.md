@@ -18,6 +18,7 @@
 | [Non-Synapse-Mouse](https://github.com/Damnedapa/Non-Synapse-Mouse/tree/267cf595507a9ca1617019885a99ee601b792d06) | `267cf59` | `Non_Synapse_Mouse.py`；Windows 功能报告传输、transaction ID 探测、busy 重试、DPI 读写及界面缓存 | 源文件声明 GPL-3.0-or-later |
 | [orpheus](https://github.com/lindestad/orpheus/tree/693538c8dc885340eff0b4844ed82f37de48b76d) | `693538c` | `src/protocols.rs`、`Cargo.toml`；Feature64、EEPROM16、IPI Pix、HID++、Razer 的传输与能力边界 | MIT |
 | [Voltide](https://github.com/sdparklab/Voltide/tree/c1872c4c93124d62c05bf5887fe89c32c6be8dd6) | `c1872c4` | `Core/DeviceManager.cs`、`Core/Models.cs`、`Interop/HidNative.cs`；`Providers/` 中 Vxe、ATKA9Airadd、Rapoo、Razer、Mchose、AsusHeadset、ATKN9V2Ultimate、MchoseV9Headset、DualSense、XInput 实现 | MIT，Copyright (c) 2026 Joko |
+| [HeadsetControl](https://github.com/Sapd/HeadsetControl/tree/62e361b085d7716805a3bf524bc9cca3761e0e15) | `62e361b` | `lib/devices/steelseries_arctis_nova_5.hpp`、`steelseries_arctis_nova_7.hpp`、`steelseries_arctis_nova_7p.hpp`、`steelseries_arctis_nova_3p_wireless.hpp`、`protocols/steelseries_protocol.hpp`；Nova 型号、状态布局和电量代际 | GPL-3.0 |
 
 Logitech 官方 `Logitech/Logitech-HIDPP` 仓库在本次访问时返回 404，未将其内容作为已核对证据。HID++ 命令交叉核对 Solaar、libratbag 和 OpenMouse 的实际实现。
 
@@ -115,6 +116,7 @@ Razer 适配接入统一状态和能力模型，支持有效电量、独立充�
 - [x] 明确提示会修改板载 DPI 的协议；预设不能绕过尚未实现的 DPI 写入，身份暂缺、配置变化和离线时不沿用写入授权。
 - [x] 接入雷柏 nRF54L 当前配置的完整 X/Y 档位读取与基础切换，协议回归通过；实机切档、休眠与官方驱动共存验收待完成。
 - [ ] 优先接入上游有明确实现的多品牌电量协议，分别记录鼠标、键盘、耳机和手柄的覆盖及验证状态。
+- [x] 接入迈从 20 字节键盘状态与 Z75S 型号握手，Arctis Nova 百分比 / 等级状态；协议与刷新回归通过，对应硬件验收待完成。
 
 协议与验证方面继续推进：
 
@@ -138,3 +140,13 @@ FF00:000E Output 33 字节和 FF00:000F Feature 33 字节按 Windows 实例与 U
 公开实现未确认 ACK 的地址或事务回显，因此读取前后检查配置号，逆序重复读取两轴，并与状态报告的档位及两轴相符后才显示可切换。操作绑定完整配置指纹；只写一个激活索引，失败不重发或盲目回滚，读回整表后再等新的状态报告。查询失败保留独立电量；两秒通信预算限制单次配置读取。未开放雷柏数值编辑或软件预设写入。
 
 此实现仍需实机验证。协议模拟不能证明驱动并发时绝无竞态，也不能证明各固件都使用相同布局。当前官方驱动是协议事实依据，未分发其脚本。
+
+## 开发中：键盘与耳机电量
+
+迈从键盘结合 Voltide `MchoseProvider.cs` 的 Windows SET_REPORT 与抓包字段，以及 FerrisPulse `MchoseDeviceHelper.cs` 的 Z75S 型号握手。两者都使用 20 字节 Report 13，但 FA09 的实测控制传输与 Z75S 的中断 OUT 分开处理，不在超时后盲目换端点重发。电量应答必须为 `13 4A 01 00 02` 开头，末字节为前 19 字节之和；第 5 字节为百分比，第 6 字节高半字节为充电标志。请求回显载荷长为零，不是 0% 读数。共用 PID 不足以确认具体键盘型号。
+
+Arctis Nova 的型号与状态偏移由 HeadsetControl 交叉核对，Windows 65 字节传输和 Nova 5 报文由 FerrisPulse 提供补充证据。去掉 Windows report ID 0 后，B0 命令的 Nova 5 / 3 Wireless 布局分别在偏移 1、3、4 提供连接、百分比和充电；Nova 7 在偏移 2、3 提供电量和状态。Nova 7 的等级 / 百分比语义按 PID 决定，不能用原始值小于等于 4 来猜测。旧型号的 0～4 保留原始等级，并以 0/25/50/75/100 作为带 ≈ 的显示估值；不写入精确测量字段。未确认状态拒绝或保留未知，不把任意非离线值当作有效连接。
+
+这批实现只读电量，沿用每接口串行通信、采样时间、缓存过期和脱敏诊断。不引入上游代码或资源。范围、传输限制和未完成实机验证见兼容性文档。
+
+后续手柄研究发现 Voltide 的 XInput 适配把有线连接显示为 100% 充电，并把四级电量映射成未标注的百分比；有线模式不证明满电或充电，等级换算必须带 ≈，不当作精确测量。DualSense 的十级电量及蓝牙报告完整性需另行核对后接入。

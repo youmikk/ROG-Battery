@@ -32,6 +32,7 @@ fn battery(r: &[u8]) -> Option<Battery> {
         _ => return None,
     };
     Some(Battery {
+        estimated_percent: None,
         percent: Some(r[2]),
         charging: Some(charging),
         voltage_mv: None,

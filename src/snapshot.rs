@@ -41,6 +41,7 @@ impl Snapshot {
     pub fn battery(&self) -> Option<crate::device::Battery> {
         if !self.parsed_frame("12:07:00") || self.state.power > 100 { return None; }
         Some(crate::device::Battery {
+            estimated_percent: None,
             percent: Some(self.state.power), charging: Some(self.state.charging != 0),
             voltage_mv: Some(self.state.voltage_mv), approximate: false, level: None,
         })

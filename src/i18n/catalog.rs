@@ -33,6 +33,7 @@ macro_rules! tr {
     ("VGN 电量响应无效") => { $crate::i18n::translate("VGN 电量响应无效") };
     ("电量极低") => { if $crate::i18n::english() { "Critical battery" } else { "电量极低" } };
     ("电量良好") => { if $crate::i18n::english() { "Battery good" } else { "电量良好" } };
+    ("电量中等") => { if $crate::i18n::english() { "Battery medium" } else { "电量中等" } };
     ("电量充足") => { if $crate::i18n::english() { "Battery full" } else { "电量充足" } };
     ("电量未知") => { if $crate::i18n::english() { "Battery unknown" } else { "电量未知" } };
     ("导出设备适配报告") => { if $crate::i18n::english() { "Export device compatibility report" } else { "导出设备适配报告" } };
@@ -519,6 +520,10 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "连接设备后会自动显示。" => "Devices appear here when connected.",
         "正在充电" => "Charging",
         "电量偏低" => "Low battery",
+        "电量极低" => "Critical battery",
+        "电量中等" => "Battery medium",
+        "电量良好" => "Battery good",
+        "电量充足" => "Battery full",
         "使用中" => "In use",
         "未连接" => "Disconnected",
         "已连接" => "Connected",

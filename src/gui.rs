@@ -262,7 +262,8 @@ fn persist_device_order(shared: &Arc<Mutex<Shared>>, order: Vec<String>) {
 }
 
 fn low_battery_reading(reading: &crate::device::DeviceReading, armed: &mut bool) -> Option<u8> {
-    if reading.quality != crate::device::ReadingQuality::Live { return None; }
+    if reading.quality != crate::device::ReadingQuality::Live
+        || reading.battery.as_ref().is_some_and(|b| b.approximate) { return None; }
     let percent = reading.percent()?;
     low_battery_alert(percent, reading.is_charging(), armed).then_some(percent)
 }
@@ -1221,7 +1222,7 @@ impl TrayCtl {
                     format!(
                         "{} · {}{}",
                         cfg.device_name(r),
-                        r.battery.as_ref().and_then(|battery| battery.percent).map(|level| format!("{level}%"))
+                        r.battery.as_ref().and_then(|battery| battery.display_percent()).map(|level| level.label(true))
                             .or_else(|| r.coarse_level().map(|level| crate::i18n::battery_level(level).to_string()))
                             .unwrap_or_else(|| crate::tr!("电量未知").to_string()),
                         if !r.connected {
@@ -1258,7 +1259,7 @@ impl TrayCtl {
             }
             let icon = if let Some(r) = reading {
                 crate::tray_icon::render_device(
-                    r.percent(),
+                    r.display_percent(),
                     r.is_charging(),
                     cfg.device_kind(r),
                     content,
@@ -3828,7 +3829,7 @@ mod backend_tests {
                 path: key.into(), serial: String::new(), product: "Test mouse".into(),
                 vendor_id: 0, product_id: 0, usage_page: 1, usage: 2,
                 input_len: 20, output_len: 20, feature_len: 0,
-            } }, connected: true, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(), dpi: Dpi::default(), battery: Some(Battery { percent: Some(percent),
+            } }, connected: true, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(), dpi: Dpi::default(), battery: Some(Battery { estimated_percent: None, percent: Some(percent),
                 charging: Some(false), voltage_mv: None, approximate: false, level: None }) }
     }
 
@@ -4244,13 +4245,9 @@ mod backend_tests {
     fn refresh_finishes_only_after_all_backends_reach_requested_epoch() {
         let mut shared = Shared::new(Settings::default());
         shared.complete_refresh(BackendId::Rog, 3);
-        shared.complete_refresh(BackendId::Logitech, 3);
-        shared.complete_refresh(BackendId::Rapoo, 3);
-        shared.complete_refresh(BackendId::Vgn, 3);
-        shared.complete_refresh(BackendId::CompX, 3);
-        shared.complete_refresh(BackendId::Razer, 3);
-        shared.complete_refresh(BackendId::PageCommand, 3);
-        shared.complete_refresh(BackendId::Headset, 3);
+        for backend in crate::backends::ADDITIONAL_BACKENDS {
+            if backend != BackendId::StandardHid { shared.complete_refresh(backend, 3); }
+        }
         assert_eq!(shared.refresh_generation, 0);
         shared.complete_refresh(BackendId::StandardHid, 2);
         assert_eq!(shared.refresh_generation, 2);
@@ -4283,14 +4280,26 @@ mod backend_tests {
         let mut reading = DeviceReading { connected: true, ..Default::default() };
         let mut armed = true;
         assert_eq!(low_battery_reading(&reading, &mut armed), None);
-        reading.battery = Some(Battery { percent: None, charging: None, voltage_mv: None,
+        reading.battery = Some(Battery { estimated_percent: Some(20), percent: None, charging: None, voltage_mv: None,
             approximate: true, level: Some(BatteryLevel::Low) });
         assert!(reading.is_low());
+        assert_eq!(reading.battery_text(true), "≈20%");
         assert_eq!(low_battery_reading(&reading, &mut armed), None);
         assert!(armed);
+        for level in [BatteryLevel::Critical, BatteryLevel::Low, BatteryLevel::Medium,
+            BatteryLevel::Good, BatteryLevel::Full] {
+            reading.battery.as_mut().unwrap().level = Some(level);
+            assert_eq!(reading.is_low(), matches!(level, BatteryLevel::Critical | BatteryLevel::Low));
+            assert_eq!(low_battery_reading(&reading, &mut armed), None);
+            assert!(armed);
+        }
         reading.battery.as_mut().unwrap().percent = Some(80);
+        reading.battery.as_mut().unwrap().approximate = false;
         assert!(!reading.is_low());
         reading.battery.as_mut().unwrap().percent = Some(0);
+        reading.battery.as_mut().unwrap().approximate = true;
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+        reading.battery.as_mut().unwrap().approximate = false;
         assert_eq!(low_battery_reading(&reading, &mut armed), Some(0));
         assert!(!armed);
         armed = true;

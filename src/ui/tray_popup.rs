@@ -1697,6 +1697,9 @@ fn draw_device_row(
         }
     }
     let ink = if d.connected { t.text } else { t.text3 };
+    let displayed = d.display_percent();
+    let approximate = displayed.is_some_and(|p| p.approximate);
+    let label_reserve = if approximate { 14.0 } else { 0.0 };
     panel_icons::draw(
         p,
         Icon::Device(kind),
@@ -1706,7 +1709,7 @@ fn draw_device_row(
     );
     p.text(
         cfg.device_name(d),
-        R::new(r.x + 67.0, r.y + 10.0, w - 193.0, 21.0),
+        R::new(r.x + 67.0, r.y + 10.0, w - 193.0 - label_reserve, 21.0),
         13.0,
         true,
         ink,
@@ -1725,7 +1728,7 @@ fn draw_device_row(
     } else if d.is_low() {
         crate::tr!("电量偏低")
     } else {
-        if d.percent().is_some() { crate::tr!("已连接") } else { crate::tr!("电量未知") }
+        if d.display_percent().is_some() { crate::tr!("已连接") } else { crate::tr!("电量未知") }
     };
     let mut meta = format!("{} · {status}", kind.label());
     if cfg.tray_device.as_ref() == Some(&d.key) {
@@ -1734,7 +1737,7 @@ fn draw_device_row(
     }
     p.text(
         &meta,
-        R::new(r.x + 67.0, r.y + 33.0, w - 188.0, 17.0),
+        R::new(r.x + 67.0, r.y + 33.0, w - 188.0 - label_reserve, 17.0),
         10.0,
         false,
         if d.is_low() {
@@ -1751,16 +1754,17 @@ fn draw_device_row(
     } else {
         t.text
     };
-    let text = d.percent().map(|level| level.to_string()).unwrap_or_else(|| "—".into());
+    let text = d.battery_text(false);
     p.text(
         &text,
-        R::new(w - 94.0, r.y, 49.0, r.h),
-        20.0,
+        R::new(w - if approximate { 103.0 } else { 94.0 }, r.y,
+            if approximate { 58.0 } else { 49.0 }, r.h),
+        if approximate { 18.0 } else { 20.0 },
         true,
         color,
         Align::Right,
     );
-    if d.percent().is_some() {
+    if displayed.is_some() {
         p.text(
             "%",
             R::new(w - 45.0, r.y + 4.0, 13.0, r.h - 4.0),
@@ -1774,7 +1778,7 @@ fn draw_device_row(
         panel_icons::draw(
             p,
             Icon::Bolt,
-            R::new(w - 109.0, r.cy() - 6.5, 12.0, 13.0),
+            R::new(w - if approximate { 118.0 } else { 109.0 }, r.cy() - 6.5, 12.0, 13.0),
             t.accent,
             0.0,
         );

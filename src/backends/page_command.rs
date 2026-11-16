@@ -253,6 +253,7 @@ fn parse_battery(r: &[u8]) -> Option<Battery> {
         return None;
     }
     Some(Battery {
+        estimated_percent: None,
         percent: Some(r[1]),
         charging: match r[0] {
             0 => Some(false),

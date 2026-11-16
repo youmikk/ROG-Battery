@@ -185,6 +185,7 @@ impl<C: Channel> Session<C> {
             });
         Some((
             Battery {
+                estimated_percent: None,
                 percent: Some(percent(data[1])),
                 charging,
                 voltage_mv: None,

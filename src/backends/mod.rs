@@ -5,6 +5,7 @@ mod enumeration;
 pub mod compx;
 mod feature;
 pub mod headset;
+pub mod keyboard20;
 pub mod page_command;
 pub mod rapoo;
 mod rapoo_config;
@@ -12,6 +13,7 @@ pub mod razer;
 mod razer_capabilities;
 pub mod rog;
 pub mod standard;
+pub mod steelseries;
 pub mod status;
 pub mod trace;
 pub mod vgn;
@@ -29,11 +31,14 @@ pub enum BackendId {
     Razer,
     PageCommand,
     Headset,
+    Keyboard20,
+    Nova,
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 8] = [
-    BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::CompX, BackendId::Razer, BackendId::PageCommand, BackendId::Headset, BackendId::StandardHid,
+pub const ADDITIONAL_BACKENDS: [BackendId; 10] = [
+    BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::CompX, BackendId::Razer,
+    BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::Nova, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -47,12 +52,15 @@ impl BackendId {
             Self::Razer => "Razer Feature",
             Self::PageCommand => "CompX page-command",
             Self::Headset => "FF90 headset",
+            Self::Keyboard20 => "MCHOSE keyboard",
+            Self::Nova => "Arctis Nova",
             Self::StandardHid => "Standard HID",
         }
     }
 
     pub fn precedes_standard(self) -> bool {
-        matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::CompX | Self::Razer | Self::PageCommand | Self::Headset)
+        matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::CompX | Self::Razer
+            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova)
     }
 
     pub fn sample_lifetime(self) -> std::time::Duration {
@@ -60,7 +68,7 @@ impl BackendId {
             Self::Rapoo => 8,
             Self::Logitech => 180,
             Self::CompX => 45,
-            Self::Razer | Self::PageCommand | Self::Headset => 120,
+            Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova => 120,
             Self::Vgn | Self::StandardHid => 120,
             Self::Rog => 0,
         })
@@ -70,7 +78,7 @@ impl BackendId {
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
             Self::Rapoo => Some(2_000),
-            Self::CompX | Self::Razer | Self::PageCommand | Self::Headset => Some(10_000),
+            Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova => Some(10_000),
             _ => None,
         }
     }
@@ -102,7 +110,8 @@ impl Target {
     pub fn new(backend: BackendId, interface: &HidInterface, address: u8) -> Self {
         let identity = if backend == BackendId::Razer {
             razer::collection_group(interface)
-        } else if interface.serial.is_empty() || matches!(backend,BackendId::Rapoo|BackendId::CompX|BackendId::PageCommand|BackendId::Headset) {
+        } else if interface.serial.is_empty() || matches!(backend, BackendId::Rapoo | BackendId::CompX
+            | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Nova) {
             interface.path.to_ascii_lowercase()
         } else {
             format!(
@@ -247,6 +256,8 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Razer => &razer::Razer,
         BackendId::PageCommand => &page_command::PageCommand,
         BackendId::Headset => &headset::Headset,
+        BackendId::Keyboard20 => &keyboard20::Keyboard20,
+        BackendId::Nova => &steelseries::Nova,
         BackendId::StandardHid => &standard::StandardHid,
     };
     let mut poll = Poll { present_paths: Some(present_paths),
@@ -353,6 +364,7 @@ mod tests {
             battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
             dpi: Dpi::default(),
             battery: Some(Battery {
+                estimated_percent: None,
                 percent: Some(75),
                 charging: None,
                 voltage_mv: None,
@@ -379,7 +391,7 @@ mod tests {
 
     #[test]
     fn vendor_reading_has_priority_over_standard_reading_on_same_interface() {
-        for backend in [BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn] {
+        for backend in ADDITIONAL_BACKENDS.into_iter().filter(|id| id.precedes_standard()) {
             let result = merge_additional_results([
                 (backend, Ok(vec![reading(backend)])),
                 (

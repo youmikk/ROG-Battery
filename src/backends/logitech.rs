@@ -320,6 +320,7 @@ impl<C: Channel> Session<C> {
                             known.charging = known.charging.or(battery.charging);
                             known.voltage_mv = known.voltage_mv.or(battery.voltage_mv);
                             known.level = known.level.or(battery.level);
+                            known.estimated_percent = known.estimated_percent.or(battery.estimated_percent);
                         } else {
                             partial = Some(battery);
                         }
@@ -909,27 +910,24 @@ fn decode_battery(feature: u16, data: &[u8]) -> Option<Battery> {
             }
             // HID++ 的 0 通常表示无法给出精确百分比，不能当作电池已耗尽。
             let percent = (data[0] > 0).then_some(data[0]);
+            let level = (if feature == UNIFIED_BATTERY {
+                match data[1] {
+                    1 => Some(BatteryLevel::Critical), 2 => Some(BatteryLevel::Low),
+                    4 => Some(BatteryLevel::Good), 8 => Some(BatteryLevel::Full), _ => None,
+                }
+            } else { None }).or_else(|| (status == 3).then_some(BatteryLevel::Full));
             Some(Battery {
                 percent,
+                estimated_percent: if percent.is_none() { level.map(level_estimate) } else { None },
                 charging,
                 voltage_mv: None,
                 approximate: percent.is_none(),
-                level: (if feature == UNIFIED_BATTERY {
-                    match data[1] {
-                        1 => Some(BatteryLevel::Critical),
-                        2 => Some(BatteryLevel::Low),
-                        4 => Some(BatteryLevel::Good),
-                        8 => Some(BatteryLevel::Full),
-                        _ => None,
-                    }
-                } else {
-                    None
-                })
-                .or_else(|| (status == 3).then_some(BatteryLevel::Full)),
+                level,
             })
         }
         BATTERY_VOLTAGE => Some(Battery {
             percent: None,
+            estimated_percent: (data[2] & 0x20 != 0).then_some(5),
             voltage_mv: Some(u16::from_be_bytes([data[0], data[1]])),
             charging: Some(data[2] & 0x80 != 0),
             approximate: true,
@@ -967,6 +965,7 @@ fn decode_legacy_battery(register: u8, data: &[u8]) -> Option<Battery> {
     match register {
         0x0d if data[0] <= 100 => Some(Battery {
             percent: Some(data[0]),
+            estimated_percent: None,
             level: None,
             voltage_mv: None,
             approximate: false,
@@ -978,6 +977,7 @@ fn decode_legacy_battery(register: u8, data: &[u8]) -> Option<Battery> {
         }),
         0x07 => Some(Battery {
             percent: None,
+            estimated_percent: match data[0] { 1 => Some(5), 3 => Some(20), 5 => Some(50), 7 => Some(90), _ => None },
             voltage_mv: None,
             approximate: true,
             level: match data[0] {
@@ -996,6 +996,14 @@ fn decode_legacy_battery(register: u8, data: &[u8]) -> Option<Battery> {
             },
         }),
         _ => None,
+    }
+}
+
+// Representative values used by Solaar for HID++ qualitative levels.
+fn level_estimate(level: BatteryLevel) -> u8 {
+    match level {
+        BatteryLevel::Critical => 5, BatteryLevel::Low => 20,
+        BatteryLevel::Medium | BatteryLevel::Good => 50, BatteryLevel::Full => 90,
     }
 }
 
@@ -2086,6 +2094,16 @@ mod tests {
             None
         );
         assert_eq!(decode_battery(UNIFIED_BATTERY, &[255, 0, 0]), None);
+        for (raw, estimated) in [(1,5), (2,20), (4,50), (8,90)] {
+            let b = decode_battery(UNIFIED_BATTERY, &[0, raw, 0]).unwrap();
+            assert_eq!(b.percent, None);
+            assert_eq!(b.display_percent().unwrap().label(true), format!("≈{estimated}%"));
+        }
+        for (raw, estimated) in [(1,5), (3,20), (5,50), (7,90)] {
+            let b = decode_legacy_battery(7, &[raw, 0, 0]).unwrap();
+            assert_eq!(b.display_percent().unwrap().label(true), format!("≈{estimated}%"));
+        }
+        assert!(decode_battery(BATTERY_VOLTAGE, &[0x10, 0, 0]).unwrap().display_percent().is_none());
     }
     #[test]
     fn dpi_ranges_are_validated_before_any_device_write() {

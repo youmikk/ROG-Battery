@@ -87,6 +87,15 @@ pub enum ReadingQuality {
 }
 
 impl DeviceReading {
+    pub fn display_percent(&self) -> Option<BatteryPercent> {
+        (self.connected && matches!(self.quality, ReadingQuality::Live | ReadingQuality::Cached))
+            .then(|| self.battery.as_ref()?.display_percent()).flatten()
+    }
+
+    pub fn battery_text(&self, unit: bool) -> String {
+        self.display_percent().map(|percent| percent.label(unit)).unwrap_or_else(|| "—".into())
+    }
+
     pub fn percent(&self) -> Option<u8> {
         (self.connected && matches!(self.quality, ReadingQuality::Live | ReadingQuality::Cached))
             .then(|| self.battery.as_ref()?.percent)
@@ -126,6 +135,7 @@ impl DeviceReading {
 pub enum BatteryLevel {
     Critical,
     Low,
+    Medium,
     Good,
     Full,
 }
@@ -133,10 +143,82 @@ pub enum BatteryLevel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Battery {
     pub percent: Option<u8>,
+    /// Protocol-specific representative value for a coarse level, not a measurement.
+    pub estimated_percent: Option<u8>,
     pub charging: Option<bool>,
     pub voltage_mv: Option<u16>,
     pub approximate: bool,
     pub level: Option<BatteryLevel>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatteryPercent {
+    pub value: u8,
+    pub approximate: bool,
+}
+
+impl BatteryPercent {
+    pub fn label(self, unit: bool) -> String {
+        format!("{}{}{}", if self.approximate { "≈" } else { "" }, self.value, if unit { "%" } else { "" })
+    }
+}
+
+impl Battery {
+    pub fn display_percent(&self) -> Option<BatteryPercent> {
+        if let Some(value) = self.percent {
+            (value <= 100).then_some(BatteryPercent { value, approximate: self.approximate })
+        } else {
+            self.estimated_percent.filter(|value| *value <= 100)
+                .map(|value| BatteryPercent { value, approximate: true })
+        }
+    }
+}
+
+#[cfg(test)]
+mod battery_display_tests {
+    use super::*;
+
+    #[test]
+    fn estimates_keep_the_prefix_without_turning_into_exact_samples() {
+        let mut reading = DeviceReading { connected: true, quality: ReadingQuality::Live,
+            battery: Some(Battery { percent: None, estimated_percent: Some(50), charging: None,
+                voltage_mv: None, approximate: true, level: Some(BatteryLevel::Medium) }),
+            ..Default::default() };
+        assert_eq!(reading.percent(), None);
+        assert_eq!(reading.battery_text(true), "≈50%");
+        assert_eq!(reading.battery_text(false), "≈50");
+        reading.quality = ReadingQuality::Cached;
+        assert_eq!(reading.battery_text(true), "≈50%");
+        for quality in [ReadingQuality::Stale, ReadingQuality::Unknown] {
+            reading.quality = quality;
+            assert_eq!(reading.battery_text(true), "—");
+        }
+        reading.quality = ReadingQuality::Live;
+        reading.connected = false;
+        assert_eq!(reading.battery_text(true), "—");
+        reading.connected = true;
+        let b = reading.battery.as_mut().unwrap();
+        b.percent = Some(47); b.approximate = false;
+        assert_eq!(reading.battery_text(true), "47%");
+        assert_eq!(reading.percent(), Some(47));
+    }
+
+    #[test]
+    fn zero_full_invalid_and_voltage_only_readings_keep_their_meaning() {
+        let mut b = Battery { percent: None, estimated_percent: None, charging: None,
+            voltage_mv: Some(4000), approximate: true, level: None };
+        assert_eq!(b.display_percent(), None);
+        for value in [0, 100] {
+            b.estimated_percent = Some(value);
+            assert_eq!(b.display_percent().unwrap().label(true), format!("≈{value}%"));
+        }
+        b.estimated_percent = Some(101);
+        assert_eq!(b.display_percent(), None);
+        b.estimated_percent = Some(50); b.percent = Some(255);
+        assert_eq!(b.display_percent(), None);
+        b.percent = Some(0); b.approximate = false;
+        assert_eq!(b.display_percent().unwrap().label(true), "0%");
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

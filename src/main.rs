@@ -171,8 +171,8 @@ fn main() -> ExitCode {
         return match backends::read_all(true) {
             Ok(devices) => {
                 for device in devices {
-                    let battery = device.battery.as_ref().and_then(|battery| battery.percent)
-                        .map(|percent| format!("{percent}%")).unwrap_or_else(|| "unknown".into());
+                    let battery = device.battery.as_ref().and_then(|battery| battery.display_percent())
+                        .map(|percent| percent.label(true)).unwrap_or_else(|| "unknown".into());
                     println!("{}\t{}\t{}\t{}\tDPI={}", device.target.key,
                         device.target.backend.name(), device.target.name, battery,
                         device.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "unknown".into()));

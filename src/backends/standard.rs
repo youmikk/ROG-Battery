@@ -278,6 +278,7 @@ impl DeviceBackend for StandardHid {
             battery_at, polling_rate: Default::default(),
             dpi: Dpi::default(),
             battery: Some(Battery {
+                estimated_percent: None,
                 percent,
                 charging: None,
                 voltage_mv: None,

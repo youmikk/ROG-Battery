@@ -108,6 +108,7 @@ pub fn battery_level(level: crate::device::BatteryLevel) -> &'static str {
     match level {
         crate::device::BatteryLevel::Critical => crate::tr!("电量极低"),
         crate::device::BatteryLevel::Low => crate::tr!("电量偏低"),
+        crate::device::BatteryLevel::Medium => crate::tr!("电量中等"),
         crate::device::BatteryLevel::Good => crate::tr!("电量良好"),
         crate::device::BatteryLevel::Full => crate::tr!("电量充足"),
     }

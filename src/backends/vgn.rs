@@ -28,33 +28,13 @@ fn is_control(interface: &HidInterface) -> bool {
 }
 
 fn receiver_query() -> [u8; 20] {
-    let mut frame = [0; 20];
-    frame[..6].copy_from_slice(&[RECEIVER_REPORT, 0x4a, 1, 0, 0, 0]);
-    frame[19] = frame[..19]
-        .iter()
-        .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
-    frame
+    keyboard20::query(0x4a)
 }
 
 fn parse_battery(frame: &[u8], wireless: bool) -> Option<Battery> {
-    let (percent, status) = if wireless {
-        if frame.len() < 20
-            || frame[0] != RECEIVER_REPORT
-            || frame[1] != 0x4a
-            || frame[19]
-                != frame[..19]
-                    .iter()
-                    .fold(0u8, |sum, byte| sum.wrapping_add(*byte))
-        {
-            return None;
-        }
-        (frame[5], frame[6])
-    } else {
-        if frame.len() < 10 || frame[..8] != WIRED_QUERY {
-            return None;
-        }
-        (frame[8], frame[9])
-    };
+    if wireless { return keyboard20::battery(frame); }
+    if frame.len() < 10 || frame[..8] != WIRED_QUERY { return None; }
+    let (percent, status) = (frame[8], frame[9]);
     if percent > 100 {
         return None;
     }
@@ -65,6 +45,7 @@ fn parse_battery(frame: &[u8], wireless: bool) -> Option<Battery> {
         _ => None,
     };
     Some(Battery {
+        estimated_percent: None,
         percent: Some(percent),
         charging,
         voltage_mv: None,
@@ -98,7 +79,7 @@ impl DeviceBackend for Vgn {
             HidDevice::open(&target.interface).and_then(|mut device| {
                 device
                     .transact(&receiver_query(), 350, |frame| {
-                        frame.len() >= 20 && frame[0] == RECEIVER_REPORT && frame[1] == 0x4a
+                        parse_battery(frame, true).is_some()
                     })
                     .ok_or_else(|| crate::tr!("无法读取 VGN 电量").to_string())
             })
@@ -165,6 +146,8 @@ mod tests {
     #[test]
     fn wireless_battery_never_invents_percentage_or_charging() {
         let mut frame = receiver_query();
+        assert!(parse_battery(&frame, true).is_none());
+        frame[4] = 2;
         frame[5] = 100;
         frame[6] = 0x20;
         frame[19] = frame[..19]

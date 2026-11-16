@@ -19,6 +19,34 @@ Reads the active profile, enabled count, up to seven X/Y stages and active index
 
 Local transcripts cover collection pairing, both ACK layouts, seven slots, independent axes, profile changes, lost ACK, ignored writes, neighbor changes, expired status and backend command routing. Hardware switching and official-driver coexistence remain unverified; no supported Rapoo interface is currently available locally. The read-only scope below describes released version 1.4.5.
 
+## In development: MCHOSE keyboards and Arctis Nova headsets (unreleased)
+
+The keyboard adapter queries only `FF02:0002` control collections with 20-byte input and output reports. Ordinary key-input collections are excluded.
+
+| Interface | Identification | Implementation |
+| --- | --- | --- |
+| `3554:FA09` | Shared G75 Pro / K99 V2 / GX87 receiver; a specific product string is required for a model name, otherwise MCHOSE Keyboard | Windows SET_REPORT `13:4A` query with header, payload length, checksum and percentage validation |
+| `258A:01BB` | A `13:05` handshake verifies the six-byte Z75S identity on each read; the shared ID alone does not distinguish Z75 | Windows WriteFile handshake and read-only battery query |
+
+Query echoes are skipped. The full flag does not imply charging, and unknown charging flags do not discard valid percentages. Identical receivers retain separate Windows interface identities. G87 V2 uses a different, unimplemented protocol. VGN wireless keyboard reads share the strict frame validator, rejecting echoes with no battery payload.
+
+The Arctis Nova adapter queries only `1038`, `FFC0:0001` control collections with 65-byte input/output descriptors. It sends `00 B0` using Windows WriteFile and validates status replies. Other generations and descriptors are excluded.
+
+| Family | PIDs | Battery semantics |
+| --- | --- | --- |
+| Nova 5 / 5X | `2232` / `2253` | Actual percentage, separate connection and charging fields |
+| Nova 3P / 3X Wireless | `2269` / `226D` | Nova 5 status layout, actual percentage |
+| Original Nova 7 / 7X / 7P and selected special editions | `2202`, `2206`, `220A`, `223A`, `227A`, `22A4` | Five levels displayed as ≈0% / ≈25% / ≈50% / ≈75% / ≈100%, retaining the level label |
+| Updated Nova 7 / Gen 2, 7X / 7P and selected special editions | `22A1`, `227E`, `2258`, `229E`, `22AD`, `22A5`, `22A9`, `22A7`, `2298` | Actual percentage; values 0–4 remain exact percentages |
+
+Explicit offline replies invalidate live readings, and fresh reports restore them. An all-zero query echo cannot establish disconnection and is left to cache expiry. Timeouts do not invent battery or connection state. Coarse levels cannot trigger percentage notifications. Headsets retain Windows audio controls, with no new firmware-setting writes.
+
+Protocol regressions cover malformed frames, identity handshakes, identical receiver instances, offline/wake transitions and aggregate refresh. Neither new family is currently attached locally. Windows hardware transport, sleep/wake and coexistence with official software remain unverified in this project.
+
+Estimates carry ≈ throughout the main window, tray list, taskbar icon, tooltip and diagnostic report. HID++ uses Solaar's representative values 5/20/50/90; original Nova models use their own 0/25/50/75/100 mapping. Exact readings take priority. Estimates remain separate from measurements and cannot trigger exact-percentage notifications; missing levels and uncalibrated voltage-only readings remain unknown.
+
+Development verification (2026-11-17): 180 local regressions passed and the Windows x64 release build completed without warnings. Render checks cover Chinese/English, light/dark themes at 100% / 125% scaling and 16/20/24/32-pixel tray icons, including exact, estimated, unknown and stale readings. The read-only probe still returned 100% and charging for VGN V98 Pro V3.
+
 ## Version 1.4.5: CompX mice and polling rates
 
 Candidates must expose vendor `3554` / `373B`, collection `FF02:0002`, and exact 17-byte input/output buffers. Replies must match report ID, command, status, address, length and checksum. Unknown runtime identities can supply valid battery readings but cannot authorize guessed sensor settings. All mouse entries below await hardware verification in this project.

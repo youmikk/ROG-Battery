@@ -1206,22 +1206,23 @@ fn home_device_card(
         t.text3,
         Align::Left,
     );
-    let color = ring_color(t, dev.connected, dev.is_charging(), dev.percent().unwrap_or(100));
+    let displayed = dev.display_percent();
+    let color = ring_color(t, dev.connected, dev.is_charging(), displayed.map_or(100, |p| p.value));
     let cy = r.y + 83.0;
     p.ring(
         r.cx(),
         cy,
         48.0,
         5.0,
-        dev.percent().unwrap_or(0) as f32 / 100.0,
+        displayed.map_or(0, |p| p.value) as f32 / 100.0,
         color,
         color,
         t.track,
     );
     p.text(
-        &dev.percent().map(|level| format!("{level}%")).unwrap_or_else(|| "—".into()),
+        &dev.battery_text(true),
         R::new(r.cx() - 46.0, cy - 21.0, 92.0, 35.0),
-        29.0,
+        if displayed.is_some_and(|p| p.approximate) { 23.0 } else { 29.0 },
         false,
         if dev.connected { t.text } else { t.text3 },
         Align::Center,
@@ -1236,7 +1237,7 @@ fn home_device_card(
         } else if dev.is_low() {
             crate::tr!("电量偏低")
         } else {
-            if dev.percent().is_some() { crate::tr!("使用中") } else { crate::tr!("电量未知") }
+            if displayed.is_some() { crate::tr!("使用中") } else { crate::tr!("电量未知") }
         },
         R::new(r.cx() - 45.0, cy + 16.0, 90.0, 16.0),
         10.0,
@@ -1374,7 +1375,11 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
 fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
     let selected = d.selected;
-    let known_level = match selected { Some(reading) => reading.percent(), None => d.state.map(|state| state.power) };
+    let displayed = match selected {
+        Some(reading) => reading.display_percent(),
+        None => d.state.map(|state| crate::device::BatteryPercent { value: state.power, approximate: false }),
+    };
+    let known_level = displayed.map(|p| p.value);
     let level = known_level.unwrap_or(0);
     let connected = selected.map(|r| r.connected).unwrap_or(d.state.is_some());
     let charging = selected.is_some_and(|r| r.is_charging());
@@ -1393,9 +1398,9 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         t.track,
     );
     p.text(
-        &known_level.map(|level| format!("{level}%")).unwrap_or_else(|| "—".into()),
+        &displayed.map(|level| level.label(true)).unwrap_or_else(|| "—".into()),
         R::new(cx - 50.0, cy - 23.0, 100.0, 37.0),
-        30.0,
+        if displayed.is_some_and(|p| p.approximate) { 25.0 } else { 30.0 },
         false,
         t.text,
         Align::Center,

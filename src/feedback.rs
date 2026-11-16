@@ -75,6 +75,8 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Razer => &super::backends::razer::Razer,
             super::backends::BackendId::PageCommand => &super::backends::page_command::PageCommand,
             super::backends::BackendId::Headset => &super::backends::headset::Headset,
+            super::backends::BackendId::Keyboard20 => &super::backends::keyboard20::Keyboard20,
+            super::backends::BackendId::Nova => &super::backends::steelseries::Nova,
             super::backends::BackendId::StandardHid => &super::backends::standard::StandardHid,
             super::backends::BackendId::Rog => &super::backends::rog::Rog,
         };
@@ -106,14 +108,19 @@ fn append_probe_result(output: &mut String, target: &super::backends::Target,
             None => "read-failed",
         });
     if let Some(reading) = reading {
-        let percent = reading.battery.as_ref().and_then(|battery| battery.percent)
-            .map(|percent| format!("{percent}%")).unwrap_or_else(|| "unknown".into());
+        let percent = reading.battery.as_ref().and_then(|battery| battery.display_percent())
+            .map(|percent| percent.label(true)).unwrap_or_else(|| "unknown".into());
         let charging = match reading.battery.as_ref().and_then(|battery| battery.charging) {
             Some(true) => "yes", Some(false) => "no", None => "unknown",
         };
         let dpi = reading.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "unknown".into());
         let _ = writeln!(output, "Battery: {percent}; charging: {charging}; current DPI: {dpi}; DPI writable: {}",
             reading.dpi.writable);
+        if let Some(battery) = &reading.battery {
+            if let Some(level) = battery.level {
+                let _ = writeln!(output, "Battery level: {level:?}; approximate: {}", battery.approximate);
+            }
+        }
         if let Some(y) = reading.dpi.current_y { let _ = writeln!(output, "Current DPI Y: {y}"); }
         let rate = reading.polling_rate.current.map(|hz| hz.to_string()).unwrap_or_else(|| "unknown".into());
         let _ = writeln!(output, "Polling rate: {rate} Hz; choices: {:?}; writable: {}",
@@ -169,7 +176,7 @@ mod tests {
         let mut target = super::super::backends::Target::new(super::super::backends::BackendId::Vgn, &interface, 0);
         target.name = "private-custom-name".into();
         let snapshot = super::super::backends::Snapshot { target: target.clone(),
-            battery: Some(crate::device::Battery { percent: Some(75), charging: None,
+            battery: Some(crate::device::Battery { estimated_percent: None, percent: Some(75), charging: None,
                 voltage_mv: None, approximate: false, level: None }),
             dpi: crate::device::Dpi { current: Some(800),
                 stages: vec![crate::device::DpiStage { index: 1, value: 800 },
@@ -183,6 +190,16 @@ mod tests {
         for private in ["private-path", "private-serial", "private-custom-name", &target.key] {
             assert!(!output.contains(private));
         }
+        let coarse = super::super::backends::Snapshot {
+            battery: Some(crate::device::Battery { estimated_percent: Some(50), percent: None, charging: Some(false),
+                voltage_mv: None, approximate: true, level: Some(crate::device::BatteryLevel::Medium) }),
+            ..snapshot.clone()
+        };
+        let mut output = String::new();
+        append_probe_result(&mut output, &target, Some(&coarse));
+        assert!(output.contains("Battery: ≈50%; charging: no"));
+        assert!(output.contains("Battery level: Medium; approximate: true"));
+        assert!(!output.contains("Battery: 50%"));
         let missing = super::super::backends::Snapshot { connected: false, battery: None, ..snapshot };
         let mut output = String::new();
         append_probe_result(&mut output, &target, Some(&missing));

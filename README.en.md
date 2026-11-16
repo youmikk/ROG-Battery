@@ -12,6 +12,8 @@ Support covers selected devices with implemented protocols, not entire brands. N
 
 Devices with supported numerical DPI writes can save 1–4 software presets on the Performance page, sorted by DPI, and switch from the main window or tray. Reducing the stage count hides the highest values and keeps them for restoration. Presets remain separate from actual device stages; connections that write stored DPI show a note. Local regressions and render checks passed; per-model hardware acceptance remains pending.
 
+Development also adds profile-scoped Rapoo stage reads and switching, selected MCHOSE keyboard battery queries, and Arctis Nova headset status. Level-only readings display estimated percentages prefixed with ≈; exact readings retain the existing numeric style. Hardware acceptance remains pending; see [development compatibility](COMPATIBILITY.en.md).
+
 ## Version 1.4.5
 
 - Adds battery, actual X/Y DPI stages and polling-rate capabilities for selected VGN / VXE / ATK mice.

@@ -9,7 +9,7 @@ use crate::win32::Handle;
 pub const ICON_SIZE: i32 = 32;
 
 pub fn render_device(
-    level: Option<u8>,
+    level: Option<crate::device::BatteryPercent>,
     charging: bool,
     kind: crate::tray_prefs::TrayKind,
     content: crate::tray_prefs::TrayContent,
@@ -23,7 +23,7 @@ pub fn render_device(
 }
 
 fn render_device_at(
-    level: Option<u8>,
+    level: Option<crate::device::BatteryPercent>,
     charging: bool,
     kind: crate::tray_prefs::TrayKind,
     content: crate::tray_prefs::TrayContent,
@@ -59,7 +59,7 @@ fn render_device_at(
         GdipSetTextRenderingHint(graphics, 4);
         let ink = match level {
             None => theme.text3,
-            Some(0..=20) => theme.red,
+            Some(percent) if percent.value <= 20 => theme.red,
             _ => theme.text,
         };
         let painted = Painter::on_graphics(graphics, theme, 32.0, size as f32 / 32.0, |p| {
@@ -73,21 +73,25 @@ fn render_device_at(
                 device_glyph(p, area, kind, ink);
             }
             if content != TrayContent::Icon {
-                let text = level.map(label).unwrap_or_else(|| "–".to_string());
+                let text = level.map(|value| value.label(false)).unwrap_or_else(|| "–".to_string());
                 let rect = if combined {
                     let width = if text.len() == 1 { 10.0 } else { 18.0 };
                     R::new(22.5 - width / 2.0, 4.0, width, 24.0)
                 } else {
                     R::new(1.0, 4.0, 30.0, 24.0)
                 };
-                if level.is_some() {
-                    p.icon_text(
-                        &text,
-                        rect,
-                        if combined { 23.0 } else { 28.0 },
-                        ink,
-                        combined,
-                    );
+                if let Some(value) = level {
+                    if value.approximate && !combined {
+                        // Keep the numeral height: the qualifier has its own
+                        // small slot instead of shrinking the entire label.
+                        let digits = value.value.to_string();
+                        let digit_width = if digits.len() == 1 { 13.0 } else { 25.0 };
+                        let left = (32.0 - digit_width - 7.0) / 2.0;
+                        p.icon_text("≈", R::new(left, 12.0, 5.5, 7.0), 18.0, ink, true);
+                        p.icon_text(&digits, R::new(left + 7.0, 4.0, digit_width, 24.0), 28.0, ink, digits.len() == 1);
+                    } else {
+                        p.icon_text(&text, rect, if combined { 23.0 } else { 28.0 }, ink, combined);
+                    }
                 } else {
                     p.line(
                         rect.cx() - 4.0,
@@ -228,14 +232,6 @@ pub fn icon_size() -> i32 {
     } else {
         n.min(ICON_SIZE)
     }
-}
-
-/// 图标上要写的文字。
-///
-/// 只放数字（不带 `%`）：32x32 里 `100%` 四个字形会缩到不可读。
-/// 100 写 `99` 会撒谎 —— 所以保留三位，只是把字号按位数缩小。
-pub fn label(level: u8) -> String {
-    level.min(100).to_string()
 }
 
 /// 把 `[r, g, b]` 转 `COLORREF`（`0x00BBGGRR`）。

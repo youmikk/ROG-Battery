@@ -218,6 +218,7 @@ fn parse_status(frame: &[u8]) -> Option<(Battery, Dpi)> {
     let valid = (50..u16::MAX).contains(&x) && (50..u16::MAX).contains(&y);
     Some((
         Battery {
+            estimated_percent: None,
             percent: Some(data[7]),
             charging: Some(charging),
             voltage_mv: None,

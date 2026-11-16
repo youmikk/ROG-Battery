@@ -303,7 +303,7 @@ impl<C: Channel> Session<C> {
         let r = self.query(4,0,&[],0).ok()?;
         if !(1..=10).contains(&r[5]) || r[6] > 100 { return None; }
         let mv = (r[5] >= 4).then(|| u16::from_be_bytes([r[8],r[9]])).filter(|v| *v > 0);
-        Some(Battery { percent: Some(r[6]), charging: (r[5] >= 2).then(|| match r[7] {
+        Some(Battery { estimated_percent: None, percent: Some(r[6]), charging: (r[5] >= 2).then(|| match r[7] {
             0 => Some(false), 1 => Some(true), _ => None }).flatten(), voltage_mv: mv,
             approximate: false, level: None })
     }
