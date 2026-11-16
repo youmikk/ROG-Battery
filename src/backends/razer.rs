@@ -23,28 +23,7 @@ fn control(i: &HidInterface) -> bool {
 
 // Keep the Windows instance and USB interface; only sibling collection suffixes are removed.
 pub(super) fn collection_group(i: &HidInterface) -> String {
-    let path = i.path.to_ascii_lowercase();
-    let mut parts: Vec<String> = path.split('#').map(str::to_string).collect();
-    if parts.len() < 4 {
-        return path;
-    }
-    let collection = parts[1]
-        .split('&')
-        .find_map(|part| part.strip_prefix("col"))
-        .filter(|s| s.len() == 2 && s.bytes().all(|b| b.is_ascii_hexdigit()));
-    if let Some(collection) = collection {
-        let suffix = format!("&00{collection}");
-        if parts[2].ends_with(&suffix) {
-            let length = parts[2].len() - suffix.len();
-            parts[2].truncate(length);
-        }
-        parts[1] = parts[1]
-            .split('&')
-            .filter(|part| !part.starts_with("col"))
-            .collect::<Vec<_>>()
-            .join("&");
-    }
-    parts.join("#")
+    super::channel::collection_group(i)
 }
 
 fn packet(tx: u8, class: u8, command: u8, length: u8, data: &[u8]) -> [u8; LENGTH] {

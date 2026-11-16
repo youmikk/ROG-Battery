@@ -2110,12 +2110,18 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
                 p.text(axis,R::new(x,row.y,14.0,row.h),11.5,false,p.t.text3,Align::Left);
                 let r = R::new(x + 18.0,row.cy()-15.0,80.0,30.0);
                 let text = ui.edit_text(edit).map(str::to_string).or_else(|| value.map(|v|v.to_string())).unwrap_or_else(||"—".into());
-                num_box(p,r,&text,ui.focus==Some(edit));
-                if basic.connected && basic.dpi.stage_editable { ui.hot(r,Act::Focus(edit)); }
+                if basic.dpi.stage_editable {
+                    num_box(p,r,&text,ui.focus==Some(edit));
+                    if basic.connected { ui.hot(r,Act::Focus(edit)); }
+                } else {
+                    p.text(&text,r,12.5,active,if active {p.t.accent}else{p.t.text2},Align::Center);
+                }
             }
             if basic.connected && basic.dpi.stage_editable {
                 button(p,ui,R::new(row.right()-130.0,row.cy()-15.0,60.0,30.0),crate::tr!("应用"),false,
                     Act::ApplyEdit(Edit::BasicDpiX(stage.index)));
+            }
+            if basic.connected && basic.dpi.stage_writable {
                 if let Some(context) = basic.dpi.stage_context() {
                     button(p,ui,R::new(row.right()-62.0,row.cy()-15.0,62.0,30.0),
                         if active {crate::tr!("当前")} else {crate::tr!("切换")},active,Act::BasicDpiStage(*stage,context));

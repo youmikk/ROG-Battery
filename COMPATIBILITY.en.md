@@ -13,6 +13,12 @@ This document lists additions in 1.4.5 and existing 1.4.4 capabilities with thei
 - Apply saves the local preset. Use writes the device and verifies readback. CompX modifies the active onboard stage; Razer storage behavior follows the reviewed connection data. Stage changes while queued are rejected or reported during readback verification.
 - Local configuration, ordering, restoration, tray state and protocol regressions passed. Hardware acceptance and power-cycle persistence remain pending. Rapoo preset writes are not enabled.
 
+## In development: actual Rapoo nRF54L stages (unreleased)
+
+Reads the active profile, enabled count, up to seven X/Y stages and active index. The main window and tray switch existing device stages without changing values or stage count. Full configuration fingerprints and telemetry gate writes; full readback and a newer status report confirm the result. Configuration failure does not replace valid battery data. Unknown or mismatched interfaces are not written.
+
+Local transcripts cover collection pairing, both ACK layouts, seven slots, independent axes, profile changes, lost ACK, ignored writes, neighbor changes, expired status and backend command routing. Hardware switching and official-driver coexistence remain unverified; no supported Rapoo interface is currently available locally. The read-only scope below describes released version 1.4.5.
+
 ## Version 1.4.5: CompX mice and polling rates
 
 Candidates must expose vendor `3554` / `373B`, collection `FF02:0002`, and exact 17-byte input/output buffers. Replies must match report ID, command, status, address, length and checksum. Unknown runtime identities can supply valid battery readings but cannot authorize guessed sensor settings. All mouse entries below await hardware verification in this project.

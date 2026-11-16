@@ -72,7 +72,7 @@ Prioritize multi-brand battery coverage and basic DPI controls, retaining detail
 - [x] Save 1–4 custom DPI presets per device, sorted by value after editing. A stage-count selector hides the highest values and retains them for restoration; the main window and tray share the enabled list.
 - [x] Distinguish actual device stages from software presets; require confirmed numerical write capability, validate supported values and verify readback.
 - [x] Explain writes that alter stored DPI. Presets cannot bypass missing write support, stale identity, changed configuration or disconnection.
-- [ ] Add actual Rapoo stage reads and basic switching; current-DPI reads alone do not satisfy this requirement.
+- [x] Implement Rapoo nRF54L profile-scoped X/Y stage reads and basic switching with protocol regressions. Hardware switching, wake and official-driver coexistence remain pending.
 - [ ] Extend existing upstream battery protocols, recording mouse, keyboard, headset and gamepad coverage separately.
 
 1. Hardware validation for CompX, Logitech and Razer changes, including writes, wake recovery, device replacement and competing official software.
@@ -82,4 +82,14 @@ Prioritize multi-brand battery coverage and basic DPI controls, retaining detail
 5. Corsair, SteelSeries and further headset/gamepad families, without replacing unreadable settings with defaults.
 6. Distributable compatibility data, account-free feedback service and Beta updates. The current feedback path remains a user-submitted GitHub form and sanitized report.
 
-Custom presets are unreleased development changes. Local regressions and Chinese/English render checks passed; per-model hardware acceptance remains pending. CompX presets bind the active stage at click time and verify the active stage and X/Y before and after writing. The current official Rapoo nRF54L driver uses profile-specific addresses and up to seven stages, unlike fixed-address, six-stage reference implementations. Further work must read the actual profile and complete X/Y tables, separately from the older VT9Pro protocol.
+Custom presets are unreleased development changes. Local regressions and Chinese/English render checks passed; per-model hardware acceptance remains pending. CompX presets bind the active stage at click time and verify the active stage and X/Y before and after writing. The current official Rapoo nRF54L driver uses profile-specific addresses and up to seven stages, unlike fixed-address, six-stage reference implementations. The implementation reads the actual profile and complete X/Y tables separately from the older VT9Pro protocol.
+
+## In development: Rapoo nRF54L stages
+
+The independent register implementation follows the current [Rapoo A HUB](https://hub.rapoo.cn/) address map: current profile at 0x010C, profile base 0x0600 + profile × 0x0400, X/Y offsets 648/712, enabled-count offset 662 (zero-based), active-stage offset 664. It preserves all seven slots, independent axes, duplicates, unused data and reserved bytes. Wireless uses A5 and wired uses FF; the older VT9Pro BA protocol is separate.
+
+FF00:000E Output33 and FF00:000F Feature33 collections are paired by Windows instance and USB interface. Output uses write access and Feature uses zero access, both with bounded, cancellable I/O. The independent status listener remains active.
+
+No address or transaction echo is confirmed in the public ACK layout. The reader checks profile before and after, repeats both tables in reverse order and compares active X/Y with telemetry. Writes bind the complete configuration fingerprint and change only one active-index byte. They are not resent or blindly rolled back; full readback and a newer status report must agree. Configuration failure retains independent battery data. Configuration reads have a two-second budget. Numerical DPI edits and Rapoo software-preset writes remain disabled.
+
+Hardware validation is pending. Simulated transcripts do not establish race-free coexistence with other drivers or compatibility across every firmware. The official scripts are protocol references and are not distributed.

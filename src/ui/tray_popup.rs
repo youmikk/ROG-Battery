@@ -58,6 +58,8 @@ pub struct DpiState {
     pub stages: Vec<crate::device::DpiStage>,
     pub active: Option<u8>,
     pub current: Option<u16>,
+    pub current_y: Option<u16>,
+    pub stage_y: BTreeMap<u8,u16>,
     pub context: Option<crate::device::StageContext>,
     pub writable: bool,
     pub value_control: bool,
@@ -1350,7 +1352,8 @@ fn draw_dpi(
         t.text2,
         Align::Left,
     );
-    let current = dpi.and_then(|dpi| dpi.current).map(|value| format!("{value} DPI"))
+    let current = dpi.and_then(|dpi| dpi.current.map(|value| match dpi.current_y {
+        Some(y) if y!=value => format!("X {value} / Y {y}"), _=>format!("{value} DPI") }))
         .unwrap_or_else(|| "—".to_string());
     p.text(
         &current,
@@ -1377,14 +1380,13 @@ fn draw_dpi(
             if active || (writable && hover == Some(hits.len())) {
                 p.round(r, 7.0, if active { t.accent_soft } else { t.card_hover });
             }
-            p.text(
-                &stage.value.to_string(),
-                R::new(r.x, r.y - 2.0, r.w, r.h),
-                12.0,
-                active,
-                if active { t.accent } else if writable { t.text2 } else { t.text3 },
-                Align::Center,
-            );
+            let color=if active { t.accent } else if writable { t.text2 } else { t.text3 };
+            if let Some(y)=dpi.stage_y.get(&stage.index).filter(|y| **y!=stage.value) {
+                p.text(&stage.value.to_string(),R::new(r.x,r.y,r.w,17.0),10.5,active,color,Align::Center);
+                p.text(&y.to_string(),R::new(r.x,r.y+16.0,r.w,17.0),10.5,active,color,Align::Center);
+            } else {
+                p.text(&stage.value.to_string(),R::new(r.x,r.y-2.0,r.w,r.h),12.0,active,color,Align::Center);
+            }
             if writable {
                 let action = if dpi.custom { Action::SetDpiPreset(key.to_string(), stage.value) }
                 else if dpi.value_control { Action::SetDpiValue(key.to_string(), stage.value) }

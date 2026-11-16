@@ -7,6 +7,7 @@ mod feature;
 pub mod headset;
 pub mod page_command;
 pub mod rapoo;
+mod rapoo_config;
 pub mod razer;
 mod razer_capabilities;
 pub mod rog;
@@ -101,7 +102,7 @@ impl Target {
     pub fn new(backend: BackendId, interface: &HidInterface, address: u8) -> Self {
         let identity = if backend == BackendId::Razer {
             razer::collection_group(interface)
-        } else if interface.serial.is_empty() || matches!(backend,BackendId::CompX|BackendId::PageCommand|BackendId::Headset) {
+        } else if interface.serial.is_empty() || matches!(backend,BackendId::Rapoo|BackendId::CompX|BackendId::PageCommand|BackendId::Headset) {
             interface.path.to_ascii_lowercase()
         } else {
             format!(
@@ -286,6 +287,7 @@ pub fn set_dpi_stage(target: &Target, stage: crate::device::DpiStage, context: c
         BackendId::Logitech => logitech::Logitech.set_dpi_stage(&api, target, stage, context),
         BackendId::CompX => compx::CompX.set_dpi_stage(&api, target, stage, context),
         BackendId::Razer => razer::Razer.set_dpi_stage(&api, target, stage, context),
+        BackendId::Rapoo => rapoo::Rapoo.set_dpi_stage(&api, target, stage, context),
         _ => Err("设备不支持 DPI 档位切换".into()),
     }
 }

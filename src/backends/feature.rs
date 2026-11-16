@@ -19,14 +19,18 @@ impl FeatureChannel {
     /// Only a protocol with independently confirmed report size may use this for
     /// an unadvertised control report (some Razer mouse collections).
     pub(super) fn open_with_length(interface: &HidInterface, length: usize) -> Result<Self, String> {
+        Self::open_access(interface,length,0)
+    }
+
+    fn open_access(interface: &HidInterface, length: usize, access: u32) -> Result<Self, String> {
         if !(2..=4096).contains(&length) {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
-        // Feature IOCTL 不需要键盘/鼠标输入流的读写权限。
+        // Feature queries need no input-stream access; Output Report uses write access.
         let handle = unsafe {
             CreateFileW(
                 to_wide(&interface.path).as_ptr(),
-                0,
+                access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 core::ptr::null_mut(),
                 OPEN_EXISTING,
@@ -99,15 +103,38 @@ impl FeatureChannel {
     }
 
     pub fn receive(&mut self, report_id: u8, timeout: u32) -> Result<Vec<u8>, String> {
+        let response = self.receive_raw(report_id, timeout)?;
+        if response[0] != report_id {
+            return Err(crate::tr!("设备功能报告长度无效").into());
+        }
+        Ok(response)
+    }
+
+    /// Rapoo acknowledges in the report-ID byte on some Windows transports.
+    /// Its protocol parser validates the status and payload after this transfer.
+    pub(super) fn receive_raw(&mut self, report_id: u8, timeout: u32) -> Result<Vec<u8>, String> {
         let mut response = vec![0; self.length];
         response[0] = report_id;
         let length = self.transfer(GET_FEATURE, &mut response, timeout)?;
         let length = length + usize::from(report_id == 0);
-        if length == 0 || length > self.length || response[0] != report_id {
+        if length == 0 || length > self.length {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
         response.truncate(length);
         Ok(response)
+    }
+
+    pub(super) fn open_output(interface: &HidInterface) -> Result<Self, String> {
+        Self::open_access(interface, usize::from(interface.output_len), GENERIC_WRITE)
+    }
+
+    pub(super) fn send_output(&mut self, packet: &[u8], timeout: u32) -> Result<(), String> {
+        if packet.is_empty() || packet.len() != self.length {
+            return Err(crate::tr!("设备功能报告长度无效").into());
+        }
+        let mut request = packet.to_vec();
+        self.transfer(winapi::shared::hidclass::IOCTL_HID_SET_OUTPUT_REPORT, &mut request, timeout)?;
+        Ok(())
     }
 
     pub fn query(&mut self, packet: &[u8], timeout: u32) -> Result<Vec<u8>, String> {

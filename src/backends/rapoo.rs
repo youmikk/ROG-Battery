@@ -1,4 +1,4 @@
-//! nRF54L 鼠标状态报告，只读电量及当前 DPI。
+//! nRF54L 鼠标持续状态报告；配置访问使用独立的兄弟集合。
 use super::*;
 use crate::hid::HidDevice;
 use std::{
@@ -35,6 +35,10 @@ impl StatusState {
     fn recent(&self, now: Instant) -> Option<&(Instant, Option<(Battery, Dpi)>, usize)> {
         (!self.failed).then(|| self.sample.as_ref())
             .flatten().filter(|sample| now.saturating_duration_since(sample.0) < SAMPLE_LIFETIME)
+    }
+
+    fn confirmed_after(&self,now:Instant,after:Option<Instant>)->Option<&(Instant,Option<(Battery,Dpi)>,usize)> {
+        self.recent(now).filter(|s|after.is_none_or(|after|s.0>after))
     }
 }
 
@@ -211,8 +215,7 @@ fn parse_status(frame: &[u8]) -> Option<(Battery, Dpi)> {
     }
     let x = u16::from_le_bytes([data[2], data[3]]);
     let y = u16::from_le_bytes([data[4], data[5]]);
-    // 公共 DPI 控件尚不能表达独立 X/Y，保留未知，避免显示不完整的设置。
-    let current = (x == y && x >= 50 && x <= 45000 && x % 50 == 0).then_some(x);
+    let valid = (50..u16::MAX).contains(&x) && (50..u16::MAX).contains(&y);
     Some((
         Battery {
             percent: Some(data[7]),
@@ -222,7 +225,10 @@ fn parse_status(frame: &[u8]) -> Option<(Battery, Dpi)> {
             level: None,
         },
         Dpi {
-            current,
+            current: valid.then_some(x),
+            current_y: valid.then_some(y),
+            active_stage: valid.then_some(data[1]),
+            profile: data.get(11).copied().map(u16::from),
             values: Vec::new(),
             writable: false,
             ..Default::default()
@@ -250,45 +256,49 @@ impl DeviceBackend for Rapoo {
             .collect())
     }
 
-    fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
+    fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         if !is_control(&target.interface) {
             return Err(crate::tr!("此雷柏型号尚未适配").into());
         }
-        let started = Instant::now();
-        let session = status_reader(&target.interface);
-        let state = session.state.lock().unwrap_or_else(|error| error.into_inner());
-        let (state, _) = session.changed.wait_timeout_while(state, FIRST_REPORT_WAIT,
-            |state| !state.failed && state.recent(Instant::now()).is_none())
-            .unwrap_or_else(|error| error.into_inner());
-        let sample = state.recent(Instant::now());
-        let parsed = sample.and_then(|sample| sample.1.clone());
-        trace::record(
-            &target.interface,
-            BackendId::Rapoo,
-            "read-status",
-            0,
-            STATUS_REPORT,
-            0,
-            sample.map(|sample| sample.2).unwrap_or(0),
-            started,
-            if parsed.is_some() {
-                trace::Outcome::Ok
-            } else if sample.is_some() {
-                trace::Outcome::InvalidData
-            } else {
-                trace::Outcome::NoReply
-            },
-        );
-        let (battery, dpi) =
-            parsed.ok_or_else(|| crate::tr!("雷柏状态报告不可用，请唤醒设备后重试"))?;
+        let (mut taken,mut battery,status)=latest_status(target,None,FIRST_REPORT_WAIT)?;
+        // Configuration failure never clears independently received battery data.
+        let mut dpi=super::rapoo_config::read(api,target,&status).unwrap_or(status);
+        if let Ok((new_taken,new_battery,new_status))=latest_status(target,None,Duration::ZERO) {
+            taken=new_taken;battery=new_battery;
+            if dpi.profile!=new_status.profile || dpi.active_stage!=new_status.active_stage
+                || dpi.current!=new_status.current || dpi.current_y!=new_status.current_y {
+                dpi=new_status;
+            }
+        } else {
+            dpi.disable_writes();
+        }
         Ok(Snapshot {
             target: target.clone(),
             battery: Some(battery),
             dpi,
             connected: true,
-            battery_at: sample.map(|sample| sample.0), polling_rate: Default::default(),
+            battery_at: Some(taken), polling_rate: Default::default(),
         })
     }
+
+    fn set_dpi_stage(&self,api:&HidApi,target:&Target,stage:crate::device::DpiStage,context:crate::device::StageContext)->Result<(),String> {
+        if !is_control(&target.interface) {return Err(crate::tr!("此雷柏型号尚未适配").into());}
+        super::rapoo_config::switch(api,target,stage,context)
+    }
+}
+
+pub(super) fn latest_status(target:&Target,after:Option<Instant>,wait:Duration)->Result<(Instant,Battery,Dpi),String> {
+    let started=Instant::now();
+    let session=status_reader(&target.interface);
+    let state=session.state.lock().unwrap_or_else(|e|e.into_inner());
+    let (state,_)=session.changed.wait_timeout_while(state,wait,|s| !s.failed &&
+        s.confirmed_after(Instant::now(),after).is_none())
+        .unwrap_or_else(|e|e.into_inner());
+    let sample=state.confirmed_after(Instant::now(),after);
+    let result=sample.and_then(|s|s.1.clone().map(|(battery,dpi)|(s.0,battery,dpi)));
+    trace::record(&target.interface,BackendId::Rapoo,"read-status",0,STATUS_REPORT,0,
+        sample.map(|s|s.2).unwrap_or(0),started,if result.is_some(){trace::Outcome::Ok}else{trace::Outcome::NoReply});
+    result.ok_or_else(||crate::tr!("雷柏状态报告不可用，请唤醒设备后重试").into())
 }
 
 #[cfg(test)]
@@ -352,10 +362,13 @@ mod tests {
         assert!(parse_status(&frame).is_none());
     }
     #[test]
-    fn independent_axes_do_not_claim_a_single_dpi() {
+    fn independent_axes_retain_both_values_without_authorizing_scalar_writes() {
         let mut frame = report();
         frame[5] = 0x40;
-        assert_eq!(parse_status(&frame).unwrap().1.current, None);
+        let dpi=parse_status(&frame).unwrap().1;
+        assert_eq!(dpi.current,Some(800));
+        assert_eq!(dpi.current_y,Some(832));
+        assert!(!dpi.writable);
     }
 
     #[test]
@@ -407,5 +420,19 @@ mod tests {
         assert_eq!(sample.0, now);
         assert_eq!(sample.1.as_ref().unwrap().0.percent, Some(75));
         assert!(state.recent(now + SAMPLE_LIFETIME).is_none());
+    }
+    #[test]
+    fn stage_confirmation_requires_a_new_valid_report_after_the_write() {
+        let now=Instant::now();let mut state=StatusState::default();
+        state.receive(&report(),now);
+        assert!(state.confirmed_after(now,Some(now)).is_none());
+        state.receive(&[8,1,0,0],now+Duration::from_millis(1));
+        assert!(state.confirmed_after(now+Duration::from_millis(1),Some(now)).is_none());
+        let mut frame=report();frame[2]=6;frame[3..5].copy_from_slice(&25600u16.to_le_bytes());
+        frame[5..7].copy_from_slice(&30000u16.to_le_bytes());
+        state.receive(&frame,now+Duration::from_secs(3));
+        let dpi=&state.confirmed_after(now+Duration::from_secs(3),Some(now)).unwrap().1.as_ref().unwrap().1;
+        assert_eq!(dpi.active_stage,Some(6));assert_eq!(dpi.current_y,Some(30000));
+        assert!(state.confirmed_after(now+Duration::from_secs(11),Some(now)).is_none());
     }
 }

@@ -543,6 +543,26 @@ fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, po
 
 fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll,
     now: std::time::Instant) {
+    if backend==crate::backends::BackendId::Rapoo {
+        // Older builds keyed Rapoo by serial. Migrate only when the current scan
+        // establishes one receiver for that serial; identical receivers stay separate.
+        for snapshot in &poll.snapshots {
+            let i=&snapshot.target.interface;
+            if i.serial.is_empty() || poll.snapshots.iter().filter(|s| {
+                let other=&s.target.interface;
+                other.vendor_id==i.vendor_id && other.product_id==i.product_id && other.serial==i.serial
+            }).count()!=1 {continue;}
+            let old=crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",backend.name(),i.vendor_id,i.product_id,i.serial,snapshot.target.address));
+            if old!=snapshot.target.key && (shared.cfg.device_names.contains_key(&old)
+                || shared.cfg.device_tray.contains_key(&old) || shared.cfg.dpi_presets.contains_key(&old)
+                || shared.cfg.device_order.contains(&old) || shared.cfg.tray_device.as_ref()==Some(&old)) {
+                if shared.promote_device_key(&old,&snapshot.target.key) {shared.device_keys_dirty=true;}
+                shared.cfg.device_names.remove(&old);
+                shared.cfg.device_tray.remove(&old);
+                shared.devices.remove(&old);
+            }
+        }
+    }
     for device in shared.devices.values_mut() {
         if let Some(basic) = &mut device.basic {
             if basic.target.backend != backend { continue; }
@@ -891,7 +911,8 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
                 let disabled = if value_control { stages.iter().filter(|stage| !basic.dpi.values.contains(&stage.value))
                     .map(|stage|stage.index).collect() } else { Vec::new() };
                 return Some((key.clone(), crate::ui::tray_popup::DpiState { stages, active,
-                    current: basic.dpi.current, context: basic.dpi.stage_context(),
+                    current: basic.dpi.current, current_y: basic.dpi.current_y,
+                    stage_y:if value_control {BTreeMap::new()} else {basic.dpi.stage_y.clone()},context: basic.dpi.stage_context(),
                     custom, disabled, value_control, writable: basic.connected &&
                         if !value_control { basic.dpi.stage_writable } else { basic.dpi.writable
                             && (!custom || basic.dpi.write_effect.is_some()) } }));
@@ -903,6 +924,8 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
                     stages: (0..4).map(|index| crate::device::DpiStage {
                         index: index as u8 + 1, value: state.dpi(index) as u16 }).collect(),
                     current: Some(state.dpi(usize::from(state.active_stage.clamp(1, 4) - 1)) as u16),
+                    current_y: None,
+                    stage_y: BTreeMap::new(),
                     active: Some(state.active_stage.clamp(1, 4)),
                     context: None,
                     writable: true,
@@ -2043,7 +2066,8 @@ fn update_dpi_presets(env: &UiEnv, action: Act, value: Option<u16>) {
 /// 「应用」按钮：读草稿 → 校验 → 提交。
 fn apply_edit(env: &UiEnv, e: Edit) {
     if let Edit::DpiPreset(index) = e {
-        let value = env.canvas.with_ui(|u| u.edit_text(e).and_then(|s| s.trim().parse::<u16>().ok()));
+        let Some(text) = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string)) else {return;};
+        let value = text.trim().parse::<u16>().ok();
         update_dpi_presets(env, Act::ApplyEdit(Edit::DpiPreset(index)), value);
         return;
     }
@@ -4159,6 +4183,51 @@ mod backend_tests {
         assert!(state.pending.is_empty());
         assert_eq!(state.source_pending[&BackendId::Logitech].len(), 1);
         assert_eq!(state.source_write_gen[&BackendId::Logitech], 1);
+    }
+
+    #[test]
+    fn rapoo_actual_stages_use_the_rapoo_queue_and_fail_closed_after_a_partial_read() {
+        let shared=Arc::new(Mutex::new(Shared::new(Settings::default())));let signal=Signal::new(60);
+        let mut reading=snapshot(BackendId::Rapoo,"rapoo",70);
+        reading.dpi=Dpi {current:Some(800),current_y:Some(1600),active_stage:Some(1),profile:Some(2),
+            configuration_token:Some(42),stage_writable:true,
+            stages:vec![crate::device::DpiStage {index:1,value:800},crate::device::DpiStage {index:6,value:25600}],
+            stage_y:[(1,1600),(6,30000)].into(),..Default::default()};
+        let target=reading.target.clone();
+        lock_shared(&shared).publish_additional(BackendId::Rapoo,vec![reading.clone()],0,1);
+        let p=popup_dpi_states(&lock_shared(&shared));let dpi=&p["rapoo"];
+        assert!(!dpi.custom && !dpi.value_control && dpi.writable);
+        assert_eq!(dpi.stages[1].index,6);assert_eq!(dpi.context,Some(crate::device::StageContext::Configuration(42)));
+        assert_eq!(dpi.current_y,Some(1600));assert_eq!(dpi.stage_y[&6],30000);
+        assert!(submit(&shared,&signal,Cmd::BasicDpiStage {target,stage:dpi.stages[1],context:dpi.context.unwrap()}));
+        assert_eq!(lock_shared(&shared).source_pending[&BackendId::Rapoo].len(),1);
+        reading.dpi=Dpi {current:Some(800),current_y:Some(1600),..Default::default()};
+        lock_shared(&shared).publish_additional(BackendId::Rapoo,vec![reading],1,2);
+        assert!(!popup_dpi_states(&lock_shared(&shared))["rapoo"].writable);
+        assert_eq!(lock_shared(&shared).readings[0].percent(),Some(70));
+    }
+
+    #[test]
+    fn rapoo_serial_preference_migration_requires_an_unambiguous_receiver_and_runs_once() {
+        let mut a=snapshot(BackendId::Rapoo,"a",70);a.target.interface.serial="same".into();
+        a.target.interface.vendor_id=0x24ae;a.target.interface.product_id=0x1415;
+        let old=crate::device::stable_key("Rapoo nRF54L:24ae:1415:same:1");
+        let mut cfg=Settings::default();cfg.device_names.insert(old.clone(),"Custom".into());
+        cfg.device_tray.insert(old.clone(),Default::default());cfg.tray_device=Some(old.clone());
+        let mut shared=Shared::new(cfg.clone());
+        shared.publish_additional(BackendId::Rapoo,vec![a.clone()],0,1);
+        assert_eq!(shared.cfg.device_names["a"],"Custom");
+        assert_eq!(shared.cfg.tray_device.as_deref(),Some("a"));
+        assert!(!shared.cfg.device_tray.contains_key(&old));
+        shared.device_keys_dirty=false;
+        shared.publish_additional(BackendId::Rapoo,vec![a.clone()],0,2);
+        assert!(!shared.device_keys_dirty);
+        let mut b=a.clone();b.target.key="b".into();b.target.interface.path="b".into();
+        let mut shared=Shared::new(cfg);
+        shared.publish_additional(BackendId::Rapoo,vec![a,b],0,1);
+        assert!(shared.cfg.device_names.contains_key(&old));
+        assert!(!shared.cfg.device_names.contains_key("a"));assert!(!shared.cfg.device_names.contains_key("b"));
+        assert_eq!(shared.readings.len(),2);
     }
 
     #[test]
