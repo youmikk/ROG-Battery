@@ -6,6 +6,7 @@ use crate::paths;
 pub struct Settings {
     pub device_tray: std::collections::BTreeMap<String, crate::tray_prefs::DeviceTray>,
     pub device_names: std::collections::BTreeMap<String, String>,
+    pub dpi_presets: std::collections::BTreeMap<String, crate::device::DpiPresets>,
     /// 用户拖拽后的设备顺序。未知或已移除的设备会被忽略。
     pub device_order: Vec<String>,
     pub tray_device: Option<String>,
@@ -38,6 +39,7 @@ impl Default for Settings {
         Settings {
             device_tray: Default::default(),
             device_names: Default::default(),
+            dpi_presets: Default::default(),
             device_order: Vec::new(),
             tray_device: None,
             tray_device_name: String::new(),
@@ -144,6 +146,30 @@ impl Settings {
                         warnings.push(format!("theme={v} 只认 system/light/dark，已忽略"));
                     }
                 }
+                key if key.starts_with("dpi_presets.") => {
+                    let id = &key[12..];
+                    let parsed = (|| {
+                        if id.len() != 16 || !id.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+                        let mut parts = v.split(';');
+                        let mode = parts.next()?;
+                        let list = parts.next()?;
+                        let hidden = parts.next().unwrap_or("");
+                        if parts.next().is_some() { return None; }
+                        let enabled = match mode { "1" => true, "0" => false, _ => return None };
+                        let values = if list.is_empty() { Vec::new() } else {
+                            list.split(',').map(|v| v.parse::<u16>().ok()).collect::<Option<Vec<_>>>()?
+                        };
+                        let hidden = if hidden.is_empty() { Vec::new() } else {
+                            hidden.split(',').map(|v| v.parse::<u16>().ok()).collect::<Option<Vec<_>>>()?
+                        };
+                        let mut pref = crate::device::DpiPresets { enabled, values, hidden };
+                        pref.values.sort_unstable();
+                        pref.hidden.sort_unstable();
+                        pref.valid().then_some(pref)
+                    })();
+                    if let Some(pref) = parsed { s.dpi_presets.insert(id.to_ascii_lowercase(), pref); }
+                    else { warnings.push("DPI 预设配置无效，已忽略".into()); }
+                }
                 key if key.starts_with("device_name.") => {
                     let id = &key[12..];
                     if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -213,6 +239,11 @@ impl Settings {
         for (key, name) in &self.device_names {
             s.push_str(&format!("device_name.{key}={name}\n"));
         }
+        for (key, presets) in &self.dpi_presets {
+            let values = presets.values.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
+            let hidden = presets.hidden.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
+            s.push_str(&format!("dpi_presets.{key}={};{values};{hidden}\n", u8::from(presets.enabled)));
+        }
         if !self.device_order.is_empty() {
             s.push_str(&format!("device_order={}\n", self.device_order.join(",")));
         }
@@ -224,6 +255,14 @@ impl Settings {
             .get(&device.key)
             .map(String::as_str)
             .unwrap_or(&device.name)
+    }
+
+    pub fn presets_for(&self, key: &str, dpi: &crate::device::Dpi) -> crate::device::DpiPresets {
+        self.dpi_presets.get(key).cloned().unwrap_or_else(|| crate::device::DpiPresets {
+            enabled: false,
+            values: dpi.quick_values().into_iter().filter(|v| dpi.values.contains(v)).collect(),
+            hidden: Vec::new(),
+        })
     }
 
     pub fn device_order_index(&self, key: &str) -> Option<usize> {
@@ -319,6 +358,40 @@ fn parse_bool(v: &str) -> Option<bool> {
         "true" | "1" | "yes" | "on" => Some(true),
         "false" | "0" | "no" | "off" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    use crate::device::DpiPresets;
+
+    #[test]
+    fn preset_settings_roundtrip_per_device_with_sorted_values_and_hidden_stages() {
+        let mut cfg = Settings::default();
+        cfg.dpi_presets.insert("0123456789abcdef".into(), DpiPresets { enabled: true, values: vec![400,800], hidden: vec![1600,3200] });
+        cfg.dpi_presets.insert("fedcba9876543210".into(), DpiPresets { enabled: false, values: vec![1200], ..Default::default() });
+        let (loaded, warnings) = Settings::parse_collect(&cfg.to_text());
+        assert!(warnings.is_empty());
+        assert_eq!(loaded.dpi_presets, cfg.dpi_presets);
+        let mut restored=loaded.dpi_presets["0123456789abcdef"].clone();
+        let dpi=crate::device::Dpi {values:vec![400,800,1600,3200],
+            write_effect:Some(crate::device::DpiWriteEffect::Current),..Default::default()};
+        assert!(restored.set_count(4,&dpi));
+        assert_eq!(restored.values,vec![400,800,1600,3200]);
+        let (sorted, warnings) = Settings::parse_collect("dpi_presets.0123456789abcdef=1;1600,400,800");
+        assert!(warnings.is_empty());
+        assert_eq!(sorted.dpi_presets["0123456789abcdef"].values, vec![400,800,1600]);
+    }
+
+    #[test]
+    fn corrupt_presets_are_rejected_without_loading_a_partial_list() {
+        for bad in ["1;800,0", "1;800,800", "1;400,no", "2;400", "1;65536", "1;1,2,3,4,5", "1;", "1;400;400", "1;400;800,1600,3200,6400", "1;400;800;1600"] {
+            let (cfg, warnings) = Settings::parse_collect(&format!("dpi_presets.0123456789abcdef={bad}\nlanguage=en"));
+            assert!(cfg.dpi_presets.is_empty(), "{bad}");
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(cfg.language, crate::i18n::Language::English);
+        }
     }
 }
 

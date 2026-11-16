@@ -621,6 +621,8 @@ impl DeviceBackend for Razer {
                 .filter(|_| s.normal_mode())
             {
                 dpi.values = (100..=caps.max_dpi).collect();
+                dpi.write_effect = Some(if caps.dpi_storage == 0 { crate::device::DpiWriteEffect::Current }
+                    else { crate::device::DpiWriteEffect::Stored });
                 dpi.writable = dpi.current.is_some() && dpi.current == dpi.current_y;
                 dpi.stage_editable = !dpi.stages.is_empty()
                     && dpi.stages.iter().all(|stage| {

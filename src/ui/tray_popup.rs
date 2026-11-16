@@ -43,6 +43,7 @@ pub enum Action {
     TogglePanel(String),
     SetDpiStage(String, u8),
     SetDpiValue(String, u16),
+    SetDpiPreset(String, u16),
     SetOnboardDpiStage(String, crate::device::DpiStage, crate::device::StageContext),
     AudioSlot(AudioSlot),
     AudioSlider(AudioSlot),
@@ -60,6 +61,8 @@ pub struct DpiState {
     pub context: Option<crate::device::StageContext>,
     pub writable: bool,
     pub value_control: bool,
+    pub custom: bool,
+    pub disabled: Vec<u8>,
 }
 
 struct State {
@@ -1340,8 +1343,8 @@ fn draw_dpi(
 ) {
     let t = *p.t;
     p.text(
-        "DPI",
-        R::new(panel.x + 18.0, panel.y + 6.0, 42.0, 18.0),
+        if dpi.is_some_and(|d| d.custom) { crate::tr!("自定义预设") } else { "DPI" },
+        R::new(panel.x + 18.0, panel.y + 6.0, 120.0, 18.0),
         10.5,
         true,
         t.text2,
@@ -1351,7 +1354,7 @@ fn draw_dpi(
         .unwrap_or_else(|| "—".to_string());
     p.text(
         &current,
-        R::new(panel.x + 54.0, panel.y + 6.0, panel.w - 72.0, 18.0),
+        R::new(panel.x + 142.0, panel.y + 6.0, panel.w - 160.0, 18.0),
         12.0,
         true,
         t.text,
@@ -1370,7 +1373,8 @@ fn draw_dpi(
                 segment.h - 6.0,
             );
             let active = dpi.active == Some(stage.index);
-            if active || (dpi.writable && hover == Some(hits.len())) {
+            let writable = dpi.writable && !dpi.disabled.contains(&stage.index);
+            if active || (writable && hover == Some(hits.len())) {
                 p.round(r, 7.0, if active { t.accent_soft } else { t.card_hover });
             }
             p.text(
@@ -1378,11 +1382,12 @@ fn draw_dpi(
                 R::new(r.x, r.y - 2.0, r.w, r.h),
                 12.0,
                 active,
-                if active { t.accent } else if dpi.writable { t.text2 } else { t.text3 },
+                if active { t.accent } else if writable { t.text2 } else { t.text3 },
                 Align::Center,
             );
-            if dpi.writable {
-                let action = if dpi.value_control { Action::SetDpiValue(key.to_string(), stage.value) }
+            if writable {
+                let action = if dpi.custom { Action::SetDpiPreset(key.to_string(), stage.value) }
+                else if dpi.value_control { Action::SetDpiValue(key.to_string(), stage.value) }
                 else if let Some(context) = dpi.context { Action::SetOnboardDpiStage(key.to_string(), *stage, context) }
                 else { Action::SetDpiStage(key.to_string(), stage.index) };
                 push_visible_hit(hits, visible, r, action);

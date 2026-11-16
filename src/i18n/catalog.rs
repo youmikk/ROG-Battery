@@ -2,6 +2,19 @@
 
 #[macro_export]
 macro_rules! tr {
+    ("按 DPI 升序排列；减少档数时保留收起的数值") => { $crate::i18n::translate("按 DPI 升序排列；减少档数时保留收起的数值") };
+    ("启用档数") => { $crate::i18n::translate("启用档数") };
+    ("设备档位") => { $crate::i18n::translate("设备档位") };
+    ("快捷数值") => { $crate::i18n::translate("快捷数值") };
+    ("自定义预设") => { $crate::i18n::translate("自定义预设") };
+    ("添加预设") => { $crate::i18n::translate("添加预设") };
+    ("切换会写入鼠标保存的 DPI；预设列表保存在软件中") => { $crate::i18n::translate("切换会写入鼠标保存的 DPI；预设列表保存在软件中") };
+    ("预设保存在软件中，点击切换后读取确认") => { $crate::i18n::translate("预设保存在软件中，点击切换后读取确认") };
+    ("当前连接不支持 DPI 预设写入") => { $crate::i18n::translate("当前连接不支持 DPI 预设写入") };
+    ("预设需使用设备支持的 DPI，不能重复，可设置 1～4 档") => { $crate::i18n::translate("预设需使用设备支持的 DPI，不能重复，可设置 1～4 档") };
+    ("不可用") => { $crate::i18n::translate("不可用") };
+    ("保存") => { $crate::i18n::translate("保存") };
+    ("删除") => { $crate::i18n::translate("删除") };
     ("当前") => { $crate::i18n::translate("当前") };
     ("上次电量") => { $crate::i18n::translate("上次电量") };
     ("等待状态回报") => { $crate::i18n::translate("等待状态回报") };
@@ -788,6 +801,19 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "操作失败。" => "Operation failed.",
         "写 LOD 会重置表面标定（厂商确认无恢复命令）。" => "Changing LOD resets surface calibration. The manufacturer provides no command to restore it.",
         "「永不」休眠会显著增加耗电，设备闲置时不会自动休眠。" => "Never sleeping increases power use. The device will stay awake when idle.",
+        "启用档数" => "Active stages",
+        "按 DPI 升序排列；减少档数时保留收起的数值" => "Sorted by DPI. Hidden values are kept when reducing the stage count.",
+        "设备档位" => "Device stages",
+        "快捷数值" => "Quick values",
+        "自定义预设" => "Custom presets",
+        "添加预设" => "Add preset",
+        "切换会写入鼠标保存的 DPI；预设列表保存在软件中" => "Switching writes stored DPI on the mouse. The preset list stays in the app.",
+        "预设保存在软件中，点击切换后读取确认" => "Presets stay in the app. DPI changes are checked by readback.",
+        "当前连接不支持 DPI 预设写入" => "DPI preset writes are unavailable on this connection.",
+        "预设需使用设备支持的 DPI，不能重复，可设置 1～4 档" => "Use supported DPI values, without duplicates. Choose 1–4 stages.",
+        "不可用" => "Unavailable",
+        "保存" => "Save",
+        "删除" => "Delete",
         _ => text,
     }
 }

@@ -67,9 +67,19 @@ Razer exposes battery, charging, current X/Y, complete stage records and separat
 
 ## Remaining work
 
+Prioritize multi-brand battery coverage and basic DPI controls, retaining detailed ROG support. Advanced settings for other brands must not displace keyboard and headset battery coverage.
+
+- [x] Save 1–4 custom DPI presets per device, sorted by value after editing. A stage-count selector hides the highest values and retains them for restoration; the main window and tray share the enabled list.
+- [x] Distinguish actual device stages from software presets; require confirmed numerical write capability, validate supported values and verify readback.
+- [x] Explain writes that alter stored DPI. Presets cannot bypass missing write support, stale identity, changed configuration or disconnection.
+- [ ] Add actual Rapoo stage reads and basic switching; current-DPI reads alone do not satisfy this requirement.
+- [ ] Extend existing upstream battery protocols, recording mouse, keyboard, headset and gamepad coverage separately.
+
 1. Hardware validation for CompX, Logitech and Razer changes, including writes, wake recovery, device replacement and competing official software.
 2. Additional CompX/Beken runtime layouts and transport data; newer Logitech onboard layouts, static feature/identity caching and continuous notification routing.
 3. More Razer connection data, including paired-device and transport limits on shared high-rate receivers.
 4. Validated page-command writes and sibling-collection notifications; separate treatment for Beast X 4K.
 5. Corsair, SteelSeries and further headset/gamepad families, without replacing unreadable settings with defaults.
 6. Distributable compatibility data, account-free feedback service and Beta updates. The current feedback path remains a user-submitted GitHub form and sanitized report.
+
+Custom presets are unreleased development changes. Local regressions and Chinese/English render checks passed; per-model hardware acceptance remains pending. CompX presets bind the active stage at click time and verify the active stage and X/Y before and after writing. The current official Rapoo nRF54L driver uses profile-specific addresses and up to seven stages, unlike fixed-address, six-stage reference implementations. Further work must read the actual profile and complete X/Y tables, separately from the older VT9Pro protocol.

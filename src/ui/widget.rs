@@ -95,6 +95,7 @@ pub enum Edit {
     Dpi(u8),
     BasicDpiX(u8),
     BasicDpiY(u8),
+    DpiPreset(u8),
     /// 性能页：第 N 档 DPI 的颜色（0–3），6 位十六进制。
     DpiColor(u8),
     /// 电量页：低电量阈值（0–100）。
@@ -115,7 +116,7 @@ impl Edit {
     /// 最多几位。
     pub fn max_len(self) -> usize {
         match self {
-            Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_) => 5,
+            Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiPreset(_) => 5,
             Edit::DpiColor(_) | Edit::LightColor => 6,
             Edit::LowWarn => 3,
         }
@@ -188,8 +189,11 @@ pub enum Act {
     /// 应用某个输入框的值（输入框旁边的「应用」，或回车）。
     ApplyEdit(Edit),
     BasicDpi(u16),
+    UseDpiPreset(u16),
     BasicDpiStage(crate::device::DpiStage, crate::device::StageContext),
     BasicPollingRate(u16),
+    DpiPresetMode(bool),
+    DpiPresetCount(u8),
     /// 点一下开关。
     Toggle(Pref),
     /// 拖动滑块到某个比例（0–1），拖拽过程中连续触发。

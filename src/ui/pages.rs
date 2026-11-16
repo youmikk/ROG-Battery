@@ -2033,7 +2033,69 @@ fn known_state<'a>(d: &'a Data) -> Option<&'a crate::proto::State> {
     d.state.filter(|s| !placeholder_state(s))
 }
 
-fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot, c: &mut Cursor) {
+fn dpi_preset_editor(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
+    presets: &crate::device::DpiPresets, c: &mut Cursor) {
+    let t = p.t;
+    let title = R::new(c.x, c.y + 4.0, c.w, 32.0);
+    p.text(crate::tr!("DPI 档位"), title, font::H2, true, t.text2, Align::Left);
+    let count = R::new(title.right() - 196.0, title.y, 196.0, 30.0);
+    segmented(p, ui, count, &["1", "2", "3", "4"], presets.values.len().saturating_sub(1),
+        |i| Act::DpiPresetCount(i as u8 + 1));
+    p.text(crate::tr!("启用档数"), R::new(count.x - 104.0, title.y, 96.0, 30.0),
+        11.5, false, t.text3, Align::Right);
+    c.y = title.bottom() + 10.0;
+    let card = c.card(p, 4.0 + presets.values.len() as f32 * 46.0 + 58.0);
+    for (index, value) in presets.values.iter().enumerate() {
+        let row = R::new(card.x, card.y + 4.0 + index as f32 * 46.0, card.w, 46.0);
+        let active = basic.dpi.current == Some(*value) && basic.dpi.current_y.is_none_or(|y| y == *value);
+        let valid = basic.dpi.values.contains(value);
+        let edit = Edit::DpiPreset(index as u8);
+        if active { p.rect(row, t.accent_soft); }
+        p.text(&crate::trf!("档位 {}", index + 1), R::new(row.x + 18.0,row.y,52.0,row.h),11.5,active,
+            if active {t.accent} else {t.text3},Align::Left);
+        let input = R::new(row.x + 74.0,row.cy()-15.0,76.0,30.0);
+        let text = ui.edit_text(edit).map(str::to_string).unwrap_or_else(|| value.to_string());
+        num_box(p,input,&text,ui.focus == Some(edit));
+        p.text("DPI",R::new(input.right()+8.0,row.y,30.0,row.h),12.0,false,t.text3,Align::Left);
+        if basic.dpi.write_effect.is_some() && !basic.dpi.values.is_empty() {
+            ui.hot(input,Act::Focus(edit));
+            button(p,ui,R::new(row.right()-62.0,input.y,52.0,30.0),crate::tr!("应用"),false,Act::ApplyEdit(edit));
+        }
+        let use_rect = R::new(row.right()-124.0,input.y,54.0,30.0);
+        if active {
+            p.text(crate::tr!("● 当前使用"),R::new(row.right()-146.0,row.y,76.0,row.h),
+                11.0,true,t.accent,Align::Left);
+        } else if valid && basic.connected && basic.dpi.writable && basic.dpi.write_effect.is_some() {
+            button(p,ui,use_rect,crate::tr!("切换"),false,Act::UseDpiPreset(*value));
+        } else {
+            p.text(if valid {"—"} else {crate::tr!("不可用")},use_rect,11.0,false,p.t.text3,Align::Center);
+        }
+    }
+    let hint = match basic.dpi.write_effect {
+        Some(crate::device::DpiWriteEffect::Stored) => crate::tr!("切换会写入鼠标保存的 DPI；预设列表保存在软件中"),
+        Some(_) => crate::tr!("预设保存在软件中，点击切换后读取确认"),
+        None => crate::tr!("当前连接不支持 DPI 预设写入"),
+    };
+    p.text(crate::tr!("按 DPI 升序排列；减少档数时保留收起的数值"),
+        R::new(card.x+18.0,card.bottom()-52.0,card.w-36.0,22.0),11.0,false,t.text3,Align::Left);
+    p.text(hint,R::new(card.x+18.0,card.bottom()-30.0,card.w-36.0,22.0),11.0,false,t.text3,Align::Left);
+    c.y = card.bottom();
+}
+
+fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
+    cfg: &crate::settings::Settings, c: &mut Cursor) {
+    let presets = cfg.presets_for(&basic.target.key, &basic.dpi);
+    if basic.dpi.write_effect.is_some() || cfg.dpi_presets.contains_key(&basic.target.key) {
+        let r = R::new(c.x,c.y+4.0,c.w,36.0);
+        segmented(p,ui,r,&[if basic.dpi.stages.is_empty() {crate::tr!("快捷数值")}
+            else {crate::tr!("设备档位")},crate::tr!("自定义预设")],usize::from(presets.enabled),
+            |i| Act::DpiPresetMode(i == 1));
+        c.y = r.bottom()+12.0;
+        if presets.enabled {
+            dpi_preset_editor(p,ui,basic,&presets,c);
+            return;
+        }
+    }
     if !basic.dpi.stage_y.is_empty() && !basic.dpi.stages.is_empty() {
         c.h2(p,crate::tr!("DPI 档位"),true);
         let card = c.card(p,48.0 * basic.dpi.stages.len() as f32 + 12.0);
@@ -2112,7 +2174,7 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot, c:
 
 fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     if let Some(basic) = d.basic {
-        basic_dpi(p, ui, basic, c);
+        basic_dpi(p, ui, basic, d.cfg, c);
         if basic.polling_rate.current.is_some() || !basic.polling_rate.values.is_empty() {
             c.h2(p,crate::tr!("回报率"),false);
             let rate = &basic.polling_rate;

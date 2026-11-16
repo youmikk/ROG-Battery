@@ -145,6 +145,8 @@ pub struct Dpi {
     pub current_y: Option<u16>,
     pub values: Vec<u16>,
     pub writable: bool,
+    /// Effect of a numerical DPI write; absent when that operation is not supported.
+    pub write_effect: Option<DpiWriteEffect>,
     pub stages: Vec<DpiStage>,
     pub active_stage: Option<u8>,
     pub profile: Option<u16>,
@@ -170,6 +172,70 @@ pub struct DpiStage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DpiWriteEffect {
+    Current,
+    Stored,
+}
+
+pub const MAX_DPI_PRESETS: usize = 4;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DpiPresets {
+    pub enabled: bool,
+    pub values: Vec<u16>,
+    /// Values hidden by the stage-count selector, retained for restoration.
+    pub hidden: Vec<u16>,
+}
+
+impl DpiPresets {
+    pub fn valid(&self) -> bool {
+        let all: Vec<_> = self.values.iter().chain(&self.hidden).copied().collect();
+        !self.values.is_empty() && all.len() <= MAX_DPI_PRESETS && all.iter().all(|v| *v != 0)
+            && all.iter().collect::<std::collections::BTreeSet<_>>().len() == all.len()
+    }
+
+    pub fn edit(&mut self, index: usize, value: u16, dpi: &Dpi) -> bool {
+        if dpi.write_effect.is_none() || !dpi.values.contains(&value)
+            || index >= self.values.len() || self.values.iter().enumerate().any(|(i,v)| i != index && *v == value) {
+            return false;
+        }
+        self.values[index] = value;
+        self.values.sort_unstable();
+        self.hidden.retain(|v| *v != value);
+        true
+    }
+
+    fn add(&mut self, dpi: &Dpi) -> bool {
+        if dpi.write_effect.is_none() || self.values.len() >= MAX_DPI_PRESETS { return false; }
+        let next = self.hidden.first().copied().or_else(|| {
+            dpi.current.into_iter().chain([400,800,1600,3200]).chain(dpi.values.iter().copied())
+                .find(|v| *v != 0 && dpi.values.contains(v) && !self.values.contains(v))
+        });
+        if let Some(value) = next {
+            self.hidden.retain(|v| *v != value);
+            self.values.push(value);
+            self.values.sort_unstable();
+            true
+        } else { false }
+    }
+
+    pub fn set_count(&mut self, count: usize, dpi: &Dpi) -> bool {
+        if !(1..=MAX_DPI_PRESETS).contains(&count) { return false; }
+        let mut next = self.clone();
+        if count < next.values.len() {
+            next.hidden.extend(next.values.split_off(count));
+            next.hidden.sort_unstable();
+        }
+        while next.values.len() < count {
+            if !next.add(dpi) { return false; }
+        }
+        if !next.valid() { return false; }
+        *self = next;
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StageContext {
     Profile(u16),
     Configuration(u64),
@@ -185,6 +251,16 @@ impl StageContext {
 }
 
 impl Dpi {
+    pub fn shortcut_stages(&self, presets: Option<&DpiPresets>) -> (Vec<DpiStage>, bool) {
+        if let Some(presets) = presets.filter(|p| p.enabled) {
+            return (presets.values.iter().enumerate().map(|(index,value)| DpiStage {
+                index: index as u8, value: *value }).collect(), true);
+        }
+        if !self.stages.is_empty() { return (self.stages.clone(), false); }
+        (self.quick_values().into_iter().enumerate().map(|(index,value)| DpiStage {
+            index: index as u8, value }).collect(), true)
+    }
+
     pub fn stage_context(&self) -> Option<StageContext> {
         self.configuration_token.map(StageContext::Configuration)
             .or_else(|| self.profile.map(StageContext::Profile))
@@ -218,4 +294,76 @@ pub fn stable_key(source: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    #[test]
+    fn editing_presets_sorts_supported_values_and_limits_to_four_without_writing_device() {
+        let dpi = Dpi { current: Some(800), values: vec![400,800,1200,1600,2400,3200,6400],
+            writable: true, write_effect: Some(DpiWriteEffect::Current), ..Default::default() };
+        let mut p = DpiPresets { enabled: true, values: vec![800,1600], ..Default::default() };
+        assert!(!p.edit(0, 801, &dpi));
+        assert!(!p.edit(0, 1600, &dpi));
+        assert!(p.edit(0, 1200, &dpi));
+        assert_eq!(p.values, vec![1200,1600]);
+        assert!(p.edit(0, 3200, &dpi));
+        assert_eq!(p.values, vec![1600,3200]);
+        while p.values.len() < MAX_DPI_PRESETS { assert!(p.add(&dpi)); }
+        assert!(!p.add(&dpi));
+        assert!(p.valid());
+        assert_eq!(p.values, vec![400,800,1600,3200]);
+        assert_eq!(dpi.current, Some(800));
+        let mut readonly = dpi.clone(); readonly.write_effect = None;
+        assert!(!p.edit(0, 400, &readonly));
+    }
+
+    #[test]
+    fn custom_values_do_not_replace_or_renumber_real_device_stages() {
+        let stages = vec![DpiStage { index: 1, value: 800 }, DpiStage { index: 4, value: 3200 }];
+        let dpi = Dpi { stages: stages.clone(), ..Default::default() };
+        let mut presets = DpiPresets { enabled: true, values: vec![400,1600], ..Default::default() };
+        let (choices, scalar) = dpi.shortcut_stages(Some(&presets));
+        assert!(scalar);
+        assert_eq!(choices.iter().map(|s|s.value).collect::<Vec<_>>(), vec![400,1600]);
+        presets.enabled = false;
+        assert_eq!(dpi.shortcut_stages(Some(&presets)), (stages.clone(), false));
+        assert_eq!(dpi.stages, stages);
+    }
+
+    #[test]
+    fn stage_count_hides_high_values_and_restores_them_without_device_writes() {
+        let dpi = Dpi { current: Some(800), values: vec![400,800,1600,3200,6400],
+            write_effect: Some(DpiWriteEffect::Current), ..Default::default() };
+        let mut presets = DpiPresets { enabled: true, values: vec![400,800,1600,3200], ..Default::default() };
+        assert!(presets.set_count(2, &dpi));
+        assert_eq!(presets.values, vec![400,800]);
+        assert_eq!(presets.hidden, vec![1600,3200]);
+        assert_eq!(dpi.shortcut_stages(Some(&presets)).0.iter().map(|s|s.value).collect::<Vec<_>>(),vec![400,800]);
+        assert!(presets.set_count(1, &dpi));
+        assert_eq!(presets.hidden, vec![800,1600,3200]);
+        assert!(presets.set_count(4, &dpi));
+        assert_eq!(presets.values, vec![400,800,1600,3200]);
+        assert!(presets.hidden.is_empty());
+        assert!(!presets.set_count(0, &dpi));
+        assert!(!presets.set_count(5, &dpi));
+        assert_eq!(dpi.current, Some(800));
+    }
+
+    #[test]
+    fn editing_hidden_value_does_not_restore_duplicates_and_failed_expansion_is_atomic() {
+        let dpi = Dpi { values: vec![400,800,1600,3200], write_effect: Some(DpiWriteEffect::Current), ..Default::default() };
+        let mut presets = DpiPresets {enabled:true,values:vec![400,800],hidden:vec![1600,3200]};
+        assert!(presets.edit(0,1600,&dpi));
+        assert_eq!(presets.values,vec![800,1600]);
+        assert_eq!(presets.hidden,vec![3200]);
+        assert!(presets.set_count(4,&dpi));
+        assert_eq!(presets.values,vec![400,800,1600,3200]);
+        let limited = Dpi {values:vec![400,800], ..dpi};
+        let mut presets = DpiPresets {enabled:true,values:vec![400],..Default::default()};
+        let before = presets.clone();
+        assert!(!presets.set_count(4,&limited));
+        assert_eq!(presets,before);
+    }
 }

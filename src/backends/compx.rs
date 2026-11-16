@@ -280,6 +280,7 @@ impl<C: Channel> Session<C> {
         }
         let writable = self.write_supported() && profile.is_some();
         dpi.writable = writable && dpi.current == dpi.current_y;
+        dpi.write_effect = writable.then_some(crate::device::DpiWriteEffect::Stored);
         dpi.stage_writable = writable; dpi.stage_editable = writable;
         Ok(dpi)
     }
@@ -352,8 +353,12 @@ impl<C: Channel> Session<C> {
         Ok(())
     }
     fn edit(&mut self, target: &Target, stage: DpiStage, profile: u16, expected_y: u16, x: u16, y: u16) -> Result<(), String> {
+        self.edit_checked(target,stage,profile,expected_y,x,y,false)
+    }
+    fn edit_checked(&mut self, target: &Target, stage: DpiStage, profile: u16, expected_y: u16, x: u16, y: u16, active_only: bool) -> Result<(), String> {
         let config = self.checked_config(target,profile)?;
         if !config.dpi.stage_editable || !config.dpi.stages.contains(&stage)
+            || (active_only && (!config.dpi.writable || config.dpi.active_stage != Some(stage.index)))
             || config.dpi.stage_y.get(&stage.index) != Some(&expected_y) {
             return Err("设备档位已变化，请刷新后重试".into());
         }
@@ -368,9 +373,19 @@ impl<C: Channel> Session<C> {
         next[offset..offset+encoded.len()].copy_from_slice(&encoded);
         self.check(target)?;
         if self.profile() != Some(profile) { return Err("设备配置已变化，请刷新后重试".into()); }
+        if active_only && scalar(&self.read(4,2)?) != Some(stage.index) {
+            return Err("设备档位已变化，请刷新后重试".into());
+        }
         self.write_verified(address,&next,&old)?;
         self.check(target)?;
         if self.profile() != Some(profile) { return Err("设备配置已变化，请刷新后检查".into()); }
+        if active_only {
+            let after = self.config()?;
+            if after.dpi.active_stage != Some(stage.index) || after.dpi.current != Some(x)
+                || after.dpi.current_y != Some(y) {
+                return Err("无法确认 DPI 档位切换".into());
+            }
+        }
         Ok(())
     }
     fn rate(&mut self, target: &Target, hz: u16) -> Result<(), String> {
@@ -435,6 +450,11 @@ impl DeviceBackend for CompX {
         with_session(target, |s| s.rate(target,hz))
     }
 }
+pub fn set_preset(target: &Target, stage: DpiStage, context: crate::device::StageContext, expected_y: u16, value: u16) -> Result<(),String> {
+    if target.backend != BackendId::CompX { return Err("此协议不提供通用 DPI 写入".into()); }
+    with_session(target, |s| s.edit_checked(target,stage,context.profile()?,expected_y,value,value,true))
+}
+
 fn with_session(target: &Target, f: impl FnOnce(&mut Session<DeviceChannel>) -> Result<(),String>) -> Result<(),String> {
     if !control(&target.interface) { return Err("CompX 控制接口无效".into()); }
     let lock = channel_lock(&target.interface.path);
@@ -449,7 +469,7 @@ mod tests {
     struct Reports {
         id: [u8;2], profile: u8, memory: BTreeMap<u16,u8>,
         writes: Vec<(u16,Vec<u8>)>, ack: bool, accept: bool,
-        change_profile: bool, change_identity: bool, wrong_address: bool,
+        change_profile: bool, change_identity: bool, wrong_address: bool, change_stage: bool,
     }
     impl Reports {
         fn new(id: [u8;2]) -> Self {
@@ -460,7 +480,7 @@ mod tests {
                 for (offset,byte) in bytes.into_iter().enumerate() { memory.insert(address+offset as u16,byte); }
             }
             Self { id,profile:0,memory,writes:Vec::new(),ack:false,accept:true,
-                change_profile:false,change_identity:false,wrong_address:false }
+                change_profile:false,change_identity:false,wrong_address:false,change_stage:false }
         }
         fn bytes(&self, address:u16, len:usize) -> Vec<u8> {
             (0..len).map(|offset| *self.memory.get(&(address + offset as u16)).unwrap_or(&0)).collect()
@@ -486,6 +506,7 @@ mod tests {
                     if self.accept { for (offset,byte) in data.iter().enumerate() {self.memory.insert(address+offset as u16,*byte);} }
                     if self.change_profile {self.profile=1;}
                     if self.change_identity {self.id=[2,39];}
+                    if self.change_stage {self.memory.insert(4,1);self.memory.insert(5,84);}
                     if !self.ack {return None;}
                     Self::response(7,address,data)
                 }
@@ -605,6 +626,27 @@ mod tests {
         s.edit(&target,DpiStage {index:1,value:1600},0,1600,3200,6400).unwrap();
         assert_eq!(s.channel.writes,vec![(12,vec![15,31,0,39,63,127,0,151])]);
         assert_eq!(s.channel.bytes(4,2),[0,85]);
+    }
+    #[test]
+    fn preset_rejects_a_different_active_stage_before_writing_and_verifies_current_axes() {
+        let (mut s,target)=session();
+        let stage=DpiStage {index:1,value:1600};
+        assert!(s.edit_checked(&target,stage,0,1600,3200,3200,true).is_err());
+        assert!(s.channel.writes.is_empty());
+        s.channel.memory.insert(4,1);s.channel.memory.insert(5,84);
+        s.edit_checked(&target,stage,0,1600,3200,3200,true).unwrap();
+        assert_eq!(s.channel.writes.len(),1);
+        let after=s.config().unwrap();
+        assert_eq!(after.dpi.current,Some(3200));assert_eq!(after.dpi.current_y,Some(3200));
+    }
+    #[test]
+    fn preset_stage_changed_during_write_is_not_reported_as_an_active_switch() {
+        let (mut s,target)=session();
+        // Equal axes permit scalar presets; changing stage while writing must fail readback.
+        s.channel.memory.insert(13,15);s.channel.memory.insert(15,55);
+        s.channel.change_stage=true;
+        assert!(s.edit_checked(&target,DpiStage {index:0,value:800},0,800,3200,3200,true).is_err());
+        assert_eq!(s.channel.writes.len(),1);
     }
     #[test]
     fn rate_write_preserves_stage_fields_and_rejects_unadvertised_transport_rates() {

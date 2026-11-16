@@ -8,6 +8,10 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New mouse and headset adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
+## In development (unreleased)
+
+Devices with supported numerical DPI writes can save 1–4 software presets on the Performance page, sorted by DPI, and switch from the main window or tray. Reducing the stage count hides the highest values and keeps them for restoration. Presets remain separate from actual device stages; connections that write stored DPI show a note. Local regressions and render checks passed; per-model hardware acceptance remains pending.
+
 ## Version 1.4.5
 
 - Adds battery, actual X/Y DPI stages and polling-rate capabilities for selected VGN / VXE / ATK mice.

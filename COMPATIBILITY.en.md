@@ -6,6 +6,13 @@ Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with
 
 This document lists additions in 1.4.5 and existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
+## In development: software DPI presets (unreleased)
+
+- The main window and tray share 1–4 enabled presets per device, sorted by value. The count selector only changes the software list and retains hidden values; actual device stages are never reordered or removed.
+- Presets use reviewed numerical DPI write capabilities on Logitech, CompX and Razer connections. Read-only connections, onboard-only Logitech mode and independent axes that prohibit scalar writes remain restricted.
+- Apply saves the local preset. Use writes the device and verifies readback. CompX modifies the active onboard stage; Razer storage behavior follows the reviewed connection data. Stage changes while queued are rejected or reported during readback verification.
+- Local configuration, ordering, restoration, tray state and protocol regressions passed. Hardware acceptance and power-cycle persistence remain pending. Rapoo preset writes are not enabled.
+
 ## Version 1.4.5: CompX mice and polling rates
 
 Candidates must expose vendor `3554` / `373B`, collection `FF02:0002`, and exact 17-byte input/output buffers. Replies must match report ID, command, status, address, length and checksum. Unknown runtime identities can supply valid battery readings but cannot authorize guessed sensor settings. All mouse entries below await hardware verification in this project.

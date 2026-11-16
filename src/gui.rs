@@ -81,6 +81,7 @@ pub(crate) enum Cmd {
     BasicDpi { target: crate::backends::Target, dpi: u16 },
     BasicDpiStage { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext },
     BasicDpiEdit { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext, expected_y: u16, x: u16, y: u16 },
+    BasicDpiPreset { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext, expected_y: u16, value: u16 },
     BasicPollingRate { target: crate::backends::Target, hz: u16 },
     Poll(i32),
     Dpi {
@@ -127,7 +128,8 @@ impl Cmd {
     fn basic_target(&self) -> Option<&crate::backends::Target> {
         match self {
             Self::BasicDpi { target, .. } | Self::BasicDpiStage { target, .. }
-                | Self::BasicDpiEdit { target, .. } | Self::BasicPollingRate { target, .. } => Some(target),
+                | Self::BasicDpiEdit { target, .. } | Self::BasicDpiPreset { target, .. }
+                | Self::BasicPollingRate { target, .. } => Some(target),
             _ => None,
         }
     }
@@ -135,6 +137,7 @@ impl Cmd {
     pub(crate) fn label(&self) -> String {
         match self {
             Cmd::BasicDpi { dpi, .. } => format!("DPI {dpi}"),
+            Cmd::BasicDpiPreset { value, .. } => format!("DPI {value}"),
             Cmd::BasicPollingRate { hz, .. } => crate::trf!("回报率 {hz} Hz", hz = hz),
             Cmd::BasicDpiEdit { stage, x, y, .. } => format!("DPI {} · X {x} / Y {y}", stage.index + 1),
             Cmd::BasicDpiStage { stage, .. } => crate::trf!("DPI 档 {stage} → {dpi}",
@@ -810,6 +813,10 @@ impl Shared {
                 changed = true;
             }
         }
+        if let Some(presets) = self.cfg.dpi_presets.remove(old) {
+            self.cfg.dpi_presets.entry(new.to_string()).or_insert(presets);
+            changed = true;
+        }
         if self.cfg.device_tray.contains_key(new) {
             return changed;
         }
@@ -873,19 +880,21 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
         .iter()
         .filter_map(|(key, device)| {
             if let Some(basic) = &device.basic {
-                let configured = !basic.dpi.stages.is_empty();
-                let stages = if configured { basic.dpi.stages.clone() } else {
-                    basic.dpi.quick_values().into_iter().enumerate().map(|(index, value)|
-                        crate::device::DpiStage { index: index as u8, value }).collect()
-                };
+                let presets = shared.cfg.dpi_presets.get(key);
+                let custom = presets.is_some_and(|p| p.enabled);
+                let (stages, value_control) = basic.dpi.shortcut_stages(presets);
                 if stages.is_empty() && basic.dpi.current.is_none() { return None; }
-                let active = if configured { basic.dpi.active_stage } else {
-                    stages.iter().find(|stage| Some(stage.value) == basic.dpi.current).map(|stage| stage.index)
+                let active = if !value_control { basic.dpi.active_stage } else {
+                    stages.iter().find(|stage| Some(stage.value) == basic.dpi.current
+                        && basic.dpi.current_y.is_none_or(|y| y == stage.value)).map(|stage| stage.index)
                 };
+                let disabled = if value_control { stages.iter().filter(|stage| !basic.dpi.values.contains(&stage.value))
+                    .map(|stage|stage.index).collect() } else { Vec::new() };
                 return Some((key.clone(), crate::ui::tray_popup::DpiState { stages, active,
                     current: basic.dpi.current, context: basic.dpi.stage_context(),
-                    value_control: !configured, writable: basic.connected &&
-                        if configured { basic.dpi.stage_writable } else { basic.dpi.writable } }));
+                    custom, disabled, value_control, writable: basic.connected &&
+                        if !value_control { basic.dpi.stage_writable } else { basic.dpi.writable
+                            && (!custom || basic.dpi.write_effect.is_some()) } }));
             }
             let state = device.state.as_ref()?;
             Some((
@@ -898,10 +907,29 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
                     context: None,
                     writable: true,
                     value_control: false,
+                    custom: false,
+                    disabled: Vec::new(),
                 },
             ))
         })
         .collect()
+}
+
+fn dpi_preset_command(cfg: &Settings, basic: &crate::backends::Snapshot, value: u16) -> Option<Cmd> {
+    let presets = cfg.dpi_presets.get(&basic.target.key)?;
+    if !presets.enabled || !presets.values.contains(&value) || !basic.connected
+        || !basic.dpi.writable || basic.dpi.write_effect.is_none() || !basic.dpi.values.contains(&value) {
+        return None;
+    }
+    if basic.target.backend == crate::backends::BackendId::CompX {
+        // Numerical writes on this family rewrite the active onboard row. Bind
+        // that row now, so a queued command cannot edit a newly selected stage.
+        let stage = *basic.dpi.stages.iter().find(|s| Some(s.index) == basic.dpi.active_stage)?;
+        if !basic.dpi.stage_editable { return None; }
+        return Some(Cmd::BasicDpiPreset { target:basic.target.clone(),stage,context:basic.dpi.stage_context()?,
+            expected_y:*basic.dpi.stage_y.get(&stage.index)?,value });
+    }
+    Some(Cmd::BasicDpi {target:basic.target.clone(),dpi:value})
 }
 
 /// 「有活了」的信号 + 关闭开关。
@@ -1538,6 +1566,16 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::PickDrop(d, idx) => pick_drop(env, d, idx),
 
         Act::Focus(e) => {
+            if let Edit::DpiPreset(index) = e {
+                if let Some(basic) = env.basic() {
+                    let presets = env.cfg().presets_for(&basic.target.key, &basic.dpi);
+                    if let Some(value) = presets.values.get(usize::from(index)) {
+                        env.canvas.with_ui_mut(|u| u.begin_edit(e, value.to_string()));
+                    }
+                }
+                env.canvas.repaint_now();
+                return;
+            }
             if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
                 if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable) {
                     if let Some(original) = crate::ui::widget::BasicDpiDraft::from_snapshot(&basic,index) {
@@ -1581,6 +1619,15 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
 
         Act::ApplyEdit(e) => apply_edit(env, e),
+        Act::UseDpiPreset(value) => {
+            if let Some(basic) = env.basic() {
+                if let Some(cmd) = dpi_preset_command(&env.cfg(), &basic, value) { env.submit(cmd); }
+                else { env.say(crate::tr!("当前连接不支持 DPI 预设写入")); }
+            }
+        }
+        Act::DpiPresetMode(_) | Act::DpiPresetCount(_) => {
+            update_dpi_presets(env, a, None);
+        }
         Act::BasicDpi(value) => {
             let basic = env.basic();
             if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.writable && basic.dpi.values.contains(&value)) {
@@ -1959,8 +2006,47 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
     }
 }
 
+fn update_dpi_presets(env: &UiEnv, action: Act, value: Option<u16>) {
+    let Some(basic) = env.basic() else { return; };
+    let key = basic.target.key.clone();
+    let mut shared = lock_shared(env.shared);
+    let mut cfg = shared.cfg.clone();
+    let mut presets = cfg.presets_for(&key, &basic.dpi);
+    let changed = match action {
+        Act::DpiPresetMode(enabled) => {
+            if enabled && basic.dpi.write_effect.is_none() { false }
+            else { presets.enabled = enabled; true }
+        }
+        Act::DpiPresetCount(count) => presets.set_count(usize::from(count), &basic.dpi),
+        Act::ApplyEdit(Edit::DpiPreset(index)) => value.is_some_and(|v| presets.edit(usize::from(index), v, &basic.dpi)),
+        _ => false,
+    };
+    if !changed || !presets.valid() {
+        drop(shared);
+        env.say(crate::tr!("预设需使用设备支持的 DPI，不能重复，可设置 1～4 档"));
+        return;
+    }
+    cfg.dpi_presets.insert(key, presets);
+    if let Err(error) = settings::save(&cfg) {
+        drop(shared);
+        env.say(crate::trf!("✘ 保存设置失败：{e}", e = error));
+        return;
+    }
+    shared.cfg = cfg;
+    drop(shared);
+    env.canvas.with_ui_mut(|u| {
+        for index in 0..crate::device::MAX_DPI_PRESETS as u8 { u.drop_edit(Edit::DpiPreset(index)); }
+    });
+    env.canvas.repaint_now();
+}
+
 /// 「应用」按钮：读草稿 → 校验 → 提交。
 fn apply_edit(env: &UiEnv, e: Edit) {
+    if let Edit::DpiPreset(index) = e {
+        let value = env.canvas.with_ui(|u| u.edit_text(e).and_then(|s| s.trim().parse::<u16>().ok()));
+        update_dpi_presets(env, Act::ApplyEdit(Edit::DpiPreset(index)), value);
+        return;
+    }
     if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
         if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable) {
             let current = crate::ui::widget::BasicDpiDraft::from_snapshot(&basic,index);
@@ -2002,7 +2088,7 @@ fn apply_edit(env: &UiEnv, e: Edit) {
     let st = env.state();
 
     match e {
-        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) => return,
+        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiPreset(_) => return,
         Edit::LowWarn => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
             let Some(v) = txt.as_deref().and_then(parse_num) else {
@@ -2361,7 +2447,7 @@ fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
     let known = st.filter(|s| !crate::ui::pages::placeholder_state(s));
     let hex = |c: [u8; 3]| format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
     match e {
-        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) => String::new(),
+        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiPreset(_) => String::new(),
         Edit::LowWarn => known.map(|s| s.low_warn.to_string()).unwrap_or_default(),
         Edit::Dpi(i) => known
             .map(|s| s.dpi((i as usize) & 3).to_string())
@@ -3349,6 +3435,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                                 submit(&shared_e, &signal_e, Cmd::BasicDpi { target: basic.target, dpi });
                             }
                         }
+                        Action::SetDpiPreset(key, dpi) => {
+                            let cmd = {
+                                let shared = lock_shared(&shared_e);
+                                shared.devices.get(&key).and_then(|r| r.basic.as_ref())
+                                    .and_then(|basic| dpi_preset_command(&shared.cfg,basic,dpi))
+                            };
+                            if let Some(cmd) = cmd { submit(&shared_e,&signal_e,cmd); }
+                        }
                         Action::SetOnboardDpiStage(key, stage, context) => {
                             let basic = lock_shared(&shared_e).devices.get(&key).and_then(|record| record.basic.clone());
                             if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.stage_writable
@@ -3751,6 +3845,44 @@ mod backend_tests {
         assert_ne!(Some(original),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
     }
     #[test]
+    fn tray_custom_presets_keep_order_disable_invalid_values_and_never_fake_readback() {
+        let mut shared = Shared::new(Settings::default());
+        let mut reading = snapshot(BackendId::Logitech,"preset-mouse",75);
+        reading.dpi = Dpi { current:Some(800), current_y:Some(800),values:vec![400,800,1600],
+            writable:true,write_effect:Some(crate::device::DpiWriteEffect::Current),..Default::default() };
+        shared.cfg.dpi_presets.insert("preset-mouse".into(),crate::device::DpiPresets {
+            enabled:true,values:vec![800,1200,1600], ..Default::default() });
+        shared.publish_additional(BackendId::Logitech,vec![reading.clone()],0,1);
+        let popup = popup_dpi_states(&shared);
+        let p = &popup["preset-mouse"];
+        assert!(p.custom && p.value_control && p.writable);
+        assert_eq!(p.stages.iter().map(|s|s.value).collect::<Vec<_>>(),vec![800,1200,1600]);
+        assert_eq!(p.active,Some(0)); assert_eq!(p.disabled,vec![1]);
+        reading.dpi.current = Some(1600); reading.dpi.current_y = Some(800);
+        shared.publish_additional(BackendId::Logitech,vec![reading],0,2);
+        assert_eq!(popup_dpi_states(&shared)["preset-mouse"].active,None);
+        shared.publish_additional(BackendId::Logitech,crate::backends::Poll::default(),0,3);
+        assert!(!popup_dpi_states(&shared)["preset-mouse"].writable);
+    }
+    #[test]
+    fn stored_preset_command_binds_original_stage_and_rejects_deleted_or_disabled_presets() {
+        let mut reading=snapshot(BackendId::CompX,"stored",75);
+        let stage=crate::device::DpiStage {index:2,value:800};
+        reading.dpi=Dpi {current:Some(800),current_y:Some(800),values:vec![800,1600],writable:true,
+            stage_editable:true,write_effect:Some(crate::device::DpiWriteEffect::Stored),stages:vec![stage],active_stage:Some(2),
+            profile:Some(1),stage_y:[(2,800)].into(),..Default::default()};
+        let mut cfg=Settings::default();
+        cfg.dpi_presets.insert("stored".into(),crate::device::DpiPresets {enabled:true,values:vec![1600], ..Default::default()});
+        assert!(matches!(dpi_preset_command(&cfg,&reading,1600),Some(Cmd::BasicDpiPreset {
+            stage:s,context:crate::device::StageContext::Profile(1),expected_y:800,value:1600,.. }) if s == stage));
+        assert!(dpi_preset_command(&cfg,&reading,800).is_none());
+        cfg.dpi_presets.get_mut("stored").unwrap().enabled=false;
+        assert!(dpi_preset_command(&cfg,&reading,1600).is_none());
+        cfg.dpi_presets.get_mut("stored").unwrap().enabled=true;
+        reading.dpi.disable_writes();
+        assert!(dpi_preset_command(&cfg,&reading,1600).is_none());
+    }
+    #[test]
     fn razer_config_context_reaches_main_window_tray_and_its_own_worker() {
         let mut reading=snapshot(BackendId::Razer,"razer",75);
         let stage=crate::device::DpiStage {index:1,value:800};
@@ -3926,6 +4058,8 @@ mod backend_tests {
         shared.primary_key = Some(old.clone());
         shared.cfg.tray_device = Some(old.clone());
         shared.cfg.device_names.insert(old.clone(), "Custom device".into());
+        let presets = crate::device::DpiPresets {enabled:true,values:vec![800,1600], ..Default::default()};
+        shared.cfg.dpi_presets.insert(old.clone(),presets.clone());
         shared.cfg.device_order = vec![old.clone()];
         let pref = crate::tray_prefs::DeviceTray { kind: crate::tray_prefs::TrayKind::Generic,
             ..Default::default() };
@@ -3940,6 +4074,8 @@ mod backend_tests {
         assert_eq!(shared.primary_key.as_ref(), Some(&new));
         assert_eq!(shared.cfg.tray_device.as_ref(), Some(&new));
         assert_eq!(shared.cfg.device_names[&new], "Custom device");
+        assert_eq!(shared.cfg.dpi_presets[&new],presets);
+        assert!(!shared.cfg.dpi_presets.contains_key(&old));
         assert_eq!(shared.cfg.device_tray[&new], pref);
         assert_eq!(shared.cfg.device_order, vec![new]);
         assert!(shared.device_keys_dirty);
@@ -3956,6 +4092,7 @@ mod backend_tests {
         first.dpi.writable = true;
         shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 1);
         shared.cfg.device_names.insert(old.clone(), "Custom first device".into());
+        shared.cfg.dpi_presets.insert(old.clone(),crate::device::DpiPresets {enabled:true,values:vec![800], ..Default::default()});
         first.target.key = link_key;
         first.target.verified_identity = false;
         shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 2);
@@ -3969,6 +4106,8 @@ mod backend_tests {
         assert!(!shared.devices[&old].reading.connected);
         assert!(shared.devices[&new].reading.connected);
         assert!(!shared.cfg.device_names.contains_key(&new));
+        assert!(!shared.cfg.dpi_presets.contains_key(&new));
+        assert_eq!(shared.cfg.dpi_presets[&old].values,vec![800]);
         assert_eq!(shared.cfg.device_names[&old], "Custom first device");
         assert!(!shared.device_keys_dirty);
     }

@@ -1228,8 +1228,9 @@ impl<'a> Painter<'a> {
         if st != OK {
             return (0.0, 0.0);
         }
-        let k = if self.scale > 0.01 { self.scale } else { 1.0 };
-        (bounds.w / k, bounds.h / k)
+        // GDI+ returns layout bounds in world coordinates, like DrawString.
+        // Dividing by the window scale again makes localized tabs too narrow.
+        (bounds.w, bounds.h)
     }
 
     // ---- 复合控件 ----

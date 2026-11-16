@@ -347,6 +347,7 @@ impl<C: Channel> Session<C> {
         Ok(Dpi {
             current,
             writable: current.is_some() && !values.is_empty(),
+            write_effect: Some(crate::device::DpiWriteEffect::Current),
             values,
             ..Default::default()
         })
@@ -368,6 +369,7 @@ impl<C: Channel> Session<C> {
         let (x, y) = decode_extended_dpi(&payload, separate_axes).ok_or("无法读取当前 DPI")?;
         let writable = values.contains(&x) && y.is_none_or(|y| y == x);
         Ok(Dpi { current: Some(x), current_y: y, values,
+            write_effect: Some(crate::device::DpiWriteEffect::Current),
             // 当前界面提供单值 DPI；不同轴值保持只读，防止无意覆盖 Y 轴。
             writable, ..Default::default() })
     }
