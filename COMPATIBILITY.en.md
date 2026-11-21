@@ -42,6 +42,12 @@ The request is the fixed `00 55 30` plus 62 zeroes. A reply must be 64 bytes of 
 
 Developed after the 1.4.7 tag, with all 313 local regressions and the warning-free release build passing. Evidence comes from pinned VGN HUB resources and the public MyFinder implementation; tests use synthetic field constructions. No local Dragonfly3 SE was available. Windows descriptors, receiver sleep caching, 0%, transport transitions, physical accuracy and vendor-software coexistence remain pending.
 
+## In development: HECATE G3M PRO
+
+Limited to `320F:706E / FF1C:0092`, with a descriptor proving that both directions contain only a 64-byte Report `04` and one eligible collection per interface group. The fixed request is `04 20 00 1A 06` plus 59 zeroes. Replies require 64 bytes, Report `04` and command `1A`; status bytes `FE/FF` are rejected and percentages from 0–100 are accepted. An exact request echo is not a reading.
+
+No charging field is established, so charging remains unknown. The adapter reads no DPI, lighting, online session or other configuration and never falls back to the VGN keyboard protocol sharing this vendor ID. Each query is limited to one second and failures do not renew the old sample. This feature follows the 1.4.7 tag; all 319 local regressions and the warning-free build pass. Tests use synthetic protocol fixtures and no local G3M PRO was available, so descriptors, sleep, 0%, charging and vendor-software coexistence remain pending.
+
 ## In development: AJAZZ AJ179 PRO
 
 Restricted to `3151:402D` receivers and `3151:4026` USB, `FFFF:0002`, Windows Feature capacity 65 and only report ID 0 in a unique management collection. Several brands share these IDs; only mouse identity `1851` is named AJ179 PRO and receives configuration access. Other valid identities retain a neutral name and receiver battery only. Bluetooth `402C`, newer controllers and other AJAZZ protocols are excluded.

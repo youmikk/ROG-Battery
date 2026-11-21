@@ -24,6 +24,8 @@ AULA F75 and F87 PRO now receive 2.4 GHz battery and charging reads. They share 
 
 VGN Dragonfly3 SE receivers add a battery query. The adapter requires `391D:1A01 / FF01:0010` with 65-byte unnumbered input/output reports and sends only the fixed `55 30` query. It reads no configuration and changes no DPI stage; a wired reply clears the old wireless percentage, while charging remains unknown.
 
+HECATE G3M PRO adds battery percentage reads through its 2.4 GHz receiver. The adapter requires `320F:706E / FF1C:0092` and 64-byte Report `04`, reads no DPI, lighting or other configuration, and keeps charging unknown.
+
 ## Version 1.4.7
 
 USB and Bluetooth battery reads are added for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).
