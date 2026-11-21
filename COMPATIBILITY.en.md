@@ -18,6 +18,14 @@ Actual 1–6 stages contain X/Y values from 100–12000 in steps of 100. Origina
 
 Developed after the 1.4.7 tag, with all 298 local regressions and a warning-free release build passing. Evidence comes from the official model configuration and upstream Windows hardware documentation; local tests use synthetic reports, with no matching hardware available. Descriptor behavior, real transport, sleep caching, physical switching, persistence and vendor-software coexistence remain unverified. Without transaction IDs, cross-process races and same-model replacement cannot be fully distinguished.
 
+## In development: AULA F75 / F87 PRO keyboards
+
+The existing `3554:FA09` shared-receiver backend recognizes F75 model code `03 00 00 00 00 CD` and F87 PRO code `03 00 00 00 03 E3`. The interface still requires `FF02:0002`, 20-byte bidirectional Report `13` and one management collection. F87 is excluded because its official wireless catalog entry uses `FF00:0001`, which conflicts with this receiver family. An unknown code is never named as AULA from the receiver ID alone.
+
+AULA places its identity checksum at complete-frame byte 8 and sends no equivalent checksum in the battery request; MCHOSE retains its existing framing. A unified backend caches the selected protocol for that channel for 120 seconds, preventing two background readers from competing for one receiver. Every AULA battery sample requires the same six-byte model both before and after the read. Only percentages 1–100 are accepted. Charging/full nibbles must be 0 or 1, unknown flags and sleeping zero placeholders produce no fresh sample, and the AULA UI rule allows charging to remain true at 100%.
+
+This addition follows the 1.4.7 tag. All 303 local regressions and the warning-free release build pass. Official catalogs and static scripts provide the protocol evidence, while tests use synthetic frames; no local F75 / F87 PRO was available. Windows SET_REPORT transport, receiver caching, wake recovery, switching between AULA and MCHOSE devices on one receiver and vendor-software coexistence remain hardware checks.
+
 ## In development: AJAZZ AJ179 PRO
 
 Restricted to `3151:402D` receivers and `3151:4026` USB, `FFFF:0002`, Windows Feature capacity 65 and only report ID 0 in a unique management collection. Several brands share these IDs; only mouse identity `1851` is named AJ179 PRO and receives configuration access. Other valid identities retain a neutral name and receiver battery only. Bluetooth `402C`, newer controllers and other AJAZZ protocols are excluded.

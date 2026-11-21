@@ -18,6 +18,8 @@ AJAZZ AJ179 PRO adds 2.4 GHz battery and actual X/Y stage reading/switching over
 
 AULA SC380 PRO adds 2.4 GHz battery and actual X/Y DPI-stage reading/switching. The model signature is checked before reading configuration; switching preserves other settings and verifies the complete block afterward. Charging remains unknown. Wired mode and other AULA models are not integrated yet; hardware acceptance is pending.
 
+AULA F75 and F87 PRO now receive 2.4 GHz battery and charging reads. They share a `3554:FA09` receiver with some MCHOSE keyboards, so the app selects framing from the complete model code and verifies identity before and after the battery query. F87 remains disabled because its official wireless collection entry conflicts with this path.
+
 ## Version 1.4.7
 
 USB and Bluetooth battery reads are added for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).

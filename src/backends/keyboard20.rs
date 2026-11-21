@@ -1,7 +1,11 @@
 //! Read-only Report 0x13 keyboard status. Transport evidence is in PROTOCOLS.md.
 use super::*;
 use crate::hid::HidDevice;
-use std::time::Instant;
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 pub struct Keyboard20;
 
@@ -10,6 +14,51 @@ enum Model {
     SharedReceiver,
     IdentifiedReceiver,
     Z75sCandidate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wire {
+    Aula,
+    Mchose,
+}
+
+#[derive(Clone, Copy)]
+struct WireHint {
+    wire: Wire,
+    seen: Instant,
+}
+
+fn wire_hints() -> &'static Mutex<BTreeMap<String, WireHint>> {
+    static HINTS: OnceLock<Mutex<BTreeMap<String, WireHint>>> = OnceLock::new();
+    HINTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn wire_key(i: &HidInterface) -> String {
+    crate::device::stable_key(&channel::collection_group(i))
+}
+
+fn wire_hint(i: &HidInterface) -> Option<Wire> {
+    let mut hints = wire_hints().lock().unwrap_or_else(|p| p.into_inner());
+    let key = wire_key(i);
+    let hint = hints.get(&key).copied();
+    if hint.is_some_and(|h| h.seen.elapsed() >= Duration::from_secs(120)) {
+        hints.remove(&key);
+        return None;
+    }
+    hint.map(|h| h.wire)
+}
+
+fn remember_wire(i: &HidInterface, wire: Wire) {
+    wire_hints()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            wire_key(i),
+            WireHint {
+                wire,
+                seen: Instant::now(),
+            },
+        );
 }
 
 fn model(i: &HidInterface) -> Option<Model> {
@@ -61,6 +110,17 @@ pub(super) fn query(command: u8) -> [u8; 20] {
     frame
 }
 
+fn aula_query(command: u8) -> [u8; 20] {
+    let mut frame = [0; 20];
+    frame[..3].copy_from_slice(&[0x13, command, 1]);
+    if command == 5 {
+        // AULA's identity checksum covers the report ID and header but sits
+        // before the final padding. Its battery request carries no checksum.
+        frame[8] = checksum(&frame[..8]);
+    }
+    frame
+}
+
 fn reply(frame: &[u8], command: u8, length: u8) -> bool {
     frame.len() == 20 && frame[..5] == [0x13, command, 1, 0, length]
         && frame[19] == checksum(&frame[..19])
@@ -89,6 +149,11 @@ const MODEL_CODES: [([u8; 6], &str); 18] = [
     ([10, 0, 0, 0, 0, 0x34], "MCHOSE G87 V2"),
 ];
 
+const AULA_MODEL_CODES: [([u8; 6], &str); 2] = [
+    ([3, 0, 0, 0, 0, 0xcd], "AULA F75"),
+    ([3, 0, 0, 0, 3, 0xe3], "AULA F87 PRO"),
+];
+
 fn by_reply(frame: &[u8], command: u8) -> bool {
     // M HUB reassembles one packet by total/index and takes bytes 5..19.
     // Byte 4 is packet metadata; neither its length meaning nor a reply checksum
@@ -99,6 +164,15 @@ fn by_reply(frame: &[u8], command: u8) -> bool {
 fn model_name(frame: &[u8]) -> Option<&'static str> {
     if !by_reply(frame, 5) { return None; }
     MODEL_CODES.iter().find_map(|(code, name)| (frame[5..11] == *code).then_some(*name))
+}
+
+fn aula_model_name(frame: &[u8]) -> Option<&'static str> {
+    if !by_reply(frame, 5) {
+        return None;
+    }
+    AULA_MODEL_CODES
+        .iter()
+        .find_map(|(code, name)| (frame[5..11] == *code).then_some(*name))
 }
 
 pub(super) fn battery(frame: &[u8]) -> Option<Battery> {
@@ -128,6 +202,26 @@ fn by_battery(frame: &[u8], identified: bool) -> Option<Battery> {
     } else { None };
     Some(Battery { percent: Some(percent), estimated_percent: None, charging,
         voltage_mv: None, approximate: false, level: None })
+}
+
+fn aula_battery(frame: &[u8]) -> Option<Battery> {
+    if !by_reply(frame, 0x4a) {
+        return None;
+    }
+    let percent = frame[5];
+    let charging = frame[6] >> 4;
+    let full = frame[6] & 15;
+    if !(1..=100).contains(&percent) || charging > 1 || full > 1 {
+        return None;
+    }
+    Some(Battery {
+        percent: Some(percent),
+        estimated_percent: None,
+        charging: Some(charging == 1),
+        voltage_mv: None,
+        approximate: false,
+        level: None,
+    })
 }
 
 fn keyboard_battery(frame: &[u8], selected: Model, identified: bool) -> Option<Battery> {
@@ -170,6 +264,109 @@ fn read_with(target: &Target, mut exchange: impl FnMut(u8, bool) -> Option<Vec<u
     })
 }
 
+fn read_aula_with(
+    target: &Target,
+    first_identity: &[u8],
+    mut exchange: impl FnMut(u8) -> Option<Vec<u8>>,
+) -> Result<Snapshot, String> {
+    let fail = || crate::i18n::translate("设备无有效状态回报").to_string();
+    let name = aula_model_name(first_identity).ok_or_else(fail)?;
+    let battery = exchange(0x4a)
+        .and_then(|r| aula_battery(&r))
+        .ok_or_else(fail)?;
+    let after = exchange(5).ok_or_else(fail)?;
+    if aula_model_name(&after) != Some(name) {
+        return Err(fail());
+    }
+    let mut target = target.clone();
+    target.name = name.into();
+    target.verified_identity = true;
+    Ok(Snapshot {
+        target,
+        battery: Some(battery),
+        battery_at: Some(Instant::now()),
+        battery_unavailable: false,
+        connected: true,
+        dpi: Dpi::default(),
+        polling_rate: Default::default(),
+    })
+}
+
+fn control_query(
+    device: &mut HidDevice,
+    target: &Target,
+    packet: &[u8],
+    label: &'static str,
+    matches: impl FnMut(&[u8]) -> bool,
+) -> Option<Vec<u8>> {
+    let started = Instant::now();
+    let response = device.transact_control_output(packet, 2200, matches);
+    trace::record(
+        target.hid().ok()?,
+        BackendId::Keyboard20,
+        label,
+        0x13,
+        packet[1],
+        20,
+        response.as_ref().map_or(0, Vec::len),
+        started,
+        if response.is_some() {
+            trace::Outcome::Ok
+        } else {
+            trace::Outcome::NoReply
+        },
+    );
+    response
+}
+
+fn read_mchose(
+    device: &mut HidDevice,
+    target: &Target,
+    selected: Model,
+) -> Result<Snapshot, String> {
+    read_with(target, |command, identified| {
+        let started = Instant::now();
+        let matches = |r: &[u8]| {
+            if command == 5 {
+                if selected == Model::Z75sCandidate {
+                    reply(r, 5, 6)
+                } else {
+                    by_reply(r, 5)
+                }
+            } else {
+                keyboard_battery(r, selected, identified).is_some()
+            }
+        };
+        // Keep FA09's captured SET_REPORT transport. Z75S uses interrupt
+        // OUT; the new 41E4 path follows the published BY read sequence.
+        // Never fall back to ordinary key input or a feature-only sibling.
+        let response = match selected {
+            Model::SharedReceiver => {
+                device.transact_control_output(&query(command), 2200, matches)
+            }
+            Model::Z75sCandidate | Model::IdentifiedReceiver => {
+                device.transact(&query(command), 2200, matches)
+            }
+        };
+        trace::record(
+            target.hid().ok()?,
+            BackendId::Keyboard20,
+            "query-keyboard",
+            0x13,
+            command,
+            20,
+            response.as_ref().map_or(0, Vec::len),
+            started,
+            if response.is_some() {
+                trace::Outcome::Ok
+            } else {
+                trace::Outcome::NoReply
+            },
+        );
+        response
+    })
+}
+
 impl DeviceBackend for Keyboard20 {
     fn discover(&self, api: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         Ok(candidates(interfaces).into_iter().filter(|i| proven(api, i)).map(|i| {
@@ -187,23 +384,67 @@ impl DeviceBackend for Keyboard20 {
         let lock = channel::lock(&channel::collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(target.hid()?)?;
-        read_with(target, |command, identified| {
-            let started = Instant::now();
-            let matches = |r: &[u8]| if command == 5 {
-                if selected == Model::Z75sCandidate { reply(r, 5, 6) } else { by_reply(r, 5) }
-            } else { keyboard_battery(r, selected, identified).is_some() };
-            // Keep FA09's captured SET_REPORT transport. Z75S uses interrupt
-            // OUT; the new 41E4 path follows the published BY read sequence.
-            // Never fall back to ordinary key input or a feature-only sibling.
-            let response = match selected {
-                Model::SharedReceiver => device.transact_control_output(&query(command), 2200, matches),
-                Model::Z75sCandidate | Model::IdentifiedReceiver => device.transact(&query(command), 2200, matches),
+        if selected != Model::SharedReceiver {
+            return read_mchose(&mut device, target, selected);
+        }
+
+        let hint = wire_hint(target.hid()?);
+        let mut order = [Wire::Aula, Wire::Mchose];
+        if hint == Some(Wire::Mchose) {
+            order.swap(0, 1);
+        }
+        let mut last_error = crate::i18n::translate("设备无有效状态回报").to_string();
+        for wire in order {
+            if wire == Wire::Mchose {
+                match read_mchose(&mut device, target, selected) {
+                    Ok(reading) => {
+                        remember_wire(target.hid()?, Wire::Mchose);
+                        return Ok(reading);
+                    }
+                    Err(error) => last_error = error,
+                }
+                continue;
+            }
+
+            let identity = control_query(
+                &mut device,
+                target,
+                &aula_query(5),
+                "query-aula-identity",
+                |r| by_reply(r, 5),
+            );
+            let Some(identity) = identity.filter(|r| aula_model_name(r).is_some()) else {
+                let error = crate::i18n::translate("设备无有效状态回报").to_string();
+                // Once a definitive AULA model has been seen, a failed wake
+                // response must not be reinterpreted by the MCHOSE framing.
+                if hint == Some(Wire::Aula) {
+                    return Err(error);
+                }
+                last_error = error;
+                continue;
             };
-            trace::record(target.hid().ok()?, BackendId::Keyboard20, "query-keyboard",
-                0x13, command, 20, response.as_ref().map_or(0, Vec::len), started,
-                if response.is_some() { trace::Outcome::Ok } else { trace::Outcome::NoReply });
-            response
-        })
+            // A valid six-byte model makes this protocol definitive. If the
+            // battery or wake-up read then fails, do not reinterpret it as
+            // another brand merely to obtain a number.
+            remember_wire(target.hid()?, Wire::Aula);
+            return read_aula_with(target, &identity, |command| {
+                let packet = aula_query(command);
+                control_query(
+                    &mut device,
+                    target,
+                    &packet,
+                    "query-aula",
+                    |r| {
+                        if command == 5 {
+                            by_reply(r, 5)
+                        } else {
+                            aula_battery(r).is_some()
+                        }
+                    },
+                )
+            });
+        }
+        Err(last_error)
     }
 }
 
@@ -222,6 +463,98 @@ mod tests {
         frame[5..5 + payload.len()].copy_from_slice(payload);
         frame[19] = checksum(&frame[..19]);
         frame.to_vec()
+    }
+    fn aula_response(command: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = [0; 20];
+        frame[..4].copy_from_slice(&[0x13, command, 1, 0]);
+        frame[5..5 + payload.len()].copy_from_slice(payload);
+        frame.to_vec()
+    }
+
+    #[test]
+    fn aula_identity_and_battery_requests_use_different_checksum_positions() {
+        let identity = aula_query(5);
+        assert_eq!(&identity[..9], &[0x13, 5, 1, 0, 0, 0, 0, 0, 0x19]);
+        assert!(identity[9..].iter().all(|b| *b == 0));
+        let battery = aula_query(0x4a);
+        assert_eq!(&battery[..4], &[0x13, 0x4a, 1, 0]);
+        assert!(battery[4..].iter().all(|b| *b == 0));
+        assert_eq!(query(5)[19], checksum(&query(5)[..19]));
+        assert_ne!(aula_query(5), query(5));
+    }
+
+    #[test]
+    fn aula_identity_requires_the_two_published_wireless_model_codes() {
+        assert_eq!(
+            aula_model_name(&aula_response(5, &[3, 0, 0, 0, 0, 0xcd])),
+            Some("AULA F75")
+        );
+        assert_eq!(
+            aula_model_name(&aula_response(5, &[3, 0, 0, 0, 3, 0xe3])),
+            Some("AULA F87 PRO")
+        );
+        // F87's catalog entry uses a conflicting collection and is excluded.
+        assert!(aula_model_name(&aula_response(5, &[3, 0, 0, 0, 0, 0x8f])).is_none());
+        assert!(aula_model_name(&aula_response(5, &[3, 0, 0, 0, 0, 0xce])).is_none());
+        assert!(aula_model_name(&aula_query(5)).is_none());
+    }
+
+    #[test]
+    fn aula_battery_preserves_its_charging_rule_and_rejects_unknown_flags_or_zero() {
+        let charging = aula_battery(&aula_response(0x4a, &[100, 0x10])).unwrap();
+        assert_eq!((charging.percent, charging.charging), (Some(100), Some(true)));
+        let full = aula_battery(&aula_response(0x4a, &[100, 0x01])).unwrap();
+        assert_eq!(full.charging, Some(false));
+        assert_eq!(
+            aula_battery(&aula_response(0x4a, &[55, 0x11]))
+                .unwrap()
+                .charging,
+            Some(true)
+        );
+        for (percent, flags) in [(0, 0), (101, 0), (55, 0x21), (55, 0x12)] {
+            assert!(aula_battery(&aula_response(0x4a, &[percent, flags])).is_none());
+        }
+        assert!(aula_battery(&aula_query(0x4a)).is_none());
+        // The MCHOSE adapter deliberately suppresses charging at exactly 100%.
+        let mchose = response(0x4a, &[100, 0x10]);
+        assert_eq!(by_battery(&mchose, true).unwrap().charging, Some(false));
+    }
+
+    #[test]
+    fn aula_read_rechecks_identity_and_returns_model_with_live_battery() {
+        let target = Target::new(BackendId::Keyboard20, &interface(), 0);
+        let first = aula_response(5, &[3, 0, 0, 0, 0, 0xcd]);
+        let mut commands = Vec::new();
+        let reading = read_aula_with(&target, &first, |command| {
+            commands.push(command);
+            Some(if command == 0x4a {
+                aula_response(0x4a, &[72, 0x10])
+            } else {
+                first.clone()
+            })
+        })
+        .unwrap();
+        assert_eq!(commands, [0x4a, 5]);
+        assert_eq!(reading.target.name, "AULA F75");
+        assert_eq!(reading.target.key, target.key);
+        assert!(reading.target.verified_identity && reading.connected);
+        let battery = reading.battery.unwrap();
+        assert_eq!((battery.percent, battery.charging), (Some(72), Some(true)));
+        assert!(reading.battery_at.is_some());
+    }
+
+    #[test]
+    fn aula_read_rejects_replacement_between_battery_and_final_identity() {
+        let target = Target::new(BackendId::Keyboard20, &interface(), 0);
+        let first = aula_response(5, &[3, 0, 0, 0, 0, 0xcd]);
+        let result = read_aula_with(&target, &first, |command| {
+            Some(if command == 0x4a {
+                aula_response(0x4a, &[64, 0])
+            } else {
+                aula_response(5, &[3, 0, 0, 0, 3, 0xe3])
+            })
+        });
+        assert!(result.is_err());
     }
 
     #[test]
