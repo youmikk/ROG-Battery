@@ -86,6 +86,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Logitech => &super::backends::logitech::Logitech,
             super::backends::BackendId::Rapoo => &super::backends::rapoo::Rapoo,
             super::backends::BackendId::Vgn => &super::backends::vgn::Vgn,
+            super::backends::BackendId::VgnDragonfly3 => &super::backends::vgn_dragonfly3::VgnDragonfly3,
             super::backends::BackendId::VgnKeyboard => &super::backends::vgn_keyboard::VgnKeyboard,
             super::backends::BackendId::CompX => &super::backends::compx::CompX,
             super::backends::BackendId::Razer => &super::backends::razer::Razer,
