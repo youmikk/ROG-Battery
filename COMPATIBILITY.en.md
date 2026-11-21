@@ -8,6 +8,16 @@ This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
 
+## In development: AULA SC380 PRO
+
+Limited to `258A:0138` receivers, `FF02:0002`, Windows Feature capacity 520 and only report ID `09` in a unique management collection. Each poll checks the six-byte model signature `04 00 00 00 00 2E` and online response; the receiver ID alone cannot establish the mouse model. Wired `0136`, other AULA mice and keyboards are excluded.
+
+Battery exposes exact percentages from 1–100; charging is unknown. A zero payload is indistinguishable from a query echo on this path, so it establishes neither 0% nor explicit offline. Failed queries retain the original sample age, expiring after 120 seconds; the background wait is at most ten seconds, and new valid replies restore the number. Battery and settings reads can succeed independently.
+
+Actual 1–6 stages contain X/Y values from 100–12000 in steps of 100. Original order and duplicate values are retained without fabricated defaults. Switching is bound to the complete 400-byte configuration, rechecks identity and configuration before writing, changes only the active-stage nibble and preserves buttons, lighting, rate and all other bytes. Full readback confirms the result. Lost send completions are not retried or blindly rolled back. Numerical edits, software presets, stage-count and rate writes are not exposed.
+
+Developed after the 1.4.7 tag, with all 298 local regressions and a warning-free release build passing. Evidence comes from the official model configuration and upstream Windows hardware documentation; local tests use synthetic reports, with no matching hardware available. Descriptor behavior, real transport, sleep caching, physical switching, persistence and vendor-software coexistence remain unverified. Without transaction IDs, cross-process races and same-model replacement cannot be fully distinguished.
+
 ## In development: AJAZZ AJ179 PRO
 
 Restricted to `3151:402D` receivers and `3151:4026` USB, `FFFF:0002`, Windows Feature capacity 65 and only report ID 0 in a unique management collection. Several brands share these IDs; only mouse identity `1851` is named AJ179 PRO and receives configuration access. Other valid identities retain a neutral name and receiver battery only. Bluetooth `402C`, newer controllers and other AJAZZ protocols are excluded.

@@ -97,6 +97,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Edifier => &super::backends::edifier::Edifier,
             super::backends::BackendId::Dareu => &super::backends::dareu::Dareu,
             super::backends::BackendId::GearHub => &super::backends::gearhub::GearHub,
+            super::backends::BackendId::Aula => &super::backends::aula::Aula,
             super::backends::BackendId::Cherry => &super::backends::cherry::Cherry,
             super::backends::BackendId::Lofree => &super::backends::lofree::Lofree,
             super::backends::BackendId::Nova => &super::backends::steelseries::Nova,

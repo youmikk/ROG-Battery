@@ -9,6 +9,7 @@ mod descriptor;
 pub mod edifier;
 pub mod dareu;
 pub mod gearhub;
+pub mod aula;
 mod enumeration;
 pub mod compx;
 mod feature;
@@ -51,6 +52,7 @@ pub enum BackendId {
     Edifier,
     Dareu,
     GearHub,
+    Aula,
     Cherry,
     Lofree,
     Nova,
@@ -61,10 +63,10 @@ pub enum BackendId {
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 22] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 23] = [
     BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::Edifier, BackendId::Dareu, BackendId::GearHub, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
-    BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::StandardHid,
+    BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -85,6 +87,7 @@ impl BackendId {
             Self::Edifier => "EDIFIER Halo Space",
             Self::Dareu => "DAREU Jm",
             Self::GearHub => "GearHub Feature mouse",
+            Self::Aula => "AULA SC380 PRO",
             Self::Cherry => "CHERRY keyboard",
             Self::Lofree => "Lofree HYZEN",
             Self::Nova => "Arctis Nova",
@@ -98,7 +101,7 @@ impl BackendId {
 
     pub fn precedes_standard(self) -> bool {
         matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::VgnKeyboard | Self::CompX | Self::Razer
-            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::Dareu | Self::GearHub | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
+            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::Dareu | Self::GearHub | Self::Aula | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
     }
 
     pub fn sample_lifetime(self) -> std::time::Duration {
@@ -107,7 +110,7 @@ impl BackendId {
             Self::Logitech => 180,
             Self::CompX => 45,
             Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => 120,
-            Self::Vgn | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::Dareu | Self::GearHub | Self::StandardHid => 120,
+            Self::Vgn | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::Dareu | Self::GearHub | Self::Aula | Self::StandardHid => 120,
             Self::Rog => 0,
         })
     }
@@ -116,7 +119,7 @@ impl BackendId {
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
             Self::Rapoo | Self::DualSense | Self::XInput => Some(2_000),
-            Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::Dareu | Self::GearHub | Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
+            Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::Dareu | Self::GearHub | Self::Aula | Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
             _ => None,
         }
     }
@@ -191,7 +194,7 @@ impl Target {
             razer::collection_group(interface)
         } else if interface.serial.is_empty() || matches!(backend, BackendId::Rapoo | BackendId::CompX
             | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Cherry | BackendId::Lofree | BackendId::Nova | BackendId::Inzone | BackendId::HyperX
-            | BackendId::DualSense | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::Edifier | BackendId::Dareu | BackendId::GearHub) {
+            | BackendId::DualSense | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::Edifier | BackendId::Dareu | BackendId::GearHub | BackendId::Aula) {
             interface.path.to_ascii_lowercase()
         } else {
             format!(
@@ -346,6 +349,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Edifier => &edifier::Edifier,
         BackendId::Dareu => &dareu::Dareu,
         BackendId::GearHub => &gearhub::GearHub,
+        BackendId::Aula => &aula::Aula,
         BackendId::Cherry => &cherry::Cherry,
         BackendId::Lofree => &lofree::Lofree,
         BackendId::Nova => &steelseries::Nova,
@@ -396,6 +400,7 @@ pub fn set_dpi_stage(target: &Target, stage: crate::device::DpiStage, context: c
         BackendId::Rapoo => rapoo::Rapoo.set_dpi_stage(&api, target, stage, context),
         BackendId::Dareu => dareu::Dareu.set_dpi_stage(&api, target, stage, context),
         BackendId::GearHub => gearhub::GearHub.set_dpi_stage(&api, target, stage, context),
+        BackendId::Aula => aula::Aula.set_dpi_stage(&api, target, stage, context),
         BackendId::MchoseMouse => mchose_mouse::MchoseMouse.set_dpi_stage(&api, target, stage, context),
         _ => Err("设备不支持 DPI 档位切换".into()),
     }
