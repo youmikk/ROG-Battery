@@ -4154,7 +4154,7 @@ mod backend_tests {
     fn queried_device_silence_keeps_sample_age_then_wake_restores_tray_without_manual_refresh() {
         for (backend, family) in [(BackendId::VgnKeyboard, DeviceFamily::Keyboard),
             (BackendId::MchoseQhw, DeviceFamily::Keyboard), (BackendId::Keyboard20, DeviceFamily::Keyboard),
-            (BackendId::Edifier, DeviceFamily::Headset)] {
+            (BackendId::Edifier, DeviceFamily::Headset), (BackendId::Dareu, DeviceFamily::Mouse)] {
         let now = std::time::Instant::now();
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
         let mut shared = Shared::new(Settings::default());
@@ -4332,25 +4332,27 @@ mod backend_tests {
     }
 
     #[test]
-    fn rapoo_actual_stages_use_the_rapoo_queue_and_fail_closed_after_a_partial_read() {
+    fn configuration_bound_stages_use_their_backend_queue_and_disable_writes_after_partial_reads() {
+        for (backend, key, last) in [(BackendId::Rapoo, "rapoo", 6), (BackendId::Dareu, "dareu", 4)] {
         let shared=Arc::new(Mutex::new(Shared::new(Settings::default())));let signal=Signal::new(60);
-        let mut reading=snapshot(BackendId::Rapoo,"rapoo",70);
+        let mut reading=snapshot(backend,key,70);
         reading.dpi=Dpi {current:Some(800),current_y:Some(1600),active_stage:Some(1),profile:Some(2),
             configuration_token:Some(42),stage_writable:true,
-            stages:vec![crate::device::DpiStage {index:1,value:800},crate::device::DpiStage {index:6,value:25600}],
-            stage_y:[(1,1600),(6,30000)].into(),..Default::default()};
+            stages:vec![crate::device::DpiStage {index:1,value:800},crate::device::DpiStage {index:last,value:25600}],
+            stage_y:[(1,1600),(last,30000)].into(),..Default::default()};
         let target=reading.target.clone();
-        lock_shared(&shared).publish_additional(BackendId::Rapoo,vec![reading.clone()],0,1);
-        let p=popup_dpi_states(&lock_shared(&shared));let dpi=&p["rapoo"];
+        lock_shared(&shared).publish_additional(backend,vec![reading.clone()],0,1);
+        let p=popup_dpi_states(&lock_shared(&shared));let dpi=&p[key];
         assert!(!dpi.custom && !dpi.value_control && dpi.writable);
-        assert_eq!(dpi.stages[1].index,6);assert_eq!(dpi.context,Some(crate::device::StageContext::Configuration(42)));
-        assert_eq!(dpi.current_y,Some(1600));assert_eq!(dpi.stage_y[&6],30000);
+        assert_eq!(dpi.stages[1].index,last);assert_eq!(dpi.context,Some(crate::device::StageContext::Configuration(42)));
+        assert_eq!(dpi.current_y,Some(1600));assert_eq!(dpi.stage_y[&last],30000);
         assert!(submit(&shared,&signal,Cmd::BasicDpiStage {target,stage:dpi.stages[1],context:dpi.context.unwrap()}));
-        assert_eq!(lock_shared(&shared).source_pending[&BackendId::Rapoo].len(),1);
+        assert_eq!(lock_shared(&shared).source_pending[&backend].len(),1);
         reading.dpi=Dpi {current:Some(800),current_y:Some(1600),..Default::default()};
-        lock_shared(&shared).publish_additional(BackendId::Rapoo,vec![reading],1,2);
-        assert!(!popup_dpi_states(&lock_shared(&shared))["rapoo"].writable);
+        lock_shared(&shared).publish_additional(backend,vec![reading],1,2);
+        assert!(!popup_dpi_states(&lock_shared(&shared))[key].writable);
         assert_eq!(lock_shared(&shared).readings[0].percent(),Some(70));
+        }
     }
 
     #[test]

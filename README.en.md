@@ -10,7 +10,7 @@ Support covers selected devices with implemented protocols, not entire brands. N
 
 ## In development
 
-Further work prioritizes commonly used Chinese brands: Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu and Edifier. Battery, basic DPI and sleep recovery come first, with existing detailed ROG support retained. The development branch adds selected shared VGN / VXE keyboard receivers, MCHOSE G98 V3, Lofree HYZEN and Edifier Halo Space battery queries, plus improved MCHOSE BY identification. Hardware acceptance is pending; these changes are not part of the 1.4.7 tag.
+Further work prioritizes commonly used Chinese brands: Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu and Edifier. Battery, basic DPI and sleep recovery come first, with existing detailed ROG support retained. The development branch adds selected shared VGN / VXE keyboard receivers, MCHOSE G98 V3, Lofree HYZEN and Edifier Halo Space battery queries, improved MCHOSE BY identification, and battery plus actual DPI-stage switching for selected Dareu A950 models. Hardware acceptance is pending; these changes are not part of the 1.4.7 tag. Exact receiver and model limits are documented in the [compatibility notes](PROTOCOLS.en.md).
 
 ## Version 1.4.7
 

@@ -205,3 +205,25 @@ The fixed query is `2E AA EC D0 00 00 66` with zero padding. Its first byte alre
 Descriptors must additionally show only input `2F` and output `2E`; this conservative entry condition needs real caps acceptance. No C8 MAC, C9 name, C6 firmware or unsupported F2 status query is issued. Charging stays unknown rather than borrowing the upstream UI's false as evidence of discharge. Cross-process reply attribution, charging-cable disconnection and sleep-cache behavior remain hardware questions.
 
 All 241 regressions and a warning-free build passed, covering valid zero/full, bad checksums, wrong endpoints, lengths, stale tails, identical units and shared main/tray expiry and recovery. Upstream hardware claims are protocol-source evidence only; no matching headset was available locally.
+
+## In development: Dareu Jm mice
+
+Independently implemented from the [official Dareu WebHID driver](https://driver.dareu.com/allinone/) 1.3.26, its pairing map and product JSONs, cross-checked against OpenMouse `5a4f643`'s A950 PRO Mg record and Voltide `c1872c4`'s `DareuA950MouseProvider`. Official `jmdevice.js` SHA256 is `997fb0cb6331a68e730db1d59499cad11aaf0a976db70383f33aa476c1370427`; `global.js` is `cdb0d2db7f36bd53e87f906bc86749e498d45739dc6f815d6c033c441842accf`. Vendor resources were inspected statically and are not distributed.
+
+Entry requires `260D:1114 / 1117 / 1175`, `FF02:0002`, bidirectional Report `08`, 17-byte full reports and a unique management collection in its USB interface group. The official current `ParseDevices` identifies Jm through FF02:2 Report 08. This implementation proves that collection directly; it does not borrow FF05 service collections from another receiver or guess physical associations across USB interfaces. Receiver IDs 1114 and 1175 do not prove a specific paired model.
+
+| Interface PID | Runtime CID / MID | Official model | Added capability |
+| --- | --- | --- | --- |
+| 1114 | 10 / 1, 10 / 3, 10 / 4, 10 / 39 | A950 PRO, A950 PRO Mg, two A950G catalog entries | Battery and actual PAW3395 DPI-stage reads/switching |
+| 1117 | 10 / 3 | A950 PRO Mg wired | Same, with unverified wired transport |
+| 1175 | 10 / 9, 4 / 9, 10 / 25 | Two A950 AIR entries, A950 GM | Battery and actual PAW3395 DPI-stage reads/switching |
+| 1175 | 10 / 37 | LM180T | Battery/name only; PAW3950 settings are not accessed |
+| Listed receivers | Unknown or missing identity | Neutral name | Valid battery only, without settings writes |
+
+Command 03 establishes active status. Command 01 returns CID/MID/type at full-frame offsets 10/11/12. Its four random request bytes follow the vendor flow, but no challenge echo is established and they are not treated as a transaction ID. Battery command 04 requires byte 5 equal to two and percentage at byte 6. That conservative length requirement comes from Voltide's driver evidence; other 1114 firmware still needs verification. Charge enums 0/1 mean not charging/charging. Enum 2 remains unknown because the current official Jm energy pages display it as charging while Voltide describes full. Voltage and an unproven incoming checksum are not inferred.
+
+Read the active one of four profiles without changing it. Memory addresses 2/4 contain stage count and zero-based active index with separate checksums. Read the actual 1–5 stages at `12 + 4 × index`; catalog defaults never fill missing settings. PAW3395 high bytes `00/44/88` encode successive 256-value groups at 50 DPI per step, constrained to the paired model's 100–26000, 100–30000 or 50–26000 range. Preserve raw indexes, duplicate values and X/Y values; each record must sum to `55`.
+
+Reverse rereads verify the entire table and identity/profile boundaries. A configuration fingerprint includes identity, receiver type, profile, count, active stage and every record. A click rereads and compares this state before sending command 07 exactly once, changing only the two-byte active-stage pair at address 4. No count, DPI-table, button, macro, polling or profile edits are performed. Lost ACKs are not retried; a full readback must confirm the requested stage and unchanged surrounding records. Without a transaction ID or cross-process atomic lock, an external driver can still race the final check. Replacing a paired unit with the same model also lacks unique identity evidence.
+
+All 252 regressions and a warning-free release build passed. New tests use synthetic reports constructed from documented fields, covering shared receivers, unsupported sensors, malformed lengths/addresses, sleep recovery, concurrent configuration changes, ignored writes, lost ACKs and the main/tray command queue. OpenMouse's 1114 hardware report is source evidence only; no Dareu device was available locally, and all new entries await hardware acceptance.
