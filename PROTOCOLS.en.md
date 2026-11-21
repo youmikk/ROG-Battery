@@ -240,9 +240,9 @@ The FF90 headset backend gates identities by exact `FF90:0001`, Reports `55` in 
 
 `3837:600A` MCHOSE V9 Turbo+ retains 64/64 bytes. State `02` reads a percentage, `00/03` means external power with unknown level, and `1A` means explicitly offline; other states are rejected. External power carries a charging flag without substituting 100% or the previous percentage. Offline and silence are separate outcomes. The `3837:6008` lighting interface is never probed.
 
-`291D:385D` V9 PRO remains disabled: official receiver firmware below `0008` does not support battery, and support requires a descriptor-proven `FF22:0001` Feature `AA/64` sibling on the same physical receiver to read the version. Until that gate is implemented, Turbo+ evidence is not expanded to V9 PRO.
+`291D:385D` V9 PRO uses the same FF90 battery protocol but adds a firmware gate. The same physical receiver must expose one `FF22:0001` collection whose descriptor proves Feature `AA/64`. A read-only `AA 01 01` plus 61 zeroes is followed by a 300 ms wait and Feature `AA` receive; bytes 2–5 are concatenated as decimal text to obtain the version. Confirmed versions below `0008` block battery I/O. Unknown versions, failed reads or ambiguous descriptors retain the conservative fallback without repeatedly retrying the firmware query.
 
-All 356 local regressions and the warning-free Windows x64 release build pass, covering ATK's 22–64 byte inputs and states 2/3/4, MCHOSE states 0/2/3/1A, echoes, malformed headers and descriptors. None of these headsets is available locally. Real caps, charging/full/unplug transitions, sleep, firmware versions and vendor-software coexistence remain pending.
+All 357 local regressions and the warning-free Windows x64 release build pass, covering ATK's 22–64 byte inputs and states 2/3/4, MCHOSE states 0/2/3/1A, echoes, firmware decimal versions and descriptors. None of these headsets is available locally. Real caps, charging/full/unplug transitions, sleep, firmware versions and vendor-software coexistence remain pending.
 
 ## In development: MCHOSE QHW and BY keyboards
 

@@ -78,7 +78,7 @@ The FF90 `55:65` headset backend adds `373B:12D6` ATK N9 V2 ULTRA and limits ATK
 
 MCHOSE V9 Turbo+ remains limited to `3837:600A / FF90:0001` and 64-byte input/output. State `02` decodes a 0–100 percentage, `00/03` means external power with unknown level, and `1A` explicitly means offline. Silence does not mean offline. The `3837:6008` lighting device and all other identities remain excluded.
 
-All 356 local regressions and the warning-free Windows x64 release build pass, covering ATK's dynamic input capacity and three states, MCHOSE external-power/offline handling and strict descriptors. `291D:385D` MCHOSE V9 PRO still needs its receiver firmware `0008` gate and proven `FF22` Feature `AA`; this version does not claim support. All new headset paths still need matching hardware acceptance.
+All 357 local regressions and the warning-free Windows x64 release build pass, covering ATK's dynamic input capacity and three states, MCHOSE external-power/offline handling and strict descriptors. `291D:385D` MCHOSE V9 PRO now requires the same physical receiver's `FF22:0001` descriptor to prove Feature `AA/64` before reading firmware; confirmed versions below `0008` block the battery query, while unknown versions retain the conservative battery fallback. All new headset paths still need matching hardware acceptance.
 
 ## In development: AULA SC380 PRO
 

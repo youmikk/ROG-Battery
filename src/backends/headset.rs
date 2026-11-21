@@ -2,7 +2,11 @@
 //! ATK and MCHOSE transport/capture evidence: Voltide, pinned in PROTOCOLS.md.
 use super::*;
 use crate::hid::HidDevice;
-use std::time::Instant;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 pub struct Headset;
 
@@ -11,6 +15,7 @@ enum Model {
     AtkUltimate,
     AtkUltra,
     MchoseV9,
+    MchoseV9Pro,
 }
 
 impl Model {
@@ -19,6 +24,7 @@ impl Model {
             Self::AtkUltimate => "ATK N9 V2 Ultimate",
             Self::AtkUltra => "ATK N9 V2 ULTRA",
             Self::MchoseV9 => "MCHOSE V9 Turbo+",
+            Self::MchoseV9Pro => "MCHOSE V9 PRO",
         }
     }
 }
@@ -35,8 +41,20 @@ fn model(i: &HidInterface) -> Option<Model> {
             Some(Model::AtkUltra)
         }
         (0x3837, 0x600a) if i.input_len == 64 => Some(Model::MchoseV9),
+        (0x291d, 0x385d) if i.input_len == 64 => Some(Model::MchoseV9Pro),
         _ => None,
     }
+}
+
+#[derive(Default)]
+struct ProCache {
+    firmware: BTreeMap<String, HidInterface>,
+    versions: BTreeMap<String, Option<u16>>,
+}
+
+fn pro_cache() -> &'static Mutex<ProCache> {
+    static CACHE: OnceLock<Mutex<ProCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ProCache::default()))
 }
 
 fn proven(api: &HidApi, i: &HidInterface) -> bool {
@@ -95,7 +113,7 @@ fn reading(model: Model, r: &[u8]) -> Option<Reading> {
                 _ => None,
             }
         }
-        Model::MchoseV9 => {
+        Model::MchoseV9 | Model::MchoseV9Pro => {
             if r.len() != 64 {
                 return None;
             }
@@ -139,9 +157,125 @@ fn battery(reading: Reading) -> (Option<Battery>, bool) {
         Reading::Offline => (None, false),
     }
 }
+
+fn firmware_request() -> [u8; 64] {
+    let mut request = [0; 64];
+    request[..3].copy_from_slice(&[0xaa, 1, 1]);
+    request
+}
+
+fn receiver_version(reply: &[u8]) -> Option<u16> {
+    if reply.len() != 64
+        || reply[..2] != [0xaa, 1]
+        || reply == firmware_request()
+    {
+        return None;
+    }
+    let decimal = reply[2..6]
+        .iter()
+        .map(u8::to_string)
+        .collect::<String>();
+    decimal.parse().ok()
+}
+
+fn firmware_candidate(
+    api: &HidApi,
+    interfaces: &[HidInterface],
+    group: &str,
+) -> Option<HidInterface> {
+    let candidates = interfaces
+        .iter()
+        .filter(|i| {
+            i.vendor_id == 0x291d
+                && i.product_id == 0x385d
+                && i.usage_page == 0xff22
+                && i.usage == 1
+                && channel::collection_group(i) == group
+                && descriptor::Descriptor::open(api, i)
+                    .is_some_and(|caps| caps.feature_byte_report(i, 0xaa, 64))
+        })
+        .collect::<Vec<_>>();
+    (candidates.len() == 1).then(|| candidates[0].clone())
+}
+
+fn cache_firmware_candidates(
+    api: &HidApi,
+    interfaces: &[HidInterface],
+    controls: &[&HidInterface],
+) {
+    let groups = controls
+        .iter()
+        .filter(|i| model(i) == Some(Model::MchoseV9Pro))
+        .map(|i| channel::collection_group(i))
+        .collect::<BTreeSet<_>>();
+    let mut cache = pro_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.firmware.clear();
+    cache.versions.retain(|group, _| groups.contains(group));
+    for group in groups {
+        if let Some(interface) = firmware_candidate(api, interfaces, &group) {
+            cache.firmware.insert(group, interface);
+        }
+    }
+}
+
+fn pro_version(interface: &HidInterface) -> Option<u16> {
+    let group = channel::collection_group(interface);
+    let firmware = {
+        let mut cache = pro_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(version) = cache.versions.get(&group) {
+            return *version;
+        }
+        let firmware = cache.firmware.get(&group).cloned();
+        if firmware.is_none() {
+            cache.versions.insert(group.clone(), None);
+            return None;
+        }
+        firmware
+    }?;
+    let started = Instant::now();
+    let result = (|| {
+        let mut channel =
+            feature::FeatureChannel::open_with_length(&firmware, 64)?;
+        channel.send(&firmware_request(), 600)?;
+        std::thread::sleep(Duration::from_millis(300));
+        channel.receive(0xaa, 600)
+    })();
+    let version = result
+        .as_ref()
+        .ok()
+        .and_then(|reply| receiver_version(reply));
+    trace::record(
+        &firmware,
+        BackendId::Headset,
+        "query-receiver-version",
+        0xaa,
+        1,
+        64,
+        result.as_ref().map_or(0, Vec::len),
+        started,
+        if result.is_ok() && version.is_some() {
+            trace::Outcome::Ok
+        } else {
+            trace::Outcome::InvalidData
+        },
+    );
+    pro_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .versions
+        .insert(group, version);
+    version
+}
+
 impl DeviceBackend for Headset {
     fn discover(&self, api: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
-        Ok(candidates(api, interfaces)
+        let controls = candidates(api, interfaces);
+        cache_firmware_candidates(api, interfaces, &controls);
+        Ok(controls
             .into_iter()
             .map(|i| {
                 let selected = model(i).expect("proven headset model");
@@ -157,6 +291,11 @@ impl DeviceBackend for Headset {
             .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
         if target.backend != BackendId::Headset || !proven(api, target.hid()?) {
             return Err(crate::i18n::translate("设备无有效状态回报").into());
+        }
+        if selected == Model::MchoseV9Pro
+            && pro_version(target.hid()?).is_some_and(|version| version < 8)
+        {
+            return Err(crate::i18n::translate("接收器固件低于 0008").into());
         }
         let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -232,6 +371,11 @@ mod tests {
         i.vendor_id = 0x3837;
         i.product_id = 0x600a;
         assert_eq!(model(&i), Some(Model::MchoseV9));
+        i.vendor_id = 0x291d;
+        i.product_id = 0x385d;
+        assert_eq!(model(&i), Some(Model::MchoseV9Pro));
+        i.vendor_id = 0x3837;
+        i.product_id = 0x600a;
         i.product_id = 0x6008;
         assert!(model(&i).is_none());
         i.product_id = 0x600a;
@@ -327,5 +471,23 @@ mod tests {
         assert!(connected);
         assert_eq!(parsed_battery.unwrap().charging, Some(true));
         assert!(!battery(Reading::Offline).1);
+    }
+
+    #[test]
+    fn receiver_version_uses_decimal_concatenation_and_rejects_echoes() {
+        let mut reply = firmware_request();
+        reply[2..6].copy_from_slice(&[0, 0, 0, 8]);
+        assert_eq!(receiver_version(&reply), Some(8));
+        reply[2..6].copy_from_slice(&[0, 1, 2, 3]);
+        assert_eq!(receiver_version(&reply), Some(123));
+        let mut echo = firmware_request();
+        echo[2] = 0xff;
+        assert!(receiver_version(&echo).is_none());
+        assert!(receiver_version(&firmware_request()).is_none());
+        let mut short = firmware_request().to_vec();
+        short.truncate(63);
+        assert!(receiver_version(&short).is_none());
+        reply[1] = 2;
+        assert!(receiver_version(&reply).is_none());
     }
 }

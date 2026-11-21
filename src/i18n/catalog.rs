@@ -229,6 +229,7 @@ macro_rules! tr {
     ("还原配置") => { if $crate::i18n::english() { "Restore settings" } else { "还原配置" } };
     ("已生效") => { if $crate::i18n::english() { "Applied" } else { "已生效" } };
     ("正在写设备 ……") => { if $crate::i18n::english() { "Writing to device…" } else { "正在写设备 ……" } };
+    ("接收器固件低于 0008") => { if $crate::i18n::english() { "Receiver firmware is below 0008" } else { "接收器固件低于 0008" } };
     ("（上次电量，未连接）") => { if $crate::i18n::english() { " (last reading, disconnected)" } else { "（上次电量，未连接）" } };
     ("（充电中）") => { if $crate::i18n::english() { " (charging)" } else { "（充电中）" } };
     ("R Battery · 打开设备页面") => { if $crate::i18n::english() { "R Battery · Open devices" } else { "R Battery · 打开设备页面" } };
@@ -554,6 +555,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "CompX 设备无有效应答" => "No valid response from the CompX device",
         "Razer 设备无有效应答" => "No valid response from the Razer device",
         "设备无有效状态回报" => "No valid status report from the device",
+        "接收器固件低于 0008" => "Receiver firmware is below 0008",
         "设备模式不允许设置，请刷新后重试" => "The current device mode does not allow changes. Refresh and try again.",
         "设备拒绝设置，请刷新后检查" => "The device rejected the setting. Refresh to check its state.",
         "CompX 传感器布局尚未确认" => "The CompX sensor layout has not been confirmed",
