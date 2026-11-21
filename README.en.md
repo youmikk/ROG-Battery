@@ -8,6 +8,10 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
+## Version 1.4.9
+
+This version is released as a portable build first. The taskbar battery strip now uses compact dimensions that match the system tray. A single device shows only its number; multiple devices are shown in order with a type glyph and percentage, using enough spacing and only whole entries that fit in the available taskbar space. VGN / VXE adds strict read-only battery support for five 2.4 GHz keyboard receivers; `258A:024F` uses the documented charging bit while charging remains unknown on the other IDs.
+
 ## Version 1.4.8
 
 This version is released as a portable build first. It adds the taskbar battery strip and continues support for commonly used Chinese brands including Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo and HECATE. New protocols pass local simulated regressions but still require per-model hardware acceptance. Exact receiver and model limits are documented in the [compatibility notes](COMPATIBILITY.en.md).
@@ -68,9 +72,9 @@ Click a device card to open its details. With multiple devices, return to the ov
 
 One numeric tray icon shows the selected device's battery level. Click it once to open a panel centered on the tray icon, with device battery levels, refresh, and settings. Double-click to open the main window, or right-click for the menu.
 
-A compact battery strip appears immediately left of the notification area. It follows the selected tray device, uses its device-type icon and a clearly readable percentage, and opens the same quick-view panel on click. Clicking it again closes the panel. It can be disabled independently in Settings and hides automatically while a full-screen application is active.
+A battery strip with system-tray-sized content appears immediately left of the notification area. A single device shows only its number. Multiple devices are listed in order with a type glyph, percentage and clear spacing. Click the strip to open quick view and click it again to close; it can be disabled independently in Settings and hides automatically while a full-screen application is active.
 
-Device preferences provide tray selection, device name, and device type, in that order. Names can be edited or restored. Types default to automatic detection and can be set to Mouse, Keyboard, Headset, Gamepad, or Other. Your choice applies throughout the main window and tray. Changing the type does not add hardware capabilities.
+Device preferences provide a primary tray icon, device name, and device type, in that order. The primary selection controls the standard Windows tray icon, while the taskbar strip shows every device with battery data. Names can be edited or restored. Types default to automatic detection and can be set to Mouse, Keyboard, Headset, Gamepad, or Other. Your choice applies throughout the main window and both battery displays. Changing the type does not add hardware capabilities.
 
 In the tray device list, a mouse opens its known DPI stages, while a headset opens audio controls for speaker or headset volume, microphone mute, and Windows sound settings. Windows remains responsible for changing the default playback device; the app does not call undocumented interfaces.
 

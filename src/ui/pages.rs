@@ -770,8 +770,8 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
     let ctl = row_label(
         p,
         area,
-        crate::tr!("托盘显示设备"),
-        Some(crate::tr!("固定显示这台设备的电量")),
+        crate::tr!("标准托盘图标设备"),
+        Some(crate::tr!("任务栏电量条会同时显示全部有电量设备")),
         150.0,
     );
     button(
@@ -779,9 +779,9 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
         ui,
         R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
         if selected {
-            crate::tr!("已在托盘显示")
+            crate::tr!("已在标准托盘显示")
         } else {
-            crate::tr!("设为托盘显示设备")
+            crate::tr!("设为标准托盘图标")
         },
         false,
         if selected {
@@ -2867,7 +2867,7 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             p,
             area,
             crate::tr!("在任务栏显示电量"),
-            Some(crate::tr!("点击电量条打开快速查看")),
+            Some(crate::tr!("显示全部有电量设备，点击打开快速查看")),
             40.0,
         );
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
@@ -2881,8 +2881,8 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         let ctl = row_label(
             p,
             area,
-            crate::tr!("托盘显示设备"),
-            Some(crate::tr!("单击数字查看全部设备")),
+            crate::tr!("标准托盘图标设备"),
+            Some(crate::tr!("任务栏电量条会同时显示全部有电量设备")),
             180.0,
         );
         drop_button(

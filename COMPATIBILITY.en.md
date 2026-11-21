@@ -4,11 +4,21 @@
 
 Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with simulated protocol coverage and Logitech hardware validation pending. Battery observations now distinguish live, cached and stale readings; failed queries alone do not establish disconnection. See [protocol research](PROTOCOLS.en.md) for upstream catalogs and capability boundaries.
 
-This document lists additions in 1.4.8, 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
+This document lists additions in 1.4.9, 1.4.8, 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
 Version 1.4.8 release validation (2026-11-22): all 319 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. The taskbar battery strip was verified to display, open the quick-view panel on click and close it on a second click. The existing VGN read-only probe returned valid data; new models still require hardware acceptance.
 
+Version 1.4.9 acceptance candidate: all 326 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and copied-executable SHA256. The new multi-device taskbar layout is covered by synthetic readings and width-boundary tests. Existing wired VGN V98 Pro V3 hardware still returned 100% and charging. None of the five new wireless VGN / VXE identities is attached locally, so matching hardware acceptance remains pending.
+
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed and the Windows x64 release build completed without warnings. Synthetic keyboard, headset and gamepad render checks covered Chinese/English, light/dark themes and 100% / 125% scaling; these were not hardware-connection evidence.
+
+## 1.4.9 acceptance candidate
+
+The taskbar strip no longer packs a device glyph and number into one 32-pixel cell. A single device remains number-only. Multiple devices are shown in overview order with a 16-pixel type glyph, 13-pixel percentage and a 14-pixel gap between devices. Percentages include `%`, low readings use a warning color and charging devices show a small status dot. Only connected devices with current battery data are included. Entries are kept whole and laid out only within available taskbar space, so a half-device is never clipped into the notification area.
+
+Five exact VGN / VXE 2.4 GHz keyboard identities are added: `258A:024F/027F/027B` and `391D:2A01/2A02`. Each requires a unique `FF02:0002` management collection, 20-byte bidirectional Report `13` and a proven descriptor. The fixed request is `13 4A 01`, sixteen zero bytes and checksum `5E`; replies require the complete 20-byte frame, matching header and checksum, a percentage from 0–100, and rejection of request echoes. Only `258A:024F` has documented charging evidence at complete-frame byte 6 bit `0x10`; charging stays unknown on the other four. `3554:FA09` remains exclusively owned by the unified MCHOSE keyboard backend.
+
+Each query is limited to 2.5 seconds. Failure neither clears nor renews the old sample, which expires after 120 seconds without a new valid reply. The existing wired `258A:024E` VGN V98 Pro V3 path still reads through its original Feature protocol; this project has obtained a valid 100% and charging reading from that device. All five new wireless identities still require matching hardware acceptance. Synthetic tests do not validate descriptors, sleep, 0%, charging transitions or coexistence with VGN HUB.
 
 ## In development: AULA SC380 PRO
 

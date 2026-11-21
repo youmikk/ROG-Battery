@@ -62,10 +62,10 @@ macro_rules! tr {
     ("恢复原名") => { if $crate::i18n::english() { "Reset name" } else { "恢复原名" } };
     ("留空恢复原始名称，最多 64 个字符") => { if $crate::i18n::english() { "Up to 64 characters. Leave blank to use the original name." } else { "留空恢复原始名称，最多 64 个字符" } };
     ("名称最多 64 个字符，不能包含换行或控制字符") => { if $crate::i18n::english() { "Use up to 64 characters, without line breaks or control characters." } else { "名称最多 64 个字符，不能包含换行或控制字符" } };
-    ("托盘显示设备") => { if $crate::i18n::english() { "Device shown in tray" } else { "托盘显示设备" } };
-    ("固定显示这台设备的电量") => { if $crate::i18n::english() { "Keep this device’s battery in the tray" } else { "固定显示这台设备的电量" } };
-    ("已在托盘显示") => { if $crate::i18n::english() { "Shown in tray" } else { "已在托盘显示" } };
-    ("设为托盘显示设备") => { if $crate::i18n::english() { "Show in tray" } else { "设为托盘显示设备" } };
+    ("标准托盘图标设备") => { if $crate::i18n::english() { "Primary tray icon device" } else { "标准托盘图标设备" } };
+    ("任务栏电量条会同时显示全部有电量设备") => { if $crate::i18n::english() { "The taskbar battery strip shows every device with battery data" } else { "任务栏电量条会同时显示全部有电量设备" } };
+    ("已在标准托盘显示") => { if $crate::i18n::english() { "Shown as primary tray icon" } else { "已在标准托盘显示" } };
+    ("设为标准托盘图标") => { if $crate::i18n::english() { "Use as primary tray icon" } else { "设为标准托盘图标" } };
     ("设备类型") => { if $crate::i18n::english() { "Device type" } else { "设备类型" } };
     ("单击数字查看全部设备") => { if $crate::i18n::english() { "Click the number to view all devices" } else { "单击数字查看全部设备" } };
     ("正在刷新…") => { if $crate::i18n::english() { "Refreshing…" } else { "正在刷新…" } };
@@ -152,7 +152,7 @@ macro_rules! tr {
     ("程序") => { if $crate::i18n::english() { "Application" } else { "程序" } };
     ("显示托盘图标") => { if $crate::i18n::english() { "Show tray icons" } else { "显示托盘图标" } };
     ("在任务栏显示电量") => { if $crate::i18n::english() { "Show battery on the taskbar" } else { "在任务栏显示电量" } };
-    ("点击电量条打开快速查看") => { if $crate::i18n::english() { "Click the battery strip to open quick view" } else { "点击电量条打开快速查看" } };
+    ("显示全部有电量设备，点击打开快速查看") => { if $crate::i18n::english() { "Show every device with battery data; click to open quick view" } else { "显示全部有电量设备，点击打开快速查看" } };
     ("低电量系统通知") => { if $crate::i18n::english() { "Low battery notifications" } else { "低电量系统通知" } };
     ("低于 20% 时通过 Windows 通知提醒") => { if $crate::i18n::english() { "Notify through Windows below 20%" } else { "低于 20% 时通过 Windows 通知提醒" } };
     ("关闭后只能用窗口操作") => { if $crate::i18n::english() { "When off, use the application window" } else { "关闭后只能用窗口操作" } };
@@ -616,7 +616,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "程序" => "Application",
         "显示托盘图标" => "Show tray icons",
         "在任务栏显示电量" => "Show battery on the taskbar",
-        "点击电量条打开快速查看" => "Click the battery strip to open quick view",
+        "显示全部有电量设备，点击打开快速查看" => "Show every device with battery data; click to open quick view",
         "低电量系统通知" => "Low battery notifications",
         "低于 20% 时通过 Windows 通知提醒" => "Notify through Windows below 20%",
         "关闭后只能用窗口操作" => "When off, use the application window",

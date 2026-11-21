@@ -951,16 +951,18 @@ fn taskbar_strip_content(
     readings: &[crate::device::DeviceReading],
     cfg: &Settings,
 ) -> Option<crate::taskbar_widget::StripContent> {
-    let reading = cfg
-        .tray_device
-        .as_ref()
-        .and_then(|key| readings.iter().find(|reading| &reading.key == key))
-        .or_else(|| readings.first())?;
-    Some(crate::taskbar_widget::StripContent {
-        level: reading.display_percent(),
-        charging: reading.is_charging(),
-        kind: cfg.device_kind(reading),
-    })
+    let items = readings
+        .iter()
+        .filter(|reading| {
+            reading.display_percent().is_some() || reading.coarse_level().is_some()
+        })
+        .map(|reading| crate::taskbar_widget::StripItem {
+            level: reading.display_percent(),
+            charging: reading.is_charging(),
+            kind: cfg.device_kind(reading),
+        })
+        .collect::<Vec<_>>();
+    (!items.is_empty()).then_some(crate::taskbar_widget::StripContent { items })
 }
 
 fn dpi_preset_command(cfg: &Settings, basic: &crate::backends::Snapshot, value: u16) -> Option<Cmd> {
@@ -3922,6 +3924,45 @@ mod backend_tests {
     }
 
     #[test]
+    fn taskbar_strip_lists_every_connected_device_with_battery_in_display_order() {
+        let reading = |key: &str, family: DeviceFamily, percent: Option<u8>,
+            connected: bool| DeviceReading {
+            key: key.into(),
+            name: key.into(),
+            family,
+            battery: percent.map(|percent| Battery {
+                percent: Some(percent),
+                estimated_percent: None,
+                charging: Some(key == "mouse"),
+                voltage_mv: None,
+                approximate: false,
+                level: None,
+            }),
+            connected,
+            quality: crate::device::ReadingQuality::Live,
+        };
+        let readings = vec![
+            reading("mouse", DeviceFamily::Mouse, Some(81), true),
+            reading("keyboard", DeviceFamily::Keyboard, Some(64), true),
+            reading("offline", DeviceFamily::Headset, Some(50), false),
+        ];
+        let mut cfg = Settings::default();
+        cfg.device_tray
+            .entry("keyboard".into())
+            .or_default()
+            .kind = crate::tray_prefs::TrayKind::Headset;
+        let strip = taskbar_strip_content(&readings, &cfg).unwrap();
+        assert_eq!(strip.items.len(), 2);
+        assert_eq!(strip.items[0].level.map(|level| level.value), Some(81));
+        assert!(strip.items[0].charging);
+        assert_eq!(strip.items[0].kind, crate::tray_prefs::TrayKind::Mouse);
+        assert_eq!(strip.items[1].level.map(|level| level.value), Some(64));
+        assert!(!strip.items[1].charging);
+        assert_eq!(strip.items[1].kind, crate::tray_prefs::TrayKind::Headset);
+        assert!(taskbar_strip_content(&readings[2..], &cfg).is_none());
+    }
+
+    #[test]
     fn rog_refresh_preserves_concurrent_additional_reading() {
         let mut shared = Shared::new(Settings::default());
         shared.publish_additional(BackendId::Logitech, vec![snapshot(BackendId::Logitech, "logitech", 75)], 0, 1);
@@ -4233,6 +4274,7 @@ mod backend_tests {
     #[test]
     fn queried_device_silence_keeps_sample_age_then_wake_restores_tray_without_manual_refresh() {
         for (backend, family) in [(BackendId::VgnKeyboard, DeviceFamily::Keyboard),
+            (BackendId::VgnBeiying, DeviceFamily::Keyboard),
             (BackendId::MchoseQhw, DeviceFamily::Keyboard), (BackendId::Keyboard20, DeviceFamily::Keyboard),
             (BackendId::Edifier, DeviceFamily::Headset), (BackendId::Dareu, DeviceFamily::Mouse),
             (BackendId::VgnDragonfly3, DeviceFamily::Mouse),

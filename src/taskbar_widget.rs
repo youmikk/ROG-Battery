@@ -128,8 +128,13 @@ extern "system" {
     ) -> i32;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StripContent {
+    pub items: Vec<StripItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StripItem {
     pub level: Option<crate::device::BatteryPercent>,
     pub charging: bool,
     pub kind: crate::tray_prefs::TrayKind,
@@ -141,7 +146,7 @@ pub struct TaskbarWidget {
     enabled: Cell<bool>,
     light: Cell<bool>,
     content: RefCell<Option<StripContent>>,
-    rendered: RefCell<Option<(Option<StripContent>, bool, u32)>>,
+    rendered: RefCell<Option<(Option<StripContent>, bool, u32, usize)>>,
 }
 
 unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
@@ -274,7 +279,7 @@ impl TaskbarWidget {
                 WS_POPUP | WS_CLIPSIBLINGS,
                 0,
                 0,
-                crate::tray_icon::TASKBAR_STRIP_WIDTH,
+                crate::tray_icon::TASKBAR_STRIP_MIN_WIDTH,
                 crate::tray_icon::TASKBAR_STRIP_HEIGHT,
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -336,20 +341,31 @@ impl TaskbarWidget {
         }
         let dpi = unsafe { GetDpiForWindow(taskbar) };
         let scale = (if dpi == 0 { 96 } else { dpi }) as f32 / 96.0;
-        let content = *self.content.borrow();
-        let render_key = (content, self.light.get(), dpi);
+        let content = self.content.borrow().clone();
+        let available_width =
+            (tray_rect.left - bar.left - (scale * 2.0).round() as i32).max(0);
+        let visible = content.as_ref().map_or(0, |content| {
+            visible_item_count(&content.items, available_width, scale)
+        });
+        if visible == 0 {
+            unsafe { ShowWindow(hwnd, 0) };
+            return;
+        }
+        let render_key = (content.clone(), self.light.get(), dpi, visible);
         if self.rendered.borrow().as_ref() != Some(&render_key) {
+            let items = content
+                .as_ref()
+                .map(|content| content.items[..visible].to_vec())
+                .unwrap_or_default();
             let Some(bitmap) = crate::tray_icon::render_taskbar_strip(
-                content.and_then(|value| value.level),
-                content.is_some_and(|value| value.charging),
-                content.map_or(crate::tray_prefs::TrayKind::Generic, |value| value.kind),
+                &items,
                 self.light.get(),
                 scale,
             ) else {
                 unsafe { ShowWindow(hwnd, 0) };
                 return;
             };
-            let width = (crate::tray_icon::TASKBAR_STRIP_WIDTH as f32 * scale).round() as i32;
+            let width = (crate::tray_icon::taskbar_strip_width(&items) as f32 * scale).round() as i32;
             let height = (crate::tray_icon::TASKBAR_STRIP_HEIGHT as f32 * scale).round() as i32;
             let screen = unsafe { crate::win32::GetDC(ptr::null_mut()) };
             if screen.is_null() {
@@ -404,7 +420,11 @@ impl TaskbarWidget {
             }
             *self.rendered.borrow_mut() = Some(render_key);
         }
-        let width = (crate::tray_icon::TASKBAR_STRIP_WIDTH as f32 * scale).round() as i32;
+        let items = content
+            .as_ref()
+            .map(|content| &content.items[..visible])
+            .unwrap_or_default();
+        let width = (crate::tray_icon::taskbar_strip_width(items) as f32 * scale).round() as i32;
         let height = (crate::tray_icon::TASKBAR_STRIP_HEIGHT as f32 * scale).round() as i32;
         let x = tray_rect.left - width - (scale * 2.0).round() as i32;
         let y = bar.top + (bar.bottom - bar.top - height) / 2;
@@ -431,9 +451,59 @@ impl TaskbarWidget {
     }
 }
 
+fn visible_item_count(
+    items: &[StripItem],
+    available_width: i32,
+    scale: f32,
+) -> usize {
+    (1..=items.len())
+        .rev()
+        .find(|count| {
+            (crate::tray_icon::taskbar_strip_width(&items[..*count]) as f32 * scale).round()
+                as i32
+                <= available_width
+        })
+        .unwrap_or(0)
+}
+
 impl Drop for TaskbarWidget {
     fn drop(&mut self) {
         self.destroy();
         NOTIFY_WINDOW.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(value: u8) -> StripItem {
+        StripItem {
+            level: Some(crate::device::BatteryPercent {
+                value,
+                approximate: false,
+            }),
+            charging: false,
+            kind: crate::tray_prefs::TrayKind::Mouse,
+        }
+    }
+
+    #[test]
+    fn only_whole_items_are_shown_in_available_space() {
+        let items = [item(75), item(100), item(50), item(5), item(88)];
+        assert_eq!(crate::tray_icon::taskbar_strip_width(&[]), 0);
+        let one = crate::tray_icon::taskbar_strip_width(&items[..1]);
+        let two = crate::tray_icon::taskbar_strip_width(&items[..2]);
+        let five = crate::tray_icon::taskbar_strip_width(&items);
+        assert!(one >= 32 && one < two && two < five);
+        assert_eq!(visible_item_count(&items, one - 1, 1.0), 0);
+        assert_eq!(visible_item_count(&items, one, 1.0), 1);
+        assert_eq!(visible_item_count(&items, two, 1.0), 2);
+        assert_eq!(visible_item_count(&items, five, 1.0), 5);
+        assert_eq!(
+            visible_item_count(&items, (two as f32 * 1.5).round() as i32 - 1, 1.5),
+            1
+        );
+        assert_eq!(visible_item_count(&[], 400, 1.0), 0);
     }
 }

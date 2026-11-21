@@ -183,6 +183,16 @@ Queries require `320F:5088 / FF1C:0092`, 64-byte input/output with Report `04` o
 
 Shared IDs/product strings cannot exclude Rainy75 or establish a VGN model. Product names and instance identities are retained; charging, cross-process attribution without transaction IDs and full sleep cycles need hardware verification. All 223 regressions and the release build passed, including shared UI/tray expiry and background recovery; upstream observations are not local hardware acceptance.
 
+## In development: VGN / VXE 20-byte keyboard receivers
+
+Pinned VGN HUB resource `index-ZngoA_qG.js`, MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc` files `vgn_beiying.py` and `by_keyboard.py`, and issue #190 hardware evidence were cross-checked. The official catalog assigns five wireless identities to `FF02:0002`, Report `13`: `258A:024F/027F/027B` and `391D:2A01/2A02`. Wired `FF00:0001 / 09` and shared `3554:FA09` remain outside this reader; the unified MCHOSE keyboard backend retains exclusive ownership of FA09.
+
+The complete request is `13 4A 01`, sixteen zero bytes and trailer `5E`; the trailer is the wrapping sum of the preceding 19 bytes. A reply must be exactly 20 bytes with header `13 4A 01 00`, must not equal the request or identity query, and must pass the same checksum. Full-frame byte 5 is a percentage from 0–100. Byte 4 is packet metadata and is not interpreted as a payload length. Only `258A:024F` has issue #190's controlled external-power comparison for byte 6 bit `0x10`; charging remains unknown on the other four IDs. MCHOSE high/low-nibble rules are not inherited.
+
+The descriptor must prove one unique `FF02:0002` management collection per USB interface group and that both directions contain only a 20-byte Report `13`. Product strings and a model query are not used to establish eligibility. The exact VID/PID table supplies product names, but it is not treated as full hardware acceptance. Each query allows 2.5 seconds and failures do not renew a sample, which expires after 120 seconds; the ten-second background publication limit follows the existing tray state.
+
+All five new identities still require matching wireless hardware. The existing wired `258A:024E` V98 Pro V3 path remains separate and returned a valid 100% plus charging in this project; that result does not validate the wireless transports. Descriptors, 0%, charging transitions, sleep recovery and coexistence with VGN HUB require later hardware records.
+
 ## In development: MCHOSE QHW and BY keyboards
 
 The current [M HUB](https://www.mchose.com.cn/) entry was checked on 2026-11-21. Application `assets/main-DIt5vAcV.js` has SHA256 `cb10c9d3d29505bef2e2d3207dbe223601ff84c46d772b4a0f1e93ef02391c1b`; the official manifest points to `cizhou/CZ_SHARED_DATA/main.002bbdb0f17b5f7135ee.js`, SHA256 `d47d1d0e9e86efbbc1888d17f3bc5cd5caba73c06149a6f1fe26bb3d9386cbc3`. No vendor implementation license was found. Files were inspected statically for protocol facts, without executing or distributing their code/assets, and cross-checked with MyFinder `73d99e2`.

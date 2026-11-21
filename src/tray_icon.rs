@@ -7,8 +7,20 @@ use crate::win32::Handle;
 
 /// 图标布局基准尺寸。
 pub const ICON_SIZE: i32 = 32;
-pub const TASKBAR_STRIP_WIDTH: i32 = 78;
 pub const TASKBAR_STRIP_HEIGHT: i32 = 32;
+pub const TASKBAR_STRIP_MIN_WIDTH: i32 = 48;
+
+pub fn taskbar_strip_width(items: &[crate::taskbar_widget::StripItem]) -> i32 {
+    if items.is_empty() {
+        return 0;
+    }
+    let multi = items.len() > 1;
+    16 + items
+        .iter()
+        .map(|item| taskbar_item_width(item, multi))
+        .sum::<i32>()
+        + (items.len().saturating_sub(1) as i32 * 14)
+}
 
 pub fn render_device(
     level: Option<crate::device::BatteryPercent>,
@@ -24,18 +36,22 @@ pub fn render_device(
     render_device_at(level, charging, kind, content, theme, icon_size())
 }
 
-/// Render the taskbar-adjacent battery pill as a premultiplied 32-bit HBITMAP.
+/// Render the taskbar-adjacent battery row as one premultiplied 32-bit HBITMAP.
+///
+/// A single device stays numeric. Multiple devices use the native taskbar scale:
+/// a 16 px type glyph, 13 px percentage text and a fixed gap between devices.
 /// The caller owns the bitmap and must release it with `DeleteObject`.
 pub fn render_taskbar_strip(
-    level: Option<crate::device::BatteryPercent>,
-    charging: bool,
-    kind: crate::tray_prefs::TrayKind,
+    items: &[crate::taskbar_widget::StripItem],
     light_taskbar: bool,
     scale: f32,
 ) -> Option<Handle> {
-    use crate::ui::gfx::{Painter, R};
+    use crate::ui::gfx::Painter;
     use gdiplus::*;
     if !crate::ui::gfx::start() {
+        return None;
+    }
+    if items.is_empty() {
         return None;
     }
     let theme = if light_taskbar {
@@ -44,7 +60,7 @@ pub fn render_taskbar_strip(
         &crate::ui::theme::DARK
     };
     let scale = scale.max(0.75);
-    let width = (TASKBAR_STRIP_WIDTH as f32 * scale).round() as i32;
+    let width = (taskbar_strip_width(items) as f32 * scale).round() as i32;
     let height = (TASKBAR_STRIP_HEIGHT as f32 * scale).round() as i32;
     unsafe {
         let mut bitmap = ptr::null_mut();
@@ -68,44 +84,97 @@ pub fn render_taskbar_strip(
         GdipGraphicsClear(graphics, 0);
         GdipSetSmoothingMode(graphics, 4);
         GdipSetTextRenderingHint(graphics, 4);
-        let ink = match level {
-            None => theme.text3,
-            Some(percent) if percent.value <= 20 => theme.red,
-            _ => theme.text,
-        };
-        let painted = Painter::on_graphics(graphics, theme, 32.0, scale, |p| {
-            p.card(
-                R::new(0.5, 2.5, TASKBAR_STRIP_WIDTH as f32 - 1.0, 27.0),
-                8.0,
-                theme.card,
-                theme.border,
-            );
-            device_glyph(
-                p,
-                R::new(5.0, 5.0, 22.0, 22.0),
-                kind,
-                ink,
-            );
-            let text = level
-                .map(|value| value.label(true))
-                .unwrap_or_else(|| "—".into());
-            p.icon_text(
-                &text,
-                R::new(30.0, 4.0, 42.0, 24.0),
-                if text.len() >= 4 { 18.0 } else { 21.0 },
-                ink,
-                false,
-            );
-            if charging {
-                p.dot(TASKBAR_STRIP_WIDTH as f32 - 8.0, 8.0, 2.2, theme.green);
+        let multi = items.len() > 1;
+        let painted = Painter::on_graphics(
+            graphics,
+            theme,
+            taskbar_strip_width(items).max(TASKBAR_STRIP_HEIGHT) as f32,
+            scale,
+            |p| {
+                let mut x = 8.0;
+                for (index, item) in items.iter().enumerate() {
+                    paint_taskbar_item(p, item, theme, x, multi);
+                    x += taskbar_item_width(item, multi) as f32;
+                    if index + 1 < items.len() {
+                        x += 14.0;
+                    }
+                }
             }
-        });
+        );
         let mut result = ptr::null_mut();
         let converted = painted.is_some()
             && GdipCreateHBITMAPFromBitmap(bitmap, &mut result, 0) == 0;
         GdipDeleteGraphics(graphics);
         GdipDisposeImage(bitmap);
         (converted && !result.is_null()).then_some(result)
+    }
+}
+
+fn taskbar_item_width(item: &crate::taskbar_widget::StripItem, multi: bool) -> i32 {
+    let label = taskbar_label(item, multi);
+    let digits = item.level.map_or(0, |level| level.value.to_string().len()) as i32;
+    let mut text = match digits {
+        0 => 8,
+        1 => 17,
+        2 => 24,
+        _ => 30,
+    };
+    if multi {
+        text += 7; // percent sign
+    }
+    if item.level.is_some_and(|level| level.approximate) {
+        text += 9;
+    }
+    let charge = i32::from(item.charging && item.level.is_some()) * 5;
+    if multi {
+        16 + 5 + text + charge
+    } else {
+        text.max(label.chars().count() as i32 * 7) + charge
+    }
+}
+
+fn taskbar_label(item: &crate::taskbar_widget::StripItem, multi: bool) -> String {
+    item.level
+        .map(|level| level.label(multi))
+        .unwrap_or_else(|| "—".into())
+}
+
+fn paint_taskbar_item(
+    p: &mut crate::ui::gfx::Painter,
+    item: &crate::taskbar_widget::StripItem,
+    theme: &crate::ui::theme::Theme,
+    x: f32,
+    multi: bool,
+) {
+    use crate::ui::gfx::R;
+    let ink = match item.level {
+        None => theme.text3,
+        Some(percent) if percent.value <= 20 => theme.red,
+        _ => theme.text,
+    };
+    let label = taskbar_label(item, multi);
+    let mut text_x = x;
+    if multi {
+        device_glyph(
+            p,
+            R::new(x, 8.0, 16.0, 16.0),
+            item.kind,
+            ink,
+        );
+        text_x += 21.0;
+    }
+    let text_width = taskbar_item_width(item, multi) as f32
+        - if multi { 21.0 } else { 0.0 }
+        - if item.charging && item.level.is_some() { 5.0 } else { 0.0 };
+    p.icon_text(
+        &label,
+        R::new(text_x, 4.0, text_width, 24.0),
+        if multi { 12.5 } else { 13.0 },
+        ink,
+        false,
+    );
+    if item.charging && item.level.is_some() {
+        p.dot(text_x + text_width + 2.0, 9.0, 1.8, theme.green);
     }
 }
 
@@ -117,8 +186,7 @@ fn render_device_at(
     theme: &crate::ui::theme::Theme,
     size: i32,
 ) -> Option<Handle> {
-    use crate::tray_prefs::TrayContent;
-    use crate::ui::gfx::{Painter, R};
+    use crate::ui::gfx::Painter;
     use gdiplus::*;
     if !crate::ui::gfx::start() {
         return None;
@@ -144,55 +212,8 @@ fn render_device_at(
         GdipGraphicsClear(graphics, 0);
         GdipSetSmoothingMode(graphics, 4);
         GdipSetTextRenderingHint(graphics, 4);
-        let ink = match level {
-            None => theme.text3,
-            Some(percent) if percent.value <= 20 => theme.red,
-            _ => theme.text,
-        };
         let painted = Painter::on_graphics(graphics, theme, 32.0, size as f32 / 32.0, |p| {
-            let combined = content == TrayContent::Combined;
-            if content != TrayContent::Number {
-                let area = if combined {
-                    R::new(1.5, 6.0, 10.0, 20.0)
-                } else {
-                    R::new(2.0, 2.0, 28.0, 28.0)
-                };
-                device_glyph(p, area, kind, ink);
-            }
-            if content != TrayContent::Icon {
-                let text = level.map(|value| value.label(false)).unwrap_or_else(|| "–".to_string());
-                let rect = if combined {
-                    let width = if text.len() == 1 { 10.0 } else { 18.0 };
-                    R::new(22.5 - width / 2.0, 4.0, width, 24.0)
-                } else {
-                    R::new(1.0, 4.0, 30.0, 24.0)
-                };
-                if let Some(value) = level {
-                    if value.approximate && !combined {
-                        // Keep the numeral height: the qualifier has its own
-                        // small slot instead of shrinking the entire label.
-                        let digits = value.value.to_string();
-                        let digit_width = if digits.len() == 1 { 13.0 } else { 25.0 };
-                        let left = (32.0 - digit_width - 7.0) / 2.0;
-                        p.icon_text("≈", R::new(left, 12.0, 5.5, 7.0), 18.0, ink, true);
-                        p.icon_text(&digits, R::new(left + 7.0, 4.0, digit_width, 24.0), 28.0, ink, digits.len() == 1);
-                    } else {
-                        p.icon_text(&text, rect, if combined { 23.0 } else { 28.0 }, ink, combined);
-                    }
-                } else {
-                    p.line(
-                        rect.cx() - 4.0,
-                        rect.cy(),
-                        rect.cx() + 4.0,
-                        rect.cy(),
-                        ink,
-                        1.8,
-                    );
-                }
-            }
-            if charging && level.is_some() {
-                p.dot(if combined { 6.5 } else { 29.0 }, 2.0, 1.8, theme.green);
-            }
+            paint_device_content(p, level, charging, kind, content, theme, 0.0);
         });
         GdipDeleteGraphics(graphics);
         let mut icon = ptr::null_mut();
@@ -206,6 +227,73 @@ fn render_device_at(
     }
 }
 
+fn paint_device_content(
+    p: &mut crate::ui::gfx::Painter,
+    level: Option<crate::device::BatteryPercent>,
+    charging: bool,
+    kind: crate::tray_prefs::TrayKind,
+    content: crate::tray_prefs::TrayContent,
+    theme: &crate::ui::theme::Theme,
+    x: f32,
+) {
+    use crate::tray_prefs::TrayContent;
+    use crate::ui::gfx::R;
+    let ink = match level {
+        None => theme.text3,
+        Some(percent) if percent.value <= 20 => theme.red,
+        _ => theme.text,
+    };
+    let combined = content == TrayContent::Combined;
+    if content != TrayContent::Number {
+        let area = if combined {
+            R::new(x + 1.5, 6.0, 10.0, 20.0)
+        } else {
+            R::new(x + 2.0, 2.0, 28.0, 28.0)
+        };
+        device_glyph(p, area, kind, ink);
+    }
+    if content != TrayContent::Icon {
+        let text = level.map(|value| value.label(false)).unwrap_or_else(|| "–".to_string());
+        let rect = if combined {
+            let width = if text.len() == 1 { 10.0 } else { 18.0 };
+            R::new(x + 22.5 - width / 2.0, 4.0, width, 24.0)
+        } else {
+            R::new(x + 1.0, 4.0, 30.0, 24.0)
+        };
+        if let Some(value) = level {
+            if value.approximate && !combined {
+                // Keep the numeral height: the qualifier has its own small slot
+                // instead of shrinking the entire label.
+                let digits = value.value.to_string();
+                let digit_width = if digits.len() == 1 { 13.0 } else { 25.0 };
+                let left = x + (32.0 - digit_width - 7.0) / 2.0;
+                p.icon_text("≈", R::new(left, 12.0, 5.5, 7.0), 18.0, ink, true);
+                p.icon_text(
+                    &digits,
+                    R::new(left + 7.0, 4.0, digit_width, 24.0),
+                    28.0,
+                    ink,
+                    digits.len() == 1,
+                );
+            } else {
+                p.icon_text(&text, rect, if combined { 23.0 } else { 28.0 }, ink, combined);
+            }
+        } else {
+            p.line(
+                rect.cx() - 4.0,
+                rect.cy(),
+                rect.cx() + 4.0,
+                rect.cy(),
+                ink,
+                1.8,
+            );
+        }
+    }
+    if charging && level.is_some() {
+        p.dot(x + if combined { 6.5 } else { 29.0 }, 2.0, 1.8, theme.green);
+    }
+}
+
 fn device_glyph(
     p: &mut crate::ui::gfx::Painter,
     r: crate::ui::gfx::R,
@@ -214,7 +302,7 @@ fn device_glyph(
 ) {
     use crate::tray_prefs::TrayKind;
     use crate::ui::gfx::R;
-    let stroke = 2.4;
+    let stroke = (r.w.min(r.h) * 0.12).clamp(1.2, 2.4);
     let cx = r.cx();
     let cy = r.cy();
     match kind {
@@ -608,5 +696,45 @@ fn render_glyph(
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(value: u8, approximate: bool, charging: bool) -> crate::taskbar_widget::StripItem {
+        crate::taskbar_widget::StripItem {
+            level: Some(crate::device::BatteryPercent { value, approximate }),
+            charging,
+            kind: crate::tray_prefs::TrayKind::Mouse,
+        }
+    }
+
+    #[test]
+    fn taskbar_width_reserves_icon_text_percent_and_inter_device_space() {
+        let single = [item(75, false, false)];
+        let two = [item(75, false, false), item(100, false, false)];
+        let approximate = [item(75, true, false)];
+        let charging = [item(75, false, true)];
+        assert_eq!(taskbar_label(&single[0], false), "75");
+        assert_eq!(taskbar_label(&two[1], true), "100%");
+        assert_eq!(taskbar_strip_width(&single), 40);
+        assert_eq!(taskbar_strip_width(&two), 140);
+        assert_eq!(
+            taskbar_strip_width(&approximate),
+            taskbar_strip_width(&single) + 9
+        );
+        assert_eq!(
+            taskbar_strip_width(&two),
+            taskbar_item_width(&two[0], true)
+                + taskbar_item_width(&two[1], true)
+                + 30
+        );
+        assert!(taskbar_strip_width(&two) > taskbar_strip_width(&single));
+        assert_eq!(
+            taskbar_strip_width(&charging),
+            taskbar_strip_width(&single) + 5
+        );
     }
 }

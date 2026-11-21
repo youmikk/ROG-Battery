@@ -1,38 +1,24 @@
-//! V98 Pro V3 的北应控制协议；有线 Feature 与接收器 Output 分开处理。
+//! V98 Pro V3 的有线北应 Feature 电量查询。
 use super::*;
-use crate::hid::HidDevice;
 
 pub struct Vgn;
 const VID: u16 = 0x258a;
 const WIRED_REPORT: u8 = 9;
-const RECEIVER_REPORT: u8 = 19;
 const WIRED_QUERY: [u8; 8] = [WIRED_REPORT, 0x87, 0, 0, 1, 0, 2, 0];
 
-fn receiver(pid: u16) -> Option<bool> {
-    match pid {
-        0x024e | 0x027e => Some(false),
-        0x024f | 0x027f => Some(true),
-        _ => None,
-    }
+fn wired(pid: u16) -> bool {
+    matches!(pid, 0x024e | 0x027e)
 }
 
 fn is_control(interface: &HidInterface) -> bool {
     interface.vendor_id == VID
         && interface.usage_page == 0xff02
         && interface.usage == 1
-        && match receiver(interface.product_id) {
-            Some(false) => (10..=4096).contains(&interface.feature_len),
-            Some(true) => interface.input_len >= 20 && interface.output_len >= 20,
-            None => false,
-        }
+        && wired(interface.product_id)
+        && (10..=4096).contains(&interface.feature_len)
 }
 
-fn receiver_query() -> [u8; 20] {
-    keyboard20::query(0x4a)
-}
-
-fn parse_battery(frame: &[u8], wireless: bool) -> Option<Battery> {
-    if wireless { return keyboard20::battery(frame); }
+fn parse_battery(frame: &[u8]) -> Option<Battery> {
     if frame.len() < 10 || frame[..8] != WIRED_QUERY { return None; }
     let (percent, status) = (frame[8], frame[9]);
     if percent > 100 {
@@ -69,43 +55,23 @@ impl DeviceBackend for Vgn {
     }
 
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        let wireless = receiver(target.hid()?.product_id)
-            .ok_or_else(|| crate::tr!("此 VGN 型号尚未适配"))?;
-        if !is_control(target.hid()?) {
+        if target.backend != BackendId::Vgn || !is_control(target.hid()?) {
             return Err(crate::tr!("此 VGN 型号尚未适配").into());
         }
         let started = std::time::Instant::now();
-        let reply = if wireless {
-            HidDevice::open(target.hid()?).and_then(|mut device| {
-                device
-                    .transact(&receiver_query(), 350, |frame| {
-                        parse_battery(frame, true).is_some()
-                    })
-                    .ok_or_else(|| crate::tr!("无法读取 VGN 电量").to_string())
-            })
-        } else {
-            feature::FeatureChannel::open(target.hid()?)
-                .and_then(|mut channel| channel.query(&WIRED_QUERY, 350))
-        };
+        let reply = feature::FeatureChannel::open(target.hid()?)
+            .and_then(|mut channel| channel.query(&WIRED_QUERY, 350));
         let battery = reply
             .as_ref()
             .ok()
-            .and_then(|frame| parse_battery(frame, wireless));
+            .and_then(|frame| parse_battery(frame));
         trace::record(
             target.hid()?,
             BackendId::Vgn,
             "query-battery",
-            if wireless { 0x4a } else { 0x87 },
-            if wireless {
-                RECEIVER_REPORT
-            } else {
-                WIRED_REPORT
-            },
-            if wireless {
-                20
-            } else {
-                usize::from(target.hid()?.feature_len)
-            },
+            0x87,
+            WIRED_REPORT,
+            usize::from(target.hid()?.feature_len),
             reply.as_ref().map(Vec::len).unwrap_or(0),
             started,
             match (&reply, &battery) {
@@ -133,32 +99,15 @@ mod tests {
     fn wired_battery_requires_request_echo_and_valid_percentage() {
         let mut frame = WIRED_QUERY.to_vec();
         frame.extend([0, 0x10]);
-        let battery = parse_battery(&frame, false).unwrap();
+        let battery = parse_battery(&frame).unwrap();
         assert_eq!(battery.percent, Some(0));
         assert_eq!(battery.charging, Some(true));
         frame[8] = 101;
-        assert!(parse_battery(&frame, false).is_none());
+        assert!(parse_battery(&frame).is_none());
         frame[8] = 70;
         frame[1] = 0x82;
-        assert!(parse_battery(&frame, false).is_none());
-        assert!(parse_battery(&WIRED_QUERY, false).is_none());
-    }
-    #[test]
-    fn wireless_battery_never_invents_percentage_or_charging() {
-        let mut frame = receiver_query();
-        assert!(parse_battery(&frame, true).is_none());
-        frame[4] = 2;
-        frame[5] = 100;
-        frame[6] = 0x20;
-        frame[19] = frame[..19]
-            .iter()
-            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
-        let battery = parse_battery(&frame, true).unwrap();
-        assert_eq!(battery.percent, Some(100));
-        assert_eq!(battery.charging, None);
-        frame[19] ^= 1;
-        assert!(parse_battery(&frame, true).is_none());
-        assert!(parse_battery(&[19, 0x4a, 1, 0, 0, 255, 0], true).is_none());
+        assert!(parse_battery(&frame).is_none());
+        assert!(parse_battery(&WIRED_QUERY).is_none());
     }
     #[test]
     fn unrelated_vendor_interfaces_are_not_probed() {
@@ -179,6 +128,8 @@ mod tests {
         assert!(!is_control(&interface));
         interface.usage_page = 0xff02;
         interface.product_id = 0x024c;
+        assert!(!is_control(&interface));
+        interface.product_id = 0x024f;
         assert!(!is_control(&interface));
     }
 }
