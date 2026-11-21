@@ -8,6 +8,24 @@ This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
 
+## In development: Dareu and MCHOSE mice
+
+These adapters were developed after the 1.4.7 tag. Protocol regressions pass, but no matching device was available for local hardware acceptance. Catalog entries and upstream hardware reports are not local compatibility certification.
+
+| Scope | Battery / identity | DPI |
+| --- | --- | --- |
+| Dareu `260D:1114` receiver | Runtime CID/MID distinguishes A950 PRO, PRO Mg and A950G; valid percentage reads | Actual 1–5 stage reads/switching on identified PAW3395 models |
+| Dareu `260D:1175` receiver | Distinguishes A950 AIR, A950 GM and LM180T | Identified PAW3395 AIR/GM models can switch stages; LM180T has no DPI settings yet |
+| Dareu A950 PRO Mg cable `260D:1117` | Requires the same report shape and runtime identity; unverified wired path | Same guards; host PID alone never enables writes |
+| MCHOSE A7 V2 Pro / Pro+ / Ultra / Ultra+, L7 Pro / Pro+ | Restricted Feature endpoints read the mouse's own PID, percentage and charge; shared receiver IDs never select the name | Actual enabled-stage reads; Ultra+ and L7 Pro+ can switch existing stages, other models are read-only |
+| Older MCHOSE A7 Ultra | Restricted `5253:1020/1011` paths; some receivers are documented to return no 06 battery data | Reads require valid identity/config; no writes |
+
+Dareu requires `FF02:0002`, bidirectional Report 08, 17-byte reports. MCHOSE requires `FF01:0001`, Feature 11/12 and 65-byte capacity; exact host PIDs are listed in [protocol notes](PROTOCOLS.en.md). Bluetooth, MCHOSE A7 V3, old A5, firmware collections and unknown sensor layouts are excluded. Missing descriptor evidence never triggers an alternate write path.
+
+Both adapters preserve raw stage indexes and actual enabled counts; no default 400/800/1600 list is substituted. Identity and full configuration are checked before writes and results are read back. Dareu changes only the two-byte active-stage record. MCHOSE echoes the original full configuration, changing only the live connection's stage nibble and preserving rate, buttons, macro mappings and all other bytes. Arbitrary DPI/software-preset value writes are not offered for these adapters yet.
+
+MCHOSE uses published L7 Pro+ raw battery/config frames, corrects the upstream connection-bit interpretation and requires two consecutive matching replies. A wireless-zero sleep placeholder cannot enable settings or renew battery age. Dareu charge enum 2 stays unknown due to conflicting evidence. Full sleep cycles, official-driver coexistence, Windows Feature/caps, physical stage effect and multiple receivers still need hardware validation; stale receiver caches and last-moment cross-process races are not claimed solved.
+
 ## In development: Edifier Halo Space
 
 Only `2D99:E049` wireless receiver, `FF14:0001`, with 64-byte input/output is eligible. Descriptors must establish input Report `2F` only and output Report `2E` only, with one management collection per Windows USB interface group. There is no fallback to `FF13`, multimedia collections, other Edifier models or Bluetooth.

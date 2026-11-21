@@ -12,6 +12,8 @@ Support covers selected devices with implemented protocols, not entire brands. N
 
 Further work prioritizes commonly used Chinese brands: Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu and Edifier. Battery, basic DPI and sleep recovery come first, with existing detailed ROG support retained. The development branch adds selected shared VGN / VXE keyboard receivers, MCHOSE G98 V3, Lofree HYZEN and Edifier Halo Space battery queries, improved MCHOSE BY identification, and battery plus actual DPI-stage switching for selected Dareu A950 models. Hardware acceptance is pending; these changes are not part of the 1.4.7 tag. Exact receiver and model limits are documented in the [compatibility notes](PROTOCOLS.en.md).
 
+MCHOSE mouse work adds Feature-protocol battery, identity and actual-stage reads for A7 V2 and selected L7 models, with existing-stage switching on A7 V2 Ultra+ / L7 Pro+. Some older A7 Ultra receivers are documented not to return battery; a shared name does not guarantee compatibility. A7 V3 and old A5 protocols are not implemented yet.
+
 ## Version 1.4.7
 
 USB and Bluetooth battery reads are added for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).

@@ -29,6 +29,7 @@ impl Descriptor {
         let (button_count, value_count) = match kind {
             0 => (self.caps.number_input_button_caps, self.caps.number_input_value_caps),
             1 => (self.caps.number_output_button_caps, self.caps.number_output_value_caps),
+            2 => (self.caps.number_feature_button_caps, self.caps.number_feature_value_caps),
             _ => return None,
         };
         collect_ids(button_count, value_count, |buttons, count| {
@@ -63,6 +64,13 @@ impl Descriptor {
             && self.caps.input_report_byte_length == input && self.caps.output_report_byte_length == output
             && [(0, input_id), (1, output_id)].into_iter().all(|(kind, id)| self.report_ids(kind)
                 .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|actual| *actual == id)))
+    }
+
+    pub fn feature_reports(&self, interface: &HidInterface, length: u16, required: &[u8], allowed: &[u8]) -> bool {
+        self.caps.usage_page == interface.usage_page && self.caps.usage == interface.usage
+            && length > 0 && self.caps.feature_report_byte_length == length
+            && self.report_ids(2).is_some_and(|ids| !ids.is_empty()
+                && required.iter().all(|id| ids.contains(id)) && ids.iter().all(|id| allowed.contains(id)))
     }
 }
 
