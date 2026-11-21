@@ -4151,13 +4151,15 @@ mod backend_tests {
     }
 
     #[test]
-    fn keyboard_sleep_keeps_sample_age_then_wake_restores_tray_without_manual_refresh() {
-        for backend in [BackendId::VgnKeyboard, BackendId::MchoseQhw, BackendId::Keyboard20] {
+    fn queried_device_silence_keeps_sample_age_then_wake_restores_tray_without_manual_refresh() {
+        for (backend, family) in [(BackendId::VgnKeyboard, DeviceFamily::Keyboard),
+            (BackendId::MchoseQhw, DeviceFamily::Keyboard), (BackendId::Keyboard20, DeviceFamily::Keyboard),
+            (BackendId::Edifier, DeviceFamily::Headset)] {
         let now = std::time::Instant::now();
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
         let mut shared = Shared::new(Settings::default());
         let mut sample = snapshot(backend, "keyboard", 93);
-        sample.target.family = DeviceFamily::Keyboard;
+        sample.target.family = family;
         sample.battery_at = Some(now);
         sample.battery.as_mut().unwrap().charging = None;
         merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
@@ -4177,7 +4179,7 @@ mod backend_tests {
         merge_additional_at(&mut shared, backend, vec![sample].into(), woke);
         assert_eq!(shared.readings[0].battery_text(true), "92%");
         assert_eq!(shared.readings[0].quality, crate::device::ReadingQuality::Live);
-        assert_eq!(shared.readings[0].family, DeviceFamily::Keyboard);
+        assert_eq!(shared.readings[0].family, family);
         }
     }
 

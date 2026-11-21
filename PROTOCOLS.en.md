@@ -81,6 +81,7 @@ Prioritize commonly used Chinese brands and basic DPI, retaining detailed ROG su
 - [x] Implement MCHOSE 20-byte keyboard status with Z75S identity checks and Arctis Nova percentage/level status. Protocol and refresh regressions passed; hardware acceptance remains pending.
 - [x] Add selected shared VGN / VXE `320F:5088` keyboard battery queries with independent slow-response, sleep and background-recovery handling. Hardware acceptance remains pending.
 - [x] Add MCHOSE G98 V3 QHW battery, BY model identification and notifications, with separate firmware-specific reply validation. Hardware acceptance remains pending.
+- [x] Add Edifier Halo Space wireless battery with restricted EC collection/report matching and meaningful-payload validation. Hardware acceptance remains pending.
 
 1. Improve integrated Rapoo, VGN / VXE / ATK and MCHOSE support first: battery, basic DPI, sleep recovery, replacement and vendor-software coexistence. Record missing hardware acceptance explicitly.
 2. Extend runtime mouse identities and transports for these brands, separate MCHOSE keyboard protocols and receiver collection pairing. Keyboard queries must not inherit mouse setting commands.
@@ -194,3 +195,13 @@ Recognized models also accept `0A`, type `05` battery notifications during the b
 FA09 retains captured SET_REPORT transport; Z75S and `41E4:2001` use interrupt OUT without fallback resends. The latter is restricted to exact generic product names, `FF04:0002` and recognized model codes. Cross-USB-interface FF02 sibling pairing is not implemented. All entries require bidirectional Report `13` descriptor evidence and an unambiguous interface-group control collection; feature-only AULA/FA09 paths receive no command.
 
 All 236 local regressions and a warning-free release build passed. Coverage includes QHW sequence wrap, invalid replies and distinct capacities; BY unknown identity, notifications, sleep placeholders and background recovery. MyFinder #476's two complete frames are retained verbatim: the identity does not prove G75 Pro, while battery gives a neutral 100% with unknown charging. #312 provides a prefix with synthetic trailing test padding. Existing ROG read 79% / DPI 800 and VGN read 100% / charging in a read-only probe; no newly supported keyboard was present for hardware acceptance.
+
+## In development: Edifier Halo Space
+
+Battery command `D0` is independently implemented from FerrisPulse `335fb15`'s [public protocol record](https://github.com/Ferris-echo/FerrisPulse/blob/335fb15ba98be94a85e13061dc0812a04b3aadf6/docs/EDIFIER_HALO_SPACE_PROTOCOL.md), helper and packet tests. It specifies `2D99:E049 / FF14:0001`, 64-byte input/output, input prefix `2F BB EC` and output `2E AA EC`. `FF13` is a distinct collection. Upstream's broad collection fallback and permissive alternate headers are not used.
+
+The fixed query is `2E AA EC D0 00 00 66` with zero padding. Its first byte already occupies the Windows report-ID slot; no extra `00` is prepended. Reply big-endian payload length must be one. Sum wire bytes 1–6 against byte 7 before unmasking byte 6 with XOR `A5`. Published prefix `2F BB EC D0 00 01 86 FE` yields 35%. Trailing historical scratch data never supplies battery or charging information.
+
+Descriptors must additionally show only input `2F` and output `2E`; this conservative entry condition needs real caps acceptance. No C8 MAC, C9 name, C6 firmware or unsupported F2 status query is issued. Charging stays unknown rather than borrowing the upstream UI's false as evidence of discharge. Cross-process reply attribution, charging-cable disconnection and sleep-cache behavior remain hardware questions.
+
+All 241 regressions and a warning-free build passed, covering valid zero/full, bad checksums, wrong endpoints, lengths, stale tails, identical units and shared main/tray expiry and recovery. Upstream hardware claims are protocol-source evidence only; no matching headset was available locally.

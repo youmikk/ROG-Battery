@@ -8,6 +8,16 @@ This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
 
+## In development: Edifier Halo Space
+
+Only `2D99:E049` wireless receiver, `FF14:0001`, with 64-byte input/output is eligible. Descriptors must establish input Report `2F` only and output Report `2E` only, with one management collection per Windows USB interface group. There is no fallback to `FF13`, multimedia collections, other Edifier models or Bluetooth.
+
+The only query is battery `D0`. No MAC, firmware or internal device-name query, audio/ANC/lighting change or firmware operation is sent. Existing volume, output-device and microphone controls continue through Windows audio APIs. Replies require `2F BB EC D0 00 01`, exactly 64 bytes, a valid sum over the meaningful wire bytes and an unmasked percentage in 0–100. Trailing scratch data is ignored.
+
+Charging is unconfirmed and stays unknown. Queries allow 1.2 seconds, with a ten-second maximum background wait. Silence neither confirms disconnection nor renews the old sample; numbers expire after 120 seconds and recover on a fresh response. The protocol lacks transaction IDs, so TempoHub coexistence and cached receiver replies require hardware tests. Identical headsets retain separate instance identities.
+
+On 2026-11-21, all 241 local regressions and a warning-free Windows x64 build passed. The independent implementation uses FerrisPulse's published interface, 35% reply prefix and checksum evidence, with synthetic trailing test data. No matching headset was available locally. Descriptors, actual communication, charging-cable transitions, sleep recovery and official-software coexistence remain unverified. This work follows the 1.4.7 tag.
+
 ## In development: MCHOSE keyboards
 
 M HUB and CZ SDK were inspected separately; their keyboard protocols are not interchangeable. Queries require the matching collection, input/output capacities and actual report IDs. Missing descriptor evidence or multiple eligible controls in one Windows USB interface group prevents I/O.
