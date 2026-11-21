@@ -84,7 +84,7 @@ fn snapshot(target: &Target, status: Status) -> Snapshot {
     let (connected, battery) = match status {
         Status::Offline => (false, None), Status::Online(battery) => (true, Some(battery)),
     };
-    Snapshot { target: target.clone(), battery_at: battery.as_ref().map(|_| Instant::now()),
+    Snapshot { target: target.clone(), battery_unavailable: false, battery_at: battery.as_ref().map(|_| Instant::now()),
         battery, connected, dpi: Dpi::default(), polling_rate: Default::default() }
 }
 
@@ -99,15 +99,15 @@ impl DeviceBackend for Nova {
         }).collect())
     }
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        let (_, layout) = control(&target.interface)
+        let (_, layout) = control(target.hid()?)
             .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
-        let lock = channel::lock(&target.interface.path);
+        let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-        let mut device = HidDevice::open(&target.interface)?;
+        let mut device = HidDevice::open(target.hid()?)?;
         let started = Instant::now();
         let response = device.transact(&[0, 0xb0], 800, |r| status(r, layout).is_some());
-        trace::record(&target.interface, BackendId::Nova, "query-battery", 0, 0xb0,
-            usize::from(target.interface.output_len), response.as_ref().map_or(0, Vec::len), started,
+        trace::record(target.hid()?, BackendId::Nova, "query-battery", 0, 0xb0,
+            usize::from(target.hid()?.output_len), response.as_ref().map_or(0, Vec::len), started,
             if response.is_some() { trace::Outcome::Ok } else { trace::Outcome::NoReply });
         let status = response.as_deref().and_then(|r| status(r, layout))
             .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;

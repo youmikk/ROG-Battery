@@ -13,6 +13,12 @@ pub struct Status {
 }
 
 impl Status {
+    pub fn clear_battery(&mut self) {
+        self.battery = None;
+        self.measured_at = None;
+        self.quality = ReadingQuality::Unknown;
+    }
+
     pub fn expire(&mut self, now: Instant, lifetime: Duration) -> bool {
         if self.measured_at.is_some_and(|measured| now.saturating_duration_since(measured) >= lifetime)
             && self.quality != ReadingQuality::Stale {

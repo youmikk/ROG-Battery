@@ -65,7 +65,7 @@ impl DeviceBackend for Rog {
         let link = crate::hid::open_links(api)?
             .into_iter()
             .find(|link| {
-                link.iface.path == target.interface.path && link.report_id == target.address
+                target.hid().is_ok_and(|i| link.iface.path == i.path) && link.report_id == target.address
             })
             .ok_or("ROG 设备已断开")?;
         let outcome = fetch(&link, detail)?;
@@ -101,7 +101,7 @@ impl DeviceBackend for Rog {
         Ok(Snapshot {
             target,
             connected,
-            battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
+            battery_unavailable: false, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
             dpi,
             battery: outcome.snapshot.battery(),
         })
@@ -117,7 +117,7 @@ impl DeviceBackend for Rog {
         let link = crate::hid::open_links(api)?
             .into_iter()
             .find(|link| {
-                link.iface.path == target.interface.path && link.report_id == target.address
+                target.hid().is_ok_and(|i| link.iface.path == i.path) && link.report_id == target.address
             })
             .ok_or("ROG 设备已断开")?;
         let current = fetch(&link, true)?;

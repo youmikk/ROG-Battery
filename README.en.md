@@ -12,6 +12,8 @@ Support covers selected devices with implemented protocols, not entire brands. N
 
 The development branch adds USB and Bluetooth battery reads for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. This feature is not part of the 1.4.6 tag. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).
 
+Windows XInput battery reads are also integrated when the current driver returns a valid battery grade. System slots are shown separately, four-level estimates carry ≈, and wired or unknown battery types do not produce invented charge or charging status. Hardware acceptance remains pending.
+
 ## Version 1.4.6
 
 Devices with supported numerical DPI writes can save 1–4 software presets on the Performance page, sorted by DPI, and switch from the main window or tray. Reducing the stage count hides the highest values and keeps them for restoration. Presets remain separate from actual device stages; connections that write stored DPI show a note. Local regressions and render checks passed; per-model hardware acceptance remains pending.

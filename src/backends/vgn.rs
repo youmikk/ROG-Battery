@@ -69,14 +69,14 @@ impl DeviceBackend for Vgn {
     }
 
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        let wireless = receiver(target.interface.product_id)
+        let wireless = receiver(target.hid()?.product_id)
             .ok_or_else(|| crate::tr!("此 VGN 型号尚未适配"))?;
-        if !is_control(&target.interface) {
+        if !is_control(target.hid()?) {
             return Err(crate::tr!("此 VGN 型号尚未适配").into());
         }
         let started = std::time::Instant::now();
         let reply = if wireless {
-            HidDevice::open(&target.interface).and_then(|mut device| {
+            HidDevice::open(target.hid()?).and_then(|mut device| {
                 device
                     .transact(&receiver_query(), 350, |frame| {
                         parse_battery(frame, true).is_some()
@@ -84,7 +84,7 @@ impl DeviceBackend for Vgn {
                     .ok_or_else(|| crate::tr!("无法读取 VGN 电量").to_string())
             })
         } else {
-            feature::FeatureChannel::open(&target.interface)
+            feature::FeatureChannel::open(target.hid()?)
                 .and_then(|mut channel| channel.query(&WIRED_QUERY, 350))
         };
         let battery = reply
@@ -92,7 +92,7 @@ impl DeviceBackend for Vgn {
             .ok()
             .and_then(|frame| parse_battery(frame, wireless));
         trace::record(
-            &target.interface,
+            target.hid()?,
             BackendId::Vgn,
             "query-battery",
             if wireless { 0x4a } else { 0x87 },
@@ -104,7 +104,7 @@ impl DeviceBackend for Vgn {
             if wireless {
                 20
             } else {
-                usize::from(target.interface.feature_len)
+                usize::from(target.hid()?.feature_len)
             },
             reply.as_ref().map(Vec::len).unwrap_or(0),
             started,
@@ -121,7 +121,7 @@ impl DeviceBackend for Vgn {
             battery: Some(battery),
             dpi: Dpi::default(),
             connected: true,
-            battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
+            battery_unavailable: false, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
         })
     }
 }

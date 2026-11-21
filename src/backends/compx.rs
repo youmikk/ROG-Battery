@@ -414,10 +414,10 @@ impl DeviceBackend for CompX {
         Ok(interfaces.iter().filter(|i| control(i)).map(candidate).collect())
     }
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot,String> {
-        if !control(&target.interface) { return Err("CompX 控制接口无效".into()); }
-        let lock = channel_lock(&target.interface.path);
+        if !control(target.hid()?) { return Err("CompX 控制接口无效".into()); }
+        let lock = channel_lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-        let mut s = Session::open(DeviceChannel::open(&target.interface)?, &target.interface);
+        let mut s = Session::open(DeviceChannel::open(target.hid()?)?, target.hid()?);
         s.identify();
         let battery = s.battery(); let battery_at = battery.as_ref().map(|_| Instant::now());
         let config = s.config().ok();
@@ -427,7 +427,7 @@ impl DeviceBackend for CompX {
         if battery.is_none() && dpi.current.is_none() && polling_rate.current.is_none() {
             return Err("CompX 设备无有效应答".into());
         }
-        Ok(Snapshot { target, battery, battery_at, dpi, polling_rate, connected: true })
+        Ok(Snapshot { target, battery, battery_at, battery_unavailable: false, dpi, polling_rate, connected: true })
     }
     fn set_dpi(&self, api: &HidApi, target: &Target, dpi: u16) -> Result<(),String> {
         with_session(target, |s| {
@@ -456,10 +456,10 @@ pub fn set_preset(target: &Target, stage: DpiStage, context: crate::device::Stag
 }
 
 fn with_session(target: &Target, f: impl FnOnce(&mut Session<DeviceChannel>) -> Result<(),String>) -> Result<(),String> {
-    if !control(&target.interface) { return Err("CompX 控制接口无效".into()); }
-    let lock = channel_lock(&target.interface.path);
+    if !control(target.hid()?) { return Err("CompX 控制接口无效".into()); }
+    let lock = channel_lock(&target.hid()?.path);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-    f(&mut Session::open(DeviceChannel::open(&target.interface)?, &target.interface))
+    f(&mut Session::open(DeviceChannel::open(target.hid()?)?, target.hid()?))
 }
 
 #[cfg(test)]

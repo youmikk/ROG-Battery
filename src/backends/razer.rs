@@ -568,14 +568,14 @@ impl DeviceBackend for Razer {
             .collect())
     }
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        if !control(&target.interface) {
+        if !control(target.hid()?) {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
-        let lock = channel::lock(&collection_group(&target.interface));
+        let lock = channel::lock(&collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut s = Session::new(
-            feature::FeatureChannel::open_with_length(&target.interface, LENGTH)?,
-            &target.interface,
+            feature::FeatureChannel::open_with_length(target.hid()?, LENGTH)?,
+            target.hid()?,
         );
         let (battery, battery_at) = match s.battery() {
             Some((battery, at)) => (Some(battery), Some(at)),
@@ -597,7 +597,7 @@ impl DeviceBackend for Razer {
             target.verified_identity = true;
         }
         if target.verified_identity {
-            if let Some(caps) = razer_capabilities::for_product(target.interface.product_id)
+            if let Some(caps) = razer_capabilities::for_product(target.hid()?.product_id)
                 .filter(|_| s.normal_mode())
             {
                 dpi.values = (100..=caps.max_dpi).collect();
@@ -625,7 +625,7 @@ impl DeviceBackend for Razer {
         Ok(Snapshot {
             target,
             battery,
-            battery_at,
+            battery_unavailable: false, battery_at,
             dpi,
             polling_rate,
             connected: true,
@@ -666,14 +666,14 @@ fn with_session(
     target: &Target,
     f: impl FnOnce(&mut Session<feature::FeatureChannel>) -> Result<(), String>,
 ) -> Result<(), String> {
-    if !control(&target.interface) {
+    if !control(target.hid()?) {
         return Err(crate::tr!("设备功能报告长度无效").into());
     }
-    let lock = channel::lock(&collection_group(&target.interface));
+    let lock = channel::lock(&collection_group(target.hid()?));
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
     f(&mut Session::new(
-        feature::FeatureChannel::open_with_length(&target.interface, LENGTH)?,
-        &target.interface,
+        feature::FeatureChannel::open_with_length(target.hid()?, LENGTH)?,
+        target.hid()?,
     ))
 }
 
@@ -1105,7 +1105,7 @@ mod tests {
         assert_eq!(s.channel.writes.len(), 2);
         let (mut s, mut target) = mouse();
         s.interface.product_id = 0x00a6;
-        target.interface.product_id = 0x00a6;
+        target.hid_mut().product_id = 0x00a6;
         assert!(s.set_rate(&target, 4000).is_err());
         assert!(s.channel.writes.is_empty());
         s.set_rate(&target, 500).unwrap();
@@ -1115,7 +1115,7 @@ mod tests {
     fn legacy_rate_uses_divisor_of_1000_and_failed_readback_never_commits() {
         let (mut s, mut target) = mouse();
         s.interface.product_id = 0x00b7;
-        target.interface.product_id = 0x00b7;
+        target.hid_mut().product_id = 0x00b7;
         s.channel.rate = 1;
         s.set_rate(&target, 500).unwrap();
         assert_eq!(s.channel.writes, vec![(0, 5, vec![2], 0x1f)]);
@@ -1128,7 +1128,7 @@ mod tests {
     fn unknown_product_remains_read_only_even_with_valid_reports() {
         let (mut s, mut target) = mouse();
         s.interface.product_id = 0xffff;
-        target.interface.product_id = 0xffff;
+        target.hid_mut().product_id = 0xffff;
         assert!(s.numeric(&target, 800).is_err());
         assert!(s.set_rate(&target, 500).is_err());
         assert!(s.channel.writes.is_empty());

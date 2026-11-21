@@ -154,21 +154,21 @@ impl DeviceBackend for StandardHid {
     }
 
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        let descriptor = Descriptor::open(api, &target.interface)?;
+        let descriptor = Descriptor::open(api, target.hid()?)?;
         let mut percent = None;
         for cap in descriptor.battery_caps(2) {
             let started = std::time::Instant::now();
             if let Some(mut report) =
-                crate::hid::query_report(&target.interface, cap.ReportID, true, 160)
+                crate::hid::query_report(target.hid()?, cap.ReportID, true, 160)
             {
                 percent = descriptor.percent(2, &cap, &mut report);
                 trace::record(
-                    &target.interface,
+                    target.hid()?,
                     BackendId::StandardHid,
                     "feature-report",
                     0x0620,
                     cap.ReportID,
-                    target.interface.feature_len as usize,
+                    target.hid()?.feature_len as usize,
                     report.len(),
                     started,
                     if percent.is_some() {
@@ -182,12 +182,12 @@ impl DeviceBackend for StandardHid {
                 }
             } else {
                 trace::record(
-                    &target.interface,
+                    target.hid()?,
                     BackendId::StandardHid,
                     "feature-report",
                     0x0620,
                     cap.ReportID,
-                    target.interface.feature_len as usize,
+                    target.hid()?.feature_len as usize,
                     0,
                     started,
                     trace::Outcome::NoReply,
@@ -199,16 +199,16 @@ impl DeviceBackend for StandardHid {
             for cap in &caps {
                 let started = std::time::Instant::now();
                 if let Some(mut report) =
-                    crate::hid::query_report(&target.interface, cap.ReportID, false, 160)
+                    crate::hid::query_report(target.hid()?, cap.ReportID, false, 160)
                 {
                     percent = descriptor.percent(0, cap, &mut report);
                     trace::record(
-                        &target.interface,
+                        target.hid()?,
                         BackendId::StandardHid,
                         "input-report",
                         0x0620,
                         cap.ReportID,
-                        target.interface.input_len as usize,
+                        target.hid()?.input_len as usize,
                         report.len(),
                         started,
                         if percent.is_some() {
@@ -222,12 +222,12 @@ impl DeviceBackend for StandardHid {
                     }
                 } else {
                     trace::record(
-                        &target.interface,
+                        target.hid()?,
                         BackendId::StandardHid,
                         "input-report",
                         0x0620,
                         cap.ReportID,
-                        target.interface.input_len as usize,
+                        target.hid()?.input_len as usize,
                         0,
                         started,
                         trace::Outcome::NoReply,
@@ -235,7 +235,7 @@ impl DeviceBackend for StandardHid {
                 }
             }
             if percent.is_none() && !caps.is_empty() {
-                if let Ok(mut device) = crate::hid::HidDevice::open(&target.interface) {
+                if let Ok(mut device) = crate::hid::HidDevice::open(target.hid()?) {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(80);
                     while let Some(left) =
                         deadline.checked_duration_since(std::time::Instant::now())
@@ -275,7 +275,7 @@ impl DeviceBackend for StandardHid {
         Ok(Snapshot {
             target: target.clone(),
             connected: true,
-            battery_at, polling_rate: Default::default(),
+            battery_unavailable: false, battery_at, polling_rate: Default::default(),
             dpi: Dpi::default(),
             battery: Some(Battery {
                 estimated_percent: None,

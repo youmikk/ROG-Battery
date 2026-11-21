@@ -18,6 +18,16 @@ The adapter matches Sony `054C:0CE6` DualSense and `054C:0DF2` DualSense Edge, o
 
 On 2026-11-21, all 187 local regressions passed and the Windows x64 build completed without warnings. Coverage includes USB / Bluetooth layouts, CRC, invalid and truncated reports, minimal mode, identical models, expiry and recovery. Neither controller is currently attached locally; hardware transport, sleep recovery and Steam / DS4Windows coexistence remain unverified. The read-only hardware probe still returned valid ROG and VGN keyboard battery readings.
 
+## In development: XInput gamepads
+
+Windows' system XInput 1.4 provides four slots through `XInputGetState` and `XInputGetBatteryInformation`. Support depends on the current Xbox-compatible driver and connection returning battery data, not on a whole-brand claim. The adapter does not fabricate HID paths, VID/PID or physical model names, and sends no vibration or settings commands.
+
+Only known wireless battery types supply usable levels. Empty / Low / Medium / Full display as ≈0% / ≈20% / ≈50% / ≈100%. These are application display representatives: Windows defines no percentage boundaries or charging flag. Wired and unknown battery types clear previous numbers immediately. Failed queries retain the original measurement timestamp, with expiry after eight seconds. A confirmed disconnect clears that slot's battery before another controller can reuse it.
+
+Names, tray selection and order are saved by slot. XInput exposes no stable physical identity, so preferences follow the slot when controllers change or Windows reassigns it; a replacement between polls without an observed disconnect cannot be identified. Virtual XInput controllers can appear alongside their physical HID device, and reliable cross-protocol deduplication is not implemented. Users can select which cards appear in the tray.
+
+On 2026-11-21 all 192 local regressions passed and the Windows x64 build completed without warnings. The system API loaded successfully with all four slots disconnected. Battery grades, wireless / wired transitions, sleep recovery and different drivers still need hardware acceptance. The read-only probe returned valid VGN keyboard charge; the ROG receiver supplied no valid device reading in this run.
+
 ## Version 1.4.6: software DPI presets
 
 - The main window and tray share 1–4 enabled presets per device, sorted by value. The count selector only changes the software list and retains hidden values; actual device stages are never reordered or removed.

@@ -67,6 +67,21 @@ pub fn collect_probe() -> Result<String, String> {
     output.push_str("Read-only capability probe (no settings are changed)\n");
     for backend in std::iter::once(super::backends::BackendId::Rog)
         .chain(super::backends::ADDITIONAL_BACKENDS) {
+        if backend == super::backends::BackendId::XInput {
+            match super::backends::xinput::poll() {
+                Ok(poll) if poll.snapshots.is_empty() => {
+                    let outcome = if poll.present_channels.is_some_and(|channels| channels.is_empty()) {
+                        "no-connected-slot"
+                    } else { "query-failed" };
+                    let _ = writeln!(output, "XInput: {outcome}");
+                }
+                Ok(poll) => for snapshot in poll.snapshots {
+                    append_probe_result(&mut output, &snapshot.target, Some(&snapshot));
+                },
+                Err(_) => { let _ = writeln!(output, "XInput: query-failed"); }
+            }
+            continue;
+        }
         let provider: &dyn super::backends::DeviceBackend = match backend {
             super::backends::BackendId::Logitech => &super::backends::logitech::Logitech,
             super::backends::BackendId::Rapoo => &super::backends::rapoo::Rapoo,
@@ -78,6 +93,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Keyboard20 => &super::backends::keyboard20::Keyboard20,
             super::backends::BackendId::Nova => &super::backends::steelseries::Nova,
             super::backends::BackendId::DualSense => &super::backends::sony::DualSense,
+            super::backends::BackendId::XInput => unreachable!("XInput is queried without HID"),
             super::backends::BackendId::StandardHid => &super::backends::standard::StandardHid,
             super::backends::BackendId::Rog => &super::backends::rog::Rog,
         };
@@ -100,8 +116,11 @@ pub fn collect_probe() -> Result<String, String> {
 
 fn append_probe_result(output: &mut String, target: &super::backends::Target,
     reading: Option<&super::backends::Snapshot>) {
-    let _ = writeln!(output, "{} {:04X}:{:04X} result={}", target.backend.name(),
-        target.interface.vendor_id, target.interface.product_id,
+    let source = match &target.endpoint {
+        super::backends::Endpoint::Hid(i) => format!("{:04X}:{:04X}", i.vendor_id, i.product_id),
+        super::backends::Endpoint::XInput(slot) => format!("slot={}", slot + 1),
+    };
+    let _ = writeln!(output, "{} {} result={}", target.backend.name(), source,
         match reading {
             Some(reading) if reading.connected && (reading.battery.is_some() || reading.dpi.current.is_some()
                 || reading.polling_rate.current.is_some()) => "ok",
@@ -148,6 +167,20 @@ pub fn issue_url() -> String {
 mod tests {
     use super::*;
     #[test]
+    fn xinput_report_uses_slot_without_fabricated_usb_identity() {
+        let target = crate::backends::xinput::target(1);
+        let reading = crate::backends::Snapshot { target: target.clone(), battery: None,
+            battery_at: None, battery_unavailable: true, connected: true,
+            dpi: Default::default(), polling_rate: Default::default() };
+        let mut output = String::new();
+        append_probe_result(&mut output, &target, Some(&reading));
+        assert!(output.contains("XInput slot=2 result=no-valid-reading"));
+        assert!(output.contains("Battery: unknown; charging: unknown"));
+        assert!(!output.contains("0000:0000"));
+        assert!(!output.contains(&target.key));
+    }
+
+    #[test]
     fn exported_report_never_contains_paths_or_serial_numbers() {
         let interface = crate::hid::HidInterface {
             path: "sensitive-interface-path".into(),
@@ -183,7 +216,7 @@ mod tests {
                 stages: vec![crate::device::DpiStage { index: 1, value: 800 },
                     crate::device::DpiStage { index: 4, value: 3200 }],
                 active_stage: Some(1), profile: Some(1), stage_writable: true,
-                ..Default::default() }, polling_rate: Default::default(), connected: true, battery_at: Some(std::time::Instant::now()) };
+                ..Default::default() }, polling_rate: Default::default(), connected: true, battery_unavailable: false, battery_at: Some(std::time::Instant::now()) };
         let mut output = String::new();
         append_probe_result(&mut output, &target, Some(&snapshot));
         assert!(output.contains("Battery: 75%; charging: unknown"));

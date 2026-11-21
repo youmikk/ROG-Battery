@@ -18,6 +18,7 @@ pub mod steelseries;
 pub mod status;
 pub mod trace;
 pub mod vgn;
+pub mod xinput;
 
 pub use crate::device::{Battery, BatteryLevel, Dpi};
 use crate::{device::DeviceFamily, hid::HidInterface, win32::HidApi};
@@ -35,13 +36,14 @@ pub enum BackendId {
     Keyboard20,
     Nova,
     DualSense,
+    XInput,
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 11] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 12] = [
     BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::Nova,
-    BackendId::DualSense, BackendId::StandardHid,
+    BackendId::DualSense, BackendId::XInput, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -58,6 +60,7 @@ impl BackendId {
             Self::Keyboard20 => "MCHOSE keyboard",
             Self::Nova => "Arctis Nova",
             Self::DualSense => "Sony DualSense",
+            Self::XInput => "XInput",
             Self::StandardHid => "Standard HID",
         }
     }
@@ -69,7 +72,7 @@ impl BackendId {
 
     pub fn sample_lifetime(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
-            Self::Rapoo | Self::DualSense => 8,
+            Self::Rapoo | Self::DualSense | Self::XInput => 8,
             Self::Logitech => 180,
             Self::CompX => 45,
             Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova => 120,
@@ -81,11 +84,17 @@ impl BackendId {
     /// 被动状态采样需要及时发布到界面，不能沿用主动查询的长间隔。
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
-            Self::Rapoo | Self::DualSense => Some(2_000),
+            Self::Rapoo | Self::DualSense | Self::XInput => Some(2_000),
             Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova => Some(10_000),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum Endpoint {
+    Hid(HidInterface),
+    XInput(u8),
 }
 
 #[derive(Clone, Debug)]
@@ -94,21 +103,56 @@ pub struct Target {
     pub name: String,
     pub family: DeviceFamily,
     pub backend: BackendId,
-    pub interface: HidInterface,
+    pub endpoint: Endpoint,
     /// 多设备接收器内的地址，与 report ID 分开。
     pub address: u8,
     pub verified_identity: bool,
 }
 
 impl Target {
+    pub fn hid(&self) -> Result<&HidInterface, String> {
+        match &self.endpoint {
+            Endpoint::Hid(interface) => Ok(interface),
+            Endpoint::XInput(_) => Err("此设备没有 HID 控制接口".into()),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn hid_mut(&mut self) -> &mut HidInterface {
+        match &mut self.endpoint {
+            Endpoint::Hid(interface) => interface,
+            Endpoint::XInput(_) => panic!("expected HID test target"),
+        }
+    }
+
+    pub fn channel_key(&self) -> String {
+        match &self.endpoint {
+            Endpoint::Hid(interface) => interface.path.clone(),
+            Endpoint::XInput(slot) => format!("xinput:{slot}"),
+        }
+    }
+
+    pub fn unverified_key(&self) -> String {
+        self.hid().map_or_else(|_| self.key.clone(), |i| Self::new(self.backend, i, self.address).key)
+    }
+
+    pub fn same_hid_path(&self, other: &Self) -> bool {
+        match (self.hid(), other.hid()) {
+            (Ok(a), Ok(b)) => a.path.eq_ignore_ascii_case(&b.path),
+            _ => false,
+        }
+    }
+
     /// A device address on one control channel, independent of serial promotion.
     pub fn same_channel(&self, other: &Self) -> bool {
-        self.backend == other.backend && self.address == other.address
-            && if self.backend == BackendId::Razer {
-                razer::collection_group(&self.interface) == razer::collection_group(&other.interface)
-            } else {
-                self.interface.path.eq_ignore_ascii_case(&other.interface.path)
-            }
+        if self.backend != other.backend || self.address != other.address { return false; }
+        match (&self.endpoint, &other.endpoint) {
+            (Endpoint::Hid(a), Endpoint::Hid(b)) if self.backend == BackendId::Razer =>
+                razer::collection_group(a) == razer::collection_group(b),
+            (Endpoint::Hid(a), Endpoint::Hid(b)) => a.path.eq_ignore_ascii_case(&b.path),
+            (Endpoint::XInput(a), Endpoint::XInput(b)) => a == b,
+            _ => false,
+        }
     }
 
     pub fn new(backend: BackendId, interface: &HidInterface, address: u8) -> Self {
@@ -134,7 +178,7 @@ impl Target {
                 _ => crate::device::family_of(&interface.product),
             },
             backend,
-            interface: interface.clone(),
+            endpoint: Endpoint::Hid(interface.clone()),
             address,
             verified_identity: false,
         }
@@ -149,6 +193,8 @@ pub struct Snapshot {
     pub polling_rate: crate::device::PollingRate,
     pub connected: bool,
     pub battery_at: Option<std::time::Instant>,
+    /// Explicit no-battery evidence, distinct from a silent or failed query.
+    pub battery_unavailable: bool,
 }
 
 impl Snapshot {
@@ -162,14 +208,14 @@ impl Snapshot {
 pub struct Poll {
     pub snapshots: Vec<Snapshot>,
     /// None 表示枚举失败，不提供拔出设备的证据。
-    pub present_paths: Option<std::collections::BTreeSet<String>>,
+    pub present_channels: Option<std::collections::BTreeSet<String>>,
 }
 
 impl Poll {
     #[cfg(test)]
     pub fn from_snapshots(snapshots: Vec<Snapshot>) -> Self {
-        let present_paths = Some(snapshots.iter().map(|s| s.target.interface.path.clone()).collect());
-        Self { snapshots, present_paths }
+        let present_channels = Some(snapshots.iter().map(|s| s.target.channel_key()).collect());
+        Self { snapshots, present_channels }
     }
 }
 
@@ -226,12 +272,12 @@ fn merge_additional_results(
         };
         for snapshot in devices {
             if backend == BackendId::StandardHid
-                && claimed.contains(&snapshot.target.interface.path)
+                && claimed.contains(&snapshot.target.channel_key())
             {
                 continue;
             }
             if backend.precedes_standard() {
-                claimed.insert(snapshot.target.interface.path.clone());
+                claimed.insert(snapshot.target.channel_key());
             }
             snapshots.push(snapshot);
         }
@@ -247,9 +293,10 @@ pub fn read_backend(backend: BackendId, detail: bool) -> Result<Vec<Snapshot>, S
 }
 
 pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
+    if backend == BackendId::XInput { return xinput::poll(); }
     let api = HidApi::load()?;
     let enumeration = enumeration::scan(&api)?;
-    let present_paths = enumeration.interfaces.iter().map(|i|i.path.clone())
+    let present_channels = enumeration.interfaces.iter().map(|i|i.path.clone())
         .chain(enumeration.skipped.iter().map(|i|i.path.clone())).collect();
     let interfaces = enumeration.interfaces;
     let provider: &dyn DeviceBackend = match backend {
@@ -264,9 +311,10 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Keyboard20 => &keyboard20::Keyboard20,
         BackendId::Nova => &steelseries::Nova,
         BackendId::DualSense => &sony::DualSense,
+        BackendId::XInput => unreachable!("XInput does not enumerate HID interfaces"),
         BackendId::StandardHid => &standard::StandardHid,
     };
-    let mut poll = Poll { present_paths: Some(present_paths),
+    let mut poll = Poll { present_channels: Some(present_channels),
         ..Default::default() };
     poll.snapshots = read_targets(provider.discover(&api, &interfaces)?, |target| provider.read(&api, target, detail));
     Ok(poll)
@@ -367,7 +415,7 @@ mod tests {
         Snapshot {
             target: Target::new(backend, &interface, 1),
             connected: true,
-            battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
+            battery_unavailable: false, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(),
             dpi: Dpi::default(),
             battery: Some(Battery {
                 estimated_percent: None,
@@ -423,10 +471,10 @@ mod tests {
     #[test]
     fn successful_collection_stops_sibling_reads_after_identity_promotion() {
         let mut first = reading(BackendId::Razer);
-        first.target.interface.path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
-        first.target = Target::new(BackendId::Razer, &first.target.interface, 0);
+        first.target.hid_mut().path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
+        first.target = Target::new(BackendId::Razer, first.target.hid().unwrap(), 0);
         let mut sibling = first.target.clone();
-        sibling.interface.path = sibling.interface.path.replace("col01", "col02").replace("0001#", "0002#");
+        sibling.hid_mut().path = sibling.hid().unwrap().path.replace("col01", "col02").replace("0001#", "0002#");
         let mut calls = 0;
         let snapshots = read_targets(vec![first.target.clone(), sibling], |_| {
             calls += 1;
@@ -443,18 +491,18 @@ mod tests {
     #[test]
     fn failed_collection_allows_sibling_and_does_not_merge_identical_receivers() {
         let mut first = reading(BackendId::Razer);
-        first.target.interface.path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
-        first.target = Target::new(BackendId::Razer, &first.target.interface, 0);
+        first.target.hid_mut().path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
+        first.target = Target::new(BackendId::Razer, first.target.hid().unwrap(), 0);
         let mut sibling = first.target.clone();
-        sibling.interface.path = sibling.interface.path.replace("col01", "col02").replace("0001#", "0002#");
+        sibling.hid_mut().path = sibling.hid().unwrap().path.replace("col01", "col02").replace("0001#", "0002#");
         let mut second = sibling.clone();
-        second.interface.path = second.interface.path.replace("aaaa", "bbbb");
+        second.hid_mut().path = second.hid().unwrap().path.replace("aaaa", "bbbb");
         let mut calls = 0;
         let snapshots = read_targets(vec![first.target.clone(), sibling, second], |target| {
             calls += 1;
             if calls == 1 { return Err("silent collection".into()); }
             let mut result = first.clone();
-            result.target = Target::new(BackendId::Razer, &target.interface, target.address);
+            result.target = Target::new(BackendId::Razer, target.hid().unwrap(), target.address);
             Ok(result)
         });
         assert_eq!(calls, 3);

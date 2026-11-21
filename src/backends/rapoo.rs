@@ -258,7 +258,7 @@ impl DeviceBackend for Rapoo {
     }
 
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        if !is_control(&target.interface) {
+        if !is_control(target.hid()?) {
             return Err(crate::tr!("此雷柏型号尚未适配").into());
         }
         let (mut taken,mut battery,status)=latest_status(target,None,FIRST_REPORT_WAIT)?;
@@ -278,26 +278,26 @@ impl DeviceBackend for Rapoo {
             battery: Some(battery),
             dpi,
             connected: true,
-            battery_at: Some(taken), polling_rate: Default::default(),
+            battery_unavailable: false, battery_at: Some(taken), polling_rate: Default::default(),
         })
     }
 
     fn set_dpi_stage(&self,api:&HidApi,target:&Target,stage:crate::device::DpiStage,context:crate::device::StageContext)->Result<(),String> {
-        if !is_control(&target.interface) {return Err(crate::tr!("此雷柏型号尚未适配").into());}
+        if !is_control(target.hid()?) {return Err(crate::tr!("此雷柏型号尚未适配").into());}
         super::rapoo_config::switch(api,target,stage,context)
     }
 }
 
 pub(super) fn latest_status(target:&Target,after:Option<Instant>,wait:Duration)->Result<(Instant,Battery,Dpi),String> {
     let started=Instant::now();
-    let session=status_reader(&target.interface);
+    let session=status_reader(target.hid()?);
     let state=session.state.lock().unwrap_or_else(|e|e.into_inner());
     let (state,_)=session.changed.wait_timeout_while(state,wait,|s| !s.failed &&
         s.confirmed_after(Instant::now(),after).is_none())
         .unwrap_or_else(|e|e.into_inner());
     let sample=state.confirmed_after(Instant::now(),after);
     let result=sample.and_then(|s|s.1.clone().map(|(battery,dpi)|(s.0,battery,dpi)));
-    trace::record(&target.interface,BackendId::Rapoo,"read-status",0,STATUS_REPORT,0,
+    trace::record(target.hid()?,BackendId::Rapoo,"read-status",0,STATUS_REPORT,0,
         sample.map(|s|s.2).unwrap_or(0),started,if result.is_some(){trace::Outcome::Ok}else{trace::Outcome::NoReply});
     result.ok_or_else(||crate::tr!("雷柏状态报告不可用，请唤醒设备后重试").into())
 }

@@ -548,10 +548,10 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
         // Older builds keyed Rapoo by serial. Migrate only when the current scan
         // establishes one receiver for that serial; identical receivers stay separate.
         for snapshot in &poll.snapshots {
-            let i=&snapshot.target.interface;
+            let Ok(i)=snapshot.target.hid() else {continue;};
             if i.serial.is_empty() || poll.snapshots.iter().filter(|s| {
-                let other=&s.target.interface;
-                other.vendor_id==i.vendor_id && other.product_id==i.product_id && other.serial==i.serial
+                s.target.hid().is_ok_and(|other|
+                    other.vendor_id==i.vendor_id && other.product_id==i.product_id && other.serial==i.serial)
             }).count()!=1 {continue;}
             let old=crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",backend.name(),i.vendor_id,i.product_id,i.serial,snapshot.target.address));
             if old!=snapshot.target.key && (shared.cfg.device_names.contains_key(&old)
@@ -567,10 +567,17 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
     for device in shared.devices.values_mut() {
         if let Some(basic) = &mut device.basic {
             if basic.target.backend != backend { continue; }
-            let connection = poll.present_paths.as_ref().and_then(|paths|
-                (!paths.contains(&basic.target.interface.path)).then_some(false));
+            let connection = poll.present_channels.as_ref().and_then(|paths|
+                (!paths.contains(&basic.target.channel_key())).then_some(false));
             let status = device.basic_status.get_or_insert_with(Default::default);
             status.observe(connection, None, now, backend.sample_lifetime());
+            if backend == crate::backends::BackendId::XInput && connection == Some(false) {
+                // A slot can be reused by a different controller after disconnection.
+                status.clear_battery();
+                basic.battery = None;
+                basic.battery_at = None;
+                device.reading.battery = None;
+            }
             basic.connected = status.connected;
             basic.disable_writes();
             device.reading.connected = status.connected;
@@ -580,17 +587,17 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
     for mut snapshot in poll.snapshots {
         if backend == crate::backends::BackendId::StandardHid && shared.devices.values().any(|device|
             device.basic.as_ref().is_some_and(|other| other.target.backend.precedes_standard()
-                && other.connected && other.target.interface.path == snapshot.target.interface.path)) { continue; }
+                && other.connected && other.target.same_hid_path(&snapshot.target))) { continue; }
         if backend.precedes_standard() {
             shared.devices.retain(|_, device| !device.basic.as_ref().is_some_and(|other|
-                other.target.backend == crate::backends::BackendId::StandardHid && other.target.interface.path == snapshot.target.interface.path));
+                other.target.backend == crate::backends::BackendId::StandardHid && other.target.same_hid_path(&snapshot.target)));
         }
         let previous = shared.devices.values().filter(|device| device.basic.as_ref().is_some_and(|other|
             other.target.same_channel(&snapshot.target) && other.target.key != snapshot.target.key))
             .max_by_key(|device| device.full_at)
             .and_then(|device| device.basic.as_ref()).map(|other| other.target.clone());
         if let Some(previous) = previous {
-            let link_key = crate::backends::Target::new(backend, &previous.interface, previous.address).key;
+            let link_key = previous.unverified_key();
             let had_identity = previous.verified_identity || previous.key != link_key;
             if snapshot.target.verified_identity && !had_identity {
                 if shared.promote_device_key(&previous.key, &snapshot.target.key) { shared.device_keys_dirty = true; }
@@ -600,7 +607,7 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
                 snapshot.target.key = previous.key;
                 if had_identity { snapshot.disable_writes(); }
                 if snapshot.target.family == crate::device::DeviceFamily::Unknown { snapshot.target.family = previous.family; }
-                if snapshot.target.name == snapshot.target.interface.product { snapshot.target.name = previous.name; }
+                if snapshot.target.hid().is_ok_and(|i| snapshot.target.name == i.product) { snapshot.target.name = previous.name; }
             } else if let Some(device) = shared.devices.get_mut(&previous.key) {
                 // 同一接收器槽位出现另一个已确认身份，旧设备不能继续显示在线。
                 if let Some(status) = &mut device.basic_status {
@@ -616,6 +623,7 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
         let mut status = previous.and_then(|device| device.basic_status.clone()).unwrap_or_default();
         status.observe_sample(Some(snapshot.connected), snapshot.battery.as_ref(), snapshot.battery_at,
             now, backend.sample_lifetime());
+        if snapshot.battery_unavailable { status.clear_battery(); }
         if snapshot.dpi.current.is_none() {
             if let Some(previous) = previous.and_then(|device| device.basic.as_ref()) {
                 snapshot.dpi = previous.dpi.clone();
@@ -2659,7 +2667,7 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
         }
         let target = match cmd.basic_target() {
             Some(target) => s.devices.values().find_map(|device|
-                device.link.as_ref().filter(|link| link.iface.path == target.interface.path
+                device.link.as_ref().filter(|link| target.hid().is_ok_and(|i| link.iface.path == i.path)
                     && link.report_id == target.address).cloned()),
             None => s.active_key.as_ref().and_then(|k| s.devices.get(k)).and_then(|d| d.link.clone()),
         };
@@ -3825,11 +3833,11 @@ mod backend_tests {
 
     fn snapshot(backend: BackendId, key: &str, percent: u8) -> Snapshot {
         Snapshot { target: Target { key: key.into(), name: "Test mouse".into(), family: DeviceFamily::Mouse,
-            backend, address: 1, verified_identity: false, interface: hid::HidInterface {
+            backend, address: 1, verified_identity: false, endpoint: crate::backends::Endpoint::Hid(hid::HidInterface {
                 path: key.into(), serial: String::new(), product: "Test mouse".into(),
                 vendor_id: 0, product_id: 0, usage_page: 1, usage: 2,
                 input_len: 20, output_len: 20, feature_len: 0,
-            } }, connected: true, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(), dpi: Dpi::default(), battery: Some(Battery { estimated_percent: None, percent: Some(percent),
+            }) }, connected: true, battery_unavailable: false, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(), dpi: Dpi::default(), battery: Some(Battery { estimated_percent: None, percent: Some(percent),
                 charging: Some(false), voltage_mv: None, approximate: false, level: None }) }
     }
 
@@ -3928,7 +3936,7 @@ mod backend_tests {
     #[test]
     fn razer_first_serial_identity_promotes_preferences_from_the_discovery_key() {
         let mut first=snapshot(BackendId::Razer,"temporary",75);
-        first.target=Target::new(BackendId::Razer,&first.target.interface,0);
+        first.target=Target::new(BackendId::Razer,first.target.hid().unwrap(),0);
         let discovery_key=first.target.key.clone();
         let mut shared=Shared::new(Settings::default());
         shared.cfg.device_names.insert(discovery_key.clone(),"My mouse".into());
@@ -3941,14 +3949,14 @@ mod backend_tests {
     #[test]
     fn razer_sibling_fallback_preserves_preferences_and_latest_receiver_identity() {
         let mut first = snapshot(BackendId::Razer, "temporary", 75);
-        first.target.interface.path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
-        first.target = Target::new(BackendId::Razer, &first.target.interface, 0);
+        first.target.hid_mut().path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
+        first.target = Target::new(BackendId::Razer, first.target.hid().unwrap(), 0);
         let discovery_key = first.target.key.clone();
         let mut shared = Shared::new(Settings::default());
         let now = std::time::Instant::now();
         shared.cfg.device_names.insert(discovery_key.clone(), "Custom mouse".into());
         merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now);
-        first.target.interface.path = first.target.interface.path.replace("col01", "col02").replace("0001#", "0002#");
+        first.target.hid_mut().path = first.target.hid().unwrap().path.replace("col01", "col02").replace("0001#", "0002#");
         first.target.key = "a-first-serial".into();
         first.target.verified_identity = true;
         merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now + Duration::from_secs(1));
@@ -3957,8 +3965,8 @@ mod backend_tests {
         first.target.key = "z-replacement-serial".into();
         merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now + Duration::from_secs(2));
         assert!(!shared.devices["a-first-serial"].reading.connected);
-        first.target = Target::new(BackendId::Razer, &first.target.interface, 0);
-        first.target.interface.path = first.target.interface.path.replace("col02", "col01").replace("0002#", "0001#");
+        first.target = Target::new(BackendId::Razer, first.target.hid().unwrap(), 0);
+        first.target.hid_mut().path = first.target.hid().unwrap().path.replace("col02", "col01").replace("0002#", "0001#");
         first.dpi.writable = true;
         merge_additional_at(&mut shared, BackendId::Razer, vec![first].into(), now + Duration::from_secs(3));
         assert_eq!(shared.devices.len(), 2);
@@ -3991,7 +3999,7 @@ mod backend_tests {
         first.dpi.writable = true;
         shared.publish_additional(BackendId::Logitech, vec![first], 0, 1);
         let poll = crate::backends::Poll { snapshots: vec![],
-            present_paths: Some(["logitech".to_string()].into_iter().collect()) };
+            present_channels: Some(["logitech".to_string()].into_iter().collect()) };
         shared.publish_additional(BackendId::Logitech, poll, 0, 2);
         let device = &shared.devices["logitech"];
         assert!(device.reading.connected);
@@ -4002,7 +4010,7 @@ mod backend_tests {
         shared.publish_additional(BackendId::Logitech, crate::backends::Poll::default(), 0, 3);
         assert!(shared.devices["logitech"].reading.connected);
         shared.publish_additional(BackendId::Logitech, crate::backends::Poll {
-            snapshots: vec![], present_paths: Some(Default::default()) }, 0, 4);
+            snapshots: vec![], present_channels: Some(Default::default()) }, 0, 4);
         assert!(!shared.devices["logitech"].reading.connected);
         assert_eq!(shared.devices["logitech"].reading.battery.as_ref().unwrap().percent, Some(75));
     }
@@ -4055,7 +4063,7 @@ mod backend_tests {
                     vec![reading]
                 } else { Vec::new() };
                 merge_additional_at(&mut shared, BackendId::Rapoo, crate::backends::Poll { snapshots,
-                    present_paths: Some(["rapoo".into()].into_iter().collect()) }, tick);
+                    present_channels: Some(["rapoo".into()].into_iter().collect()) }, tick);
             }
             shared.expire_additional_at(tick);
             let device = &shared.devices["rapoo"];
@@ -4090,7 +4098,7 @@ mod backend_tests {
         let mut armed = true;
         assert_eq!(low_battery_reading(&shared.readings[0], &mut armed), None);
         let poll = crate::backends::Poll { snapshots: Vec::new(),
-            present_paths: Some(["controller".into()].into_iter().collect()) };
+            present_channels: Some(["controller".into()].into_iter().collect()) };
         merge_additional_at(&mut shared, backend, poll, now + Duration::from_secs(3));
         assert_eq!(shared.readings[0].battery_text(false), "≈55");
         shared.expire_additional_at(now + backend.sample_lifetime());
@@ -4101,17 +4109,51 @@ mod backend_tests {
         assert_eq!(shared.readings[0].battery_text(true), "≈45%");
         assert!(shared.devices["controller"].basic.as_ref().unwrap().dpi.stages.is_empty());
         merge_additional_at(&mut shared, backend, crate::backends::Poll {
-            snapshots: Vec::new(), present_paths: Some(Default::default()),
+            snapshots: Vec::new(), present_channels: Some(Default::default()),
         }, now + Duration::from_secs(10));
         assert!(!shared.readings[0].connected);
         assert_eq!(shared.readings[0].battery_text(true), "—");
     }
 
     #[test]
+    fn xinput_slots_clear_wired_and_replaced_battery_without_affecting_other_devices() {
+        let mut shared = Shared::new(Settings::default());
+        let backend = BackendId::XInput;
+        let now = std::time::Instant::now();
+        let mut first = snapshot(backend, "unused", 50);
+        first.target = crate::backends::xinput::target(0);
+        first.battery_at = Some(now);
+        first.battery = Some(Battery { percent: None, estimated_percent: Some(50), charging: None,
+            voltage_mv: None, approximate: true, level: Some(BatteryLevel::Medium) });
+        let key = first.target.key.clone();
+        let mut other = first.clone(); other.target = crate::backends::xinput::target(1);
+        let other_key = other.target.key.clone();
+        merge_additional_at(&mut shared, backend, vec![first.clone(), other.clone()].into(), now);
+        assert_eq!(shared.devices[&key].reading.battery_text(true), "≈50%");
+        let mut wired = first.clone(); wired.battery = None; wired.battery_at = None;
+        wired.battery_unavailable = true;
+        merge_additional_at(&mut shared, backend, vec![wired, other.clone()].into(), now + Duration::from_secs(1));
+        assert_eq!(shared.devices[&key].reading.battery_text(true), "—");
+        assert!(shared.devices[&key].reading.connected);
+        assert_eq!(shared.devices[&other_key].reading.battery_text(true), "≈50%");
+        first.battery_at = Some(now + Duration::from_secs(2));
+        merge_additional_at(&mut shared, backend, vec![first, other.clone()].into(), now + Duration::from_secs(2));
+        merge_additional_at(&mut shared, backend, vec![other.clone()].into(), now + Duration::from_secs(3));
+        assert!(!shared.devices[&key].reading.connected);
+        let mut replacement = snapshot(backend, "unused", 99);
+        replacement.target = crate::backends::xinput::target(0);
+        replacement.battery = None; replacement.battery_at = None;
+        merge_additional_at(&mut shared, backend, vec![replacement, other].into(), now + Duration::from_secs(4));
+        assert!(shared.devices[&key].reading.connected);
+        assert_eq!(shared.devices[&key].reading.battery_text(true), "—");
+        assert_eq!(shared.devices[&other_key].reading.battery_text(true), "≈50%");
+    }
+
+    #[test]
     fn additional_identity_promotion_preserves_name_type_tray_and_order() {
         let mut shared = Shared::new(Settings::default());
         let mut first = snapshot(BackendId::Logitech, "interface", 75);
-        first.target.key = Target::new(BackendId::Logitech, &first.target.interface, first.target.address).key;
+        first.target.key = Target::new(BackendId::Logitech, first.target.hid().unwrap(), first.target.address).key;
         let old = first.target.key.clone();
         shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 1);
         shared.active_key = Some(old.clone());
@@ -4145,7 +4187,7 @@ mod backend_tests {
     fn missing_identity_keeps_card_without_authorizing_writes_or_inheriting_on_replacement() {
         let mut shared = Shared::new(Settings::default());
         let mut first = snapshot(BackendId::Logitech, "interface", 75);
-        let link_key = Target::new(BackendId::Logitech, &first.target.interface, first.target.address).key;
+        let link_key = Target::new(BackendId::Logitech, first.target.hid().unwrap(), first.target.address).key;
         let old = crate::device::stable_key("first-unit");
         first.target.key = old.clone();
         first.target.verified_identity = true;
@@ -4245,8 +4287,8 @@ mod backend_tests {
 
     #[test]
     fn rapoo_serial_preference_migration_requires_an_unambiguous_receiver_and_runs_once() {
-        let mut a=snapshot(BackendId::Rapoo,"a",70);a.target.interface.serial="same".into();
-        a.target.interface.vendor_id=0x24ae;a.target.interface.product_id=0x1415;
+        let mut a=snapshot(BackendId::Rapoo,"a",70);a.target.hid_mut().serial ="same".into();
+        a.target.hid_mut().vendor_id =0x24ae;a.target.hid_mut().product_id =0x1415;
         let old=crate::device::stable_key("Rapoo nRF54L:24ae:1415:same:1");
         let mut cfg=Settings::default();cfg.device_names.insert(old.clone(),"Custom".into());
         cfg.device_tray.insert(old.clone(),Default::default());cfg.tray_device=Some(old.clone());
@@ -4258,7 +4300,7 @@ mod backend_tests {
         shared.device_keys_dirty=false;
         shared.publish_additional(BackendId::Rapoo,vec![a.clone()],0,2);
         assert!(!shared.device_keys_dirty);
-        let mut b=a.clone();b.target.key="b".into();b.target.interface.path="b".into();
+        let mut b=a.clone();b.target.key="b".into();b.target.hid_mut().path ="b".into();
         let mut shared=Shared::new(cfg);
         shared.publish_additional(BackendId::Rapoo,vec![a,b],0,1);
         assert!(shared.cfg.device_names.contains_key(&old));

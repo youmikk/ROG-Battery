@@ -241,7 +241,7 @@ impl<C: Channel> Session<C> {
         Some(Snapshot {
             target,
             battery,
-            battery_at,
+            battery_unavailable: false, battery_at,
             dpi,
             polling_rate: rate,
             connected: true,
@@ -314,15 +314,15 @@ impl DeviceBackend for PageCommand {
             .collect())
     }
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        if !control(&target.interface) {
+        if !control(target.hid()?) {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
-        let lock = channel::lock(&target.interface.path);
+        let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut s = Session {
-            channel: feature::FeatureChannel::open(&target.interface)?,
-            interface: target.interface.clone(),
-            address: target_address(&target.interface),
+            channel: feature::FeatureChannel::open(target.hid()?)?,
+            interface: target.hid()?.clone(),
+            address: target_address(target.hid()?),
         };
         s.read(target)
             .ok_or_else(|| crate::i18n::translate("设备无有效状态回报").into())

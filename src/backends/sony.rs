@@ -96,7 +96,7 @@ fn calibration_valid(frame: &[u8]) -> bool {
 
 fn snapshot(target: &Target, report: Report, received: Instant) -> Snapshot {
     Snapshot { target: target.clone(), connected: true,
-        battery_at: report.battery.as_ref().map(|_| received), battery: report.battery,
+        battery_unavailable: false, battery_at: report.battery.as_ref().map(|_| received), battery: report.battery,
         dpi: Dpi::default(), polling_rate: Default::default() }
 }
 
@@ -112,20 +112,20 @@ impl DeviceBackend for DualSense {
     }
 
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        let (_, transport) = control(&target.interface)
+        let (_, transport) = control(target.hid()?)
             .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
-        let lock = channel::lock(&target.interface.path);
+        let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-        let mut device = HidDevice::open_read_only(&target.interface)?;
+        let mut device = HidDevice::open_read_only(target.hid()?)?;
         let started = Instant::now();
         let mut batch = receive_status(transport, 300, true, |timeout| device.read_report(timeout));
         if batch.minimal {
             // A GET of calibration data requests extended Bluetooth reports. Do this
             // only after observing minimal mode; never send rumble, LED or setup output.
             let feature_started = Instant::now();
-            let calibration = feature::FeatureChannel::open_with_length(&target.interface, 41)
+            let calibration = feature::FeatureChannel::open_with_length(target.hid()?, 41)
                 .and_then(|mut channel| channel.receive(5, 250));
-            trace::record(&target.interface, BackendId::DualSense, "get-calibration", 0, 5,
+            trace::record(target.hid()?, BackendId::DualSense, "get-calibration", 0, 5,
                 41, calibration.as_ref().map_or(0, Vec::len), feature_started, match &calibration {
                     Ok(frame) if calibration_valid(frame) => trace::Outcome::Ok,
                     Ok(_) => trace::Outcome::InvalidData, Err(_) => trace::Outcome::NoReply,
@@ -140,7 +140,7 @@ impl DeviceBackend for DualSense {
             None if batch.bytes > 0 => trace::Outcome::InvalidData,
             None => trace::Outcome::NoReply,
         };
-        trace::record(&target.interface, BackendId::DualSense, "input-battery", 0,
+        trace::record(target.hid()?, BackendId::DualSense, "input-battery", 0,
             transport.report_id(), 0, batch.bytes, started, outcome);
         let report = batch.report.ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
         Ok(snapshot(target, report, Instant::now()))

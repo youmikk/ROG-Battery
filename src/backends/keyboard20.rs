@@ -65,7 +65,7 @@ pub(super) fn battery(frame: &[u8]) -> Option<Battery> {
 
 fn read_with(target: &Target, mut exchange: impl FnMut(u8) -> Option<Vec<u8>>) -> Result<Snapshot, String> {
     let fail = || crate::i18n::translate("设备无有效状态回报").to_string();
-    let selected = model(&target.interface).ok_or_else(fail)?;
+    let selected = model(target.hid()?).ok_or_else(fail)?;
     let mut target = target.clone();
     if selected == Model::Z75sCandidate {
         let identity = exchange(5).ok_or_else(fail)?;
@@ -78,7 +78,7 @@ fn read_with(target: &Target, mut exchange: impl FnMut(u8) -> Option<Vec<u8>>) -
     let response = exchange(0x4a).ok_or_else(fail)?;
     let battery = battery(&response).ok_or_else(fail)?;
     Ok(Snapshot {
-        target, battery: Some(battery), battery_at: Some(Instant::now()),
+        target, battery: Some(battery), battery_unavailable: false, battery_at: Some(Instant::now()),
         dpi: Dpi::default(), polling_rate: Default::default(), connected: true,
     })
 }
@@ -94,11 +94,11 @@ impl DeviceBackend for Keyboard20 {
     }
 
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        let selected = model(&target.interface)
+        let selected = model(target.hid()?)
             .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
-        let lock = channel::lock(&target.interface.path);
+        let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-        let mut device = HidDevice::open(&target.interface)?;
+        let mut device = HidDevice::open(target.hid()?)?;
         read_with(target, |command| {
             let started = Instant::now();
             let matches = |r: &[u8]| if command == 5 { reply(r, 5, 6) } else { battery(r).is_some() };
@@ -108,7 +108,7 @@ impl DeviceBackend for Keyboard20 {
                 Model::SharedReceiver => device.transact_control_output(&query(command), 800, matches),
                 Model::Z75sCandidate => device.transact(&query(command), 800, matches),
             };
-            trace::record(&target.interface, BackendId::Keyboard20, "query-keyboard",
+            trace::record(target.hid().ok()?, BackendId::Keyboard20, "query-keyboard",
                 0x13, command, 20, response.as_ref().map_or(0, Vec::len), started,
                 if response.is_some() { trace::Outcome::Ok } else { trace::Outcome::NoReply });
             response

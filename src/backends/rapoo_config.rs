@@ -168,13 +168,13 @@ impl<C:Channel> Session<C> {
 }
 
 fn open(target:&Target,interfaces:&[HidInterface])->Result<Session<Transport>,String> {
-    let (output,feature)=endpoints(&target.interface,interfaces).ok_or("雷柏配置接口不可用")?;
-    Ok(Session::new(Transport {output:FeatureChannel::open_output(output)?,feature:FeatureChannel::open(feature)?},&target.interface))
+    let (output,feature)=endpoints(target.hid()?,interfaces).ok_or("雷柏配置接口不可用")?;
+    Ok(Session::new(Transport {output:FeatureChannel::open_output(output)?,feature:FeatureChannel::open(feature)?},target.hid()?))
 }
 
 pub(super) fn read(api:&HidApi,target:&Target,status:&Dpi)->Result<Dpi,String> {
     let interfaces=super::enumeration::scan(api)?.interfaces;
-    let key=channel::collection_group(&target.interface);let lock=channel::lock(&key);
+    let key=channel::collection_group(target.hid()?);let lock=channel::lock(&key);
     let _guard=lock.lock().unwrap_or_else(|p|p.into_inner());
     let config=open(target,&interfaces)?.config()?;
     if !config.matches_status(status) {return Err("设备档位或配置已变化，请刷新后重试".into());}
@@ -184,7 +184,7 @@ pub(super) fn read(api:&HidApi,target:&Target,status:&Dpi)->Result<Dpi,String> {
 pub(super) fn switch(api:&HidApi,target:&Target,stage:DpiStage,context:StageContext)->Result<(),String> {
     let StageContext::Configuration(token)=context else {return Err("设备配置已变化，请刷新后重试".into());};
     let interfaces=super::enumeration::scan(api)?.interfaces;
-    let key=channel::collection_group(&target.interface);let lock=channel::lock(&key);
+    let key=channel::collection_group(target.hid()?);let lock=channel::lock(&key);
     let _guard=lock.lock().unwrap_or_else(|p|p.into_inner());
     let (_,_,status)=rapoo::latest_status(target,None,Duration::from_millis(100))?;
     let after=open(target,&interfaces)?.switch(stage,token,&status)?;

@@ -60,7 +60,7 @@ struct RateInfo {
 
 impl Session<HidDevice> {
     fn open(target: &Target) -> Result<Self, String> {
-        Self::from_channel(HidDevice::open(&target.interface)?, target)
+        Self::from_channel(HidDevice::open(target.hid()?)?, target)
     }
 }
 
@@ -114,7 +114,7 @@ impl<C: Channel> Session<C> {
             Ok(None) => (None,true),
             Err(_) => (None,false),
         };
-        let identity = !((0xc500..=0xc5ff).contains(&target.interface.product_id) && !target.verified_identity);
+        let identity = !((0xc500..=0xc5ff).contains(&target.hid()?.product_id) && !target.verified_identity);
         let rate = crate::device::PollingRate { current,values:choices.iter().map(|(_,hz)| *hz).collect(),
             writable: identity && host_control && current.is_some() && choices.iter().any(|(v,_)| *v == raw) };
         Ok(Some(RateInfo { rate,feature,connection,raw,choices,mode_feature }))
@@ -154,7 +154,7 @@ impl<C: Channel> Session<C> {
             software: 0,
             legacy: false,
             last_protocol_error: None,
-            interface: target.interface.clone(),
+            interface: target.hid()?.clone(),
             features: Default::default(),
         };
         match session.request(0, 1, &[0, 0, 0x5a]) {
@@ -495,7 +495,7 @@ impl<C: Channel> Session<C> {
         if target.verified_identity && self.identity_key()?.as_ref() != Some(&target.key) {
             return Err("设备标识已变化，请刷新后再试".into());
         }
-        if (0xc500..=0xc5ff).contains(&target.interface.product_id) && !target.verified_identity {
+        if (0xc500..=0xc5ff).contains(&target.hid()?.product_id) && !target.verified_identity {
             return Err("未确认接收器中设备的唯一标识，不能写入 DPI".into());
         }
         Ok(())
@@ -664,7 +664,7 @@ impl<C: Channel> Session<C> {
 
     fn identify_legacy(&mut self, target: &mut Target) {
         if !(1..=6).contains(&self.address)
-            || !(0xc500..=0xc5ff).contains(&target.interface.product_id)
+            || !(0xc500..=0xc5ff).contains(&self.interface.product_id)
         {
             return;
         }
@@ -711,14 +711,14 @@ impl<C: Channel> Session<C> {
         } else {
             Dpi::default()
         };
-        if (0xc500..=0xc5ff).contains(&target.interface.product_id) && !target.verified_identity {
+        if (0xc500..=0xc5ff).contains(&target.hid()?.product_id) && !target.verified_identity {
             dpi.writable = false;
             dpi.stage_writable = false;
         }
         Ok(Snapshot {
             target,
             battery,
-            battery_at, polling_rate: Default::default(),
+            battery_unavailable: false, battery_at, polling_rate: Default::default(),
             dpi,
             connected: true,
         })
@@ -1086,7 +1086,7 @@ impl DeviceBackend for Logitech {
     }
 
     fn read(&self, _: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
-        let lock = super::channel::lock(&collection_group(&target.interface));
+        let lock = super::channel::lock(&collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
         let mut session = Session::open(target)?;
         let mut snapshot = session.read_snapshot(target, detail)?;
@@ -1097,7 +1097,7 @@ impl DeviceBackend for Logitech {
     }
 
     fn set_dpi(&self, _: &HidApi, target: &Target, dpi: u16) -> Result<(), String> {
-        let lock = super::channel::lock(&collection_group(&target.interface));
+        let lock = super::channel::lock(&collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
         Session::open(target)?.set_dpi(target, dpi)
     }
@@ -1108,12 +1108,12 @@ impl DeviceBackend for Logitech {
         stage: crate::device::DpiStage,
         context: crate::device::StageContext,
     ) -> Result<(), String> {
-        let lock = super::channel::lock(&collection_group(&target.interface));
+        let lock = super::channel::lock(&collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
         Session::open(target)?.set_stage(target, stage, context.profile()?)
     }
     fn set_polling_rate(&self, _: &HidApi,target:&Target,hz:u16) -> Result<(),String> {
-        let lock = super::channel::lock(&collection_group(&target.interface));
+        let lock = super::channel::lock(&collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
         Session::open(target)?.set_rate(target,hz)
     }
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[test]
     fn long_collection_selection_does_not_merge_two_identical_receivers() {
-        let mut short = target().interface;
+        let mut short = target().hid().unwrap().clone();
         short.path = r"\\?\hid#vid_046d&pid_c547&mi_01&col01#8&abc&0&0000#{hid}".into();
         short.input_len = 7; short.output_len = 7;
         let mut long = short.clone();
@@ -1880,7 +1880,7 @@ mod tests {
     fn legacy_receiver_metadata_identifies_the_selected_slot() {
         let mut target = target();
         target.address = 2;
-        target.interface.product_id = 0xc52b;
+        target.hid_mut().product_id = 0xc52b;
         target.family = DeviceFamily::Unknown;
         target.name = "Unifying Receiver".into();
         let negotiation = Step {
@@ -1919,7 +1919,7 @@ mod tests {
     fn legacy_metadata_failures_preserve_successful_battery_reading() {
         let mut target = target();
         target.address = 1;
-        target.interface.product_id = 0xc52b;
+        target.hid_mut().product_id = 0xc52b;
         target.family = DeviceFamily::Unknown;
         let mut script = vec![
             Step {

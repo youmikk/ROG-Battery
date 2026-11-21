@@ -54,14 +54,14 @@ impl DeviceBackend for Headset {
             .collect())
     }
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        model(&target.interface).ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
-        let lock = channel::lock(&target.interface.path);
+        model(target.hid()?).ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+        let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-        let mut device = HidDevice::open(&target.interface)?;
+        let mut device = HidDevice::open(target.hid()?)?;
         let started = Instant::now();
         let response = device.transact(&query(), 1200, |r| battery(r).is_some());
         trace::record(
-            &target.interface,
+            target.hid()?,
             BackendId::Headset,
             "query-battery",
             0x55,
@@ -82,7 +82,7 @@ impl DeviceBackend for Headset {
         Ok(Snapshot {
             target: target.clone(),
             battery: Some(battery),
-            battery_at: Some(Instant::now()),
+            battery_unavailable: false, battery_at: Some(Instant::now()),
             dpi: Dpi::default(),
             polling_rate: Default::default(),
             connected: true,
