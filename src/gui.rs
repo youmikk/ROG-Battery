@@ -4151,6 +4151,36 @@ mod backend_tests {
     }
 
     #[test]
+    fn keyboard_sleep_keeps_sample_age_then_wake_restores_tray_without_manual_refresh() {
+        let backend = BackendId::VgnKeyboard;
+        let now = std::time::Instant::now();
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(backend, "keyboard", 93);
+        sample.target.family = DeviceFamily::Keyboard;
+        sample.battery_at = Some(now);
+        sample.battery.as_mut().unwrap().charging = None;
+        merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+        for second in [10, 60, 119, 120, 130] {
+            let time = now + Duration::from_secs(second);
+            let sleeping = crate::backends::Poll { snapshots: Vec::new(),
+                present_channels: Some(["keyboard".into()].into_iter().collect()) };
+            merge_additional_at(&mut shared, backend, sleeping, time);
+            shared.expire_additional_at(time);
+            let device = &shared.devices["keyboard"];
+            assert!(device.reading.connected);
+            assert_eq!(device.basic_status.as_ref().unwrap().measured_at, Some(now));
+            assert_eq!(device.reading.battery_text(true), if second < 120 { "93%" } else { "—" });
+        }
+        let woke = now + Duration::from_secs(140);
+        sample.battery_at = Some(woke); sample.battery.as_mut().unwrap().percent = Some(92);
+        merge_additional_at(&mut shared, backend, vec![sample].into(), woke);
+        assert_eq!(shared.readings[0].battery_text(true), "92%");
+        assert_eq!(shared.readings[0].quality, crate::device::ReadingQuality::Live);
+        assert_eq!(shared.readings[0].family, DeviceFamily::Keyboard);
+    }
+
+    #[test]
     fn xinput_slots_clear_wired_and_replaced_battery_without_affecting_other_devices() {
         let mut shared = Shared::new(Settings::default());
         let backend = BackendId::XInput;

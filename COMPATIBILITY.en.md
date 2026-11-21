@@ -8,6 +8,18 @@ This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
 
+## In development: shared VGN / VXE keyboard receivers
+
+Adds `320F:5088`, `FF1C:0092`, 64-byte input/output receiver queries. VGN HUB lists S99, V98 Pro / V2, N75 Pro and VXE75 / V2 in this protocol family. Exactly one management collection per Windows USB interface group is required, and both input/output descriptors must contain only Report `04`. Wired `320F:5055` is excluded; the existing V98 Pro V3 backend is separate.
+
+The shared ID cannot establish a brand or model. USB product names are retained, with a neutral 2.4G keyboard fallback. Rainy75 can share the same ID and generic product string, so it may receive this read-only query; it is not claimed as hardware-validated. Only matching battery replies produce a reading. Identical receivers retain separate interface-instance identities.
+
+The sole request is `04 00 00 1A 06` with zero padding. Replies require exactly 64 bytes, the same five-byte prefix and a percentage in 0–100. A zero reply identical to the request is an echo, not a reading. Charging and response checksums are unconfirmed. Sleep replies starting `04 00 00 FF 06` do not refresh the sample or establish disconnection. Old readings expire after 120 seconds, and a later valid background response restores the display.
+
+The published receiver response took about 1.03 seconds, so each query allows 2.5 seconds with a ten-second maximum background wait. An independent backend worker avoids blocking V98 Pro V3 queries. The protocol has no transaction ID, so concurrent VGN HUB queries cannot be reliably attributed and need hardware testing.
+
+Local validation on 2026-11-21 passed 223 regressions and a warning-free Windows x64 build. No matching keyboard was available locally. The published 93% reply prefix and sleep observations inform protocol tests; their trailing test padding is synthetic. This does not validate every listed model. This feature was developed after the 1.4.7 tag.
+
 ## In development: Lofree HYZEN
 
 Only receiver `388D:0025`, collection `FF1C:0092`, with 32-byte input/output is matched. Wired `0024` and single-mode `0029` are not battery-query targets. A present `0024` suppresses receiver polling, following the official driver's wired exclusion. Without a proven cable/receiver pairing identity, this may also suppress a different HYZEN receiver when multiple keyboards are attached; hardware work remains.

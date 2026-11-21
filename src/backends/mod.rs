@@ -23,6 +23,7 @@ pub mod steelseries;
 pub mod status;
 pub mod trace;
 pub mod vgn;
+pub mod vgn_keyboard;
 pub mod xinput;
 
 pub use crate::device::{Battery, BatteryLevel, Dpi};
@@ -34,6 +35,7 @@ pub enum BackendId {
     Logitech,
     Rapoo,
     Vgn,
+    VgnKeyboard,
     CompX,
     Razer,
     PageCommand,
@@ -49,8 +51,8 @@ pub enum BackendId {
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 16] = [
-    BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::CompX, BackendId::Razer,
+pub const ADDITIONAL_BACKENDS: [BackendId; 17] = [
+    BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::StandardHid,
 ];
@@ -62,6 +64,7 @@ impl BackendId {
             Self::Logitech => "Logitech HID++",
             Self::Rapoo => "Rapoo nRF54L",
             Self::Vgn => "VGN V98 Pro V3",
+            Self::VgnKeyboard => "Weisheng keyboard",
             Self::CompX => "CompX mouse",
             Self::Razer => "Razer Feature",
             Self::PageCommand => "CompX page-command",
@@ -79,7 +82,7 @@ impl BackendId {
     }
 
     pub fn precedes_standard(self) -> bool {
-        matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::CompX | Self::Razer
+        matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::VgnKeyboard | Self::CompX | Self::Razer
             | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
     }
 
@@ -89,7 +92,7 @@ impl BackendId {
             Self::Logitech => 180,
             Self::CompX => 45,
             Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => 120,
-            Self::Vgn | Self::StandardHid => 120,
+            Self::Vgn | Self::VgnKeyboard | Self::StandardHid => 120,
             Self::Rog => 0,
         })
     }
@@ -98,7 +101,7 @@ impl BackendId {
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
             Self::Rapoo | Self::DualSense | Self::XInput => Some(2_000),
-            Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
+            Self::VgnKeyboard | Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
             _ => None,
         }
     }
@@ -173,7 +176,7 @@ impl Target {
             razer::collection_group(interface)
         } else if interface.serial.is_empty() || matches!(backend, BackendId::Rapoo | BackendId::CompX
             | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Cherry | BackendId::Lofree | BackendId::Nova | BackendId::Inzone | BackendId::HyperX
-            | BackendId::DualSense) {
+            | BackendId::DualSense | BackendId::VgnKeyboard) {
             interface.path.to_ascii_lowercase()
         } else {
             format!(
@@ -317,6 +320,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Logitech => &logitech::Logitech,
         BackendId::Rapoo => &rapoo::Rapoo,
         BackendId::Vgn => &vgn::Vgn,
+        BackendId::VgnKeyboard => &vgn_keyboard::VgnKeyboard,
         BackendId::CompX => &compx::CompX,
         BackendId::Razer => &razer::Razer,
         BackendId::PageCommand => &page_command::PageCommand,
