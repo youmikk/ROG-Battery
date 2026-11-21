@@ -201,7 +201,7 @@ The output request is `00 30` plus 31 zeroes. The first byte is Windows' Report 
 
 A reply must be 15–33 bytes, begin `30 00`, declare enough data for bytes 4–14 without exceeding the frame, contain ASCII `M156` at bytes 4–7, place a 0–100 percentage at byte 13 and the observed connected value `01` at byte 14. No charging field is established, so charging remains unknown. `30 02`, other states, wrong identity, truncation and request echoes never become 0%. One send may ignore unrelated input for up to one second and accept the first valid M156 frame; no extra online or configuration command is sent.
 
-All 350 local regressions and the warning-free Windows x64 release build pass, covering 15–33 byte inputs, every percentage, strict identity and malformed frames. No local S9 was available. Real Windows caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
+All 354 local regressions and the warning-free Windows x64 release build pass, covering 15–33 byte inputs, every percentage, strict identity and malformed frames. No local S9 was available. Real Windows caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
 
 ## In development: EWEADN S9 PRO 8K
 
@@ -224,7 +224,15 @@ The `37D7:2501 / FFA0:0001` GET_INFO battery query is independently implemented 
 
 The sole request is `03 5A A5 01 02 03` plus 26 zeroes. Replies must be 32 bytes and match `04 5A A5 01 01 00 80`, with mode byte 7 equal to `01` or `02`. Byte 12 bits 0–3 encode tiers `0..5`, mapped to 0/20/40/60/80/100% and displayed uniformly as `≈` estimates. Bits 4–7 accept only 0 or 1. A high nibble of 1 is a vendor charging sentinel and is never interpreted as a sixth tier or illegal percentage; it reports charging with unknown level. Other tiers, charge values, echoes and malformed frames are rejected.
 
-No reply checksum is established, so request checksum rules are not applied to replies. Exactly one GET_INFO request is sent; no IMU, rumble, trigger, lighting, mode or configuration command is reachable. All 350 local regressions and the warning-free Windows x64 release build pass. No local APEX5 was available; real caps, sleep, charging transitions, 0%/100% and desktop-software coexistence remain pending.
+No reply checksum is established, so request checksum rules are not applied to replies. Exactly one GET_INFO request is sent; no IMU, rumble, trigger, lighting, mode or configuration command is reachable. All 354 local regressions and the warning-free Windows x64 release build pass. No local APEX5 was available; real caps, sleep, charging transitions, 0%/100% and desktop-software coexistence remain pending.
+
+## In development: GameSir Nova / Cyclone 2
+
+Protocol facts are independently implemented from the MIT-licensed Wireless-Device-Battery-Monitor driver records and public GameSir client descriptions; no driver code is copied. The Nova family is limited to `3537:1098/100F/1040` and `FF7A`. A descriptor must prove one unnumbered Report 0 in each direction, with input capacity at least 19 and output at least 3. The request is Windows' Report ID slot `00` followed by `01 01`. A `F4` state frame may arrive first; the reader waits up to 800 ms for a frame beginning with `01` and reads byte 18: 0–100 is an exact percentage and `FF` is a charging sentinel; other values are rejected.
+
+Cyclone 2 is limited to `3537:100B / FFF0:0040`, 64-byte input/output and Output Report `0F`, Input Report `12`. The fixed request is `0F 03`, which only causes the controller to stream state. Replies must be Report `12`, byte 35 accepts only 0/1 and byte 36 is a 0–100 percentage. Other reports, input lengths, charging enums and levels are rejected.
+
+Neither path exposes settings writes; rumble, trigger, lighting, button, mode and configuration commands are unreachable. All 354 local regressions and the warning-free Windows x64 release build pass, covering exact identity, descriptors, requests, 0%/100% and malformed frames. No matching hardware was available. Real caps, sleep, wired/2.4 GHz transitions, multiple controller instances and vendor-software coexistence remain pending.
 
 ## In development: MCHOSE QHW and BY keyboards
 
@@ -256,7 +264,7 @@ Windows HidP capacities include the Report ID slot. For an unnumbered input, the
 
 `SS` is the wrapping sum of payload bytes 4–63 and `OO OO` is the little-endian active-profile offset. Base byte 0 is the current index; a complete `0..3` permutation at bytes 2–5 maps to a real slot, while other layouts retain the documented legacy direct index. Each `05` response must declare 56 or 8 bytes and echo the offset. The combined 64-byte configuration uses byte 32 bits 0–6 for 0–100 percentage and bit 7 for charging.
 
-Replies must match the `AA` marker, command, length and offset. Reply checksum and other header flags are unconfirmed and are neither required nor guessed. Base repair, mode changes, polling-rate, DPI, lighting, macro, pairing and firmware commands are unreachable. All 350 regressions and the warning-free release build pass, covering zero/nonzero input IDs, request checksums, all three read exchanges, slot permutations and malformed frames. No G87 V2 hardware was available; real caps, sleep, cold start, profile changes and vendor-software coexistence remain pending.
+Replies must match the `AA` marker, command, length and offset. Reply checksum and other header flags are unconfirmed and are neither required nor guessed. Base repair, mode changes, polling-rate, DPI, lighting, macro, pairing and firmware commands are unreachable. All 354 regressions and the warning-free release build pass, covering zero/nonzero input IDs, request checksums, all three read exchanges, slot permutations and malformed frames. No G87 V2 hardware was available; real caps, sleep, cold start, profile changes and vendor-software coexistence remain pending.
 
 ## In development: Edifier Halo Space
 

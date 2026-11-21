@@ -34,7 +34,7 @@ Limited to `089D:062F / FF01:0010`, a 33-byte output and a 16–34 byte Windows 
 
 The fixed request is `00 30` plus 31 zeroes; its checksum covers bytes 5–31 and is zero. A reply must be 15–33 bytes, begin `30 00`, declare enough data for bytes 4–14, contain ASCII `M156` at bytes 4–7, put a 0–100 percentage at byte 13 and the connected value `01` at byte 14. No charging field is established, so charging remains unknown. `30 02`, M302, passive `D1`, malformed lengths and other status values create no reading.
 
-All 350 local regressions and the warning-free Windows x64 release build pass, covering actual input capacities, every percentage, bad headers/lengths/identity/status and exact VID/PID/collection boundaries. Packet facts were independently implemented from HaloBattery PR #352 under MIT. No local S9 hardware was available; real caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
+All 354 local regressions and the warning-free Windows x64 release build pass, covering actual input capacities, every percentage, bad headers/lengths/identity/status and exact VID/PID/collection boundaries. Packet facts were independently implemented from HaloBattery PR #352 under MIT. No local S9 hardware was available; real caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
 
 ## In development: MCHOSE G87 V2
 
@@ -42,13 +42,21 @@ All 350 local regressions and the warning-free Windows x64 release build pass, c
 
 Only three read-only configuration requests are sent: command `04` reads base data, then command `05` reads the active profile in 56+8 byte segments. Base data maps the current index to a real profile slot; a valid `0..3` permutation is honored, while the documented legacy direct index remains supported otherwise. Complete configuration byte 32 encodes a 0–100 percentage in bits 0–6 and charging in bit 7. Replies must match the `AA` marker, command, requested length and offset. Reply checksum and other header flags remain unconfirmed and are not guessed; failure never becomes 0%.
 
-All 350 local regressions and the warning-free Windows x64 release build pass, covering zero/nonzero input report IDs, all three requests, slot permutations, malformed headers/lengths/offsets/levels and exact identity boundaries. No local G87 V2 was available. Real descriptors, sleep caching, cold start, reads during profile changes and coexistence with MCHOSE software remain pending.
+All 354 local regressions and the warning-free Windows x64 release build pass, covering zero/nonzero input report IDs, all three requests, slot permutations, malformed headers/lengths/offsets/levels and exact identity boundaries. No local G87 V2 was available. Real descriptors, sleep caching, cold start, reads during profile changes and coexistence with MCHOSE software remain pending.
 
 ## In development: Flydigi APEX5
 
 Limited to `37D7:2501 / FFA0:0001`, 32-byte input/output and Reports `04` / `03`. The only request is the fixed GET_INFO frame `03 5A A5 01 02 03` plus 26 zeroes. IMU, rumble, trigger, lighting, mode and configuration commands are unreachable. A reply must match the `04 5A A5 01 01 00 80` header and mode `01/02`.
 
-Byte 12 bits 0–3 encode five battery tiers, displayed as `≈` estimates of `0/20/40/60/80/100%`. Bits 4–7 accept only 0 or 1. A high nibble of 1 is a charging sentinel; it produces neither a sixth tier nor a fabricated percentage and shows charging only. Other tiers or charge values are rejected. All 350 local regressions and the warning-free release build pass. No local APEX5 was available; real descriptors, sleep, charging transitions and desktop-software coexistence remain pending.
+Byte 12 bits 0–3 encode five battery tiers, displayed as `≈` estimates of `0/20/40/60/80/100%`. Bits 4–7 accept only 0 or 1. A high nibble of 1 is a charging sentinel; it produces neither a sixth tier nor a fabricated percentage and shows charging only. Other tiers or charge values are rejected. All 354 local regressions and the warning-free release build pass. No local APEX5 was available; real descriptors, sleep, charging transitions and desktop-software coexistence remain pending.
+
+## In development: GameSir Nova / Cyclone 2
+
+The Nova family is limited to `3537:1098/100F/1040` and an unnumbered `FF7A` input/output collection. The app sends `00 01 01`, ignores `F4` state frames for up to 800 ms, and accepts only replies beginning with `01` whose byte 18 is 0–100 or charging sentinel `FF`; `FF` reports charging without inventing a percentage.
+
+Cyclone 2 is limited to `3537:100B / FFF0:0040`, 64-byte input/output and Reports `12/0F`. The fixed read-only request is `0F 03`. Reply Report `12` accepts only 0/1 at byte 35 and a 0–100 percentage at byte 36. Both paths send only device-information reads; no rumble, trigger, lighting, button or mode command is reachable.
+
+All 354 local regressions and the warning-free Windows x64 release build pass, covering exact Nova/Cyclone VID/PID, collection, capacity, report IDs, requests, 0%/100%, the charging sentinel and malformed frames. No matching GameSir controller was available locally. Windows descriptors, sleep/wake, wired/2.4 GHz transitions, multiple identical units and GameSir Nexus coexistence remain pending.
 
 ## In development: AULA SC380 PRO
 

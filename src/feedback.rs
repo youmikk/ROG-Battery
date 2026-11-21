@@ -103,6 +103,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Dareu => &super::backends::dareu::Dareu,
             super::backends::BackendId::EightBitDo => &super::backends::eightbitdo::EightBitDo,
             super::backends::BackendId::Flydigi => &super::backends::flydigi::Flydigi,
+            super::backends::BackendId::GameSir => &super::backends::gamesir::GameSir,
             super::backends::BackendId::GearHub => &super::backends::gearhub::GearHub,
             super::backends::BackendId::G3m => &super::backends::g3m::G3m,
             super::backends::BackendId::Aula => &super::backends::aula::Aula,
