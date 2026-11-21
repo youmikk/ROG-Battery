@@ -14,6 +14,8 @@ The development branch adds USB and Bluetooth battery reads for Sony DualSense /
 
 Windows XInput battery reads are also integrated when the current driver returns a valid battery grade. System slots are shown separately, four-level estimates carry ≈, and wired or unknown battery types do not produce invented charge or charging status. Hardware acceptance remains pending.
 
+Sony INZONE H5 and H9 II receiver battery queries are integrated on the development branch, with model-specific control interfaces and separate percentage and charging data. No headset settings are written; hardware acceptance remains pending.
+
 ## Version 1.4.6
 
 Devices with supported numerical DPI writes can save 1–4 software presets on the Performance page, sorted by DPI, and switch from the main window or tray. Reducing the stage count hides the highest values and keeps them for restoration. Presets remain separate from actual device stages; connections that write stored DPI show a note. Local regressions and render checks passed; per-model hardware acceptance remains pending.

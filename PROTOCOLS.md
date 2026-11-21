@@ -20,6 +20,7 @@
 | [Voltide](https://github.com/sdparklab/Voltide/tree/c1872c4c93124d62c05bf5887fe89c32c6be8dd6) | `c1872c4` | `Core/DeviceManager.cs`、`Core/Models.cs`、`Interop/HidNative.cs`；`Providers/` 中 Vxe、ATKA9Airadd、Rapoo、Razer、Mchose、AsusHeadset、ATKN9V2Ultimate、MchoseV9Headset、DualSense、XInput 实现 | MIT，Copyright (c) 2026 Joko |
 | [HeadsetControl](https://github.com/Sapd/HeadsetControl/tree/62e361b085d7716805a3bf524bc9cca3761e0e15) | `62e361b` | `lib/devices/steelseries_arctis_nova_5.hpp`、`steelseries_arctis_nova_7.hpp`、`steelseries_arctis_nova_7p.hpp`、`steelseries_arctis_nova_3p_wireless.hpp`、`protocols/steelseries_protocol.hpp`；Nova 型号、状态布局和电量代际 | GPL-3.0 |
 | [Linux hid-playstation](https://github.com/torvalds/linux/blob/4dd10fbbeb9c33709edc89916e19c03c780a0751/drivers/hid/hid-playstation.c) | `4dd10fb` | DualSense USB / 蓝牙输入结构、状态位、CRC 前缀及校准 Feature 报告 | 所查文件 GPL-2.0-or-later |
+| [sony-h5-tray](https://github.com/splitbrain/sony-h5-tray/tree/1d282db4ec641bfdefab1df14c3e6d05eb767706) | `1d282db` | `src/proto.rs`、`src/hid.rs`；H5 HCI 报文、校验和和公开抓取样例，与 HeadsetControl 的 INZONE 协议及 H5 / H9 II 接口表交叉核对 | MIT，Copyright (c) 2026 Andreas Gohr |
 
 Logitech 官方 `Logitech/Logitech-HIDPP` 仓库在本次访问时返回 404，未将其内容作为已核对证据。HID++ 命令交叉核对 Solaar、libratbag 和 OpenMouse 的实际实现。
 
@@ -120,6 +121,7 @@ Razer 适配接入统一状态和能力模型，支持有效电量、独立充�
 - [x] 接入迈从 20 字节键盘状态与 Z75S 型号握手，Arctis Nova 百分比 / 等级状态；协议与刷新回归通过，对应硬件验收待完成。
 - [x] 接入 DualSense / Edge USB、蓝牙电量，区间数字标注 ≈，检查报告类型、长度及 CRC；协议回归通过，对应硬件验收待完成。
 - [x] 接入 XInput 系统槽位、有效无线电池等级与非 HID 连接证据，明确无电池时清除旧数字；回归通过，对应硬件验收待完成。
+- [x] 接入 Sony INZONE H5 / H9 II 接收器电量，按型号限制接口，核对事务、来源、校验和与离线回报；对应硬件验收待完成。
 
 协议与验证方面继续推进：
 
@@ -173,3 +175,13 @@ Arctis Nova 的型号与状态偏移由 HeadsetControl 交叉核对，Windows 65
 设备地址现在区分 HID 接口与 XInput 槽位；现有 HID 识别键和品牌协议沿用原逻辑。XInput 的连接证据来自 API 返回值，不来自 HID 枚举。新增明确无电池标志，与暂时没读到电量分开，有线或未知电池类型清除旧采样；普通失败不会延长采样寿命。显示代表值为 0/20/50/100，始终带 ≈，不进入精确百分比通知。
 
 XInput 不提供型号或持久物理 ID，不使用 VID/PID 猜测槽位，也不推断虚拟控制器对应哪个 HID 设备。偏好按系统槽位保存，快速替换和跨协议重复项的边界已写入兼容性说明。本地 192 项回归及构建通过；本机系统 API 正常，暂无已连接手柄可做电量实测。
+
+## 开发中：Sony INZONE 电量
+
+HeadsetControl 的 `sony_inzone_protocol.hpp`、H5 / H9 II 型号定义和接口选择测试，与 sony-h5-tray 的公开 H5 报文交叉核对。H5 使用 `FF04:0002`，H9 II 使用 `FF04:0001` / `MI_05`。FerrisPulse 的 H5 路径会在 usage 1 未找到时退回任意 64 字节输出集合，本项目不采用这一宽泛回退，也不访问 `FF13` 升级接口。
+
+64 字节报告 `02` 内封装 Sony HCI，GET 电量请求事件 `04`、类型 `01`、地址 `41`。请求校验和为字节 6～12 的和；回复长度为 14，地址 `14`，事件 `04`，返回类型 `10` 或相同事务的 `A0`，校验和为字节 5～14 的和。查询编号跳过 0 和主动通知使用的 1；HCI 的参数长度字段在上游按信息字段处理，外围固定长度、来源、事务及校验必须同时通过。
+
+载荷依次是充电标志与百分比。0～100 保留设备百分比；`FF` 标记离线 / 无缓存值；101～254 拒绝。充电只认 0/1，不将未知非零字节或满电当成充电。超时不刷新采样时间，明确离线清除数字，后续有效报告恢复。Buds 有多个电量组件，不能套用这两字节结构，因此未加入此适配器。
+
+本次独立实现仅含状态查询，复用每接口串行化和现有生命周期。协议与状态回归通过，实机验收待完成；公开报文与合成异常测试不是本机硬件抓取。

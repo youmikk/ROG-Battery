@@ -4116,6 +4116,40 @@ mod backend_tests {
     }
 
     #[test]
+    fn inzone_query_timeouts_expire_and_explicit_offline_clears_before_wake() {
+        let backend = BackendId::Inzone;
+        let now = std::time::Instant::now();
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(backend, "headset", 61);
+        sample.target.family = DeviceFamily::Headset;
+        sample.battery_at = Some(now);
+        merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+        assert_eq!(shared.devices["headset"].reading.battery_text(true), "61%");
+        let silent = crate::backends::Poll { snapshots: Vec::new(),
+            present_channels: Some(["headset".into()].into_iter().collect()) };
+        merge_additional_at(&mut shared, backend, silent, now + Duration::from_secs(10));
+        assert!(shared.devices["headset"].reading.connected);
+        assert_eq!(shared.devices["headset"].reading.quality, crate::device::ReadingQuality::Cached);
+        assert_eq!(shared.devices["headset"].basic_status.as_ref().unwrap().measured_at, Some(now));
+        shared.expire_additional_at(now + backend.sample_lifetime());
+        assert_eq!(shared.devices["headset"].reading.battery_text(true), "—");
+        let mut offline = sample.clone();
+        offline.connected = false; offline.battery = None; offline.battery_at = None;
+        offline.battery_unavailable = true;
+        merge_additional_at(&mut shared, backend, vec![offline].into(), now + Duration::from_secs(121));
+        assert!(!shared.devices["headset"].reading.connected);
+        assert!(shared.devices["headset"].reading.battery.is_none());
+        sample.battery_at = Some(now + Duration::from_secs(122));
+        sample.battery.as_mut().unwrap().percent = Some(59);
+        merge_additional_at(&mut shared, backend, vec![sample].into(), now + Duration::from_secs(122));
+        assert!(shared.devices["headset"].reading.connected);
+        assert_eq!(shared.devices["headset"].reading.battery_text(true), "59%");
+        assert_eq!(shared.devices["headset"].reading.quality, crate::device::ReadingQuality::Live);
+        assert_eq!(shared.devices["headset"].reading.family, DeviceFamily::Headset);
+    }
+
+    #[test]
     fn xinput_slots_clear_wired_and_replaced_battery_without_affecting_other_devices() {
         let mut shared = Shared::new(Settings::default());
         let backend = BackendId::XInput;

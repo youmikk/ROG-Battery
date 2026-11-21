@@ -28,6 +28,17 @@ Names, tray selection and order are saved by slot. XInput exposes no stable phys
 
 On 2026-11-21 all 192 local regressions passed and the Windows x64 build completed without warnings. The system API loaded successfully with all four slots disconnected. Battery grades, wireless / wired transitions, sleep recovery and different drivers still need hardware acceptance. The read-only probe returned valid VGN keyboard charge; the ROG receiver supplied no valid device reading in this run.
 
+## In development: Sony INZONE headsets
+
+The adapter matches only Sony `054C:0EBF` H5 on collection `FF04:0002`, and `054C:0FA8` H9 II on `FF04:0001` / `MI_05`, with 64-byte input and output reports. H3, H7, original H9, Buds, PS5 mode and firmware-update interfaces are outside this adapter's scope.
+
+- Only battery GET queries are sent. Volume, ANC, microphone and firmware settings are not changed. Existing audio controls in the main window and tray continue to use Windows audio APIs.
+- Replies must match the report ID, fixed battery payload length, HCI direction, Sony marker, headset-to-PC address, event, transaction and checksum. Transaction IDs 0/1 are reserved; old replies and unsolicited notifications cannot satisfy a current query.
+- Values 0–100 are device-reported percentages without ≈. Charger bytes 0/1 mean not charging / charging; other values remain unknown. Full charge does not imply charging. Battery `FF` explicitly marks offline and clears prior numbers; 101–254 are invalid.
+- Background polling waits at most ten seconds. Failed queries retain the original sample time, with numbers hidden after 120 seconds and restored by a valid response. Identical receiver models retain separate Windows interface identities.
+
+Protocol tests cover a published H5 notification, transaction wraparound, echoes, unrelated events, checksum errors, valid zero, offline and wake. UI-state regressions cover expiry and recovery. Neither headset is attached locally; USB communication, power recovery, receiver mode changes and INZONE Hub coexistence await hardware acceptance. This feature is not part of the 1.4.6 tag.
+
 ## Version 1.4.6: software DPI presets
 
 - The main window and tray share 1–4 enabled presets per device, sorted by value. The count selector only changes the software list and retains hidden values; actual device stages are never reordered or removed.
