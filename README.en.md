@@ -8,6 +8,10 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
+## Version 1.4.11
+
+This version is released as a portable build first. FF90 headset handling now adds ATK N9 V2 ULTRA and distinguishes ATK discharging, charging and full states. MCHOSE V9 Turbo+ now separates external power with unknown level from explicit offline, so silence or external power is never shown as 0% / 100%.
+
 ## Version 1.4.10
 
 This version is released as a portable build first. It adds read-only battery support for EWEADN S9 PRO 8K, EWEADN S9 (M156), MCHOSE G87 V2, Flydigi APEX5 and GameSir Nova / Cyclone 2. The user-verified S9 PRO 8K path reported 23%–98% and charging data. Every path sends only reviewed queries; no configuration, rumble, lighting or mode writes are exposed.

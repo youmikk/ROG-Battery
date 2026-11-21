@@ -4,7 +4,7 @@
 
 Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with simulated protocol coverage and Logitech hardware validation pending. Battery observations now distinguish live, cached and stale readings; failed queries alone do not establish disconnection. See [protocol research](PROTOCOLS.en.md) for upstream catalogs and capability boundaries.
 
-This document lists additions in 1.4.10, 1.4.9, 1.4.8, 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
+This document lists additions in 1.4.11, 1.4.10, 1.4.9, 1.4.8, 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
 Version 1.4.8 release validation (2026-11-22): all 319 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. The taskbar battery strip was verified to display, open the quick-view panel on click and close it on a second click. The existing VGN read-only probe returned valid data; new models still require hardware acceptance.
 
@@ -12,7 +12,13 @@ Version 1.4.9 acceptance candidate: all 326 local regressions and the warning-fr
 
 Version 1.4.10 portable validation: all 354 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and SHA256. A live mock-device run displayed separate mouse, keyboard, headset and gamepad cards. The post-1.4.10 FF90 headset state expansion passes 356 local regressions. New EWEADN, MCHOSE G87 V2, Flydigi and GameSir protocols still need matching hardware acceptance; S9 PRO 8K already has user hardware readings.
 
+Version 1.4.11 portable validation: all 356 local regressions and the warning-free Windows x64 release build passed, including runtime version, PE type and SHA256. FF90 adds ATK N9 V2 ULTRA and corrects MCHOSE external-power/offline handling. Matching hardware acceptance remains pending.
+
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed and the Windows x64 release build completed without warnings. Synthetic keyboard, headset and gamepad render checks covered Chinese/English, light/dark themes and 100% / 125% scaling; these were not hardware-connection evidence.
+
+## Version 1.4.11
+
+This version adds ATK N9 V2 ULTRA through the FF90 battery query and corrects ATK/MCHOSE headset state semantics. Exact bytes, descriptors and validation limits remain in the ATK N9 V2 ULTRA / MCHOSE V9 section below.
 
 ## Version 1.4.10
 
