@@ -26,6 +26,14 @@ AULA places its identity checksum at complete-frame byte 8 and sends no equivale
 
 This addition follows the 1.4.7 tag. All 303 local regressions and the warning-free release build pass. Official catalogs and static scripts provide the protocol evidence, while tests use synthetic frames; no local F75 / F87 PRO was available. Windows SET_REPORT transport, receiver caching, wake recovery, switching between AULA and MCHOSE devices on one receiver and vendor-software coexistence remain hardware checks.
 
+## In development: 8BitDo Pro 3 controller
+
+Limited to D-input mode `2DC8:6009`, standard Gamepad `0001:0005`, and a descriptor proving that every Input Report ID is `04` with a 15–64-byte input capacity. The adapter opens a read-only input handle and sends no Feature, Output, rumble, lighting, mode or initialization command. XInput mode uses a different PID and does not enter this private-report parser.
+
+Each read receives at most 64 reports within 400 ms and accepts only an Input Report `04` with the declared capacity. Byte 14 contains an exact percentage in bits 0–6 and a charging bit at bit 7. A 0% value is retained; values 101–127 are rejected. At 100%, the controller is treated as charged rather than actively charging. Background publication is capped at ten seconds, failed reads do not renew the sample time, numbers expire after 120 seconds and a new report restores them automatically.
+
+Developed after the 1.4.7 tag, with all 308 local regressions and the warning-free release build passing. Evidence comes from a pinned SDL driver and public MyFinder records; a reporter also confirmed Pro 3 sending this report over D-input Bluetooth without Steam. No matching local hardware was available. Windows descriptors, 0% / 100%, charging transitions, sleep recovery, multiple controller instances and coexistence with Steam or vendor software remain pending.
+
 ## In development: AJAZZ AJ179 PRO
 
 Restricted to `3151:402D` receivers and `3151:4026` USB, `FFFF:0002`, Windows Feature capacity 65 and only report ID 0 in a unique management collection. Several brands share these IDs; only mouse identity `1851` is named AJ179 PRO and receives configuration access. Other valid identities retain a neutral name and receiver battery only. Bluetooth `402C`, newer controllers and other AJAZZ protocols are excluded.

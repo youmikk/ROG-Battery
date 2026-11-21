@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md)
 
-轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并逐步支持 Logitech、雷柏、VGN、VXE、ATK、Razer、Lamzu、WLMouse、MCHOSE、Sony、HyperX、Cherry 和 Arctis Nova 的部分设备，以及 XInput 与标准 HID 电量查询。通过 Windows HID 和系统接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
+轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并逐步支持 Logitech、雷柏、VGN、VXE、ATK、Razer、Lamzu、WLMouse、MCHOSE、狼蛛、黑爵、达尔优、漫步者、八位堂、Sony、HyperX、Cherry 和 Arctis Nova 的部分设备，以及 XInput 与标准 HID 电量查询。通过 Windows HID 和系统接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
 
 [![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#系统要求)
@@ -23,6 +23,8 @@
 狼蛛 SC380 PRO 新增 2.4G 电量、实际 X/Y DPI 档位读取与切换。型号签名确认后读取原配置，切档保留其他设置并完整读回；充电状态保持未知，有线和其他狼蛛型号暂未接入，待实机验收。
 
 狼蛛 F75、F87 PRO 的 2.4G 电量与充电查询也已接入。两者与部分迈从键盘共用 `3554:FA09` 接收器，程序会按完整型号码选择协议，并在读取前后确认设备身份；F87 的官方无线集合存在冲突，暂不启用。
+
+八位堂 Pro 3 在 D-input 模式下增加只读电量和充电显示。程序按标准手柄集合与唯一 Input Report `04` 限定接口，只接收现有状态报文，不发送模式、震动或灯光命令；XInput 模式继续使用系统电量接口。
 
 ## 1.4.7
 

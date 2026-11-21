@@ -72,6 +72,15 @@ impl Descriptor {
             && self.report_ids(2).is_some_and(|ids| !ids.is_empty()
                 && required.iter().all(|id| ids.contains(id)) && ids.iter().all(|id| allowed.contains(id)))
     }
+
+    /// Prove that every advertised input report ID is in a small protocol
+    /// allow-list. The caller must separately validate the collection usage.
+    pub fn input_report_ids(&self, interface: &HidInterface, length: u16, allowed: &[u8]) -> bool {
+        self.caps.usage_page == interface.usage_page && self.caps.usage == interface.usage
+            && length > 0 && self.caps.input_report_byte_length == length
+            && self.report_ids(0).is_some_and(|ids| !ids.is_empty()
+                && ids.iter().all(|id| allowed.contains(id)))
+    }
 }
 
 impl Drop for Descriptor {

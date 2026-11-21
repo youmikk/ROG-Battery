@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | **English**
 
-A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse, MCHOSE, Sony, HyperX, Cherry and Arctis Nova devices, plus XInput and standard HID battery queries. It communicates through Windows HID and system APIs, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
+A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, Sony, HyperX, Cherry and Arctis Nova devices, plus XInput and standard HID battery queries. It communicates through Windows HID and system APIs, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
@@ -19,6 +19,8 @@ AJAZZ AJ179 PRO adds 2.4 GHz battery and actual X/Y stage reading/switching over
 AULA SC380 PRO adds 2.4 GHz battery and actual X/Y DPI-stage reading/switching. The model signature is checked before reading configuration; switching preserves other settings and verifies the complete block afterward. Charging remains unknown. Wired mode and other AULA models are not integrated yet; hardware acceptance is pending.
 
 AULA F75 and F87 PRO now receive 2.4 GHz battery and charging reads. They share a `3554:FA09` receiver with some MCHOSE keyboards, so the app selects framing from the complete model code and verifies identity before and after the battery query. F87 remains disabled because its official wireless collection entry conflicts with this path.
+
+8BitDo Pro 3 adds read-only battery and charging display in D-input mode. The adapter requires the standard gamepad collection and only Input Report `04`, reads the existing state stream and sends no mode, rumble or lighting command. XInput mode continues to use the system battery API.
 
 ## Version 1.4.7
 
