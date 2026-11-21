@@ -14,6 +14,8 @@ Further work prioritizes commonly used Chinese brands: Rapoo, VGN / VXE / ATK, M
 
 MCHOSE mouse work adds Feature-protocol battery, identity and actual-stage reads for A7 V2 and selected L7 models, with existing-stage switching on A7 V2 Ultra+ / L7 Pro+. Some older A7 Ultra receivers are documented not to return battery; a shared name does not guarantee compatibility. A7 V3 and old A5 protocols are not implemented yet.
 
+AJAZZ AJ179 PRO adds 2.4 GHz battery and actual X/Y stage reading/switching over USB or its receiver. The mouse's own ID establishes its model; switching reads the current profile and preserves all stage values and colors. Charging and wired battery remain unknown, Bluetooth is not integrated, and hardware acceptance is pending.
+
 ## Version 1.4.7
 
 USB and Bluetooth battery reads are added for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).

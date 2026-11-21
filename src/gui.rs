@@ -4155,7 +4155,7 @@ mod backend_tests {
         for (backend, family) in [(BackendId::VgnKeyboard, DeviceFamily::Keyboard),
             (BackendId::MchoseQhw, DeviceFamily::Keyboard), (BackendId::Keyboard20, DeviceFamily::Keyboard),
             (BackendId::Edifier, DeviceFamily::Headset), (BackendId::Dareu, DeviceFamily::Mouse),
-            (BackendId::MchoseMouse, DeviceFamily::Mouse)] {
+            (BackendId::MchoseMouse, DeviceFamily::Mouse), (BackendId::GearHub, DeviceFamily::Mouse)] {
         let now = std::time::Instant::now();
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
         let mut shared = Shared::new(Settings::default());
@@ -4335,7 +4335,7 @@ mod backend_tests {
     #[test]
     fn configuration_bound_stages_use_their_backend_queue_and_disable_writes_after_partial_reads() {
         for (backend, key, last) in [(BackendId::Rapoo, "rapoo", 6), (BackendId::Dareu, "dareu", 4),
-            (BackendId::MchoseMouse, "mchose", 5)] {
+            (BackendId::MchoseMouse, "mchose", 5), (BackendId::GearHub, "gearhub", 7)] {
         let shared=Arc::new(Mutex::new(Shared::new(Settings::default())));let signal=Signal::new(60);
         let mut reading=snapshot(backend,key,70);
         reading.dpi=Dpi {current:Some(800),current_y:Some(1600),active_stage:Some(1),profile:Some(2),

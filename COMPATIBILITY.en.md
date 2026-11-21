@@ -8,6 +8,18 @@ This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
 
+## In development: AJAZZ AJ179 PRO
+
+Restricted to `3151:402D` receivers and `3151:4026` USB, `FFFF:0002`, Windows Feature capacity 65 and only report ID 0 in a unique management collection. Several brands share these IDs; only mouse identity `1851` is named AJ179 PRO and receives configuration access. Other valid identities retain a neutral name and receiver battery only. Bluetooth `402C`, newer controllers and other AJAZZ protocols are excluded.
+
+Receiver percentage is exact; charging remains unknown. USB exposes settings without inventing battery or charging state. Explicit offline clears old readings; failed queries preserve sample age, with expiry after 120 seconds and a maximum ten-second background wait. A valid new reply restores the number. Receiver-side sleep caching still needs hardware testing.
+
+The current one-of-eight profile is queried before its complete X/Y table; profile 0 is not assumed or selected. Disabled slots retain their original indices, including internal gaps, and duplicate values are not merged. The current vendor catalog permits reads of 50–32000 in steps of 50. Published hardware write evidence extends only to 26000, so any enabled axis above that limit makes the whole table read-only. Switching preserves all eight stored slots, colors and reserved fields in the 64-byte block, changing only the active index and protocol header before full readback. Numerical edits, custom presets, stage-count changes and polling-rate writes are not exposed.
+
+Identity and complete configuration are rechecked before writes. A lost send completion is not retried or blindly rolled back; success requires matching readback. There is no transaction ID or system-wide exclusive lock. Vendor-software races, same-model replacement, USB/receiver deduplication and power-cycle persistence remain unresolved hardware checks.
+
+This is development work after the 1.4.7 tag; all 285 local regressions and a warning-free release build passed. Published original replies provide offline decoding evidence; other boundary and write cases use synthetic reports. No local AJ179 PRO was available to validate Windows Feature transport, wake or physical stage switching.
+
 ## In development: Dareu and MCHOSE mice
 
 These adapters were developed after the 1.4.7 tag. Protocol regressions pass, but no matching device was available for local hardware acceptance. Catalog entries and upstream hardware reports are not local compatibility certification.
