@@ -6,7 +6,7 @@
     DisplayName = 'R Battery'
     ShortName = 'R Battery'
     Description = 'Peripheral battery monitor and mouse settings utility.'
-    Version = '1.4.6.0'
+    Version = '1.4.7.0'
     Executable = 'rog-mouse-ctl.exe'
     StartupTaskId = 'RogBatteryAutoStart'
 

@@ -159,7 +159,7 @@ Arctis Nova 的型号与状态偏移由 HeadsetControl 交叉核对，Windows 65
 
 后续手柄研究发现 Voltide 的 XInput 适配把有线连接显示为 100% 充电，并把四级电量映射成未标注的百分比；有线模式不证明满电或充电，等级换算必须带 ≈，不当作精确测量。
 
-## 开发中：DualSense 电量
+## 1.4.7：DualSense 电量
 
 已交叉核对 Voltide 的 Windows 通道行为与 Linux `hid-playstation.c` 的报告结构、状态解析和 CRC。USB 输入为 Report `01` / 64 字节，状态偏移 53；蓝牙完整输入为 Report `31` / 78 字节，状态偏移 54，末四字节保存小端 CRC32。计算先放入前缀 `A1`，再放入前 74 字节；初始化全 1、最终取反。精简蓝牙 Report `01` 不含电量，即使 Windows 补齐缓冲长度也不能按 USB 偏移读取。
 
@@ -169,7 +169,7 @@ Arctis Nova 的型号与状态偏移由 HeadsetControl 交叉核对，Windows 65
 
 适配器轮询等待上限为两秒，电量有效期八秒，超时保留原测量时间并按期隐藏；新报告恢复数字。Windows 实例隔离同型号设备；跨 USB / 蓝牙的同一设备去重尚未接入。诊断不保留输入载荷。本机没有对应手柄，实机传输、休眠及 Steam / DS4Windows 共存验收待完成。
 
-## 开发中：XInput 系统电量
+## 1.4.7：XInput 系统电量
 
 依据微软 [XInputGetBatteryInformation](https://learn.microsoft.com/en-us/windows/win32/api/xinput/nf-xinput-xinputgetbatteryinformation) 与 [XINPUT_BATTERY_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/xinput/ns-xinput-xinput_battery_information) 文档核对 Voltide 的实现。电池类型 0 为断开、1 为有线、2 为碱性、3 为镍氢、FF 为未知。只有已知无线电池类型的等级有效；0～3 分别为空、低、中、满，没有百分比阈值或充电状态。
 
@@ -179,7 +179,7 @@ Arctis Nova 的型号与状态偏移由 HeadsetControl 交叉核对，Windows 65
 
 XInput 不提供型号或持久物理 ID，不使用 VID/PID 猜测槽位，也不推断虚拟控制器对应哪个 HID 设备。偏好按系统槽位保存，快速替换和跨协议重复项的边界已写入兼容性说明。本地 192 项回归及构建通过；本机系统 API 正常，暂无已连接手柄可做电量实测。
 
-## 开发中：Sony INZONE 电量
+## 1.4.7：Sony INZONE 电量
 
 HeadsetControl 的 `sony_inzone_protocol.hpp`、H5 / H9 II 型号定义和接口选择测试，与 sony-h5-tray 的公开 H5 报文交叉核对。H5 使用 `FF04:0002`，H9 II 使用 `FF04:0001` / `MI_05`。FerrisPulse 的 H5 路径会在 usage 1 未找到时退回任意 64 字节输出集合，本项目不采用这一宽泛回退，也不访问 `FF13` 升级接口。
 
@@ -189,7 +189,7 @@ HeadsetControl 的 `sony_inzone_protocol.hpp`、H5 / H9 II 型号定义和接口
 
 本次独立实现仅含状态查询，复用每接口串行化和现有生命周期。协议与状态回归通过，实机验收待完成；公开报文与合成异常测试不是本机硬件抓取。
 
-## 开发中：HyperX Cloud Alpha 2 电量
+## 1.4.7：HyperX Cloud Alpha 2 电量
 
 核对 HeadsetControl `62e361b` 的 `hyperx_cloud_alpha_2_wireless.hpp` 与对应测试，以及 MyFinder `73d99e2` 的 `hyperx_alpha2.py` 与测试。两者公开报文共同确认控制基站 `03F0:08BE`、`FF13:FF00`、64 字节和 `50 02` / `51 02`，不能读取 `0ABE` 音频端，也不能用恒定的 `61 02` 音频设置当成电量。
 
@@ -199,7 +199,7 @@ HeadsetControl 的 `sony_inzone_protocol.hpp`、H5 / H9 II 型号定义和接口
 
 NuPhy 原厂键盘的接入暂未扩大：FerrisPulse 的 `55` / `AA` 路径会用默认模式和缓存设置补全未知值；另查 Slone123c/nuphy-air75-v2-web-panel `02c54f3094afc655a84271159053a19abd83f1fb`，其 README 明确为自定义固件，不能用来证明 Air V2 原厂固件支持同一电量命令。后续须补齐型号、描述符及有效回复证据。
 
-## 开发中：CHERRY MX 2.0S WL Pro
+## 1.4.7：CHERRY MX 2.0S WL Pro
 
 原项目 `af82d4d` 仅用于核对固定输出命令及字节含义；实际 Pro 型号的 USB / 接收器身份、`MI_01` / `FF1C:0092` 和双向 Report `04` 依据 MyFinder `73d99e2` 与议题 #482。型号目录没有扩展成整个 Cherry VID；原项目所述 `01AC` 与蓝牙 `0687:01DE` 均不沿用 Pro 私有查询。
 

@@ -2,23 +2,25 @@
 
 [简体中文](README.md) | **English**
 
-A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse and MCHOSE devices and standard HID battery queries. It communicates through Windows HID interfaces, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
+A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse, MCHOSE, Sony, HyperX, Cherry and Arctis Nova devices, plus XInput and standard HID battery queries. It communicates through Windows HID and system APIs, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
-Support covers selected devices with implemented protocols, not entire brands. New mouse and headset adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
+Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
-## In development
+## Version 1.4.7
 
-The development branch adds USB and Bluetooth battery reads for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. This feature is not part of the 1.4.6 tag. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).
+USB and Bluetooth battery reads are added for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).
 
 Windows XInput battery reads are also integrated when the current driver returns a valid battery grade. System slots are shown separately, four-level estimates carry ≈, and wired or unknown battery types do not produce invented charge or charging status. Hardware acceptance remains pending.
 
-Sony INZONE H5 and H9 II receiver battery queries are integrated on the development branch, with model-specific control interfaces and separate percentage and charging data. No headset settings are written; hardware acceptance remains pending.
+Sony INZONE H5 and H9 II receiver battery queries use model-specific control interfaces and separate percentage and charging data. No headset settings are written; hardware acceptance remains pending.
 
 HyperX Cloud Alpha 2 Wireless base-station battery, charging and voltage queries are also integrated, checking headset connection before and after battery reads and filtering unrelated traffic. Hardware acceptance remains pending.
 
 Keyboard coverage adds CHERRY MX 2.0S WL Pro USB / 2.4 GHz battery and charging queries, limited to reviewed identities and management collections. Bluetooth and other Cherry models are outside this addition; hardware acceptance remains pending.
+
+Standard HID strengths scaled from descriptor ranges also carry ≈, while native percentages retain ordinary numbers. Version 1.4.7 is released as a portable build first; Microsoft Store submission follows stability acceptance separately.
 
 ## Version 1.4.6
 

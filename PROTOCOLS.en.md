@@ -109,7 +109,7 @@ These adapters implement read-only battery status with per-interface serializati
 
 Further gamepad review found that Voltide maps XInput wired connections to 100% charging and converts four levels into unmarked percentages. Wired mode does not establish full charge or charging; any level-derived percentage must be marked ≈ and kept separate from exact measurements.
 
-## In development: DualSense battery
+## Version 1.4.7: DualSense battery
 
 Voltide's Windows transport was cross-checked with Linux `hid-playstation.c`. USB input is Report `01`, exactly 64 bytes, with battery status at offset 53. Bluetooth extended input is Report `31`, exactly 78 bytes, with status at offset 54 and a little-endian CRC32 in the last four bytes. CRC includes prefix `A1` followed by the first 74 bytes, with all-one initialization and final inversion. Bluetooth minimal Report `01` has no battery field, even when Windows pads it to the maximum length.
 
@@ -119,7 +119,7 @@ Input handles request read access only. A 41-byte calibration Feature `05` GET i
 
 The polling wait is capped at two seconds and samples expire after eight seconds. Silence retains the original timestamp until expiry, while fresh reports restore the numeric display. Windows interface instances distinguish identical controllers; USB / Bluetooth cross-transport deduplication is not implemented. No input payloads are logged. Neither controller is present locally; hardware transport, sleep recovery and Steam / DS4Windows coexistence remain pending.
 
-## In development: XInput system battery
+## Version 1.4.7: XInput system battery
 
 Microsoft's [XInputGetBatteryInformation](https://learn.microsoft.com/en-us/windows/win32/api/xinput/nf-xinput-xinputgetbatteryinformation) and [XINPUT_BATTERY_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/xinput/ns-xinput-xinput_battery_information) documentation were checked against Voltide. Battery types 0/1/2/3/FF mean disconnected/wired/alkaline/NiMH/unknown. Levels 0–3 mean empty/low/medium/full and are valid only for known wireless battery types. No percentage boundaries or charging flag are specified.
 
@@ -129,7 +129,7 @@ Endpoints now distinguish HID interfaces from XInput slots, preserving existing 
 
 XInput exposes neither model names nor persistent physical IDs. The adapter does not guess a slot's VID/PID or associate virtual controllers with HID devices. Preferences follow system slots; quick replacement and cross-protocol duplicate limitations are documented. All 192 local regressions and the release build passed; the system API loaded, with no connected controller available for battery acceptance.
 
-## In development: Sony INZONE battery
+## Version 1.4.7: Sony INZONE battery
 
 HeadsetControl's `sony_inzone_protocol.hpp`, H5 / H9 II definitions and interface tests were cross-checked against sony-h5-tray's published H5 frames. H5 uses `FF04:0002`; H9 II uses `FF04:0001` / `MI_05`. FerrisPulse's H5 path falls back from usage 1 to any 64-byte output collection. This adapter does not use that broad fallback or access `FF13` update interfaces.
 
@@ -139,7 +139,7 @@ Payload bytes are charger state and percentage. Values 0–100 retain reported p
 
 The independent implementation sends only status queries, using existing per-interface serialization and lifecycle rules. Protocol and state regressions pass; hardware acceptance is pending. Published frames and synthetic negative tests are not local hardware captures.
 
-## In development: HyperX Cloud Alpha 2 battery
+## Version 1.4.7: HyperX Cloud Alpha 2 battery
 
 HeadsetControl `62e361b`'s `hyperx_cloud_alpha_2_wireless.hpp` and tests were checked against MyFinder `73d99e2`'s `hyperx_alpha2.py` and tests. Their published frames agree on station `03F0:08BE`, collection `FF13:FF00`, 64-byte reports and `50 02` / `51 02`. Neither the `0ABE` audio function nor invariant `61 02` audio settings supplies battery.
 
@@ -149,7 +149,7 @@ Connection `52 01` returns `53 01` plus 0/1. ACK `FF 01` and NACK `FF 02` echo t
 
 NuPhy stock-firmware coverage is not expanded yet. FerrisPulse's `55` / `AA` path fills missing modes and settings from defaults or caches. Slone123c/nuphy-air75-v2-web-panel revision `02c54f3094afc655a84271159053a19abd83f1fb` explicitly describes custom firmware in its README and cannot establish the same battery commands on stock Air V2 firmware. Model, descriptor and valid-response evidence remains necessary.
 
-## In development: CHERRY MX 2.0S WL Pro
+## Version 1.4.7: CHERRY MX 2.0S WL Pro
 
 The original `af82d4d` implementation supplies fixed-command and field evidence. Pro USB / receiver identities, `MI_01` / `FF1C:0092` and bidirectional Report `04` come from MyFinder `73d99e2` and issue #482. The catalog is not widened to the full Cherry VID; original `01AC` and Bluetooth `0687:01DE` do not inherit Pro queries.
 

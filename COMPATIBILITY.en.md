@@ -4,11 +4,13 @@
 
 Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with simulated protocol coverage and Logitech hardware validation pending. Battery observations now distinguish live, cached and stale readings; failed queries alone do not establish disconnection. See [protocol research](PROTOCOLS.en.md) for upstream catalogs and capability boundaries.
 
-This document lists additions in 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
+This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
-## In development: DualSense gamepads
+Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
 
-The adapter matches Sony `054C:0CE6` DualSense and `054C:0DF2` DualSense Edge, only on `0001:0005` Game Pad collections with 64-byte USB or 78-byte Bluetooth input descriptors. This work follows the 1.4.6 tag.
+## Version 1.4.7: DualSense gamepads
+
+The adapter matches Sony `054C:0CE6` DualSense and `054C:0DF2` DualSense Edge, only on `0001:0005` Game Pad collections with 64-byte USB or 78-byte Bluetooth input descriptors. This feature is included from version 1.4.7.
 
 - USB Report `01` carries battery status at offset 53; Bluetooth Report `31` uses offset 54 and requires CRC32 with prefix `A1`. A padded Bluetooth minimal Report `01` is never parsed as USB battery data.
 - Bands 0–9 display ≈5%–≈95%; band 10 or the fully charged state displays ≈100%. Charging stays separate. Voltage, temperature and charging errors never become 0%, and invalid bands are not clamped to full.
@@ -18,7 +20,7 @@ The adapter matches Sony `054C:0CE6` DualSense and `054C:0DF2` DualSense Edge, o
 
 On 2026-11-21, all 187 local regressions passed and the Windows x64 build completed without warnings. Coverage includes USB / Bluetooth layouts, CRC, invalid and truncated reports, minimal mode, identical models, expiry and recovery. Neither controller is currently attached locally; hardware transport, sleep recovery and Steam / DS4Windows coexistence remain unverified. The read-only hardware probe still returned valid ROG and VGN keyboard battery readings.
 
-## In development: XInput gamepads
+## Version 1.4.7: XInput gamepads
 
 Windows' system XInput 1.4 provides four slots through `XInputGetState` and `XInputGetBatteryInformation`. Support depends on the current Xbox-compatible driver and connection returning battery data, not on a whole-brand claim. The adapter does not fabricate HID paths, VID/PID or physical model names, and sends no vibration or settings commands.
 
@@ -28,7 +30,7 @@ Names, tray selection and order are saved by slot. XInput exposes no stable phys
 
 On 2026-11-21 all 192 local regressions passed and the Windows x64 build completed without warnings. The system API loaded successfully with all four slots disconnected. Battery grades, wireless / wired transitions, sleep recovery and different drivers still need hardware acceptance. The read-only probe returned valid VGN keyboard charge; the ROG receiver supplied no valid device reading in this run.
 
-## In development: Sony INZONE headsets
+## Version 1.4.7: Sony INZONE headsets
 
 The adapter matches only Sony `054C:0EBF` H5 on collection `FF04:0002`, and `054C:0FA8` H9 II on `FF04:0001` / `MI_05`, with 64-byte input and output reports. H3, H7, original H9, Buds, PS5 mode and firmware-update interfaces are outside this adapter's scope.
 
@@ -37,9 +39,9 @@ The adapter matches only Sony `054C:0EBF` H5 on collection `FF04:0002`, and `054
 - Values 0–100 are device-reported percentages without ≈. Charger bytes 0/1 mean not charging / charging; other values remain unknown. Full charge does not imply charging. Battery `FF` explicitly marks offline and clears prior numbers; 101–254 are invalid.
 - Background polling waits at most ten seconds. Failed queries retain the original sample time, with numbers hidden after 120 seconds and restored by a valid response. Identical receiver models retain separate Windows interface identities.
 
-Protocol tests cover a published H5 notification, transaction wraparound, echoes, unrelated events, checksum errors, valid zero, offline and wake. UI-state regressions cover expiry and recovery. Neither headset is attached locally; USB communication, power recovery, receiver mode changes and INZONE Hub coexistence await hardware acceptance. This feature is not part of the 1.4.6 tag.
+Protocol tests cover a published H5 notification, transaction wraparound, echoes, unrelated events, checksum errors, valid zero, offline and wake. UI-state regressions cover expiry and recovery. Neither headset is attached locally; USB communication, power recovery, receiver mode changes and INZONE Hub coexistence await hardware acceptance. This feature is included from version 1.4.7.
 
-## In development: HyperX Cloud Alpha 2 Wireless
+## Version 1.4.7: HyperX Cloud Alpha 2 Wireless
 
 Only the `03F0:08BE` control station's `FF13:FF00` collection with 64-byte input/output reports is matched. The `03F0:0ABE` audio function, `FF13:0001` sibling, original Alpha, and Cloud II / III protocols are excluded. Only connection and battery queries are sent; audio settings are not written.
 
@@ -48,9 +50,9 @@ Only the `03F0:08BE` control station's `FF13:FF00` collection with 64-byte input
 - Connection is checked before and after battery. A power-off during the read cannot publish station-cached charge. Failed reconfirmation cannot renew the prior sample; explicit offline clears it. Polling waits at most ten seconds, cached samples expire after 120 seconds, and identical stations keep separate interface identities.
 - The protocol has no transaction number or checksum. Same-command replies from another process cannot be reliably distinguished. Filtering and bounded queue draining do not replace NGENUITY coexistence testing; cross-mode USB deduplication is not claimed.
 
-Protocol regressions use four published HeadsetControl / MyFinder frames plus synthetic faults and query transcripts, covering charge, voltage, rejection, power-off and expiry. No matching headset is attached locally; USB transport, power recovery and NGENUITY coexistence await hardware acceptance. This feature is not part of the 1.4.6 tag.
+Protocol regressions use four published HeadsetControl / MyFinder frames plus synthetic faults and query transcripts, covering charge, voltage, rejection, power-off and expiry. No matching headset is attached locally; USB transport, power recovery and NGENUITY coexistence await hardware acceptance. This feature is included from version 1.4.7.
 
-## In development: CHERRY MX 2.0S WL Pro
+## Version 1.4.7: CHERRY MX 2.0S WL Pro
 
 The adapter matches receiver `046A:01E0` / `MX 2.0S Pro Dongle` and USB `046A:01DE` / `MX 2.0S WL Pro`, requiring `MI_01`, `FF1C:0092` and 64-byte input/output. Eligible management collections must be unique within the Windows USB interface instance. Both button and value capabilities must establish input/output Report `04` only; otherwise no query is sent. Full physical-parent resolution across USB interfaces is not implemented.
 
@@ -60,7 +62,7 @@ The hardware meaning of 0% is unverified and zero payloads cannot be reliably di
 
 USB and receiver paths retain separate identities; identical keyboards are not merged by name or serial. A keyboard connected through both transports may show two cards, with independent tray visibility. Bluetooth `0687:01DE` and other Cherry products such as `046A:01AC` are excluded from this private adapter.
 
-Evidence includes the original project's fixed query and MyFinder issue #482's identity, report-descriptor and reply-prefix records. Regression padding is synthetic. No matching keyboard is attached locally; low/full battery, stopped charging, long sleep recovery, multiple units and Cherry Utility coexistence await acceptance. Upstream reported a temporary 3–4 percentage-point difference after changing connections; its cause remains unresolved despite later agreement. This feature is not part of the 1.4.6 tag.
+Evidence includes the original project's fixed query and MyFinder issue #482's identity, report-descriptor and reply-prefix records. Regression padding is synthetic. No matching keyboard is attached locally; low/full battery, stopped charging, long sleep recovery, multiple units and Cherry Utility coexistence await acceptance. Upstream reported a temporary 3–4 percentage-point difference after changing connections; its cause remains unresolved despite later agreement. This feature is included from version 1.4.7.
 
 ## Version 1.4.6: software DPI presets
 
@@ -180,7 +182,7 @@ Additional backends share descriptor scans for 500 milliseconds without extendin
 | Rapoo nRF54L | 77 official driver model entries, covering specific VT0 / VT1 / VT2 / VT3 / VT4 / VT6 / VT7 / VT8 / VT9 variants and ESM models | Status report reads implemented | Current DPI read-only; independent X/Y is not shown as one DPI | 1.4.4; per-model hardware validation pending |
 | VGN Beiying | V98 Pro V3, USB / 2.4G | Wired feature and receiver status queries implemented | No DPI for keyboards | USB read verified; receiver and wake recovery validation pending |
 
-Voltage and coarse HID++ battery levels are not shown as exact percentages. Charging remains unknown when standard HID does not expose it. The development branch also distinguishes native 0–100 percentages from other descriptor ranges: values scaled from 0–4, 0–255 and other ranges carry ≈, retain their precision through caching and cannot trigger exact-percentage notifications.
+Voltage and coarse HID++ battery levels are not shown as exact percentages. Charging remains unknown when standard HID does not expose it. Version 1.4.7 also distinguishes native 0–100 percentages from other descriptor ranges: values scaled from 0–4, 0–255 and other ranges carry ≈, retain their precision through caching and cannot trigger exact-percentage notifications.
 
 HID++ 1.0 receivers that expose pairing information provide per-slot names and device types. Device identities are hashed before they are used for preferences. A temporary identity query failure retains the existing card; first-time identity confirmation migrates custom names, types, tray selection and order without treating a replacement device as the original one. If HID++ 2.0 unified battery reports only a coarse level, other battery features are queried for an exact percentage supplied by the device.
 

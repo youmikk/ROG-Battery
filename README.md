@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md)
 
-轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并逐步支持 Logitech、雷柏、VGN、VXE、ATK、Razer、Lamzu、WLMouse 和 MCHOSE 的部分设备及标准 HID 电量查询。通过 Windows HID 接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
+轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并逐步支持 Logitech、雷柏、VGN、VXE、ATK、Razer、Lamzu、WLMouse、MCHOSE、Sony、HyperX、Cherry 和 Arctis Nova 的部分设备，以及 XInput 与标准 HID 电量查询。通过 Windows HID 和系统接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
 
 [![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#系统要求)
@@ -10,19 +10,21 @@
 
 [下载绿色版](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [更新日志](CHANGELOG.md)
 
-各品牌只支持已接入协议的部分设备，并非全系兼容。新增鼠标及耳机适配已通过协议模拟测试，仍待逐型号实机验证；具体实现范围见[兼容性说明](COMPATIBILITY.md)。
+各品牌只支持已接入协议的部分设备，并非全系兼容。新增适配已通过协议模拟测试，仍待逐型号实机验证；具体实现范围见[兼容性说明](COMPATIBILITY.md)。
 
-## 开发中
+## 1.4.7
 
-开发分支已接入 Sony DualSense / DualSense Edge 的 USB、蓝牙电量读取，区间值显示为带 ≈ 的数字。此功能不在 1.4.6 标签内，协议回归已通过，实机验收待完成，范围见[兼容性说明](COMPATIBILITY.md)。
+新增 Sony DualSense / DualSense Edge 的 USB、蓝牙电量读取，区间值显示为带 ≈ 的数字。协议回归已通过，实机验收待完成，范围见[兼容性说明](COMPATIBILITY.md)。
 
 同时接入 Windows XInput 手柄电量，兼容性取决于当前驱动是否返回有效电池等级。系统槽位分别显示，四级估值带 ≈，有线或未知电池类型不显示虚构的电量和充电状态；对应硬件验收待完成。
 
-Sony INZONE H5、H9 II 的接收器电量查询已接入开发分支，分别匹配控制接口，保留设备返回的百分比与充电信息；不包含耳机设置写入，实机验收待完成。
+新增 Sony INZONE H5、H9 II 接收器电量查询，分别匹配控制接口，保留设备返回的百分比与充电信息；不包含耳机设置写入，实机验收待完成。
 
 同时接入 HyperX Cloud Alpha 2 Wireless 基站的电量、充电和电压查询，读取前后确认耳机连接，过滤其他基站消息；实机验收待完成。
 
 键盘增加 CHERRY MX 2.0S WL Pro 的 USB / 2.4G 电量与充电查询，限定已核对的型号和管理接口；蓝牙与其他 Cherry 型号不在本次范围，实机验收待完成。
+
+标准 HID 按描述符范围换算的电量也统一显示 ≈，精确百分比继续使用普通数字。1.4.7 先提供绿色版，微软商城提交待稳定性验收后单独进行。
 
 ## 1.4.6
 
