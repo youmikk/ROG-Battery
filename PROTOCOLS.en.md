@@ -193,6 +193,21 @@ The descriptor must prove one unique `FF02:0002` management collection per USB i
 
 All five new identities still require matching wireless hardware. The existing wired `258A:024E` V98 Pro V3 path remains separate and returned a valid 100% plus charging in this project; that result does not validate the wireless transports. Descriptors, 0%, charging transitions, sleep recovery and coexistence with VGN HUB require later hardware records.
 
+## In development: EWEADN S9 PRO 8K
+
+The read-only `372E:1026` basics query is independently implemented from pinned EWEADN HUB `vendor-bytech`, MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc`'s `eweadn_s9pro.py`, and user hardware evidence in issue #315. Other S7/S9 catalog entries share the same VID/PID, so the current display name is not established by a runtime model query.
+
+The vendor catalog splits control across `FF00:0001` and `FF06:0001`. Exactly one collection in an interface group must have a runtime descriptor proving Feature Report `03` is 64 bytes. A HidP collection maximum by itself is not report-ID proof, and another ID may own a larger report. A proven map may contain both `03:64` and `09:128`, while only `03` is transferred. Zero or multiple proven collections fail closed; the reader neither prefers FF00 nor retries the other page after a failure.
+
+The complete Feature request is `03 20 50 00 00 4F 81` plus 57 zeroes. Checksum `20` is the wrapping sum of the zero-initialized 63-byte payload and excludes the Report ID. The reviewed controller performs SET_FEATURE, waits 100 ms, then GET_FEATURE `03`; no state-changing handshake prerequisite is established. Two reply shapes are accepted:
+
+- The 16-byte user-verified form `03 50 00 0B 00 01 <battery> ...` requires presence byte `01` and a percentage from 1–100.
+- The 64-byte descriptor-capacity form requires ID `03`, ACK `00`, encapsulation index `00` and declared length 7–58; percentages from 0–100 are accepted. Empty, echoed, truncated, oversized, wrong-ID/ACK/index and out-of-range packets are rejected.
+
+Both forms use the low seven data bits as percentage and the high bit as charging. No response checksum, fixed TYPE or fixed OFFSET is invented. One query permits one request and one receive, with no retry and no UUID, online, reset, DPI, polling-rate, macro, display, pairing or firmware request.
+
+Issue #315 records the 16-byte reply, stable 23%–98% readings and charging changes on Windows x64. This project has no independent matching hardware. Other models under the shared ID, real 64-byte replies, sleep caching, wake-up, cold start and vendor-driver coexistence remain unverified.
+
 ## In development: MCHOSE QHW and BY keyboards
 
 The current [M HUB](https://www.mchose.com.cn/) entry was checked on 2026-11-21. Application `assets/main-DIt5vAcV.js` has SHA256 `cb10c9d3d29505bef2e2d3207dbe223601ff84c46d772b4a0f1e93ef02391c1b`; the official manifest points to `cizhou/CZ_SHARED_DATA/main.002bbdb0f17b5f7135ee.js`, SHA256 `d47d1d0e9e86efbbc1888d17f3bc5cd5caba73c06149a6f1fe26bb3d9386cbc3`. No vendor implementation license was found. Files were inspected statically for protocol facts, without executing or distributing their code/assets, and cross-checked with MyFinder `73d99e2`.

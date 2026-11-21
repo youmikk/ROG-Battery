@@ -1,5 +1,6 @@
 //! Inspect report capabilities without opening an input or output stream.
 use crate::{hid::HidInterface, win32::*};
+use std::collections::BTreeMap;
 use winapi::shared::hidpi::{HIDP_BUTTON_CAPS, HIDP_VALUE_CAPS};
 
 pub(super) struct Descriptor {
@@ -73,6 +74,34 @@ impl Descriptor {
                 && required.iter().all(|id| ids.contains(id)) && ids.iter().all(|id| allowed.contains(id)))
     }
 
+    /// Prove one simple byte-array feature report without assuming that the
+    /// collection maximum belongs to the report being transferred.
+    pub fn feature_byte_report(&self, interface: &HidInterface, id: u8, length: u16) -> bool {
+        if self.caps.usage_page != interface.usage_page
+            || self.caps.usage != interface.usage
+            || self.caps.number_feature_button_caps != 0
+            || self.caps.feature_report_byte_length < length
+        {
+            return false;
+        }
+        let count = self.caps.number_feature_value_caps;
+        if !(1..=32).contains(&count) {
+            return false;
+        }
+        let mut values: Vec<HIDP_VALUE_CAPS> =
+            (0..count).map(|_| unsafe { core::mem::zeroed() }).collect();
+        let mut returned = count;
+        if unsafe {
+            (self.api.get_value_caps)(2, values.as_mut_ptr(), &mut returned, self.preparsed)
+        } < 0
+            || returned != count
+        {
+            return false;
+        }
+        feature_byte_report_lengths(&values, self.caps.feature_report_byte_length)
+            .is_some_and(|sizes| sizes.get(&id) == Some(&length))
+    }
+
     /// Prove that every advertised input report ID is in a small protocol
     /// allow-list. The caller must separately validate the collection usage.
     pub fn input_report_ids(&self, interface: &HidInterface, length: u16, allowed: &[u8]) -> bool {
@@ -102,6 +131,28 @@ fn collect_ids(buttons: u16, values: u16,
     Some(ids)
 }
 
+fn feature_byte_report_lengths(
+    fields: &[HIDP_VALUE_CAPS],
+    maximum: u16,
+) -> Option<BTreeMap<u8, u16>> {
+    if !(2..=4096).contains(&maximum) || fields.is_empty() || fields.len() > 32 {
+        return None;
+    }
+    let mut sizes = BTreeMap::new();
+    for field in fields {
+        let length = field.ReportCount.checked_add(1)?;
+        if field.IsAlias != 0
+            || field.BitSize != 8
+            || field.ReportCount == 0
+            || length > maximum
+            || sizes.insert(field.ReportID, length).is_some()
+        {
+            return None;
+        }
+    }
+    (sizes.values().copied().max() == Some(maximum)).then_some(sizes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +177,33 @@ mod tests {
         assert!(collect_ids(1, 1, |buttons, _| buttons.then_some(vec![4])).is_none());
         assert!(collect_ids(2, 0, |_, _| Some(vec![4])).is_none());
         assert!(collect_ids(0, 1, |_, _| None).is_none());
+    }
+
+    #[test]
+    fn feature_report_proof_uses_each_report_id_and_requires_collection_maximum() {
+        fn field(id: u8, bytes: u16) -> HIDP_VALUE_CAPS {
+            let mut field: HIDP_VALUE_CAPS = unsafe { core::mem::zeroed() };
+            field.ReportID = id;
+            field.BitSize = 8;
+            field.ReportCount = bytes - 1;
+            field
+        }
+        let sizes = feature_byte_report_lengths(
+            &[field(3, 64), field(9, 128)],
+            128,
+        )
+        .unwrap();
+        assert_eq!(sizes.get(&3), Some(&64));
+        assert_eq!(sizes.get(&9), Some(&128));
+
+        let mut alias = field(3, 64);
+        alias.IsAlias = 1;
+        let mut bits = field(3, 64);
+        bits.BitSize = 16;
+        assert!(feature_byte_report_lengths(&[alias], 64).is_none());
+        assert!(feature_byte_report_lengths(&[bits], 64).is_none());
+        assert!(feature_byte_report_lengths(&[field(3, 64), field(3, 64)], 64).is_none());
+        assert!(feature_byte_report_lengths(&[field(3, 64)], 128).is_none());
+        assert!(feature_byte_report_lengths(&[], 64).is_none());
     }
 }

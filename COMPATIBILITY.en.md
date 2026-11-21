@@ -20,6 +20,14 @@ Five exact VGN / VXE 2.4 GHz keyboard identities are added: `258A:024F/027F/027B
 
 Each query is limited to 2.5 seconds. Failure neither clears nor renews the old sample, which expires after 120 seconds without a new valid reply. The existing wired `258A:024E` VGN V98 Pro V3 path still reads through its original Feature protocol; this project has obtained a valid 100% and charging reading from that device. All five new wireless identities still require matching hardware acceptance. Synthetic tests do not validate descriptors, sleep, 0%, charging transitions or coexistence with VGN HUB.
 
+## In development: EWEADN S9 PRO 8K
+
+Limited to `372E:1026` on `FF00:0001` or `FF06:0001`. Within one USB interface group, exactly one collection must have a runtime descriptor proving Feature Report `03` is 64 bytes. A 64-byte collection maximum alone is not accepted, and other Feature IDs may own a larger report. Zero or multiple proven collections cause no device open and no request.
+
+The reader sends one 64-byte Feature request `03 20 50 00 00 4F 81` plus 57 zeroes; checksum `20` covers the payload without the Report ID. It waits 100 ms, then performs one GET_FEATURE of Report `03`. UUID, wireless-online, reset, pairing, configuration, macro, display and firmware commands are unreachable. Both the user-verified 16-byte reply and the descriptor-backed 64-byte reply are supported. Byte 6 bits 0–6 are a 1–100 percentage and bit 7 is charging; the short form additionally requires presence byte 5 to equal `01`. Wrong headers, empty packets, request echoes, out-of-range levels and silence create no fresh sample.
+
+Developed after the 1.4.9 tag, with all 332 local regressions and a warning-free Windows x64 release build passing. User issue #315 confirmed the 16-byte format, 23%–98% readings and charging transitions on Windows x64. This project has no independent S9 PRO hardware. The same VID/PID is also used by other S7/S9 catalog entries, so the current name is not a runtime paired-model proof. Real descriptor shapes, 64-byte replies, sleep caching, wake-up and coexistence with EWEADN HUB remain pending.
+
 ## In development: AULA SC380 PRO
 
 Limited to `258A:0138` receivers, `FF02:0002`, Windows Feature capacity 520 and only report ID `09` in a unique management collection. Each poll checks the six-byte model signature `04 00 00 00 00 2E` and online response; the receiver ID alone cannot establish the mouse model. Wired `0136`, other AULA mice and keyboards are excluded.
