@@ -1,0 +1,44 @@
+name: 设备适配 / Device compatibility
+description: 反馈品牌、型号和电量或 DPI 支持情况 / Request or report device support
+title: "[Device] "
+body:
+  - type: input
+    id: brand
+    attributes:
+      label: 品牌 / Brand
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: 型号 / Model
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: 连接方式 / Connection
+      options:
+        - USB
+        - 2.4 GHz receiver
+        - Bluetooth
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本 / App version
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 电量与 DPI 的表现 / Battery and DPI behavior
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: 设备适配报告 / Device report
+      description: 可附上设置 → 关于导出的报告，含设备描述符和最近查询的长度、耗时、结果摘要，不含报文内容、序列号、接口路径、配置或原始日志。 / Attach the report exported from Settings → About. It includes descriptors and recent query lengths, durations and results, without payloads, serial numbers, interface paths, settings or raw logs.
+      render: text

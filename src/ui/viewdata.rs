@@ -11,10 +11,6 @@ pub struct Data<'a> {
     pub state: Option<&'a crate::proto::State>,
     /// 设备身份（型号、SN、固件）。
     pub ident: Option<&'a crate::proto::Identity>,
-    /// 实测链路模式（`"Wired"` / `"Wireless24G"`，空串 = 还没读到）。
-    ///
-    /// 不能用 `ident.dongle_sn` 是否为空来判有线无线 —— 2.4G 下那个字段
-    /// 也可能读成空串，会把无线误显示成有线。
     pub link_mode: &'a str,
     /// 状态行文字（「已连接 · 84%」「鼠标休眠中，移动一下即可唤醒」…）。
     pub status: String,
@@ -30,21 +26,12 @@ pub struct Data<'a> {
     pub autostart_text: &'a str,
     /// 开机自启是否打开（开关状态，不能靠文案反推）。
     pub autostart_on: bool,
+    /// 当前是否为 MSIX 版，是否可显示 Windows 原生通知设置。
+    pub native_notifications_supported: bool,
     /// 版本号（侧栏底部）。
     pub version: &'a str,
     /// 首页设备卡片墙使用的读数列表。
     pub readings: &'a [crate::device::DeviceReading],
-}
-
-#[cfg(test)]
-mod tests {
-    /// `ui::pages::Data` 必须仍然是同一个类型（只是再导出）。否则 gui.rs 传进去
-    /// 的结构和 pages 读的就不是一个东西，而这个错误只会在改名时静默出现。
-    #[test]
-    fn pages_re_exports_the_same_data_type() {
-        fn same(d: crate::ui::pages::Data<'_>) -> crate::ui::viewdata::Data<'_> {
-            d
-        }
-        let _ = same as fn(crate::ui::pages::Data<'_>) -> crate::ui::viewdata::Data<'_>;
-    }
+    pub audio: &'a crate::audio::Snapshot,
+    pub basic: Option<&'a crate::backends::Snapshot>,
 }

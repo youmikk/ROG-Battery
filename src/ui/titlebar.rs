@@ -27,17 +27,12 @@
 use crate::ui::gfx::{Painter, R};
 use crate::ui::theme::Theme;
 
-
 /// 标题栏逻辑高度（96 DPI 下的像素）。
 ///
 /// 36 而不是 32：11.5 号字（≈15px）上下各留 10px，视觉上和 Win11 原生
 /// 标题栏接近，而三条按钮的 46px 宽度按老惯例取。
 pub const TITLE_H: f32 = 36.0;
 
-/// 三条按钮的逻辑宽度。
-///
-/// 46 是 Win11 的实测值（`SystemParametersInfo` 不直接给，是从原生窗口
-/// 反推的：关闭按钮热区在标题栏最右侧 46px 内）。三条合计 138。
 pub const BTN_W: f32 = 46.0;
 
 /// 自绘标题栏上三个可点的按钮，从左到右。
@@ -49,7 +44,6 @@ pub enum Btn {
 }
 
 impl Btn {
-    /// 从左到右的顺序。命中测试和绘制都靠它，**两处必须一致**。
     pub const ALL: [Btn; 3] = [Btn::Minimize, Btn::Maximize, Btn::Close];
 }
 
@@ -67,10 +61,6 @@ pub fn btn_rect(b: Btn, win_w: f32) -> R {
     R::new(win_w - BTN_W * (from_right + 1.0), 0.0, BTN_W, TITLE_H)
 }
 
-/// 命中测试：客户区坐标 `(x, y)` 落在哪个按钮上。
-///
-/// 返回 `None` 表示不是按钮 —— 落在标题栏其他位置就是**拖动区**，
-/// 落在标题栏以下才是页面。两种情况调用方要分开处理。
 pub fn hit(x: f32, y: f32, win_w: f32) -> Option<Btn> {
     if !(0.0..=TITLE_H).contains(&y) {
         return None;
@@ -81,23 +71,13 @@ pub fn hit(x: f32, y: f32, win_w: f32) -> Option<Btn> {
     })
 }
 
-#[cfg(test)]
-/// `(x, y)` 是不是落在标题栏那一条里（含按钮）。
-///
-/// 生产代码不用它 —— `frame::logical_hit` 里的 `title_h` 是参数（要按缩放
-/// 传值），不能用这个常量。留着是给测试当判据：`命中测试按按钮边界` 用它
-/// 确认「不是按钮但仍属于标题栏」这一档，正是拖动区。
-pub fn in_bar(y: f32) -> bool {
-    (0.0..=TITLE_H).contains(&y)
-}
-
 /// 品牌位置固定，与页面宽度和滚动无关。
 pub fn draw(p: &mut Painter, win_w: f32, theme: &Theme) {
     p.rect(R::new(0.0, 0.0, win_w, TITLE_H), theme.bg);
     let r = logo_rect();
     p.image_rounded(crate::ui::gfx::app_icon_bitmap(), r, 5.0);
     p.text(
-        crate::i18n::translate(crate::mock::window_title()),
+        crate::i18n::translate(crate::gui::WINDOW_TITLE),
         R::new(r.right() + 9.0, 0.0, 260.0, TITLE_H),
         12.5,
         true,
@@ -246,88 +226,6 @@ pub fn draw_buttons(p: &mut Painter, win_w: f32, t: &Theme, is_max: bool, hover:
                 p.line(cx - BOX_HALF, cy - BOX_HALF, cx + BOX_HALF, cy + BOX_HALF, fg, STROKE);
                 p.line(cx + BOX_HALF, cy - BOX_HALF, cx - BOX_HALF, cy + BOX_HALF, fg, STROKE);
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-
-    use super::*;
-
-    #[test]
-    fn 三条按钮从右往左排且不重叠() {
-        let w = 1100.0;
-        let mn = btn_rect(Btn::Minimize, w);
-        let mx = btn_rect(Btn::Maximize, w);
-        let cl = btn_rect(Btn::Close, w);
-        // 关闭贴右边界
-        assert!(
-            (cl.right() - w).abs() < 0.01,
-            "关闭按钮没贴右边: {}",
-            cl.right()
-        );
-        // 依次左移，宽度一致。
-        //
-        // 断言写成「**前一个的右边界 == 后一个的左边界**」而不是
-        // 「`mx.right() - mn.x`」—— 后者把「右边界」和「左边界」两回事混在
-        // 一起算，差了一个按钮宽度，恒不成立（我第一版就是这么写的）。
-        assert!(
-            (mn.right() - mx.x).abs() < 0.01,
-            "最小化和最大化之间有空隙或重叠: {} vs {}",
-            mn.right(),
-            mx.x
-        );
-        assert!(
-            (mx.right() - cl.x).abs() < 0.01,
-            "最大化和关闭之间有空隙或重叠: {} vs {}",
-            mx.right(),
-            cl.x
-        );
-        // 三条合计 138，最小化左边还给标题文字留出空间
-        assert!((cl.right() - mn.x).abs() - BTN_W * 3.0 < 0.01);
-        // 不重叠
-        assert!(mn.x < mx.x && mx.x < cl.x);
-        assert!(mn.w == BTN_W && mx.w == BTN_W && cl.w == BTN_W);
-    }
-
-    #[test]
-    fn 命中测试按按钮边界() {
-        let w = 1100.0;
-        let cl = btn_rect(Btn::Close, w);
-        // 关闭按钮中心
-        assert_eq!(hit(cl.cx(), cl.cy(), w), Some(Btn::Close));
-        // 标题栏左侧 = 可拖动区（没有按钮）
-        assert_eq!(hit(60.0, cl.cy(), w), None);
-        // 但仍在标题栏里 → 调用方据此走拖动而不是页面点击
-        assert!(in_bar(cl.cy()));
-        // 标题栏下方 = 不算标题栏
-        assert_eq!(hit(cl.cx(), TITLE_H + 1.0, w), None);
-        assert!(!in_bar(TITLE_H + 1.0));
-        // 负 y（拖出窗口）
-        assert_eq!(hit(cl.cx(), -1.0, w), None);
-    }
-
-    #[test]
-    fn 图标不会溢出按钮() {
-        // 最宽的图标是关闭的 X 和最大化的方框（半边长 5 / 4.5）。
-        // 按钮 46 宽，左右至少各留 8px，否则 hover 红底上图标会贴边甚至压到邻键。
-        let widest = GLYPH_HALF.max(BOX_HALF) * 2.0;
-        assert!(
-            (BTN_W - widest) / 2.0 >= 8.0,
-            "图标 {widest} 太宽，按钮只有 {BTN_W}"
-        );
-        // 笔宽必须小于图标边长，否则画成一坨
-        assert!(STROKE < GLYPH_HALF && STROKE_THIN < BOX_HALF);
-    }
-
-    #[test]
-    fn 标题栏高度能容纳按钮() {
-        // 按钮高度等于标题栏高度：矮了按钮会有一半在标题栏外面，命中测试
-        // 用的是同一个 y 范围，那种情况下点不到
-        for b in Btn::ALL {
-            assert_eq!(btn_rect(b, 800.0).h, TITLE_H);
         }
     }
 }

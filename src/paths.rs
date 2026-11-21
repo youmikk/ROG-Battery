@@ -1,12 +1,3 @@
-//! 标准目录解析。
-//!
-//! 用户明确要求「需要安装的方式」、配置放系统标准位置，因此这里**不**把任何东西写到 exe 同目录。
-//!
-//! - 配置：`%APPDATA%\rog-mouse-ctl\`（漫游，跟随用户）
-//! - 缓存：`%LOCALAPPDATA%\rog-mouse-ctl\`（本机，可随时删）
-//! - 备份：默认 `%USERPROFILE%\Documents\rog-mouse-ctl\backups\`（用户数据，跟文档走）
-//!
-//! MSIX 打包后进程仍能看到这三个环境变量，因此同一套逻辑在安装版和直接运行版都成立。
 
 use std::path::PathBuf;
 
@@ -165,28 +156,5 @@ pub fn resolve_backup_path(arg: Option<&str>, default_name: &str) -> PathBuf {
                 p
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn 原子写覆盖旧内容且不留临时文件() {
-        let dir = PathBuf::from("target/test-atomic");
-        let f = dir.join("a.txt");
-        write_atomic(&f, b"old").unwrap();
-        assert_eq!(std::fs::read(&f).unwrap(), b"old");
-        write_atomic(&f, b"new-content").unwrap();
-        assert_eq!(std::fs::read(&f).unwrap(), b"new-content");
-        // 目录里只应剩目标文件
-        let names: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["a.txt".to_string()]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

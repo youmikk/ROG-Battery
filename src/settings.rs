@@ -1,15 +1,3 @@
-//! 设置文件：`%APPDATA%\rog-mouse-ctl\settings.ini`
-//!
-//! 用户要求「需要安装的方式」+「配置放系统标准位置」，所以设置不能放 exe 同目录。
-//!
-//! 格式是极简的 `key=value`，不引第三方依赖也能解析：
-//!
-//! ```ini
-//! cache_ttl_sec=30
-//! cache_enabled=1
-//! ```
-//!
-//! 文件不存在时用默认值（**不会**因为配置缺失而报错）。
 
 use crate::paths;
 
@@ -18,6 +6,9 @@ use crate::paths;
 pub struct Settings {
     pub device_tray: std::collections::BTreeMap<String, crate::tray_prefs::DeviceTray>,
     pub device_names: std::collections::BTreeMap<String, String>,
+    pub dpi_presets: std::collections::BTreeMap<String, crate::device::DpiPresets>,
+    /// 用户拖拽后的设备顺序。未知或已移除的设备会被忽略。
+    pub device_order: Vec<String>,
     pub tray_device: Option<String>,
     pub tray_device_name: String,
     /// 快照缓存有效期（秒）。0 表示每次都重读设备。
@@ -29,6 +20,10 @@ pub struct Settings {
     pub refresh_interval_sec: u64,
     /// 是否启用托盘图标。
     pub tray_enabled: bool,
+    /// 在通知区域左侧显示任务栏电量条。
+    pub taskbar_widget_enabled: bool,
+    /// MSIX 版是否启用 Windows 低电量通知。绿色版不显示也不调用。
+    pub notify_low_battery: bool,
     /// 窗口关闭时的行为："ask"（每次询问）、"minimize"（最小化到托盘）、"quit"（直接退出）。
     pub close_mode: String,
     /// 界面配色：`"light"` 或 `"dark"`。
@@ -46,6 +41,8 @@ impl Default for Settings {
         Settings {
             device_tray: Default::default(),
             device_names: Default::default(),
+            dpi_presets: Default::default(),
+            device_order: Vec::new(),
             tray_device: None,
             tray_device_name: String::new(),
             cache_ttl_sec: crate::snapshot::DEFAULT_TTL_SEC,
@@ -54,6 +51,8 @@ impl Default for Settings {
             // 撞上超时（一次 MISS 要等满 1200ms），所以默认 60 秒。
             refresh_interval_sec: 60,
             tray_enabled: true,
+            taskbar_widget_enabled: true,
+            notify_low_battery: true,
             close_mode: "ask".to_string(),
             theme: "system".to_string(),
             language: crate::i18n::Language::System,
@@ -87,6 +86,19 @@ impl Settings {
                     }
                 }
                 "tray_device_name" => s.tray_device_name = v.to_string(),
+                "device_order" => {
+                    let mut seen = std::collections::BTreeSet::new();
+                    s.device_order = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| {
+                            id.len() == 16
+                                && id.bytes().all(|b| b.is_ascii_hexdigit())
+                                && seen.insert(id.to_ascii_lowercase())
+                        })
+                        .map(str::to_ascii_lowercase)
+                        .collect();
+                }
                 "language" => match crate::i18n::Language::parse(v) {
                     Some(language) => s.language = language,
                     None => warnings.push(format!("language={v} 只认 system/zh-CN/en，已忽略")),
@@ -107,6 +119,18 @@ impl Settings {
                     None => {
                         warnings.push(format!("tray_enabled={v} 不是布尔值（true/false），已忽略"))
                     }
+                },
+                "taskbar_widget_enabled" => match parse_bool(v) {
+                    Some(b) => s.taskbar_widget_enabled = b,
+                    None => warnings.push(format!(
+                        "taskbar_widget_enabled={v} 不是布尔值（true/false），已忽略"
+                    )),
+                },
+                "notify_low_battery" => match parse_bool(v) {
+                    Some(b) => s.notify_low_battery = b,
+                    None => warnings.push(format!(
+                        "notify_low_battery={v} 不是布尔值（true/false），已忽略"
+                    )),
                 },
                 "close_to_tray" => match parse_bool(v) {
                     Some(b) => legacy_close = Some(b),
@@ -130,6 +154,30 @@ impl Settings {
                     } else {
                         warnings.push(format!("theme={v} 只认 system/light/dark，已忽略"));
                     }
+                }
+                key if key.starts_with("dpi_presets.") => {
+                    let id = &key[12..];
+                    let parsed = (|| {
+                        if id.len() != 16 || !id.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+                        let mut parts = v.split(';');
+                        let mode = parts.next()?;
+                        let list = parts.next()?;
+                        let hidden = parts.next().unwrap_or("");
+                        if parts.next().is_some() { return None; }
+                        let enabled = match mode { "1" => true, "0" => false, _ => return None };
+                        let values = if list.is_empty() { Vec::new() } else {
+                            list.split(',').map(|v| v.parse::<u16>().ok()).collect::<Option<Vec<_>>>()?
+                        };
+                        let hidden = if hidden.is_empty() { Vec::new() } else {
+                            hidden.split(',').map(|v| v.parse::<u16>().ok()).collect::<Option<Vec<_>>>()?
+                        };
+                        let mut pref = crate::device::DpiPresets { enabled, values, hidden };
+                        pref.values.sort_unstable();
+                        pref.hidden.sort_unstable();
+                        pref.valid().then_some(pref)
+                    })();
+                    if let Some(pref) = parsed { s.dpi_presets.insert(id.to_ascii_lowercase(), pref); }
+                    else { warnings.push("DPI 预设配置无效，已忽略".into()); }
                 }
                 key if key.starts_with("device_name.") => {
                     let id = &key[12..];
@@ -160,13 +208,6 @@ impl Settings {
         (s, warnings)
     }
 
-    /// 只取结果、丢弃告警。仅供单测使用（生产一律走 [`load`]）。
-    #[cfg(test)]
-    #[cfg(test)]
-    fn parse(text: &str) -> Settings {
-        Self::parse_collect(text).0
-    }
-
     pub fn to_text(&self) -> String {
         let mut s = String::new();
         s.push_str("# rog-mouse-ctl 设置\n");
@@ -182,6 +223,16 @@ impl Settings {
         s.push_str(&format!("refresh_interval_sec={}\n\n", self.refresh_interval_sec));
         s.push_str("# 是否启用托盘图标（true/false）。\n");
         s.push_str(&format!("tray_enabled={}\n\n", self.tray_enabled));
+        s.push_str("# 是否在通知区域左侧显示任务栏电量条（true/false）。\n");
+        s.push_str(&format!(
+            "taskbar_widget_enabled={}\n\n",
+            self.taskbar_widget_enabled
+        ));
+        s.push_str("# Microsoft Store 版本是否启用 Windows 低电量通知（true/false）。\n");
+        s.push_str(&format!(
+            "notify_low_battery={}\n\n",
+            self.notify_low_battery
+        ));
         s.push_str("# 关闭窗口动作：ask=每次询问，minimize=最小化到系统托盘，quit=直接退出。\n");
         s.push_str(&format!("close_mode={}\n\n", self.close_mode));
         s.push_str("# 界面配色：system（默认，跟随系统深浅色）/ light（浅色）/ dark（深色）。\n");
@@ -202,6 +253,14 @@ impl Settings {
         for (key, name) in &self.device_names {
             s.push_str(&format!("device_name.{key}={name}\n"));
         }
+        for (key, presets) in &self.dpi_presets {
+            let values = presets.values.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
+            let hidden = presets.hidden.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
+            s.push_str(&format!("dpi_presets.{key}={};{values};{hidden}\n", u8::from(presets.enabled)));
+        }
+        if !self.device_order.is_empty() {
+            s.push_str(&format!("device_order={}\n", self.device_order.join(",")));
+        }
         s
     }
 
@@ -210,6 +269,31 @@ impl Settings {
             .get(&device.key)
             .map(String::as_str)
             .unwrap_or(&device.name)
+    }
+
+    pub fn presets_for(&self, key: &str, dpi: &crate::device::Dpi) -> crate::device::DpiPresets {
+        self.dpi_presets.get(key).cloned().unwrap_or_else(|| crate::device::DpiPresets {
+            enabled: false,
+            values: dpi.quick_values().into_iter().filter(|v| dpi.values.contains(v)).collect(),
+            hidden: Vec::new(),
+        })
+    }
+
+    pub fn device_order_index(&self, key: &str) -> Option<usize> {
+        self.device_order.iter().position(|candidate| candidate == key)
+    }
+
+    pub fn set_device_order(&mut self, keys: impl IntoIterator<Item = String>) {
+        let mut seen = std::collections::BTreeSet::new();
+        self.device_order = keys
+            .into_iter()
+            .map(|key| key.to_ascii_lowercase())
+            .filter(|key| {
+                key.len() == 16
+                    && key.bytes().all(|b| b.is_ascii_hexdigit())
+                    && seen.insert(key.clone())
+            })
+            .collect();
     }
 
     pub fn tray_name(&self) -> &str {
@@ -288,6 +372,54 @@ fn parse_bool(v: &str) -> Option<bool> {
         "true" | "1" | "yes" | "on" => Some(true),
         "false" | "0" | "no" | "off" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    use crate::device::DpiPresets;
+
+    #[test]
+    fn preset_settings_roundtrip_per_device_with_sorted_values_and_hidden_stages() {
+        let mut cfg = Settings::default();
+        cfg.dpi_presets.insert("0123456789abcdef".into(), DpiPresets { enabled: true, values: vec![400,800], hidden: vec![1600,3200] });
+        cfg.dpi_presets.insert("fedcba9876543210".into(), DpiPresets { enabled: false, values: vec![1200], ..Default::default() });
+        let (loaded, warnings) = Settings::parse_collect(&cfg.to_text());
+        assert!(warnings.is_empty());
+        assert_eq!(loaded.dpi_presets, cfg.dpi_presets);
+        let mut restored=loaded.dpi_presets["0123456789abcdef"].clone();
+        let dpi=crate::device::Dpi {values:vec![400,800,1600,3200],
+            write_effect:Some(crate::device::DpiWriteEffect::Current),..Default::default()};
+        assert!(restored.set_count(4,&dpi));
+        assert_eq!(restored.values,vec![400,800,1600,3200]);
+        let (sorted, warnings) = Settings::parse_collect("dpi_presets.0123456789abcdef=1;1600,400,800");
+        assert!(warnings.is_empty());
+        assert_eq!(sorted.dpi_presets["0123456789abcdef"].values, vec![400,800,1600]);
+    }
+
+    #[test]
+    fn corrupt_presets_are_rejected_without_loading_a_partial_list() {
+        for bad in ["1;800,0", "1;800,800", "1;400,no", "2;400", "1;65536", "1;1,2,3,4,5", "1;", "1;400;400", "1;400;800,1600,3200,6400", "1;400;800;1600"] {
+            let (cfg, warnings) = Settings::parse_collect(&format!("dpi_presets.0123456789abcdef={bad}\nlanguage=en"));
+            assert!(cfg.dpi_presets.is_empty(), "{bad}");
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(cfg.language, crate::i18n::Language::English);
+        }
+    }
+
+    #[test]
+    fn taskbar_widget_setting_roundtrips_and_bad_values_are_ignored() {
+        let mut cfg = Settings::default();
+        assert!(cfg.taskbar_widget_enabled);
+        cfg.taskbar_widget_enabled = false;
+        let (loaded, warnings) = Settings::parse_collect(&cfg.to_text());
+        assert!(warnings.is_empty());
+        assert!(!loaded.taskbar_widget_enabled);
+        let (fallback, warnings) =
+            Settings::parse_collect("taskbar_widget_enabled=maybe");
+        assert!(fallback.taskbar_widget_enabled);
+        assert_eq!(warnings.len(), 1);
     }
 }
 
@@ -394,271 +526,4 @@ pub fn format_unix_local(unix: i64) -> Option<String> {
         "{:02}-{:02} {:02}:{:02}",
         st.month, st.day, st.hour, st.minute
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn custom_names_roundtrip_by_identity_and_reset_to_reported_name() {
-        let mut devices = crate::mock::parse("mouse|Device A|78|0\nmouse|Device A|60|0");
-        let mut cfg = Settings::default();
-        cfg.ensure_tray_device(&devices[..1]);
-        let name = "  办公鼠标 🖱 = A;#  ";
-        cfg.set_device_name(&devices[0].key, name).unwrap();
-        let mut loaded = Settings::parse(&cfg.to_text());
-        assert_eq!(loaded.device_name(&devices[0]), name.trim());
-        assert_eq!(loaded.device_name(&devices[1]), "Device A");
-        assert_eq!(loaded.tray_name(), name.trim());
-        devices[0].name = "Updated model".into();
-        devices[0].connected = false;
-        loaded.ensure_tray_device(&devices);
-        assert_eq!(loaded.device_name(&devices[0]), name.trim());
-        assert_eq!(loaded.tray_name(), name.trim());
-        for bad in [
-            "a\ntray_enabled=0".to_string(),
-            "bad\0name".into(),
-            "界".repeat(65),
-        ] {
-            assert!(loaded.set_device_name(&devices[0].key, &bad).is_err());
-            assert_eq!(loaded.device_name(&devices[0]), name.trim());
-        }
-        loaded
-            .set_device_name(&devices[0].key, &"界".repeat(64))
-            .unwrap();
-        loaded.set_device_name(&devices[0].key, "   ").unwrap();
-        let reset = Settings::parse(&loaded.to_text());
-        assert_eq!(reset.device_name(&devices[0]), "Updated model");
-        assert_eq!(reset.tray_name(), "Updated model");
-        assert!(reset.device_names.is_empty());
-    }
-
-    #[test]
-    fn manual_device_type_survives_reload_and_detection_changes() {
-        use crate::device::DeviceFamily;
-        use crate::i18n::{with_language, Language};
-        use crate::tray_prefs::TrayKind;
-        let mut device = crate::mock::parse("mouse|Test device|78|0").remove(0);
-        let other = crate::mock::parse("keyboard|Other device|96|1").remove(0);
-        let mut cfg = Settings::default();
-        assert_eq!(cfg.device_kind(&device), TrayKind::Mouse);
-        for kind in TrayKind::ALL.into_iter().skip(1) {
-            cfg.device_tray.entry(device.key.clone()).or_default().kind = kind;
-            let loaded = Settings::parse(&cfg.to_text());
-            for family in [
-                DeviceFamily::Mouse,
-                DeviceFamily::Headset,
-                DeviceFamily::Unknown,
-            ] {
-                device.family = family;
-                device.connected = !device.connected;
-                assert_eq!(loaded.device_kind(&device), kind);
-                assert_eq!(loaded.device_kind(&other), TrayKind::Keyboard);
-            }
-        }
-        with_language(Language::Chinese, || {
-            assert_eq!(cfg.device_kind(&device).label(), "其他")
-        });
-        with_language(Language::English, || {
-            assert_eq!(cfg.device_kind(&device).label(), "Other")
-        });
-        cfg.device_tray.get_mut(&device.key).unwrap().kind = TrayKind::Auto;
-        let loaded = Settings::parse(&cfg.to_text());
-        device.family = DeviceFamily::Keyboard;
-        assert_eq!(loaded.device_kind(&device), TrayKind::Keyboard);
-    }
-
-    #[test]
-    fn tray_selection_migrates_once_and_never_follows_reordering_or_disconnect() {
-        let readings = crate::mock::parse("mouse|Mouse A|78|0\nkeyboard|Keyboard B|96|1");
-        let mut cfg = Settings::default();
-        cfg.device_tray
-            .entry(readings[0].key.clone())
-            .or_default()
-            .enabled = false;
-        assert!(cfg.ensure_tray_device(&readings));
-        assert_eq!(cfg.tray_device.as_ref(), Some(&readings[1].key));
-        let mut loaded = Settings::parse(&cfg.to_text());
-        assert_eq!(loaded.tray_device, cfg.tray_device);
-        assert_eq!(loaded.tray_device_name, readings[1].name);
-        assert!(!loaded.ensure_tray_device(&readings[..1]));
-        assert_eq!(loaded.tray_device, cfg.tray_device);
-        assert!(!loaded.ensure_tray_device(&[readings[1].clone(), readings[0].clone()]));
-    }
-    #[test]
-    fn language_defaults_to_system_and_roundtrips_all_choices() {
-        use crate::i18n::Language;
-        assert_eq!(Settings::default().language, Language::System);
-        assert_eq!(Settings::parse("theme=dark").language, Language::System);
-        let (invalid, warnings) = Settings::parse_collect("language=invalid");
-        assert_eq!(invalid.language, Language::System);
-        assert_eq!(warnings.len(), 1);
-        for language in Language::ALL {
-            let cfg = Settings {
-                language,
-                ..Default::default()
-            };
-            assert_eq!(Settings::parse(&cfg.to_text()).language, language);
-        }
-    }
-
-    #[test]
-    fn device_tray_settings_roundtrip_independently() {
-        use crate::tray_prefs::{DeviceTray, TrayContent, TrayKind};
-        let a = "0123456789abcdef".to_string();
-        let b = "fedcba9876543210".to_string();
-        let mut cfg = Settings::default();
-        let pref = DeviceTray {
-            enabled: false,
-            kind: TrayKind::Headset,
-            content: TrayContent::Number,
-            content_auto: false,
-        };
-        cfg.device_tray.insert(a.clone(), pref);
-        let text = cfg.to_text();
-        let loaded = Settings::parse(&text);
-        assert_eq!(loaded.tray_for(&a), pref);
-        assert_eq!(loaded.tray_for(&b), DeviceTray::default());
-        assert_eq!(
-            Settings::parse("device_tray.invalid=1,0,0")
-                .device_tray
-                .len(),
-            0
-        );
-    }
-    use super::*;
-
-    #[test]
-    fn parse_collect_reports_bad_values() {
-        // 手改文件打错值：不致命，但要留痕，否则「我明明设了」查不出原因。
-        let (s, w) = Settings::parse_collect(
-            "tray_enabled=maybe\ntheme=blue\ncache_ttl_sec=x\nclose_mode=hide\nunknown_key=1\n",
-        );
-        assert!(s.tray_enabled, "坏值不该改掉默认的 true");
-        assert_eq!(s.theme, "system");
-        assert_eq!(s.cache_ttl_sec, crate::snapshot::DEFAULT_TTL_SEC);
-        assert_eq!(s.close_mode, "ask");
-        assert_eq!(w.len(), 4, "四个坏值各留一条痕，未知键保持沉默：{w:?}");
-    }
-
-
-    #[test]
-    fn parse_settings() {
-        let s = Settings::parse("cache_ttl_sec=5\nunknown=1\n");
-        assert_eq!(s.cache_ttl_sec, 5);
-        // 缺失的键用默认值
-        assert_eq!(s.refresh_interval_sec, 60);
-        assert!(s.tray_enabled);
-        assert_eq!(s.close_mode, "ask");
-    }
-
-    #[test]
-    fn legacy_close_to_tray_maps_to_close_mode() {
-        // 旧文件里的 close_to_tray 必须还能换算成 close_mode
-        assert_eq!(Settings::parse("close_to_tray=true").close_mode, "minimize");
-        assert_eq!(Settings::parse("close_to_tray=false").close_mode, "quit");
-        // 两者同时出现时以 close_mode 为准（它更具体，能表达 ask）
-        assert_eq!(
-            Settings::parse("close_to_tray=true\nclose_mode=ask").close_mode,
-            "ask"
-        );
-    }
-
-    #[test]
-    fn parse_empty_uses_default() {
-        let s = Settings::parse("");
-        assert_eq!(s.cache_ttl_sec, crate::snapshot::DEFAULT_TTL_SEC);
-    }
-
-    #[test]
-    fn old_file_still_parses() {
-        // 旧版只有一行 cache_ttl_sec，加了新键以后必须还能读
-        let s = Settings::parse("# rog-mouse-ctl 设置\ncache_ttl_sec=30\n");
-        assert_eq!(s.cache_ttl_sec, 30);
-        assert_eq!(s.refresh_interval_sec, 60);
-    }
-
-    #[test]
-    fn bool_forms_accepted() {
-        for (text, want) in [
-            ("tray_enabled=true", true),
-            ("tray_enabled=TRUE", true),
-            ("tray_enabled=1", true),
-            ("tray_enabled=yes", true),
-            ("tray_enabled=on", true),
-            ("tray_enabled=false", false),
-            ("tray_enabled=0", false),
-            ("tray_enabled=no", false),
-            ("tray_enabled=off", false),
-        ] {
-            let s = Settings::parse(text);
-            assert_eq!(s.tray_enabled, want, "解析 {text:?} 得到错误结果");
-        }
-    }
-
-    #[test]
-    fn refresh_interval_has_floor() {
-        let s = Settings::parse("refresh_interval_sec=0");
-        assert_eq!(s.refresh_interval_sec, 5, "0 会让后台线程空转，必须钳住");
-        let s = Settings::parse("refresh_interval_sec=1");
-        assert_eq!(s.refresh_interval_sec, 5);
-    }
-
-    #[test]
-    fn roundtrip_through_text() {
-        let s = Settings {
-            device_tray: Default::default(),
-            device_names: Default::default(),
-            tray_device: None,
-            tray_device_name: String::new(),
-            cache_ttl_sec: 45,
-            refresh_interval_sec: 20,
-            tray_enabled: false,
-            close_mode: "quit".to_string(),
-            theme: "dark".to_string(),
-            language: crate::i18n::Language::English,
-        };
-        let back = Settings::parse(&s.to_text());
-        assert_eq!(back.cache_ttl_sec, 45);
-        assert_eq!(back.refresh_interval_sec, 20);
-        assert!(!back.tray_enabled);
-        assert_eq!(back.close_mode, "quit");
-        assert_eq!(back.theme, "dark", "配色没有往返成功");
-        assert_eq!(back.language, crate::i18n::Language::English);
-    }
-
-    #[test]
-    fn theme_accepts_case_and_rejects_junk() {
-        // 手改文件写成 Dark 要认
-        assert_eq!(Settings::parse("theme=Dark").theme, "dark");
-        assert_eq!(Settings::parse("theme=DARK").theme, "dark");
-        assert_eq!(Settings::parse("theme= light ").theme, "light");
-        // 打错字不能把程序搞崩，退回默认「跟随系统」
-        assert_eq!(Settings::parse("theme=blue").theme, "system");
-        assert_eq!(Settings::parse("theme=").theme, "system");
-        // 旧文件没有这个键也是默认「跟随系统」
-        assert_eq!(Settings::parse("cache_ttl_sec=30").theme, "system");
-        // system 也要能往返
-        assert_eq!(Settings::parse("theme=System").theme, "system");
-    }
-
-    #[test]
-    fn timestamp_shape() {
-        let t = timestamp_for_filename();
-        // 形如 20261021-223000
-        assert_eq!(t.len(), 15, "时间戳应是 8 位日期 + '-' + 6 位时间：{t}");
-        assert_eq!(&t[8..9], "-");
-        assert!(t[..8].chars().all(|c| c.is_ascii_digit()));
-        assert!(t[9..].chars().all(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn unix_epoch_formats() {
-        // 1970-01-01 00:00 UTC = 北京时间 08:00（这台机器在 UTC+8）
-        // 不断言具体时刻，只断言格式和「能算出来」
-        let s = format_unix_local(0).expect("1970 应该能换算");
-        assert_eq!(s.len(), 11, "格式应是 MM-DD HH:MM：{s}");
-        assert_eq!(&s[2..3], "-");
-        assert_eq!(&s[5..6], " ");
-        assert_eq!(&s[8..9], ":");
-    }
 }

@@ -1,0 +1,261 @@
+//! 适配报告使用白名单字段重新生成，不复制用户日志、路径或配置。
+use std::fmt::Write;
+
+fn clean(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(96)
+        .collect()
+}
+
+pub fn report(interfaces: &[crate::hid::HidInterface]) -> String {
+    let mut report = format!(
+        "R Battery device compatibility report\nApp version: {}\n\n",
+        crate::gui::APP_VERSION
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for interface in interfaces {
+        let identity = (
+            interface.vendor_id,
+            interface.product_id,
+            interface.usage_page,
+            interface.usage,
+            interface.input_len,
+            interface.output_len,
+            interface.feature_len,
+            interface.product.clone(),
+        );
+        if !seen.insert(identity) {
+            continue;
+        }
+        let _ = writeln!(report, "Model: {}", clean(&interface.product));
+        let _ = writeln!(
+            report,
+            "VID/PID: {:04X}:{:04X}",
+            interface.vendor_id, interface.product_id
+        );
+        let _ = writeln!(
+            report,
+            "Usage page/usage: {:04X}:{:04X}",
+            interface.usage_page, interface.usage
+        );
+        let _ = writeln!(
+            report,
+            "Input/output/feature bytes: {}/{}/{}\n",
+            interface.input_len, interface.output_len, interface.feature_len
+        );
+        if seen.len() >= 64 {
+            break;
+        }
+    }
+    report
+}
+
+pub fn collect() -> Result<String, String> {
+    let api = crate::win32::HidApi::load()?;
+    let mut output = report(&crate::hid::enumerate_all_report(&api)?.interfaces);
+    output.push_str(&super::backends::trace::render());
+    Ok(output)
+}
+
+/// 独立诊断进程先查询再导出，摘要与读数来自同一次运行。
+pub fn collect_probe() -> Result<String, String> {
+    let api = crate::win32::HidApi::load()?;
+    let interfaces = crate::hid::enumerate_all_report(&api)?.interfaces;
+    let mut output = report(&interfaces);
+    output.push_str("Read-only capability probe (no settings are changed)\n");
+    for backend in std::iter::once(super::backends::BackendId::Rog)
+        .chain(super::backends::ADDITIONAL_BACKENDS) {
+        if backend == super::backends::BackendId::XInput {
+            match super::backends::xinput::poll() {
+                Ok(poll) if poll.snapshots.is_empty() => {
+                    let outcome = if poll.present_channels.is_some_and(|channels| channels.is_empty()) {
+                        "no-connected-slot"
+                    } else { "query-failed" };
+                    let _ = writeln!(output, "XInput: {outcome}");
+                }
+                Ok(poll) => for snapshot in poll.snapshots {
+                    append_probe_result(&mut output, &snapshot.target, Some(&snapshot));
+                },
+                Err(_) => { let _ = writeln!(output, "XInput: query-failed"); }
+            }
+            continue;
+        }
+        let provider: &dyn super::backends::DeviceBackend = match backend {
+            super::backends::BackendId::Logitech => &super::backends::logitech::Logitech,
+            super::backends::BackendId::Rapoo => &super::backends::rapoo::Rapoo,
+            super::backends::BackendId::Vgn => &super::backends::vgn::Vgn,
+            super::backends::BackendId::VgnBeiying => &super::backends::vgn_beiying::VgnBeiying,
+            super::backends::BackendId::VgnDragonfly3 => &super::backends::vgn_dragonfly3::VgnDragonfly3,
+            super::backends::BackendId::VgnKeyboard => &super::backends::vgn_keyboard::VgnKeyboard,
+            super::backends::BackendId::CompX => &super::backends::compx::CompX,
+            super::backends::BackendId::Razer => &super::backends::razer::Razer,
+            super::backends::BackendId::PageCommand => &super::backends::page_command::PageCommand,
+            super::backends::BackendId::Headset => &super::backends::headset::Headset,
+            super::backends::BackendId::Keyboard20 => &super::backends::keyboard20::Keyboard20,
+            super::backends::BackendId::MchoseQhw => &super::backends::mchose_qhw::MchoseQhw,
+            super::backends::BackendId::MchoseMouse => &super::backends::mchose_mouse::MchoseMouse,
+            super::backends::BackendId::MchoseGlw => &super::backends::mchose_glw::MchoseGlw,
+            super::backends::BackendId::Edifier => &super::backends::edifier::Edifier,
+            super::backends::BackendId::EweadnS9 => &super::backends::eweadn::EweadnS9,
+            super::backends::BackendId::EweadnS9Pro => &super::backends::eweadn_s9pro::EweadnS9Pro,
+            super::backends::BackendId::Dareu => &super::backends::dareu::Dareu,
+            super::backends::BackendId::EightBitDo => &super::backends::eightbitdo::EightBitDo,
+            super::backends::BackendId::Flydigi => &super::backends::flydigi::Flydigi,
+            super::backends::BackendId::GearHub => &super::backends::gearhub::GearHub,
+            super::backends::BackendId::G3m => &super::backends::g3m::G3m,
+            super::backends::BackendId::Aula => &super::backends::aula::Aula,
+            super::backends::BackendId::Cherry => &super::backends::cherry::Cherry,
+            super::backends::BackendId::Lofree => &super::backends::lofree::Lofree,
+            super::backends::BackendId::Nova => &super::backends::steelseries::Nova,
+            super::backends::BackendId::Inzone => &super::backends::inzone::Inzone,
+            super::backends::BackendId::HyperX => &super::backends::hyperx::HyperX,
+            super::backends::BackendId::DualSense => &super::backends::sony::DualSense,
+            super::backends::BackendId::XInput => unreachable!("XInput is queried without HID"),
+            super::backends::BackendId::StandardHid => &super::backends::standard::StandardHid,
+            super::backends::BackendId::Rog => &super::backends::rog::Rog,
+        };
+        let Ok(targets) = provider.discover(&api, &interfaces) else {
+            let _ = writeln!(output, "{}: discovery-failed", backend.name());
+            continue;
+        };
+        if targets.is_empty() {
+            let _ = writeln!(output, "{}: no-supported-interface", backend.name());
+        }
+        for target in targets.into_iter().take(64) {
+            let reading = provider.read(&api, &target, true);
+            append_probe_result(&mut output, &target, reading.as_ref().ok());
+        }
+    }
+    output.push('\n');
+    output.push_str(&super::backends::trace::render());
+    Ok(output)
+}
+
+fn append_probe_result(output: &mut String, target: &super::backends::Target,
+    reading: Option<&super::backends::Snapshot>) {
+    let source = match &target.endpoint {
+        super::backends::Endpoint::Hid(i) => format!("{:04X}:{:04X}", i.vendor_id, i.product_id),
+        super::backends::Endpoint::XInput(slot) => format!("slot={}", slot + 1),
+    };
+    let _ = writeln!(output, "{} {} result={}", target.backend.name(), source,
+        match reading {
+            Some(reading) if reading.connected && (reading.battery.is_some() || reading.dpi.current.is_some()
+                || reading.polling_rate.current.is_some()) => "ok",
+            Some(_) => "no-valid-reading",
+            None => "read-failed",
+        });
+    if let Some(reading) = reading {
+        let percent = reading.battery.as_ref().and_then(|battery| battery.display_percent())
+            .map(|percent| percent.label(true)).unwrap_or_else(|| "unknown".into());
+        let charging = match reading.battery.as_ref().and_then(|battery| battery.charging) {
+            Some(true) => "yes", Some(false) => "no", None => "unknown",
+        };
+        let dpi = reading.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "unknown".into());
+        let _ = writeln!(output, "Battery: {percent}; charging: {charging}; current DPI: {dpi}; DPI writable: {}",
+            reading.dpi.writable);
+        if let Some(battery) = &reading.battery {
+            if let Some(level) = battery.level {
+                let _ = writeln!(output, "Battery level: {level:?}; approximate: {}", battery.approximate);
+            }
+        }
+        if let Some(y) = reading.dpi.current_y { let _ = writeln!(output, "Current DPI Y: {y}"); }
+        let rate = reading.polling_rate.current.map(|hz| hz.to_string()).unwrap_or_else(|| "unknown".into());
+        let _ = writeln!(output, "Polling rate: {rate} Hz; choices: {:?}; writable: {}",
+            reading.polling_rate.values, reading.polling_rate.writable);
+        if !reading.dpi.stages.is_empty() {
+            let stages = reading.dpi.stages.iter().map(|stage| match reading.dpi.stage_y.get(&stage.index) {
+                Some(y) => format!("{}:X{}/Y{y}",stage.index + 1,stage.value),
+                None => format!("{}:{}",stage.index + 1,stage.value),
+            })
+                .collect::<Vec<_>>().join(", ");
+            let active = reading.dpi.active_stage.map(|index| (index + 1).to_string()).unwrap_or_else(|| "unknown".into());
+            let _ = writeln!(output, "Onboard DPI stages: {stages}; active stage: {active}; stage switching: {}",
+                reading.dpi.stage_writable);
+        }
+    }
+}
+
+pub fn issue_url() -> String {
+    // 开发分支的模板尚未合入默认分支，直接预填正文也能提交。
+    "https://github.com/youmikk/ROG-Battery/issues/new?title=%5BDevice%5D&body=Brand%20%2F%20Model%3A%0AConnection%20%28USB%2C%202.4GHz%2C%20Bluetooth%29%3A%0AApp%20version%3A%0ABattery%20%2F%20DPI%20behavior%3A%0A%0AAttach%20the%20device%20report%20exported%20from%20Settings%20%E2%86%92%20About.%0A%E8%AF%B7%E5%A1%AB%E5%86%99%E5%93%81%E7%89%8C%E3%80%81%E5%9E%8B%E5%8F%B7%E3%80%81%E8%BF%9E%E6%8E%A5%E6%96%B9%E5%BC%8F%E5%92%8C%E9%97%AE%E9%A2%98%E8%A1%A8%E7%8E%B0%E3%80%82".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn xinput_report_uses_slot_without_fabricated_usb_identity() {
+        let target = crate::backends::xinput::target(1);
+        let reading = crate::backends::Snapshot { target: target.clone(), battery: None,
+            battery_at: None, battery_unavailable: true, connected: true,
+            dpi: Default::default(), polling_rate: Default::default() };
+        let mut output = String::new();
+        append_probe_result(&mut output, &target, Some(&reading));
+        assert!(output.contains("XInput slot=2 result=no-valid-reading"));
+        assert!(output.contains("Battery: unknown; charging: unknown"));
+        assert!(!output.contains("0000:0000"));
+        assert!(!output.contains(&target.key));
+    }
+
+    #[test]
+    fn exported_report_never_contains_paths_or_serial_numbers() {
+        let interface = crate::hid::HidInterface {
+            path: "sensitive-interface-path".into(),
+            serial: "private-device-serial".into(),
+            vendor_id: 0x046d,
+            product_id: 0xc52b,
+            usage_page: 0xff00,
+            usage: 1,
+            input_len: 20,
+            output_len: 20,
+            feature_len: 0,
+            product: "Test mouse\n\r".into(),
+        };
+        let result = report(&[interface]);
+        assert!(!result.contains("sensitive-interface-path"));
+        assert!(!result.contains("private-device-serial"));
+        assert!(result.contains("046D:C52B"));
+        assert!(result.contains("Model: Test mouse\n"));
+    }
+
+    #[test]
+    fn probe_results_export_only_readings_and_protocol_identifiers() {
+        let interface = crate::hid::HidInterface { path: "private-path".into(),
+            serial: "private-serial".into(), product: "Factory model".into(),
+            vendor_id: 0x258a, product_id: 0x024e, usage_page: 0xff02, usage: 1,
+            input_len: 0, output_len: 0, feature_len: 520 };
+        let mut target = super::super::backends::Target::new(super::super::backends::BackendId::Vgn, &interface, 0);
+        target.name = "private-custom-name".into();
+        let snapshot = super::super::backends::Snapshot { target: target.clone(),
+            battery: Some(crate::device::Battery { estimated_percent: None, percent: Some(75), charging: None,
+                voltage_mv: None, approximate: false, level: None }),
+            dpi: crate::device::Dpi { current: Some(800),
+                stages: vec![crate::device::DpiStage { index: 1, value: 800 },
+                    crate::device::DpiStage { index: 4, value: 3200 }],
+                active_stage: Some(1), profile: Some(1), stage_writable: true,
+                ..Default::default() }, polling_rate: Default::default(), connected: true, battery_unavailable: false, battery_at: Some(std::time::Instant::now()) };
+        let mut output = String::new();
+        append_probe_result(&mut output, &target, Some(&snapshot));
+        assert!(output.contains("Battery: 75%; charging: unknown"));
+        assert!(output.contains("2:800, 5:3200"));
+        for private in ["private-path", "private-serial", "private-custom-name", &target.key] {
+            assert!(!output.contains(private));
+        }
+        let coarse = super::super::backends::Snapshot {
+            battery: Some(crate::device::Battery { estimated_percent: Some(50), percent: None, charging: Some(false),
+                voltage_mv: None, approximate: true, level: Some(crate::device::BatteryLevel::Medium) }),
+            ..snapshot.clone()
+        };
+        let mut output = String::new();
+        append_probe_result(&mut output, &target, Some(&coarse));
+        assert!(output.contains("Battery: ≈50%; charging: no"));
+        assert!(output.contains("Battery level: Medium; approximate: true"));
+        assert!(!output.contains("Battery: 50%"));
+        let missing = super::super::backends::Snapshot { connected: false, battery: None, ..snapshot };
+        let mut output = String::new();
+        append_probe_result(&mut output, &target, Some(&missing));
+        assert!(output.contains("result=no-valid-reading"));
+    }
+}

@@ -1,19 +1,8 @@
-//! 续航 / 充满时间估算：最小二乘斜率 + 相位过滤 + 「沿用」缓存。
-//!
-//! 纯计算，不碰文件（读盘在 `super`）。`now_sec` 一律由调用方传入，
-//! 否则「补当前读数」那步会用到真实时间，和合成样本的时序打架、单测没法写。
 
 use super::format::{dur_short, dur_text, reason_text, Why};
 use super::{decide_charge, ChargeState, HistoryRow, HIST_GAP_BREAK_SEC};
 use std::sync::Mutex;
 
-/// 外推上限（小时）。
-///
-/// 原来取 100 小时，本意是不让界面出现「还能用 137 小时」这种没人信的数字。
-/// 但真机实测：这只鼠标 1 小时 48 分才掉 1%（≈0.55 %/h），按 97% 外推就是
-/// **176 小时** —— 完全正常的数据被这个上限判成「异常（请忽略）」，用户看到的
-/// 就是永远的「估算中」。所以放到 1000 小时（≈41 天），再由 [`COARSE_HOURS`]
-/// 用「10 天以上」这种粗粒度表达「很久」，而不是报错。
 const MAX_PREDICT_HOURS: f64 = 1000.0;
 
 /// 超过这个小时数就只说「N 天以上」。
@@ -145,10 +134,6 @@ pub fn predict_sticky(
     fresh
 }
 
-/// 从历史行推算续航/充满时间，**不做文件 IO**。
-///
-/// `now_sec` 由调用方给：否则「补当前读数」那步会用到真实时间，和合成样本的
-/// 时序打架，单测就没法写。
 pub fn predict_from_rows(
     rows: &[HistoryRow],
     now_level: u8,
@@ -371,10 +356,6 @@ pub(super) fn phase_start(rows: &[HistoryRow], charging: bool) -> usize {
         if r.charging != charging {
             break;
         }
-        // 断档检测：两条样本间隔超过 HIST_GAP_BREAK_SEC 说明中间根本没在观察
-        // （程序没运行 / 机器睡眠 / 鼠标长时间不响应）。这种跨度不能当连续观测用
-        // —— 实测遇到过 6 小时空档，两头差 4%，回归把它当成「6 小时均匀掉 4%」，
-        // 于是算出一个好看但完全错的斜率。碰到断档就截断，只用断档之后这一段。
         if let Some(pt) = prev_t {
             if pt - r.ts > HIST_GAP_BREAK_SEC {
                 break;

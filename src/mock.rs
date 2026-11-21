@@ -5,7 +5,7 @@
 //! 一行一台设备：`族|型号|电量|充电`（族写 mouse/keyboard/headset/gamepad，
 //! 充电写 0/1）。空行和 `#` 开头的行跳过。
 
-use crate::device::{DeviceFamily, DeviceReading};
+use crate::device::{Battery, DeviceFamily, DeviceReading, ReadingQuality};
 
 pub fn enabled() -> bool {
     std::env::var_os("ROG_MOCK_DEVICES").is_some()
@@ -47,10 +47,18 @@ pub fn parse(text: &str) -> Vec<DeviceReading> {
             key: crate::device::stable_key(&format!("mock:{name}:{occurrence}")),
             name: name.to_string(),
             family,
-            level: level.min(100),
-            charging: charging == "1" || charging.eq_ignore_ascii_case("true"),
+            battery: Some(Battery {
+                percent: Some(level.min(100)),
+                estimated_percent: None,
+                charging: Some(
+                    charging == "1" || charging.eq_ignore_ascii_case("true"),
+                ),
+                voltage_mv: None,
+                approximate: false,
+                level: None,
+            }),
             connected: it.next() != Some("offline"),
-            simulated: true,
+            quality: ReadingQuality::Live,
         });
     }
     out
@@ -76,8 +84,8 @@ mod tests {
         assert_eq!(got[1].family, DeviceFamily::Keyboard);
         assert_eq!(got[2].family, DeviceFamily::Headset);
         assert_eq!(got[3].family, DeviceFamily::Gamepad);
-        assert_eq!(got[1].level, 20);
-        assert!(got[1].charging);
+        assert_eq!(got[1].percent(), Some(20));
+        assert!(got[1].is_charging());
     }
 
     #[test]
@@ -85,11 +93,11 @@ mod tests {
         let text = "# 注释\n\n坏行没有分隔符\nmouse|X|abc|0\nmouse|X|50|0\n";
         let got = parse(text);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].level, 50);
+        assert_eq!(got[0].percent(), Some(50));
     }
 
     #[test]
     fn level_is_clamped() {
-        assert_eq!(parse("mouse|X|250|0")[0].level, 100);
+        assert_eq!(parse("mouse|X|250|0")[0].percent(), Some(100));
     }
 }

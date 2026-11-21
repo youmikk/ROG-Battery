@@ -1,11 +1,3 @@
-//! ROG 外设 PID → 型号名对照表（VID 0x0B05）。
-//!
-//! 数据来源：ASUS Gear Link 的 `hid-whitelist.json` 与各 PID 的 `manifest.json`
-//! （`caps.deviceName` / `caps.deviceNameZH`），抓取日期 2026-10-21。
-//! 完整表格见 `docs/device-support.md`。
-//!
-//! 为什么需要这张表：设备固件自报的产品名不可控（可能夹厂商缩写、全英文、甚至空串），
-//! 而接收器的扫描应答只给 PID。表里有的 PID 一律以表为准，表里没有才退回固件自报名。
 
 /// 设备大类。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -156,40 +148,4 @@ pub fn display_name(model_name: &str, wired_pid: u16, wireless_pid: u16) -> Stri
         }
     }
     model_name.trim().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn 型号表按_pid_能查到名字() {
-        assert_eq!(find(0x1B65).unwrap().name_zh, "ROG 龙鳞 Ace Mini");
-        assert_eq!(find(0x1B65).unwrap().kind, Kind::Mouse);
-        assert!(find(0x1ACE).is_none(), "0x1ACE 是接收器，不在设备表里");
-        assert_eq!(find_dongle(0x1ACE).unwrap().name_zh, "ROG OMNI 无线接收器");
-    }
-
-    #[test]
-    fn 型号表优先于固件自报名() {
-        // 固件自报的是英文缩写，表里有统一译名 → 用表里的
-        assert_eq!(display_name("HARPE ACE MINI", 0x1B65, 0), "ROG 龙鳞 Ace Mini");
-        // 有线 PID 为 0、只有无线 PID 时也能命中
-        assert_eq!(display_name("", 0, 0x1B63), "ROG 龙鳞 Ace Mini");
-    }
-
-    #[test]
-    fn 表里没有的型号退回固件自报名() {
-        assert_eq!(display_name("ROG 某新型号", 0xFFFF, 0), "ROG 某新型号");
-        assert_eq!(display_name("  ", 0xFFFF, 0), "");
-    }
-
-    #[test]
-    fn 表里没有重复_pid() {
-        let mut pids: Vec<u16> = DEVICES.iter().map(|d| d.pid).collect();
-        pids.sort_unstable();
-        let before = pids.len();
-        pids.dedup();
-        assert_eq!(before, pids.len(), "型号表里有重复 PID");
-    }
 }

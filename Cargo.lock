@@ -28,9 +28,10 @@ dependencies = [
 
 [[package]]
 name = "rog-mouse-ctl"
-version = "1.3.3"
+version = "1.4.9"
 dependencies = [
  "native-windows-gui",
+ "winapi",
 ]
 
 [[package]]

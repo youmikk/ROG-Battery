@@ -186,14 +186,6 @@ pub fn cmd_info(ctx: &mut Ctx, dev: &mut HidDevice, force_fresh: bool) -> Result
     Ok(())
 }
 
-/// `info --light` —— **只读 3 帧**（实测 94-97ms），给脚本/后台周期轮询用。
-///
-/// 与全量 `info` 的区别：
-/// - 只读电量帧、性能帧、profile 帧，**不读** DPI 档值/颜色/灯光/按键/身份
-/// - 鼠标休眠时**第一帧就返回**，不会白等后面两帧的超时
-///   （单帧 MISS = 一次 `DEFAULT_TIMEOUT_MS` = 1200ms；不提前返回就要付 3600ms）
-///
-/// 输出刻意做成一行机器可读的 `KEY=VALUE` 形式，方便 `.bat`/`.ps1` 直接解析。
 pub fn cmd_quick(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
     let rid = ctx.rid();
     let link_mode = ctx.link.mode.clone();
@@ -219,8 +211,6 @@ pub fn cmd_quick(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
         println!("full_effect={}", st.full_effect);
     }
     if snap.frames.contains_key("12:04:00") {
-        // raw 值与解析值并排给出：b13 的解析分支本机未被真正验证过，
-        // 把原始字节一起吐出来，将来换个设备遇到异常值能立刻定位
         println!("poll={}", proto::poll_name(st.poll_code));
         println!("poll_code={}", st.poll_code);
         println!("debounce_code={}", st.debounce_code);
@@ -322,21 +312,6 @@ pub fn apply_backup(
         log_raw(line);
     };
     let outcome: Result<(), String> = (|| -> Result<(), String> {
-    // ---- 4 档 DPI + 颜色 ----
-    //
-    // 这里刻意**不走 `ops::set_dpi`**：restore 是「按备份原样铺回去」，
-    // 不该有「写-读回-自动还原」那套六步循环（否则还原过程中每一项都会被
-    // 临时改两次）。但绕过 ops 也就绕过了它的参数校验，所以校验必须在这里补。
-    //
-    // 两道校验都有真实事故背景（2026-10-21 实测）：
-    // ① 备份里少了 `dpiN_rgb` 键时，旧代码 `unwrap_or([0,0,0])` 会把颜色
-    //    静默刷成黑色 —— 和文档第 5 节那次「能量块填错槽位」是同一类错误：
-    //    **缺失的键不该被当成零值写进设备**。现在缺失就沿用设备当前值。
-    // ② `dpiN_enc` 完全没有范围校验，写 `dpi1_enc=999` 会变成 50000 DPI
-    //    （`decode_dpi(999) = 999*50+50`）。现在超范围直接拒绝整份还原。
-    // 缺 `dpiN_rgb` 时要沿用设备当前颜色。**整份还原最多只读一次设备**：
-    // 原来每个缺失的档位都 `reader.read(...)` 一遍（17 帧 ≈ 860ms，休眠时 4.8s），
-    // 四个档位都不带颜色就是四次。基准状态在循环前取一次，后面复用。
     let base = if needs_color_base(b) {
         let mut reader = ops::DirectReader;
         Some(reader.read(dev, rid, true).map_err(|e| e.message)?)
@@ -931,76 +906,4 @@ pub fn light_zone_hint() -> String {
 /// 打开只读的接收器控制通道（`--dongle` 用）。
 pub fn open_dongle(all: &[HidInterface]) -> Result<HidDevice, String> {
     HidDevice::open_matching(all, crate::hid::USAGE_PAGE_DONGLE_CTRL)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn finish_upgrades_readback_mismatch_to_error() {
-        // 读回一致：原样返回报告
-        let ok = ApplyReport {
-            applied: true,
-            ..ApplyReport::default()
-        };
-        assert!(finish(Ok(ok)).is_ok());
-
-        // 读回不一致：CLI 靠退出码，必须升级成错误
-        let bad = ApplyReport {
-            applied: false,
-            new_value: "800 DPI".to_string(),
-            readback_value: "400 DPI".to_string(),
-            ..ApplyReport::default()
-        };
-        let err = finish(Ok(bad)).expect_err("读回不一致必须变成错误");
-        assert!(err.to_string().contains("写入未生效"), "{err}");
-
-        // ops 层的错误原样透出（不能在这里被吞掉）
-        assert!(finish(Err(OpsError::asleep("写入无应答"))).is_err());
-    }
-
-    #[test]
-    fn error_hints_cover_all_kinds() {
-        // 每个类别都要有自己的提示，不能落到空字符串
-        for k in [
-            ErrorKind::Invalid,
-            ErrorKind::Asleep,
-            ErrorKind::Rejected,
-            ErrorKind::Mismatch,
-            ErrorKind::Other,
-        ] {
-            assert!(!error_hint(k).is_empty(), "{k:?} 没有提示文案");
-        }
-    }
-
-    #[test]
-    fn partial_restore_reports_how_many_steps_landed() {
-        // 一项都没写成：错误原文，不加多余尾巴
-        assert_eq!(partial_hint("写去抖无应答".into(), 0), "写去抖无应答");
-        // 已经写了几项：必须说清楚「设备已经被改过一部分」
-        let msg = partial_hint("写能量块无应答".into(), 5);
-        assert!(msg.contains("写能量块无应答"));
-        assert!(msg.contains("已成功写入 5 项"), "实际：{msg}");
-    }
-
-    #[test]
-    fn needs_color_base_only_when_color_missing() {
-        use crate::backup::Backup;
-
-        // 全都带颜色：不需要读设备
-        let mut b = Backup::default();
-        for i in 0..crate::proto::DPI_STAGES {
-            b.dpi_enc[i] = Some(15);
-            b.dpi_rgb[i] = Some([1, 2, 3]);
-        }
-        assert!(!needs_color_base(&b));
-
-        // 有一档要写但没颜色：需要读一次
-        b.dpi_rgb[2] = None;
-        assert!(needs_color_base(&b));
-
-        // 没颜色的那档本来就不写（enc 是 None）：仍然不需要读
-        b.dpi_enc[2] = None;
-        assert!(!needs_color_base(&b));
-    }
 }

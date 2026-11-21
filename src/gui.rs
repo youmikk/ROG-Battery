@@ -1,50 +1,6 @@
-//! 图形界面：nwg 只做外壳，内容区整页 GDI+ 自绘。
-//!
-//! # 分工
-//!
-//! | 层 | 谁负责 |
-//! |---|---|
-//! | 主窗口 / 托盘 / 右键菜单 / 消息循环 | `native-windows-gui` |
-//! | 客户区全部像素 | [`crate::ui::canvas`] + [`crate::ui::pages`]（GDI+） |
-//! | 命中测试 / 滚动 / 输入框草稿 | [`crate::ui::widget`] |
-//! | 设备读写 | [`crate::ops`]（CLI 和 GUI 共用同一套六步循环） |
-//!
-//! # 三条铁律
-//!
-//! 1. **HID 操作绝不在 GUI 线程上跑**。鼠标休眠时一次 MISS 要等满 1200ms 超时，
-//!    在 GUI 线程上跑会让窗口直接假死。做法：后台线程独占设备句柄干活，
-//!    读完通过 [`nwg::Notice`] 唤醒 GUI 线程，数据用 `Arc<Mutex<Shared>>` 交接。
-//!
-//! 2. **绘制挂在 `WM_PAINT` 里**（见 [`canvas::Canvas::set_painter`]）。
-//!    窗口被遮挡再露出、最小化后恢复，Windows 只发 `WM_PAINT`，不会通知数据层；
-//!    只在「数据变了」时画，这些时刻客户区就是一片底色。
-//!
-//! 3. **写操作走队列**。GUI 线程只往 [`Shared::pending`] 塞一个 [`Cmd`]，
-//!    后台线程取出来执行。这样写天然串行 —— 两个 setter 交叉写同一寄存器
-//!    会把设备写坏。GUI 提交后立刻切 `Busy`，直到后台线程回报结果。
-//!
-//! # 为什么没有定时器
-//!
-//! 刷新节奏由后台线程自己控制（它睡在 `Condvar` 上，被「立即刷新」和「改间隔」
-//! 唤醒）。再加一个定时器只会让「谁触发刷新」有两个来源，出问题时更难定位。
-//!
-//! # nwg 已踩过的坑（写在这里省下一次试错）
-//!
-//! - `TrayNotification` 的 parent 必须是 `MessageWindow`，不能是普通 `Window`。
-//! - `TrayNotification::build` 时 icon 为 `None` 会 **panic**
-//!   （`src\controls\tray_notification.rs:370`）。本项目用 `include_bytes!` 编进 exe 的
-//!   `assets\tray.ico`，**且不能给 `.size()`** —— 那条路走 WIC image factory，
-//!   ico 里 256×256 的 PNG 条目 WIC 不认，报 `Failed to create a image factory`。
-//! - `Menu` 没有 `append()`，每个 `MenuItem` 都要显式 `.parent(&menu)`。
-//! - `TrayNotification::set_tip(&self, tip: &str)` **不接受 `Option`**。
-//! - `Window` 只有 `minimize()`，**没有** `set_minimized(bool)`；从托盘恢复用
-//!   `set_visible(true)`。
-//! - `WindowCloseData::close(false)` 可以**取消**关闭 —— `close_to_tray` 靠它实现。
-//! - `nwg::full_bind_event_handler` 收的是 **`Fn`**，不是 `FnMut`。所以要改的状态
-//!   必须放进 `Cell` / `RefCell` / `Mutex`。
 
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -54,7 +10,7 @@ use std::time::Duration;
 use native_windows_gui as nwg;
 
 use crate::commands::{run_cmd, run_file_cmd};
-use crate::hid::{self, HidDevice};
+use crate::hid;
 use crate::proto;
 use crate::settings::{self, Settings};
 use crate::snapshot::{self, FetchOutcome};
@@ -122,6 +78,11 @@ enum Status {
 /// 编码成一个可以跨线程传递的值。
 #[derive(Clone)]
 pub(crate) enum Cmd {
+    BasicDpi { target: crate::backends::Target, dpi: u16 },
+    BasicDpiStage { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext },
+    BasicDpiEdit { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext, expected_y: u16, x: u16, y: u16 },
+    BasicDpiPreset { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext, expected_y: u16, value: u16 },
+    BasicPollingRate { target: crate::backends::Target, hz: u16 },
     Poll(i32),
     Dpi {
         stage: usize,
@@ -164,9 +125,23 @@ pub(crate) enum Cmd {
 }
 
 impl Cmd {
+    fn basic_target(&self) -> Option<&crate::backends::Target> {
+        match self {
+            Self::BasicDpi { target, .. } | Self::BasicDpiStage { target, .. }
+                | Self::BasicDpiEdit { target, .. } | Self::BasicDpiPreset { target, .. }
+                | Self::BasicPollingRate { target, .. } => Some(target),
+            _ => None,
+        }
+    }
     /// 结果行 / 提示里用的中文短名。
     pub(crate) fn label(&self) -> String {
         match self {
+            Cmd::BasicDpi { dpi, .. } => format!("DPI {dpi}"),
+            Cmd::BasicDpiPreset { value, .. } => format!("DPI {value}"),
+            Cmd::BasicPollingRate { hz, .. } => crate::trf!("回报率 {hz} Hz", hz = hz),
+            Cmd::BasicDpiEdit { stage, x, y, .. } => format!("DPI {} · X {x} / Y {y}", stage.index + 1),
+            Cmd::BasicDpiStage { stage, .. } => crate::trf!("DPI 档 {stage} → {dpi}",
+                stage = usize::from(stage.index) + 1, dpi = stage.value),
             Cmd::Poll(hz) => crate::trf!("回报率 {hz} Hz", hz = hz),
             Cmd::Dpi { stage, dpi, .. } => {
                 crate::trf!("DPI 档 {stage} → {dpi}", dpi = dpi, stage = stage)
@@ -269,6 +244,30 @@ fn low_battery_alert(level: u8, charging: bool, armed: &mut bool) -> bool {
     true
 }
 
+fn persist_device_order(shared: &Arc<Mutex<Shared>>, order: Vec<String>) {
+    // 排列是用户偏好，与品牌读数分开保存。
+    let mut shared = lock_shared(shared);
+    let mut cfg = shared.cfg.clone();
+    cfg.set_device_order(order);
+    match settings::save(&cfg) {
+        Ok(()) => {
+            shared.cfg = cfg;
+            shared.sort_readings();
+        }
+        Err(error) => crate::diagnostics::event(
+            "device_order_save_failed",
+            &format!("error={error}"),
+        ),
+    }
+}
+
+fn low_battery_reading(reading: &crate::device::DeviceReading, armed: &mut bool) -> Option<u8> {
+    if reading.quality != crate::device::ReadingQuality::Live
+        || reading.battery.as_ref().is_some_and(|b| b.approximate) { return None; }
+    let percent = reading.percent()?;
+    low_battery_alert(percent, reading.is_charging(), armed).then_some(percent)
+}
+
 #[derive(Clone)]
 struct DeviceSnapshot {
     reading: crate::device::DeviceReading,
@@ -276,46 +275,89 @@ struct DeviceSnapshot {
     ident: proto::Identity,
     link: Option<hid::Link>,
     full_at: std::time::Instant,
+    basic: Option<crate::backends::Snapshot>,
+    basic_status: Option<crate::backends::status::Status>,
+}
+
+fn diagnostic_link(link: &hid::Link) -> crate::diagnostics::DeviceInfo {
+    let receiver = (link.mode == "Wireless24G").then(|| {
+        link.all_interfaces
+            .iter()
+            .find(|iface| crate::devices::find_dongle(iface.product_id).is_some())
+            .unwrap_or(&link.iface)
+    });
+    crate::diagnostics::DeviceInfo {
+        model: link.iface.product.clone(),
+        key: link.device_key(),
+        link_mode: link.mode.clone(),
+        wired_pid: 0,
+        wireless_pid: 0,
+        receiver_name: receiver
+            .map(|iface| {
+                crate::devices::find_dongle(iface.product_id)
+                    .map(|dongle| dongle.name_zh.to_string())
+                    .unwrap_or_else(|| iface.product.clone())
+            })
+            .unwrap_or_default(),
+        receiver_vendor_id: receiver.map(|iface| iface.vendor_id).unwrap_or_default(),
+        receiver_product_id: receiver.map(|iface| iface.product_id).unwrap_or_default(),
+        receiver_serial: String::new(),
+        receiver_mac: String::new(),
+        receiver_firmware: String::new(),
+    }
+}
+
+fn diagnostic_device(record: &DeviceSnapshot) -> crate::diagnostics::DeviceInfo {
+    let mut info = record
+        .link
+        .as_ref()
+        .map(diagnostic_link)
+        .unwrap_or_default();
+    info.model = record.ident.display_name();
+    info.key = record.reading.key.clone();
+    info.wired_pid = record.ident.wired_pid;
+    info.wireless_pid = record.ident.wireless_pid;
+    info.receiver_serial = record.ident.dongle_sn.clone();
+    info.receiver_mac = record.ident.dongle_mac.clone();
+    info.receiver_firmware = record.ident.dongle_firmware.clone();
+    info
+}
+
+fn diagnostic_facts<'a>(
+    operation: &'a str,
+    status: &'a str,
+    family: &'a str,
+    frames: usize,
+    elapsed_ms: u128,
+    device: Option<&'a crate::diagnostics::DeviceInfo>,
+) -> crate::diagnostics::Facts<'a> {
+    crate::diagnostics::Facts {
+        version: APP_VERSION,
+        operation,
+        status,
+        family,
+        frames,
+        elapsed_ms,
+        history_rows: crate::history::read_rows().len(),
+        device,
+    }
 }
 
 fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
-    if let Some(readings) = crate::mock::readings() {
-        let mut s = lock_shared(shared);
-        s.devices = readings
-            .iter()
-            .map(|r| {
-                (
-                    r.key.clone(),
-                    DeviceSnapshot {
-                        reading: r.clone(),
-                        state: None,
-                        ident: proto::Identity {
-                            model_name: r.name.clone(),
-                            ..Default::default()
-                        },
-                        link: None,
-                        full_at: std::time::Instant::now(),
-                    },
-                )
-            })
-            .collect();
-        s.readings = readings;
-        s.sort_readings();
-        s.status = Status::Ok;
-        return None;
-    }
     let links = crate::win32::HidApi::load().and_then(|api| hid::open_links(&api));
     let links = match links {
         Ok(links) => links,
         Err(e) => {
+            crate::diagnostics::event_once("link_enumeration_failed", &e);
             let mut s = lock_shared(shared);
+            if outcome_is_stale(generation, s.write_gen) { return None; }
             for device in s.devices.values_mut() {
+                if device.basic.is_some() { continue; }
                 device.reading.connected = false;
                 device.state = None;
+                if let Some(basic) = &mut device.basic { basic.connected = false; }
             }
-            for reading in &mut s.readings {
-                reading.connected = false;
-            }
+            s.rebuild_readings();
             s.quick = None;
             s.full = None;
             s.status = Status::Error(e);
@@ -325,7 +367,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
     let (mut records, active, mut primary, ttl) = {
         let s = lock_shared(shared);
         (
-            s.devices.clone(),
+            s.devices.iter().filter(|(_, device)| device.basic.is_none()).map(|(key, device)| (key.clone(), device.clone())).collect::<BTreeMap<_, _>>(),
             s.active_key.clone(),
             s.primary_key.clone(),
             Duration::from_secs(s.cfg.cache_ttl_sec),
@@ -333,6 +375,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
     };
     for record in records.values_mut() {
         record.reading.connected = false;
+        if let Some(basic) = &mut record.basic { basic.connected = false; }
     }
     let mut sample = None;
     let mut seen = std::collections::BTreeSet::new();
@@ -350,17 +393,24 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                 && active
                     .as_ref()
                     .is_none_or(|k| previous.as_ref().is_some_and(|d| &d.reading.key == k)));
-        let out = match HidDevice::open(&link.iface) {
-            Ok(mut dev) => {
-                if needs_full {
-                    snapshot::fetch(&mut dev, &link.all_interfaces, link.report_id, &link.mode)
-                } else {
-                    snapshot::fetch_light(&mut dev, link.report_id, &link.mode)
-                }
+        let out = match crate::backends::rog::fetch(&link, needs_full) {
+            Ok(out) => out,
+            Err(error) => {
+                let device = diagnostic_link(&link);
+                let facts = diagnostic_facts(
+                    "device_open_failed",
+                    &error,
+                    crate::device::DeviceFamily::Unknown.noun(),
+                    0,
+                    0,
+                    Some(&device),
+                );
+                crate::diagnostics::record_device_once(&facts);
+                continue;
             }
-            Err(_) => continue,
         };
-        let is_connected = out.snapshot.frames.contains_key("12:07:00");
+        let battery = out.snapshot.battery();
+        let is_connected = battery.is_some();
         let mut ident = if needs_full {
             out.snapshot.identity.clone()
         } else {
@@ -419,12 +469,10 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             st.poll_code = out.snapshot.state.poll_code;
             st.active_stage = out.snapshot.state.active_stage;
         }
-        let level = if is_connected {
-            out.snapshot.state.power
-        } else {
-            previous.as_ref().map(|d| d.reading.level).unwrap_or(0)
-        };
+        let battery = battery.or_else(|| previous.as_ref().and_then(|d| d.reading.battery.clone()));
         let record = DeviceSnapshot {
+            basic: None,
+            basic_status: None,
             reading: crate::device::DeviceReading {
                 key: key.clone(),
                 name: if name.is_empty() {
@@ -433,10 +481,9 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                     name
                 },
                 family,
-                level,
-                charging: is_connected && out.snapshot.state.charging != 0,
+                battery,
                 connected: is_connected,
-                simulated: false,
+                quality: crate::device::ReadingQuality::Live,
             },
             state: if is_connected { state } else { None },
             ident,
@@ -450,6 +497,18 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                     .unwrap_or_else(std::time::Instant::now)
             },
         };
+        if needs_full && !record.ident.model_name.trim().is_empty() {
+            let device = diagnostic_device(&record);
+            let facts = diagnostic_facts(
+                "device_identified",
+                "设备已识别",
+                family.noun(),
+                out.frames_read,
+                out.elapsed.as_millis(),
+                Some(&device),
+            );
+            crate::diagnostics::record_device_once(&facts);
+        }
         {
             let mut s = lock_shared(shared);
             if outcome_is_stale(generation, s.write_gen) {
@@ -471,17 +530,126 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         for d in records.values_mut() {
             if !d.reading.connected {
                 d.state = None;
+                if let Some(basic) = &mut d.basic { basic.connected = false; }
             }
         }
-        s.readings = records.values().map(|d| d.reading.clone()).collect();
-        s.sort_readings();
-        s.devices = records;
+        s.replace_rog_records(records);
     }
     sample
 }
 
+fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll) {
+    merge_additional_at(shared, backend, poll, std::time::Instant::now());
+}
+
+fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll,
+    now: std::time::Instant) {
+    if backend==crate::backends::BackendId::Rapoo {
+        // Older builds keyed Rapoo by serial. Migrate only when the current scan
+        // establishes one receiver for that serial; identical receivers stay separate.
+        for snapshot in &poll.snapshots {
+            let Ok(i)=snapshot.target.hid() else {continue;};
+            if i.serial.is_empty() || poll.snapshots.iter().filter(|s| {
+                s.target.hid().is_ok_and(|other|
+                    other.vendor_id==i.vendor_id && other.product_id==i.product_id && other.serial==i.serial)
+            }).count()!=1 {continue;}
+            let old=crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",backend.name(),i.vendor_id,i.product_id,i.serial,snapshot.target.address));
+            if old!=snapshot.target.key && (shared.cfg.device_names.contains_key(&old)
+                || shared.cfg.device_tray.contains_key(&old) || shared.cfg.dpi_presets.contains_key(&old)
+                || shared.cfg.device_order.contains(&old) || shared.cfg.tray_device.as_ref()==Some(&old)) {
+                if shared.promote_device_key(&old,&snapshot.target.key) {shared.device_keys_dirty=true;}
+                shared.cfg.device_names.remove(&old);
+                shared.cfg.device_tray.remove(&old);
+                shared.devices.remove(&old);
+            }
+        }
+    }
+    for device in shared.devices.values_mut() {
+        if let Some(basic) = &mut device.basic {
+            if basic.target.backend != backend { continue; }
+            let connection = poll.present_channels.as_ref().and_then(|paths|
+                (!paths.contains(&basic.target.channel_key())).then_some(false));
+            let status = device.basic_status.get_or_insert_with(Default::default);
+            status.observe(connection, None, now, backend.sample_lifetime());
+            if backend == crate::backends::BackendId::XInput && connection == Some(false) {
+                // A slot can be reused by a different controller after disconnection.
+                status.clear_battery();
+                basic.battery = None;
+                basic.battery_at = None;
+                device.reading.battery = None;
+            }
+            basic.connected = status.connected;
+            basic.disable_writes();
+            device.reading.connected = status.connected;
+            device.reading.quality = status.quality;
+        }
+    }
+    for mut snapshot in poll.snapshots {
+        if backend == crate::backends::BackendId::StandardHid && shared.devices.values().any(|device|
+            device.basic.as_ref().is_some_and(|other| other.target.backend.precedes_standard()
+                && other.connected && other.target.same_hid_path(&snapshot.target))) { continue; }
+        if backend.precedes_standard() {
+            shared.devices.retain(|_, device| !device.basic.as_ref().is_some_and(|other|
+                other.target.backend == crate::backends::BackendId::StandardHid && other.target.same_hid_path(&snapshot.target)));
+        }
+        let previous = shared.devices.values().filter(|device| device.basic.as_ref().is_some_and(|other|
+            other.target.same_channel(&snapshot.target) && other.target.key != snapshot.target.key))
+            .max_by_key(|device| device.full_at)
+            .and_then(|device| device.basic.as_ref()).map(|other| other.target.clone());
+        if let Some(previous) = previous {
+            let link_key = previous.unverified_key();
+            let had_identity = previous.verified_identity || previous.key != link_key;
+            if snapshot.target.verified_identity && !had_identity {
+                if shared.promote_device_key(&previous.key, &snapshot.target.key) { shared.device_keys_dirty = true; }
+                shared.devices.remove(&previous.key);
+            } else if !snapshot.target.verified_identity {
+                // 身份查询暂时失败仍沿用原卡片，但不能沿用之前的写入授权。
+                snapshot.target.key = previous.key;
+                if had_identity { snapshot.disable_writes(); }
+                if snapshot.target.family == crate::device::DeviceFamily::Unknown { snapshot.target.family = previous.family; }
+                if snapshot.target.hid().is_ok_and(|i| snapshot.target.name == i.product) { snapshot.target.name = previous.name; }
+            } else if let Some(device) = shared.devices.get_mut(&previous.key) {
+                // 同一接收器槽位出现另一个已确认身份，旧设备不能继续显示在线。
+                if let Some(status) = &mut device.basic_status {
+                    status.observe(Some(false), None, now, backend.sample_lifetime());
+                }
+                device.reading.connected = false;
+                device.reading.quality = crate::device::ReadingQuality::Stale;
+                if let Some(basic) = &mut device.basic { basic.connected = false; }
+            }
+        }
+        let key = snapshot.target.key.clone();
+        let previous = shared.devices.get(&key);
+        let mut status = previous.and_then(|device| device.basic_status.clone()).unwrap_or_default();
+        status.observe_sample(Some(snapshot.connected), snapshot.battery.as_ref(), snapshot.battery_at,
+            now, backend.sample_lifetime());
+        if snapshot.battery_unavailable { status.clear_battery(); }
+        if snapshot.dpi.current.is_none() {
+            if let Some(previous) = previous.and_then(|device| device.basic.as_ref()) {
+                snapshot.dpi = previous.dpi.clone();
+                snapshot.dpi.disable_writes();
+            }
+        }
+        let reading = crate::device::DeviceReading {
+            key: key.clone(), name: snapshot.target.name.clone(), family: snapshot.target.family,
+            battery: status.battery.clone(),
+            connected: status.connected,
+            quality: status.quality,
+        };
+        let ident = proto::Identity { model_name: snapshot.target.name.clone(), ..Default::default() };
+        shared.devices.insert(key, DeviceSnapshot { reading, ident, state: None, link: None,
+            full_at: now, basic: Some(snapshot), basic_status: Some(status) });
+    }
+    shared.rebuild_readings();
+}
+
 struct Shared {
+    device_keys_dirty: bool,
     refresh_generation: u64,
+    completed_requests: BTreeMap<crate::backends::BackendId, u64>,
+    source_write_gen: BTreeMap<crate::backends::BackendId, u64>,
+    source_pending: BTreeMap<crate::backends::BackendId, VecDeque<Cmd>>,
+    source_busy: std::collections::BTreeSet<crate::backends::BackendId>,
     devices: std::collections::BTreeMap<String, DeviceSnapshot>,
     key_aliases: std::collections::BTreeMap<String, String>,
     active_key: Option<String>,
@@ -493,11 +661,6 @@ struct Shared {
     full: Option<proto::State>,
     /// 全量快照里的身份信息（型号、SN、固件）。
     ident: Option<proto::Identity>,
-    /// `hid::open_link` 实测出来的链路：`Wired` / `Wireless24G`。
-    ///
-    /// **不能用 `ident.dongle_sn` 判有线无线** —— 那个字段来自设备自己回报的
-    /// 接收器 SN，2.4G 下也可能读成空串，于是界面把无线显示成「有线」。
-    /// 这个字段来自枚举到的 HID 接口本身，是实测值。
     link_mode: String,
     /// 每轮都会更新的那几项。叠在 `full` 上，电量才是活的。
     quick: Option<Quick>,
@@ -507,7 +670,7 @@ struct Shared {
     /// 接收器掉线时会沿用上一次读数，界面上不标注就变成撒谎。
     last_ok_at: Option<std::time::Instant>,
     /// 低电量提醒的闸门：`true` = 还没提醒过。
-    low_alert_armed: bool,
+    low_alert_armed: std::collections::BTreeMap<String, bool>,
     /// 当前设备的族（鼠标/耳机/键盘），提示语按它说话。
     device_family: crate::device::DeviceFamily,
     /// 设备列表与当前详情独立更新。
@@ -544,26 +707,113 @@ struct Shared {
     /// 疯狂拖滑块时堆几百条命令、松手后设备还在慢慢追。
     pending: VecDeque<(Cmd, Option<hid::Link>)>,
     /// 最近一条命令的结果，GUI 线程取走一次就清空。
-    last: Option<CmdResult>,
+    results: VecDeque<CmdResult>,
     /// 下一轮要不要读全量。
     want_full: bool,
 }
 
 impl Shared {
+    fn expire_additional(&mut self) {
+        self.expire_additional_at(std::time::Instant::now());
+    }
+
+    fn expire_additional_at(&mut self, now: std::time::Instant) {
+        let mut changed = false;
+        for device in self.devices.values_mut() {
+            if let (Some(basic), Some(status)) = (&mut device.basic, &mut device.basic_status) {
+                if status.expire(now, basic.target.backend.sample_lifetime()) {
+                    device.reading.quality = status.quality;
+                    basic.disable_writes();
+                    changed = true;
+                }
+            }
+        }
+        if changed { self.rebuild_readings(); }
+    }
+
+    fn replace_rog_records(&mut self, records: BTreeMap<String, DeviceSnapshot>) {
+        self.devices.retain(|_, device| device.basic.is_some());
+        self.devices.extend(records);
+        self.rebuild_readings();
+    }
+
+    fn publish_additional(&mut self, backend: crate::backends::BackendId, poll: impl Into<crate::backends::Poll>,
+        generation: u64, request: u64) -> bool {
+        if generation != *self.source_write_gen.get(&backend).unwrap_or(&0) { return false; }
+        merge_additional(self, backend, poll.into());
+        self.complete_refresh(backend, request);
+        true
+    }
+
+    fn replace_mock_readings(&mut self, readings: Vec<crate::device::DeviceReading>) {
+        let now = std::time::Instant::now();
+        self.devices = readings
+            .into_iter()
+            .map(|reading| {
+                let ident = proto::Identity {
+                    model_name: reading.name.clone(),
+                    ..Default::default()
+                };
+                (
+                    reading.key.clone(),
+                    DeviceSnapshot {
+                        reading,
+                        state: None,
+                        ident,
+                        link: None,
+                        full_at: now,
+                        basic: None,
+                        basic_status: None,
+                    },
+                )
+            })
+            .collect();
+        self.primary_key = None;
+        self.rebuild_readings();
+    }
+
+    fn rebuild_readings(&mut self) {
+        self.readings = self.devices.values().map(|device| device.reading.clone()).collect();
+        self.sort_readings();
+    }
+
+    fn complete_refresh(&mut self, backend: crate::backends::BackendId, request: u64) {
+        let completed = self.completed_requests.entry(backend).or_default();
+        *completed = (*completed).max(request);
+        self.refresh_generation = self.completed_requests.values().copied().min().unwrap_or(0);
+    }
+    fn complete_rog_refresh(&mut self, generation: u64, request: u64) -> bool {
+        if outcome_is_stale(generation, self.write_gen) { return false; }
+        self.complete_refresh(crate::backends::BackendId::Rog, request);
+        true
+    }
     fn sort_readings(&mut self) {
         let cfg = &self.cfg;
         self.readings.sort_by(|a, b| {
-            (cfg.device_kind(a).order(), cfg.device_name(a), &a.key).cmp(&(
-                cfg.device_kind(b).order(),
-                cfg.device_name(b),
-                &b.key,
-            ))
+            (
+                cfg.device_order_index(&a.key).unwrap_or(usize::MAX),
+                cfg.device_kind(a).order(),
+                cfg.device_name(a),
+                &a.key,
+            )
+                .cmp(&(
+                    cfg.device_order_index(&b.key).unwrap_or(usize::MAX),
+                    cfg.device_kind(b).order(),
+                    cfg.device_name(b),
+                    &b.key,
+                ))
         });
     }
 
     fn new(cfg: Settings) -> Shared {
         Shared {
+            device_keys_dirty: false,
             refresh_generation: 0,
+            completed_requests: std::iter::once(crate::backends::BackendId::Rog).chain(crate::backends::ADDITIONAL_BACKENDS)
+                .map(|backend| (backend, 0)).collect(),
+            source_write_gen: Default::default(),
+            source_pending: Default::default(),
+            source_busy: Default::default(),
             devices: Default::default(),
             key_aliases: Default::default(),
             active_key: None,
@@ -573,7 +823,7 @@ impl Shared {
             link_mode: String::new(),
             quick: None,
             last_ok_at: None,
-            low_alert_armed: true,
+            low_alert_armed: Default::default(),
             device_family: crate::device::DeviceFamily::Unknown,
             readings: Vec::new(),
             write_gen: 0,
@@ -586,7 +836,7 @@ impl Shared {
             cfg,
             autostart: (crate::autostart::AutoStartState::Unknown, crate::autostart::AutoStartPath::Unknown),
             pending: VecDeque::new(),
-            last: None,
+            results: VecDeque::new(),
             want_full: false,
         }
     }
@@ -609,11 +859,20 @@ impl Shared {
             self.cfg.tray_device = Some(new.to_string());
         }
         let mut changed = tray_changed;
+        let mut order = self.cfg.device_order.clone();
+        for key in &mut order {
+            if key == old { *key = new.to_string(); changed = true; }
+        }
+        self.cfg.set_device_order(order);
         if !self.cfg.device_names.contains_key(new) {
             if let Some(name) = self.cfg.device_names.remove(old) {
                 self.cfg.device_names.insert(new.to_string(), name);
                 changed = true;
             }
+        }
+        if let Some(presets) = self.cfg.dpi_presets.remove(old) {
+            self.cfg.dpi_presets.entry(new.to_string()).or_insert(presets);
+            changed = true;
         }
         if self.cfg.device_tray.contains_key(new) {
             return changed;
@@ -672,6 +931,85 @@ impl Shared {
     }
 }
 
+fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::DpiState> {
+    shared
+        .devices
+        .iter()
+        .filter_map(|(key, device)| {
+            if let Some(basic) = &device.basic {
+                let presets = shared.cfg.dpi_presets.get(key);
+                let custom = presets.is_some_and(|p| p.enabled);
+                let (stages, value_control) = basic.dpi.shortcut_stages(presets);
+                if stages.is_empty() && basic.dpi.current.is_none() { return None; }
+                let active = if !value_control { basic.dpi.active_stage } else {
+                    stages.iter().find(|stage| Some(stage.value) == basic.dpi.current
+                        && basic.dpi.current_y.is_none_or(|y| y == stage.value)).map(|stage| stage.index)
+                };
+                let disabled = if value_control { stages.iter().filter(|stage| !basic.dpi.values.contains(&stage.value))
+                    .map(|stage|stage.index).collect() } else { Vec::new() };
+                return Some((key.clone(), crate::ui::tray_popup::DpiState { stages, active,
+                    current: basic.dpi.current, current_y: basic.dpi.current_y,
+                    stage_y:if value_control {BTreeMap::new()} else {basic.dpi.stage_y.clone()},context: basic.dpi.stage_context(),
+                    custom, disabled, value_control, writable: basic.connected &&
+                        if !value_control { basic.dpi.stage_writable } else { basic.dpi.writable
+                            && (!custom || basic.dpi.write_effect.is_some()) } }));
+            }
+            let state = device.state.as_ref()?;
+            Some((
+                key.clone(),
+                crate::ui::tray_popup::DpiState {
+                    stages: (0..4).map(|index| crate::device::DpiStage {
+                        index: index as u8 + 1, value: state.dpi(index) as u16 }).collect(),
+                    current: Some(state.dpi(usize::from(state.active_stage.clamp(1, 4) - 1)) as u16),
+                    current_y: None,
+                    stage_y: BTreeMap::new(),
+                    active: Some(state.active_stage.clamp(1, 4)),
+                    context: None,
+                    writable: true,
+                    value_control: false,
+                    custom: false,
+                    disabled: Vec::new(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn taskbar_strip_content(
+    readings: &[crate::device::DeviceReading],
+    cfg: &Settings,
+) -> Option<crate::taskbar_widget::StripContent> {
+    let items = readings
+        .iter()
+        .filter(|reading| {
+            reading.display_percent().is_some() || reading.coarse_level().is_some()
+        })
+        .map(|reading| crate::taskbar_widget::StripItem {
+            level: reading.display_percent(),
+            charging: reading.is_charging(),
+            kind: cfg.device_kind(reading),
+        })
+        .collect::<Vec<_>>();
+    (!items.is_empty()).then_some(crate::taskbar_widget::StripContent { items })
+}
+
+fn dpi_preset_command(cfg: &Settings, basic: &crate::backends::Snapshot, value: u16) -> Option<Cmd> {
+    let presets = cfg.dpi_presets.get(&basic.target.key)?;
+    if !presets.enabled || !presets.values.contains(&value) || !basic.connected
+        || !basic.dpi.writable || basic.dpi.write_effect.is_none() || !basic.dpi.values.contains(&value) {
+        return None;
+    }
+    if basic.target.backend == crate::backends::BackendId::CompX {
+        // Numerical writes on this family rewrite the active onboard row. Bind
+        // that row now, so a queued command cannot edit a newly selected stage.
+        let stage = *basic.dpi.stages.iter().find(|s| Some(s.index) == basic.dpi.active_stage)?;
+        if !basic.dpi.stage_editable { return None; }
+        return Some(Cmd::BasicDpiPreset { target:basic.target.clone(),stage,context:basic.dpi.stage_context()?,
+            expected_y:*basic.dpi.stage_y.get(&stage.index)?,value });
+    }
+    Some(Cmd::BasicDpi {target:basic.target.clone(),dpi:value})
+}
+
 /// 「有活了」的信号 + 关闭开关。
 ///
 /// 用 `Condvar` + 计数而不是「睡固定时长」：用户点「立即刷新」时能立刻醒，
@@ -680,6 +1018,7 @@ struct Signal {
     poke: Mutex<u64>,
     cv: Condvar,
     interval_ms: AtomicU64,
+    wake_probe: AtomicBool,
     shutdown: AtomicBool,
     /// 最近一次用户活动触发的补读时刻（节流用）。
     last_activity: Mutex<Option<std::time::Instant>>,
@@ -692,6 +1031,7 @@ impl Signal {
             last_activity: Mutex::new(None),
             cv: Condvar::new(),
             interval_ms: AtomicU64::new(interval_sec.saturating_mul(1000)),
+            wake_probe: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
         }
     }
@@ -731,11 +1071,29 @@ impl Signal {
         self.cv.notify_all();
     }
 
+    fn current_request(&self) -> u64 { *lock_poke(&self.poke) }
+
+    fn set_wake_probe(&self, active: bool) {
+        self.wake_probe.store(active, Ordering::Relaxed);
+    }
+
     /// 等到「有新工作」或「过了一个间隔」。返回 `false` = 该退出了。
     fn wait_for_work(&self, seen: &mut u64) -> bool {
-        let interval = if crate::mock::enabled() { 1000 } else {
-            self.interval_ms.load(Ordering::Relaxed).max(1000)
+        self.wait_for_work_with_limit(seen, None)
+    }
+
+    fn work_interval_ms(&self, limit: Option<u64>) -> u64 {
+        let configured = self.interval_ms.load(Ordering::Relaxed).max(1000);
+        let interval = if self.wake_probe.load(Ordering::Relaxed) {
+            configured.min(WAKE_PROBE_INTERVAL_MS)
+        } else {
+            configured
         };
+        limit.map_or(interval, |limit| interval.min(limit.max(1)))
+    }
+
+    fn wait_for_work_with_limit(&self, seen: &mut u64, limit: Option<u64>) -> bool {
+        let interval = self.work_interval_ms(limit);
         let mut n = lock_poke(&self.poke);
         if *n == *seen {
             let (g, _) = self
@@ -751,6 +1109,9 @@ impl Signal {
         true
     }
 }
+
+/// 休眠时缩短轮询间隔，让鼠标移动唤醒后能自动恢复托盘电量。
+const WAKE_PROBE_INTERVAL_MS: u64 = 3_000;
 
 fn lock_poke(m: &Mutex<u64>) -> std::sync::MutexGuard<'_, u64> {
     match m.lock() {
@@ -786,6 +1147,50 @@ fn join_bounded(h: std::thread::JoinHandle<()>, budget: Duration) {
 
 /// 托盘图标回调消息号。`WM_APP + 100`，避开 nwg 自己用的那些。
 const TRAY_CALLBACK_MSG: u32 = 0x8000 + 100;
+/// Taskbar-adjacent strip callback. It routes into the same quick-view popup.
+const TASKBAR_CALLBACK_MSG: u32 = 0x8000 + 101;
+
+#[derive(Clone, Copy, Default)]
+struct TrayClicks {
+    pending: Option<(u32, bool)>,
+    pressed_was_open: Option<bool>,
+    suppress_release: bool,
+}
+
+impl TrayClicks {
+    fn press(&mut self, was_open: bool) {
+        self.pressed_was_open = Some(was_open);
+        self.suppress_release = false;
+    }
+
+    fn release(&mut self, timestamp: u32, was_open: bool) -> bool {
+        if self.suppress_release || self.pending.is_some() {
+            return false;
+        }
+        self.pending = Some((timestamp, self.pressed_was_open.take().unwrap_or(was_open)));
+        true
+    }
+
+    fn double_click(&mut self, timestamp: u32, interval: u32) -> bool {
+        if self.suppress_release {
+            return false;
+        }
+        let valid = self.pending.take().is_some_and(|(first, _)| {
+            timestamp.wrapping_sub(first) <= interval
+        });
+        self.pressed_was_open = None;
+        self.suppress_release = valid;
+        valid
+    }
+
+    fn finish_single(&mut self) -> Option<bool> {
+        self.pending.take().map(|(_, was_open)| was_open)
+    }
+
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+}
 
 /// 自己管的托盘图标。
 ///
@@ -871,12 +1276,18 @@ impl TrayCtl {
             let tip = reading
                 .map(|r| {
                     format!(
-                        "{} · {}%{}",
+                        "{} · {}{}",
                         cfg.device_name(r),
-                        r.level,
+                        r.battery.as_ref().and_then(|battery| battery.display_percent()).map(|level| level.label(true))
+                            .or_else(|| r.coarse_level().map(|level| crate::i18n::battery_level(level).to_string()))
+                            .unwrap_or_else(|| crate::tr!("电量未知").to_string()),
                         if !r.connected {
                             crate::tr!("（上次电量，未连接）")
-                        } else if r.charging {
+                        } else if r.quality == crate::device::ReadingQuality::Cached {
+                            crate::tr!("（上次电量，等待回报）")
+                        } else if r.quality == crate::device::ReadingQuality::Stale {
+                            crate::tr!("（上次电量已过期）")
+                        } else if r.is_charging() {
                             crate::tr!("（充电中）")
                         } else {
                             ""
@@ -904,8 +1315,8 @@ impl TrayCtl {
             }
             let icon = if let Some(r) = reading {
                 crate::tray_icon::render_device(
-                    if r.connected { Some(r.level) } else { None },
-                    r.charging,
+                    r.display_percent(),
+                    r.is_charging(),
                     cfg.device_kind(r),
                     content,
                 )
@@ -991,6 +1402,7 @@ impl std::ops::Drop for TrayCtl {
 /// 打成一个结构而不是给 `handle_act` 传七个参数：这条链上每加一个能力
 /// （比如新加一个「打开日志」按钮要 `ShellExecute`），改签名会波及每一处调用。
 struct UiEnv<'a> {
+    audio: &'a crate::audio::Controls,
     canvas: &'a Canvas,
     shared: &'a Arc<Mutex<Shared>>,
     signal: &'a Signal,
@@ -1000,6 +1412,10 @@ struct UiEnv<'a> {
 }
 
 impl<'a> UiEnv<'a> {
+    fn basic(&self) -> Option<crate::backends::Snapshot> {
+        let key = self.canvas.with_ui(|ui| ui.selected_device.clone())?;
+        lock_shared(self.shared).devices.get(&key)?.basic.clone()
+    }
     /// 在界面底部浮层显示一条提示，并立刻重画。
     fn say(&self, text: impl Into<String>) {
         let t = text.into();
@@ -1096,6 +1512,20 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.signal.request_refresh();
             env.canvas.repaint_now();
         }
+        Act::ReorderDevice(from, to) => {
+            let mut order = lock_shared(env.shared)
+                .readings
+                .iter()
+                .map(|reading| reading.key.clone())
+                .collect::<Vec<_>>();
+            if from < order.len() && to < order.len() && from != to {
+                let key = order.remove(from);
+                order.insert(to, key);
+                persist_device_order(env.shared, order);
+                env.canvas.with_ui_mut(|ui| ui.device_drag = None);
+                env.canvas.repaint_now();
+            }
+        }
         Act::ToggleDeviceTray => {
             if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
                 let reading = lock_shared(env.shared)
@@ -1133,6 +1563,11 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.canvas.repaint_now();
         }
 
+        Act::SettingsSection(section) => {
+            env.canvas.with_ui_mut(|ui| ui.select_settings_section(section));
+            env.canvas.repaint_now();
+        }
+
         Act::SelectCloseChoice(c) => {
             env.canvas.with_ui_mut(|u| u.close_choice = c);
             env.canvas.repaint_now();
@@ -1164,6 +1599,7 @@ fn handle_act(a: Act, env: &UiEnv) {
 
             if choice == crate::ui::widget::CloseChoice::Minimize {
                 env.window.set_visible(false);
+                env.audio.set_active(1, false);
                 // 藏起来了，把位图和字体还回去；恢复后首帧自动重建。
                 env.canvas.release_render_memory();
             } else {
@@ -1171,7 +1607,6 @@ fn handle_act(a: Act, env: &UiEnv) {
                 nwg::stop_thread_dispatch();
             }
         }
-
 
         Act::SetTheme(idx) => {
             let pref = match idx {
@@ -1181,7 +1616,6 @@ fn handle_act(a: Act, env: &UiEnv) {
             };
             apply_theme_pref(env, pref);
         }
-
 
         Act::OpenDrop(d) => {
             env.canvas.with_ui_mut(|u| u.set_open_drop(Some(d)));
@@ -1212,6 +1646,39 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::PickDrop(d, idx) => pick_drop(env, d, idx),
 
         Act::Focus(e) => {
+            if let Edit::DpiPreset(index) = e {
+                if let Some(basic) = env.basic() {
+                    let presets = env.cfg().presets_for(&basic.target.key, &basic.dpi);
+                    if let Some(value) = presets.values.get(usize::from(index)) {
+                        env.canvas.with_ui_mut(|u| u.begin_edit(e, value.to_string()));
+                    }
+                }
+                env.canvas.repaint_now();
+                return;
+            }
+            if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
+                if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable) {
+                    if let Some(original) = crate::ui::widget::BasicDpiDraft::from_snapshot(&basic,index) {
+                        env.canvas.with_ui_mut(|u| {
+                            let original = u.basic_dpi_drafts.entry(index).or_insert(original).clone();
+                            let value = if matches!(e,Edit::BasicDpiX(_)) {original.stage.value} else {original.y};
+                            u.begin_edit(e,value.to_string());
+                        });
+                    }
+                }
+                env.canvas.repaint_now();
+                return;
+            }
+            if e == Edit::Dpi(0) {
+                if let Some(basic) = env.basic() {
+                    if basic.connected && basic.dpi.writable {
+                        let init = basic.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_default();
+                        env.canvas.with_ui_mut(|ui| ui.begin_edit(e, init));
+                        env.canvas.repaint_now();
+                    }
+                    return;
+                }
+            }
             // **这里必须自己建草稿**：`Ui::on_press` 命中 `Act::Focus` 时只设
             // `focus`，`edits` 里还是空的。不建草稿的话 `type_char` 找不到槽位
             // 直接返回 `false`，表现是「点进输入框后敲字没反应」。
@@ -1232,15 +1699,66 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
 
         Act::ApplyEdit(e) => apply_edit(env, e),
+        Act::UseDpiPreset(value) => {
+            if let Some(basic) = env.basic() {
+                if let Some(cmd) = dpi_preset_command(&env.cfg(), &basic, value) { env.submit(cmd); }
+                else { env.say(crate::tr!("当前连接不支持 DPI 预设写入")); }
+            }
+        }
+        Act::DpiPresetMode(_) | Act::DpiPresetCount(_) => {
+            update_dpi_presets(env, a, None);
+        }
+        Act::BasicDpi(value) => {
+            let basic = env.basic();
+            if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.writable && basic.dpi.values.contains(&value)) {
+                drop_draft(env, Edit::Dpi(0));
+                env.submit(Cmd::BasicDpi { target: basic.target, dpi: value });
+            }
+        }
+        Act::BasicDpiStage(stage, context) => {
+            let basic = env.basic();
+            if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.stage_writable
+                && basic.dpi.stage_context() == Some(context) && basic.dpi.stages.contains(&stage)) {
+                env.submit(Cmd::BasicDpiStage { target: basic.target, stage, context });
+            }
+        }
+        Act::BasicPollingRate(hz) => {
+            if let Some(basic) = env.basic().filter(|b| b.connected && b.polling_rate.writable
+                && b.polling_rate.values.contains(&hz)) {
+                env.submit(Cmd::BasicPollingRate { target: basic.target, hz });
+            }
+        }
 
         Act::SetSlide(s, frac) => {
             // 拖拽中只改「这一帧显示什么」，**不写设备**。
             // 写一轮设备几十毫秒，拖一次会积压几十条命令，滑块会慢半拍。
             env.canvas.with_ui_mut(|u| u.set_live_frac(s, frac));
+            if s == Slide::AudioVolume {
+                let slot = env.canvas.with_ui(|u| u.audio_slot);
+                env.audio.set_volume(slot, (frac.clamp(0.0, 1.0) * 100.0).round() as u8);
+            }
             env.canvas.repaint_now();
         }
 
         Act::CommitSlide(s) => commit_slide(env, s),
+
+        Act::SelectAudio(slot) => {
+            env.canvas.with_ui_mut(|u| {
+                u.audio_slot = slot;
+                u.clear_live_frac(Slide::AudioVolume);
+            });
+            env.audio.refresh();
+            env.canvas.repaint_now();
+        }
+        Act::ToggleMicrophone => {
+            env.audio.toggle_microphone();
+            env.canvas.repaint_now();
+        }
+        Act::OpenSoundSettings => {
+            if let Err(error) = crate::audio::open_sound_settings() {
+                env.say(format!("✘ {error}"));
+            }
+        }
 
         // `on_press` 只把它写进 `pressed_slide`，不需要额外处理。
 
@@ -1256,7 +1774,6 @@ fn handle_act(a: Act, env: &UiEnv) {
             let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or(p);
             open_in_explorer(env, &dir);
         }
-
 
         Act::ChangeHistoryPath => pick_save_path(env, SavePathKind::History),
         Act::ChangeSettingsPath => pick_save_path(env, SavePathKind::Settings),
@@ -1312,6 +1829,25 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
 
         Act::OpenRepo => open_url(env, "https://github.com/youmikk/ROG-Battery"),
+        Act::DeviceFeedback => open_url(env, &crate::feedback::issue_url()),
+        Act::ExportDeviceReport => {
+            let mut dialog = nwg::FileDialog::default();
+            if nwg::FileDialog::builder().title(crate::tr!("导出设备适配报告"))
+                .action(nwg::FileDialogAction::Save).filters("Text(*.txt)").build(&mut dialog).is_err() {
+                env.say(crate::tr!("无法打开保存窗口"));
+                return;
+            }
+            if dialog.run(Some(env.window)) {
+                if let Ok(path) = dialog.get_selected_item() {
+                    let result = crate::feedback::collect().and_then(|report|
+                        std::fs::write(PathBuf::from(path), report).map_err(|_| crate::tr!("无法保存适配报告").to_string()));
+                    match result {
+                        Ok(()) => env.say(crate::tr!("适配报告已保存")),
+                        Err(error) => env.say(error),
+                    }
+                }
+            }
+        }
 
         Act::OpenStore => open_url(env, "https://apps.microsoft.com/detail/9NRC8HCD4BZ7"),
     }
@@ -1550,11 +2086,90 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
     }
 }
 
+fn update_dpi_presets(env: &UiEnv, action: Act, value: Option<u16>) {
+    let Some(basic) = env.basic() else { return; };
+    let key = basic.target.key.clone();
+    let mut shared = lock_shared(env.shared);
+    let mut cfg = shared.cfg.clone();
+    let mut presets = cfg.presets_for(&key, &basic.dpi);
+    let changed = match action {
+        Act::DpiPresetMode(enabled) => {
+            if enabled && basic.dpi.write_effect.is_none() { false }
+            else { presets.enabled = enabled; true }
+        }
+        Act::DpiPresetCount(count) => presets.set_count(usize::from(count), &basic.dpi),
+        Act::ApplyEdit(Edit::DpiPreset(index)) => value.is_some_and(|v| presets.edit(usize::from(index), v, &basic.dpi)),
+        _ => false,
+    };
+    if !changed || !presets.valid() {
+        drop(shared);
+        env.say(crate::tr!("预设需使用设备支持的 DPI，不能重复，可设置 1～4 档"));
+        return;
+    }
+    cfg.dpi_presets.insert(key, presets);
+    if let Err(error) = settings::save(&cfg) {
+        drop(shared);
+        env.say(crate::trf!("✘ 保存设置失败：{e}", e = error));
+        return;
+    }
+    shared.cfg = cfg;
+    drop(shared);
+    env.canvas.with_ui_mut(|u| {
+        for index in 0..crate::device::MAX_DPI_PRESETS as u8 { u.drop_edit(Edit::DpiPreset(index)); }
+    });
+    env.canvas.repaint_now();
+}
+
 /// 「应用」按钮：读草稿 → 校验 → 提交。
 fn apply_edit(env: &UiEnv, e: Edit) {
+    if let Edit::DpiPreset(index) = e {
+        let Some(text) = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string)) else {return;};
+        let value = text.trim().parse::<u16>().ok();
+        update_dpi_presets(env, Act::ApplyEdit(Edit::DpiPreset(index)), value);
+        return;
+    }
+    if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
+        if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable) {
+            let current = crate::ui::widget::BasicDpiDraft::from_snapshot(&basic,index);
+            let original = env.canvas.with_ui(|u|u.basic_dpi_drafts.get(&index).cloned()).or_else(||current.clone());
+            if original != current {
+                drop_draft(env,Edit::BasicDpiX(index)); drop_draft(env,Edit::BasicDpiY(index));
+                env.canvas.with_ui_mut(|u| {u.basic_dpi_drafts.remove(&index);});
+                env.say(crate::i18n::translate("设备档位或配置已变化，请刷新后重试"));
+                return;
+            }
+            if let Some(original) = original {
+                let (stage,context,current_y) = (original.stage,original.context,original.y);
+                let draft = |edit, value: u16| env.canvas.with_ui(|u| u.edit_text(edit)
+                    .map(|s| s.trim().parse::<u16>().ok()).unwrap_or(Some(value)));
+                if let (Some(x),Some(y)) = (draft(Edit::BasicDpiX(index),stage.value),draft(Edit::BasicDpiY(index),current_y)) {
+                    if basic.dpi.values.contains(&x) && basic.dpi.values.contains(&y) {
+                        env.submit(Cmd::BasicDpiEdit { target: basic.target, stage, context, expected_y: current_y, x, y });
+                        drop_draft(env,Edit::BasicDpiX(index)); drop_draft(env,Edit::BasicDpiY(index));
+                        env.canvas.with_ui_mut(|u| {u.basic_dpi_drafts.remove(&index);});
+                        return;
+                    }
+                }
+            }
+        }
+        env.say(crate::tr!("DPI 不在设备报告的可用范围内"));
+        return;
+    }
+    if e == Edit::Dpi(0) {
+        if let Some(basic) = env.basic() {
+            let text = env.canvas.with_ui(|ui| ui.edit_text(e).map(str::to_string));
+            let dpi = text.as_deref().and_then(|text| text.trim().parse::<u16>().ok());
+            if let Some(dpi) = dpi.filter(|dpi| basic.connected && basic.dpi.writable && basic.dpi.values.contains(dpi)) {
+                env.submit(Cmd::BasicDpi { target: basic.target, dpi });
+                drop_draft(env, e);
+            } else { env.say(crate::tr!("DPI 不在设备报告的可用范围内")); }
+            return;
+        }
+    }
     let st = env.state();
 
     match e {
+        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiPreset(_) => return,
         Edit::LowWarn => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
             let Some(v) = txt.as_deref().and_then(parse_num) else {
@@ -1623,7 +2238,6 @@ fn apply_edit(env: &UiEnv, e: Edit) {
             });
         }
 
-
         Edit::LightColor => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
             let cur = st.as_ref().map(|s| s.light_rgb).unwrap_or([0, 0, 0]);
@@ -1653,7 +2267,6 @@ fn apply_edit(env: &UiEnv, e: Edit) {
             });
         }
 
-
     }
 }
 
@@ -1675,6 +2288,10 @@ fn commit_slide(env: &UiEnv, s: Slide) {
             env.canvas.with_ui_mut(|u| u.clear_live_frac(s));
             env.submit(Cmd::Tuning(v));
         }
+        Slide::AudioVolume => {
+            env.canvas.with_ui_mut(|u| u.clear_live_frac(s));
+            env.canvas.repaint_now();
+        }
     }
 }
 
@@ -1687,11 +2304,41 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
             env.set_cfg(|c| c.tray_enabled = on);
             env.tray.set_visibility(on);
             // 关掉托盘时如果窗口是隐藏的，用户就再也找不到程序了。
-            if !on {
+            if !on && !env.cfg().taskbar_widget_enabled {
                 env.window.set_visible(true);
             }
             env.say(crate::trf!(
                 "✔ 托盘图标已{}",
+                if on {
+                    crate::tr!("开启")
+                } else {
+                    crate::tr!("关闭")
+                }
+            ));
+        }
+        Pref::TaskbarWidget => {
+            let on = !env.cfg().taskbar_widget_enabled;
+            env.set_cfg(|c| c.taskbar_widget_enabled = on);
+            if !on && !env.cfg().tray_enabled {
+                env.window.set_visible(true);
+            }
+            env.say(crate::trf!(
+                "✔ 任务栏电量条已{}",
+                if on {
+                    crate::tr!("开启")
+                } else {
+                    crate::tr!("关闭")
+                }
+            ));
+        }
+        Pref::LowBatteryNotify => {
+            if !crate::notifications::supported() {
+                return;
+            }
+            let on = !env.cfg().notify_low_battery;
+            env.set_cfg(|c| c.notify_low_battery = on);
+            env.say(crate::trf!(
+                "✔ 低电量系统通知已{}",
                 if on {
                     crate::tr!("开启")
                 } else {
@@ -1896,6 +2543,7 @@ fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
     let known = st.filter(|s| !crate::ui::pages::placeholder_state(s));
     let hex = |c: [u8; 3]| format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
     match e {
+        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiPreset(_) => String::new(),
         Edit::LowWarn => known.map(|s| s.low_warn.to_string()).unwrap_or_default(),
         Edit::Dpi(i) => known
             .map(|s| s.dpi((i as usize) & 3).to_string())
@@ -1929,22 +2577,22 @@ fn outcome_is_stale(gen_at_read: u64, current: u64) -> bool {
 }
 
 /// 出错时追加一段诊断日志（`<设置目录>/diagnostics.log`）。
-///
-/// 只在「接收器都不在」时写：休眠是正常状态，不该反复覆盖文件。
-fn write_diagnostics(status: &str, link_mode: &str, family: &str, frames: usize, elapsed_ms: u128) {
-    let Some(dir) = crate::paths::settings_file().parent().map(|d| d.to_path_buf()) else {
-        return;
-    };
-    let f = crate::diagnostics::Facts {
-        version: env!("CARGO_PKG_VERSION"),
+fn write_diagnostics(
+    status: &str,
+    family: &str,
+    frames: usize,
+    elapsed_ms: u128,
+    device: Option<&crate::diagnostics::DeviceInfo>,
+) {
+    let facts = diagnostic_facts(
+        "device_read_failed",
         status,
-        link_mode,
         family,
         frames,
         elapsed_ms,
-        history_rows: crate::history::read_rows().len(),
-    };
-    let _ = crate::diagnostics::append(&dir.join("diagnostics.log"), &f);
+        device,
+    );
+    let _ = crate::diagnostics::append(&crate::diagnostics::log_path(), &facts);
 }
 
 fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option<Quick> {
@@ -1976,16 +2624,17 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         // 真读不到设备时落一份诊断文本，用户能直接把事实贴过来。
         if matches!(link, crate::linkstate::LinkState::Absent) {
             if let Status::Error(ref text) = s.status {
+                let device = s
+                    .primary_key
+                    .as_ref()
+                    .and_then(|key| s.devices.get(key))
+                    .map(diagnostic_device);
                 write_diagnostics(
                     text,
-                    if snap.identity.dongle_sn.trim().is_empty() {
-                        ""
-                    } else {
-                        crate::tr!("2.4G 接收器")
-                    },
                     crate::device::family_of(&snap.identity.model_name).noun(),
                     s.frames,
                     s.elapsed_ms,
+                    device.as_ref(),
                 );
             }
         }
@@ -2001,14 +2650,7 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         return None;
     }
 
-    // 电量帧在不在，决定 `state.power` 是不是**真的**。
-    //
-    // `snapshot::fetch` 在读到一半时鼠标睡了会正常返回：`frames_read > 0`
-    // 但缺 `12:07:00`（电量帧在 `MOUSE_FRAMES` 里排第 3）。此时
-    // `snap.state.power` 还是 `State::default()` 的 **0**，绝不是「电量 0%」。
-    // 实测把这条 0 写进了 `history.tsv`（2026-10-22 18:58 那条），
-    // 曲线末端直接掉到 0，续航估算也跟着崩。
-    let have_power = snap.frames.contains_key("12:07:00");
+    let have_power = snap.battery().is_some();
     if !have_power {
         // 保留上一轮的电量显示（比清成「—」更不吓人），但**不产生新采样**。
         s.frames = out.frames_read;
@@ -2062,16 +2704,36 @@ const MAX_PENDING: usize = 4;
 /// `Status::Busy` 只表示「后台正在写设备」。读快照期间**不再拒绝新命令**：
 /// 那时设备是空闲的，命令完全可以排队等这一轮读完。
 fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
+    if let Some(target) = cmd.basic_target() {
+        let backend = target.backend;
+        if backend != crate::backends::BackendId::Rog {
+            let mut state = lock_shared(shared);
+            let queue = state.source_pending.entry(backend).or_default();
+            if queue.len() >= MAX_PENDING { return false; }
+            queue.push_back(cmd);
+            let generation = state.source_write_gen.entry(backend).or_default();
+            *generation = generation.wrapping_add(1);
+            state.source_busy.insert(backend);
+            drop(state);
+            signal.request_refresh();
+            return true;
+        }
+    }
     {
         let mut s = lock_shared(shared);
         if s.pending.len() >= MAX_PENDING {
             return false;
         }
-        let target = s
-            .active_key
-            .as_ref()
-            .and_then(|k| s.devices.get(k))
-            .and_then(|d| d.link.clone());
+        if !matches!(cmd, Cmd::AutoStart(_)) && cmd.basic_target().is_none()
+            && s.active_key.as_ref().and_then(|key| s.devices.get(key)).is_some_and(|record| record.basic.is_some()) {
+            return false;
+        }
+        let target = match cmd.basic_target() {
+            Some(target) => s.devices.values().find_map(|device|
+                device.link.as_ref().filter(|link| target.hid().is_ok_and(|i| link.iface.path == i.path)
+                    && link.report_id == target.address).cloned()),
+            None => s.active_key.as_ref().and_then(|k| s.devices.get(k)).and_then(|d| d.link.clone()),
+        };
         s.pending.push_back((cmd, target));
         s.status = Status::Busy;
         s.write_gen = s.write_gen.wrapping_add(1);
@@ -2153,24 +2815,6 @@ pub(crate) fn autostart_hint(
     }
 }
 
-/// 当前链路的中文说法。
-///
-/// 优先用 `hid::open_link` 实测出来的 [`Shared::link_mode`]；只有在还没读到
-/// 实测值时才退回「接收器 SN 是否为空」的旧判据 —— 那个判据在 2.4G 下会
-/// 误判成有线，是用户报过的 bug。
-#[cfg(test)]
-fn conn_text(s: &Shared) -> &'static str {
-    match s.link_mode.as_str() {
-        "Wired" => crate::tr!("有线"),
-        "Wireless24G" => crate::tr!("2.4G 无线"),
-        _ => match s.ident.as_ref() {
-            Some(i) if i.dongle_sn.trim().is_empty() => crate::tr!("有线"),
-            Some(_) => crate::tr!("2.4G 无线"),
-            None => crate::tr!("连接未知"),
-        },
-    }
-}
-
 /// 历史文件第四列的链路编码：有线 = 1，2.4G = 2（C# 版就是这个编码）。
 fn link_code(s: &Shared) -> i32 {
     match s.link_mode.as_str() {
@@ -2187,30 +2831,6 @@ fn link_code(s: &Shared) -> i32 {
 }
 
 /// 托盘悬停提示（多行）：鼠标名称 / 连接方式 / 电量 / 当前 DPI 与档位。
-
-/// 早期的单行悬停提示（只有电量）。
-///
-/// 现在托盘用的是 [`tray_tip_full`]（名称/链路/电量/DPI 四行）。这个只剩单测
-/// 在用 —— 留着是因为它锁定了「休眠时说休眠中、出错时说读取出错」这套措辞，
-/// 免得将来改文案时把边界情况弄丢。
-#[cfg(test)]
-fn tray_tip(q: Option<Quick>, status: &Status) -> String {
-    match (q, status) {
-        (Some(q), _) => format!(
-            "{}%  {}",
-            q.level,
-            if q.charging {
-                crate::tr!("充电中")
-            } else {
-                crate::tr!("使用中")
-            }
-        ),
-        (None, Status::Asleep) => crate::tr!("休眠中").to_string(),
-        (None, Status::Error(_)) => crate::tr!("读取出错").to_string(),
-        (None, Status::Busy) => crate::tr!("正在写设备").to_string(),
-        (None, _) => crate::tr!("尚未读取").to_string(),
-    }
-}
 
 /// 从输入框读一个十进制/十六进制整数。
 ///
@@ -2268,6 +2888,7 @@ fn ask_confirm(title: &str, text: &str) -> bool {
 
 /// 启动 GUI。返回时进程就要退出了。
 pub fn run(start_hidden: bool) -> Result<(), String> {
+    crate::diagnostics::install_panic_hook(APP_VERSION);
     let cfg = settings::load();
     crate::i18n::apply(cfg.language);
     nwg::init().map_err(|e| crate::trf!("nwg 初始化失败：{e}", e = e))?;
@@ -2430,6 +3051,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     if cfg.tray_enabled {
         tray.set_visibility(true);
     }
+    let message_hwnd = msg_window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as win32::Handle;
+    let taskbar_widget = Rc::new(crate::taskbar_widget::TaskbarWidget::new(
+        message_hwnd,
+        TASKBAR_CALLBACK_MSG,
+    ));
+    taskbar_widget.sync(
+        cfg.taskbar_widget_enabled,
+        None,
+        crate::autostart::system_uses_light_theme(),
+    );
 
     let mut notice = nwg::Notice::default();
     nwg::Notice::builder()
@@ -2439,16 +3070,15 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     // ── 共享状态 ────────────────────────────────────────────
     let shared = Arc::new(Mutex::new(Shared::new(cfg.clone())));
+    if let Some(readings) = crate::mock::readings() {
+        lock_shared(&shared).replace_mock_readings(readings);
+    }
     let signal = Arc::new(Signal::new(cfg.refresh_interval_sec));
     let sender = notice.sender();
-    let popup = Rc::new(crate::ui::tray_popup::Popup::new(&window, sender)?);
+    let audio = crate::audio::Controls::new(move || sender.notice());
+    let popup = Rc::new(crate::ui::tray_popup::Popup::new(sender, audio.clone())?);
     let name_dialog = crate::ui::device_name::Dialog::new(&window, sender)?;
 
-    // 自启状态开机时读一次 —— **放到后台线程**。
-    //
-    // `autostart::state()` 在 MSIX 包里要走一遍 WinRT 异步（实测几百毫秒），
-    // 放主线程会在窗口"该出来了"之前卡住启动（表现为一进去就转圈）。
-    // 读到后写进 shared 并 notice 一次，界面自己会刷新这一行。
     {
         let shared_a = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -2483,6 +3113,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     {
         let shared_p = Arc::clone(&shared);
+        let audio_p = audio.clone();
         canvas.set_painter(Box::new(move |inner, fonts, ui, args| {
             // 只在锁里拷一份数据，**不在锁里画** —— 画一帧要几毫秒，
             // 握着锁会让后台线程写结果时多等这段。
@@ -2496,7 +3127,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 autostart_text,
                 autostart_on,
                 rows_n,
-                err_text,
+                mut err_text,
             ) = {
                 let s = lock_shared(&shared_p);
                 (
@@ -2539,6 +3170,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 )
             };
             if let Some(record) = &record {
+                if let Some(basic) = &record.basic {
+                    err_text = if lock_shared(&shared_p).source_busy.contains(&basic.target.backend) {
+                        crate::tr!("正在写设备 ……").to_string()
+                    } else { String::new() };
+                }
                 state = record.state.clone();
                 ident = Some(record.ident.clone());
                 link_mode = record
@@ -2548,6 +3184,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     .unwrap_or_default();
             }
             let empty_estimate = crate::history::Estimate::default();
+            let audio = audio_p.snapshot();
             let data = crate::ui::viewdata::Data {
                 selected,
                 state: state.as_ref(),
@@ -2566,20 +3203,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 cfg: &cfg,
                 autostart_text: &autostart_text,
                 autostart_on,
+                native_notifications_supported: crate::notifications::supported(),
                 version: APP_VERSION,
                 readings: &readings,
+                audio: &audio,
+                basic: record.as_ref().and_then(|record| record.basic.as_ref()),
             };
             canvas::draw_frame(inner, fonts, ui, args, &theme, &data)
         }));
     }
 
-    // ── 历史曲线线程 ────────────────────────────────────────
-    //
-    // 单独一条线程，**不复用**下面那个刷新循环：`read_rows()` 冷启动实测 712 ms
-    // （之后 60–70 ms），混进刷新循环会把「第一次读到设备状态」也拖后半秒多。
-    //
-    // 每 30 秒重读一次：`history.tsv` 也可能是别的实例在追加；对一条看 8 小时
-    // 趋势的曲线，30 秒滞后无所谓。分段睡 1 秒是为了 shutdown 时能立刻退出。
     let history_thread = {
         let shared_c = Arc::clone(&shared);
         let signal_c = Arc::clone(&signal);
@@ -2603,6 +3236,40 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         })
     };
 
+    // 每个品牌有独立的读取与写入队列，慢接口不会拖住 ROG 刷新。
+    let additional_threads = crate::backends::ADDITIONAL_BACKENDS.into_iter().map(|backend| {
+        let shared_t = Arc::clone(&shared);
+        let signal_t = Arc::clone(&signal);
+        let sender_t = sender;
+        std::thread::spawn(move || {
+            if crate::mock::enabled() { return; }
+            let mut seen = 0;
+            while signal_t.wait_for_work_with_limit(&mut seen, backend.publish_interval_limit_ms()) {
+                for _ in 0..MAX_PENDING * 2 {
+                    let command = lock_shared(&shared_t).source_pending.get_mut(&backend).and_then(VecDeque::pop_front);
+                    let Some(command) = command else { break; };
+                    let result = run_cmd(&command, None);
+                    lock_shared(&shared_t).results.push_back(result);
+                    sender_t.notice();
+                }
+                let generation = {
+                    let mut state = lock_shared(&shared_t);
+                    if state.source_pending.get(&backend).is_none_or(VecDeque::is_empty) { state.source_busy.remove(&backend); }
+                    *state.source_write_gen.get(&backend).unwrap_or(&0)
+                };
+                let snapshots = crate::backends::poll_backend(backend, true).unwrap_or_default();
+                let mut state = lock_shared(&shared_t);
+                state.publish_additional(backend, snapshots, generation, seen);
+                if state.device_keys_dirty {
+                    if settings::save(&state.cfg).is_ok() { state.device_keys_dirty = false; }
+                    else { tray_log("device identity preferences save failed"); }
+                }
+                drop(state);
+                sender_t.notice();
+            }
+        })
+    }).collect::<Vec<_>>();
+
     // ── 主刷新线程 ──────────────────────────────────────────
     let refresh_thread = {
         let shared_t = Arc::clone(&shared);
@@ -2610,6 +3277,20 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         let sender_t = sender;
         std::thread::spawn(move || {
             let mut seen = 0u64;
+            if crate::mock::enabled() {
+                while signal_t.wait_for_work(&mut seen) {
+                    let readings = crate::mock::readings().unwrap_or_default();
+                    let mut state = lock_shared(&shared_t);
+                    state.replace_mock_readings(readings);
+                    state.want_full = false;
+                    state.status = Status::Ok;
+                    state.frames = 0;
+                    state.elapsed_ms = 0;
+                    drop(state);
+                    sender_t.notice();
+                }
+                return;
+            }
             loop {
                 if !signal_t.wait_for_work(&mut seen) {
                     return;
@@ -2651,7 +3332,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     if matches!(cmd, Cmd::AutoStart(_)) {
                         s.autostart = crate::autostart::state();
                     }
-                    s.last = Some(res);
+                    s.results.push_back(res);
                     // 写完必须读一次全量：DPI / 灯光 / 按键都可能变了。
                     s.want_full = true;
                     drop(s);
@@ -2678,7 +3359,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     (full, s.write_gen)
                 };
                 let sample = refresh_devices(&shared_t, full, gen_at_read);
-                lock_shared(&shared_t).refresh_generation += 1;
+                lock_shared(&shared_t).complete_rog_refresh(gen_at_read, seen);
 
                 // ④ 记一条历史采样 + 重算续航估算。
                 //
@@ -2701,6 +3382,12 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     };
                     lock_shared(&shared_t).estimate = est;
                 }
+
+                let wake_probe = {
+                    let s = lock_shared(&shared_t);
+                    matches!(s.status, Status::Asleep)
+                };
+                signal_t.set_wake_probe(wake_probe);
 
                 sender_t.notice();
             }
@@ -2726,29 +3413,26 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let taskbar_created = crate::win32::register_window_message("TaskbarCreated");
     let tray_tb = std::sync::Arc::clone(&tray);
 
-    // 闭包要 `move` 走 `window`，而 `full_bind_event_handler` 又要借用它的
-    // 句柄 —— 先克隆一份句柄再绑，否则报 E0505（不能一边借一边移）。
-    // 最小化后窗口不再重绘，立刻归还渲染内存（位图 + 字体）。
-    //
-    // 不用 nwg 的 `OnResize`：它不把 `WM_SIZE(SIZE_MINIMIZED)` 转成该事件 ——
-    // 实测最小化后回调根本不触发（`IsIconic` 那时已经是 1，但分支永远走不到）。
-    // 最小化后窗口不再重绘，立刻归还渲染内存（位图 + 字体）。
-    //
-    // 不用 nwg 的 `OnResize`：它不把 `WM_SIZE(SIZE_MINIMIZED)` 转成该事件 ——
-    // 实测最小化后回调根本不触发（那时 `IsIconic` 已经是 1，分支永远走不到）。
     let canvas_min = canvas_e.clone();
     let shared_language = Arc::clone(&shared);
+    let audio_min = audio.clone();
     let tray_broadcast = Arc::clone(&tray_tb);
+    let taskbar_broadcast = Rc::clone(&taskbar_widget);
     // 第二个参数是**处理器 id**（nwg 要求 > 0xFFFF），要过滤的消息在回调里判。
     let min_handler =
         nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
             if taskbar_created != 0 && msg == taskbar_created {
                 tray_broadcast.re_add();
+                taskbar_broadcast.recreate();
             }
 
             // SIZE_MINIMIZED = 1
             if msg == 0x0005 && wp as usize == 1 {
                 canvas_min.release_render_memory();
+                audio_min.set_active(1, false);
+            }
+            if (msg == 0x0005 && wp as usize != 1) || (msg == 0x0018 && wp != 0) {
+                sender.notice();
             }
             if msg == 0x001A {
                 let cfg = lock_shared(&shared_language).cfg.clone();
@@ -2762,6 +3446,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         .map_err(|e| crate::trf!("绑 WM_SIZE 处理器失败：{e}", e = e))?;
 
     let wh = window.handle.clone();
+    let taskbar_updates = Rc::clone(&taskbar_widget);
     let handler = nwg::full_bind_event_handler(&wh, move |evt, evt_data, _handle| {
         use nwg::Event as E;
 
@@ -2789,6 +3474,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         d.close(false);
                     }
                     window.set_visible(false);
+                    audio.set_active(1, false);
                     // 同上：收进托盘后不再重绘，渲染内存全部归还。
                     canvas_e.release_render_memory();
                 } else {
@@ -2807,7 +3493,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             }
 
             E::OnNotice => {
+                lock_shared(&shared_e).expire_additional();
                 for request in name_dialog.take_requests() {
+                    crate::diagnostics::event(
+                        "device_rename_requested",
+                        &format!(
+                            "key={} name_chars={}",
+                            request.key,
+                            request.name.chars().count()
+                        ),
+                    );
                     let mut s = lock_shared(&shared_e);
                     let key = s
                         .key_aliases
@@ -2822,6 +3517,15 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     if result.is_ok() {
                         s.cfg = cfg;
                         s.sort_readings();
+                        crate::diagnostics::event(
+                            "device_rename_saved",
+                            &format!("key={key}"),
+                        );
+                    } else if let Err(error) = &result {
+                        crate::diagnostics::event(
+                            "device_rename_failed",
+                            &format!("key={key} error={error}"),
+                        );
                     }
                     drop(s);
                     name_dialog.finish(result.as_ref().err().map(String::as_str));
@@ -2831,7 +3535,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     use crate::ui::tray_popup::Action;
                     match action {
                         Action::Refresh => {
-                            let generation = lock_shared(&shared_e).refresh_generation;
+                            let generation = signal_e.current_request();
                             popup_events.refresh_started(generation);
                             signal_e.request_refresh();
                         }
@@ -2840,7 +3544,43 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             signal_e.request_quit();
                             nwg::stop_thread_dispatch();
                         }
-                        Action::Settings | Action::Main | Action::Device(_) => {
+                        Action::SetDpiStage(key, stage) => {
+                            if lock_shared(&shared_e).devices.get(&key).is_some_and(|record| record.basic.is_some()) { continue; }
+                            canvas.with_ui_mut(|ui| ui.select_device(&key));
+                            {
+                                let mut shared = lock_shared(&shared_e);
+                                shared.active_key = Some(key);
+                                shared.want_full = true;
+                            }
+                            if !submit(&shared_e, &signal_e, Cmd::Stage(stage)) {
+                                popup_events.hide();
+                            }
+                        }
+                        Action::SetDpiValue(key, dpi) => {
+                            let basic = lock_shared(&shared_e).devices.get(&key).and_then(|record| record.basic.clone());
+                            if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.writable && basic.dpi.values.contains(&dpi)) {
+                                submit(&shared_e, &signal_e, Cmd::BasicDpi { target: basic.target, dpi });
+                            }
+                        }
+                        Action::SetDpiPreset(key, dpi) => {
+                            let cmd = {
+                                let shared = lock_shared(&shared_e);
+                                shared.devices.get(&key).and_then(|r| r.basic.as_ref())
+                                    .and_then(|basic| dpi_preset_command(&shared.cfg,basic,dpi))
+                            };
+                            if let Some(cmd) = cmd { submit(&shared_e,&signal_e,cmd); }
+                        }
+                        Action::SetOnboardDpiStage(key, stage, context) => {
+                            let basic = lock_shared(&shared_e).devices.get(&key).and_then(|record| record.basic.clone());
+                            if let Some(basic) = basic.filter(|basic| basic.connected && basic.dpi.stage_writable
+                                && basic.dpi.stage_context() == Some(context) && basic.dpi.stages.contains(&stage)) {
+                                submit(&shared_e, &signal_e, Cmd::BasicDpiStage { target: basic.target, stage, context });
+                            }
+                        }
+                        Action::ReorderDevices(order) => {
+                            persist_device_order(&shared_e, order);
+                        }
+                        Action::Settings | Action::Main => {
                             popup_events.hide();
                             match action {
                                 Action::Settings => canvas.with_ui_mut(|u| {
@@ -2851,13 +3591,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                                     u.page = Page::Home;
                                     u.initial_route_done = true;
                                 }),
-                                Action::Device(key) => {
-                                    canvas.with_ui_mut(|u| u.select_device(&key));
-                                    let mut s = lock_shared(&shared_e);
-                                    s.active_key = Some(key);
-                                    s.want_full = true;
-                                    signal_e.request_refresh();
-                                }
                                 _ => {}
                             }
                             unsafe {
@@ -2866,6 +3599,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             }
                             canvas.repaint_now();
                         }
+                        _ => {}
                     }
                 }
 
@@ -2881,7 +3615,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     let on_battery = canvas.with_ui(|u| u.page == crate::ui::widget::Page::Battery);
                     let charging = on_battery && s.quick.map(|q| q.charging).unwrap_or(false);
                     let toast_active = canvas.with_ui(|u| !u.status.is_empty());
-                    charging || toast_active
+                    let dragging_device = canvas.with_ui(|u| u.device_drag.is_some());
+                    charging || toast_active || dragging_device
                 };
                 canvas.set_animating(want_anim);
 
@@ -2889,6 +3624,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 let acts = canvas.take_acts();
                 if !acts.is_empty() {
                     let env = UiEnv {
+                        audio: &audio,
                         canvas: &canvas,
                         shared: &shared_e,
                         signal: &signal_e,
@@ -2903,8 +3639,17 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     signal_e.note_activity();
                 }
 
+                let audio_active = window.visible() && unsafe { crate::win32::IsIconic(hwnd) } == 0 && canvas.with_ui(|ui| {
+                    let shared = lock_shared(&shared_e);
+                    ui.page == Page::Battery && shared.readings.iter().any(|r| {
+                        Some(&r.key) == ui.selected_device.as_ref()
+                            && shared.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Headset
+                    })
+                });
+                audio.set_active(1, audio_active);
+
                 // ② 后台回报的命令结果
-                let result = { lock_shared(&shared_e).last.take() };
+                let result = { lock_shared(&shared_e).results.pop_front() };
                 if let Some(r) = result {
                     let text = r.toast();
                     canvas.with_ui_mut(|u| u.set_status(text));
@@ -2921,18 +3666,50 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         }
                     }
                     tray.sync(&s.readings, &s.cfg);
-                    if let Some(q) = s.quick {
-                        if low_battery_alert(q.level, q.charging, &mut s.low_alert_armed) {
-                            canvas.with_ui_mut(|u| {
-                                u.set_status(crate::tr!("设备电量低，建议充电").to_string())
-                            });
+                    let mut low_alerts = Vec::new();
+                    for reading in &readings {
+                        let key = reading.key.clone();
+                        let name = s.cfg.device_name(reading).to_string();
+                        let armed = s.low_alert_armed.entry(key.clone()).or_insert(true);
+                        if let Some(level) = low_battery_reading(reading, armed) {
+                            low_alerts.push((key, name, level));
                         }
                     }
-                    let (readings, cfg, generation) =
-                        (s.readings.clone(), s.cfg.clone(), s.refresh_generation);
+                    if !low_alerts.is_empty() {
+                        canvas.with_ui_mut(|u| {
+                            u.set_status(crate::tr!("设备电量低，建议充电").to_string())
+                        });
+                    }
+                    let notify_low = s.cfg.notify_low_battery;
+                    let (readings, cfg, dpi, generation) = (
+                        s.readings.clone(),
+                        s.cfg.clone(),
+                        popup_dpi_states(&s),
+                        s.refresh_generation,
+                    );
                     drop(s);
-                    popup_events.update(&readings, &cfg, generation);
-                    if !cfg.tray_enabled {
+                    taskbar_updates.sync(
+                        cfg.taskbar_widget_enabled,
+                        taskbar_strip_content(&readings, &cfg),
+                        crate::autostart::system_uses_light_theme(),
+                    );
+                    if notify_low && crate::notifications::supported() {
+                        for (key, name, level) in low_alerts {
+                            if let Err(error) = crate::notifications::show_low_battery(
+                                &key,
+                                &name,
+                                level,
+                                LOW_ALERT_PCT,
+                            ) {
+                                crate::diagnostics::event_once(
+                                    "low_battery_notification_failed",
+                                    &error,
+                                );
+                            }
+                        }
+                    }
+                    popup_events.update(&readings, &cfg, &dpi, generation);
+                    if !cfg.tray_enabled && !cfg.taskbar_widget_enabled {
                         popup_events.hide();
                     }
                 }
@@ -2951,29 +3728,63 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 通道已经不参与，所以这里用裸处理器。
     let shared_tray = Arc::clone(&shared);
     const CLICK_TIMER: usize = 87;
-    let pending_click = Cell::new(false);
-    let suppress_release = Cell::new(false);
-    let click_was_open = Cell::new(false);
+    const TASKBAR_TIMER: usize = 89;
+    let clicks = Cell::new(TrayClicks::default());
     let anchor = Cell::new(win32::Rect::default());
+    let taskbar_strip = Rc::clone(&taskbar_widget);
     let tray_handler = unsafe {
         nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |h, msg, wp, lp| {
             let message_hwnd = h as win32::Handle;
             if taskbar_created != 0 && msg == taskbar_created {
+                clicks.set(TrayClicks::default());
+                win32::KillTimer(message_hwnd, CLICK_TIMER);
                 tray_tb.re_add();
+                return Some(0);
+            }
+            if msg == 0x0113 && wp == TASKBAR_TIMER {
+                taskbar_strip.tick();
+                return Some(0);
+            }
+            if msg == TASKBAR_CALLBACK_MSG {
+                if popup_tray.was_open() {
+                    popup_tray.hide();
+                } else if let Some(rect) = taskbar_strip.screen_rect() {
+                    let (readings, cfg, dpi, generation) = {
+                        let s = lock_shared(&shared_tray);
+                        (
+                            s.readings.clone(),
+                            s.cfg.clone(),
+                            popup_dpi_states(&s),
+                            s.refresh_generation,
+                        )
+                    };
+                    popup_tray.update(&readings, &cfg, &dpi, generation);
+                    if cfg.tray_enabled || cfg.taskbar_widget_enabled {
+                        popup_tray.show(rect);
+                    }
+                }
                 return Some(0);
             }
             if msg == 0x0113 && wp == CLICK_TIMER {
                 win32::KillTimer(message_hwnd, CLICK_TIMER);
-                if pending_click.replace(false) {
-                    if click_was_open.get() {
+                let mut click = clicks.get();
+                let was_open = click.finish_single();
+                clicks.set(click);
+                if let Some(was_open) = was_open {
+                    if was_open {
                         popup_tray.hide();
                     } else {
-                        let (readings, cfg, generation) = {
+                        let (readings, cfg, dpi, generation) = {
                             let s = lock_shared(&shared_tray);
-                            (s.readings.clone(), s.cfg.clone(), s.refresh_generation)
+                            (
+                                s.readings.clone(),
+                                s.cfg.clone(),
+                                popup_dpi_states(&s),
+                                s.refresh_generation,
+                            )
                         };
-                        popup_tray.update(&readings, &cfg, generation);
-                        if cfg.tray_enabled {
+                        popup_tray.update(&readings, &cfg, &dpi, generation);
+                        if cfg.tray_enabled || cfg.taskbar_widget_enabled {
                             popup_tray.show(anchor.get());
                         }
                     }
@@ -2987,6 +3798,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 return Some(0);
             }
             let event = (lp as u32) & 0xffff;
+            let timestamp = win32::GetMessageTime() as u32;
             let icon_rect = tray_tb
                 .entries
                 .borrow()
@@ -3001,7 +3813,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             });
             match event {
                 0x0205 | 0x007b => {
-                    pending_click.set(false);
+                    let mut click = clicks.get();
+                    click.cancel();
+                    clicks.set(click);
                     win32::KillTimer(message_hwnd, CLICK_TIMER);
                     popup_tray.hide();
                     if let Some((parent, id)) = mi_quit.handle.hmenu_item() {
@@ -3017,40 +3831,58 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     menu.popup(x, y);
                 }
                 0x0201 => {
-                    suppress_release.set(false);
-                    click_was_open.set(popup_tray.was_open());
+                    let mut click = clicks.get();
+                    click.press(popup_tray.was_open());
+                    clicks.set(click);
                     anchor.set(current);
                 }
                 0x0203 => {
-                    pending_click.set(false);
-                    suppress_release.set(true);
+                    let mut click = clicks.get();
+                    let double = click.double_click(timestamp, win32::GetDoubleClickTime());
+                    if !double && !click.suppress_release {
+                        click.press(popup_tray.was_open());
+                        anchor.set(current);
+                    }
+                    clicks.set(click);
                     win32::KillTimer(message_hwnd, CLICK_TIMER);
-                    popup_tray.hide();
-                    canvas_tray.with_ui_mut(|u| {
-                        u.page = Page::Home;
-                        u.initial_route_done = true;
-                    });
-                    win32::ShowWindow(hwnd, 9);
-                    win32::SetForegroundWindow(hwnd);
-                    canvas_tray.repaint_now();
+                    if double {
+                        popup_tray.hide();
+                        canvas_tray.with_ui_mut(|u| {
+                            u.page = Page::Home;
+                            u.initial_route_done = true;
+                        });
+                        win32::ShowWindow(hwnd, 9);
+                        win32::SetForegroundWindow(hwnd);
+                        canvas_tray.repaint_now();
+                    }
                 }
                 0x0202 | 0x0400 => {
-                    if !suppress_release.get() && !pending_click.replace(true) {
+                    let mut click = clicks.get();
+                    let single = click.release(timestamp, popup_tray.was_open());
+                    clicks.set(click);
+                    if single {
                         anchor.set(current);
                         win32::SetTimer(message_hwnd, CLICK_TIMER, win32::GetDoubleClickTime(), 0);
                     }
                 }
                 0x0401 => {
-                    pending_click.set(false);
+                    let mut click = clicks.get();
+                    click.cancel();
+                    clicks.set(click);
                     win32::KillTimer(message_hwnd, CLICK_TIMER);
                     if popup_tray.was_open() {
                         popup_tray.hide();
                     } else {
-                        let (readings, cfg, generation) = {
+                        let (readings, cfg, dpi, generation) = {
                             let s = lock_shared(&shared_tray);
-                            (s.readings.clone(), s.cfg.clone(), s.refresh_generation)
+                            (
+                                s.readings.clone(),
+                                s.cfg.clone(),
+                                popup_dpi_states(&s),
+                                s.refresh_generation,
+                            )
                         };
-                        popup_tray.update(&readings, &cfg, generation);
+                        popup_tray.update(&readings, &cfg, &dpi, generation);
                         popup_tray.show(current);
                     }
                 }
@@ -3060,6 +3892,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         })
     }
     .map_err(|e| crate::trf!("绑托盘回调失败：{e}", e = e))?;
+    unsafe {
+        win32::SetTimer(message_hwnd, TASKBAR_TIMER, 1000, 0);
+    }
 
     // ── 菜单事件处理器 ──────────────────────────────────────
     let signal_m = Arc::clone(&signal);
@@ -3074,7 +3909,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         }
     });
 
-
     {
         let mut s = lock_shared(&shared);
         s.want_full = true;
@@ -3084,7 +3918,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 初始化全部就绪、消息循环马上开始 —— 这一刻才把窗口显示出来。
     // 若是开机自启拉起（且托盘已开启），就留在托盘后台，不弹窗打扰用户。
     // SW_SHOWNORMAL = 1。
-    if !(start_hidden && cfg.tray_enabled) {
+    if !(start_hidden && (cfg.tray_enabled || cfg.taskbar_widget_enabled)) {
         unsafe {
             let _ = crate::win32::ShowWindow(hwnd, 1);
         }
@@ -3106,6 +3940,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     signal.request_quit();
     join_bounded(history_thread, Duration::from_millis(4000));
     join_bounded(refresh_thread, Duration::from_millis(4000));
+    for thread in additional_threads { join_bounded(thread, Duration::from_millis(500)); }
 
     nwg::unbind_event_handler(&handler);
     nwg::unbind_event_handler(&msg_handler);
@@ -3119,372 +3954,755 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn device_order_uses_manual_type_without_changing_identity_or_detection() {
-        use crate::tray_prefs::TrayKind;
-        let mut s = Shared::new(Settings::default());
-        s.readings = crate::mock::parse("mouse|Device A|78|0\nkeyboard|Device B|96|1");
-        let selected = s.readings[0].clone();
-        s.cfg.ensure_tray_device(&s.readings);
-        s.active_key = Some(selected.key.clone());
-        s.cfg
-            .device_tray
-            .entry(selected.key.clone())
-            .or_default()
-            .kind = TrayKind::Generic;
-        s.sort_readings();
-        assert_eq!(s.readings[1], selected);
-        assert_eq!(s.active_key.as_ref(), Some(&selected.key));
-        assert_eq!(s.cfg.tray_device.as_ref(), Some(&selected.key));
-        s.cfg.device_tray.get_mut(&selected.key).unwrap().kind = TrayKind::Auto;
-        s.sort_readings();
-        assert_eq!(s.readings[0], selected);
+mod backend_tests {
+    use super::*;
+    use crate::backends::{BackendId, Snapshot, Target};
+    use crate::device::{Battery, BatteryLevel, DeviceFamily, DeviceReading, Dpi};
+
+    fn snapshot(backend: BackendId, key: &str, percent: u8) -> Snapshot {
+        Snapshot { target: Target { key: key.into(), name: "Test mouse".into(), family: DeviceFamily::Mouse,
+            backend, address: 1, verified_identity: false, endpoint: crate::backends::Endpoint::Hid(hid::HidInterface {
+                path: key.into(), serial: String::new(), product: "Test mouse".into(),
+                vendor_id: 0, product_id: 0, usage_page: 1, usage: 2,
+                input_len: 20, output_len: 20, feature_len: 0,
+            }) }, connected: true, battery_unavailable: false, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(), dpi: Dpi::default(), battery: Some(Battery { estimated_percent: None, percent: Some(percent),
+                charging: Some(false), voltage_mv: None, approximate: false, level: None }) }
     }
 
     #[test]
-    fn complete_identity_keeps_selection_and_independent_preferences() {
-        use crate::tray_prefs::{DeviceTray, TrayKind};
-        let mut s = Shared::new(Settings::default());
-        let fallback = crate::device::stable_key("test-interface");
-        let complete = crate::device::stable_key("test-identity");
-        let other = crate::device::stable_key("another-identity");
-        let pref = DeviceTray { enabled: false, kind: TrayKind::Keyboard, ..Default::default() };
-        s.active_key = Some(fallback.clone());
-        s.primary_key = Some(fallback.clone());
-        s.cfg.device_tray.insert(fallback.clone(), pref);
-        s.cfg.set_device_name(&fallback, "办公鼠标").unwrap();
-        assert!(s.promote_device_key(&fallback, &complete));
-        assert_eq!(
-            s.cfg.device_names.get(&complete).map(String::as_str),
-            Some("办公鼠标")
-        );
-        assert!(!s.cfg.device_names.contains_key(&fallback));
-        assert_eq!(s.active_key.as_ref(), Some(&complete));
-        assert_eq!(s.primary_key.as_ref(), Some(&complete));
-        assert_eq!(s.key_aliases.get(&fallback), Some(&complete));
-        assert_eq!(s.cfg.tray_for(&complete), pref);
-        assert_eq!(s.cfg.tray_for(&other), DeviceTray::default());
-        assert!(s.cfg.to_text().contains(&format!("device_tray.{complete}={}", pref.text())));
-        s.cfg.device_tray.insert(complete.clone(), DeviceTray::default());
-        assert!(!s.promote_device_key(&fallback, &complete));
-        assert_eq!(s.cfg.tray_for(&complete), DeviceTray::default());
-    }
-
-    #[test]
-    fn tray_keeps_one_registration_when_selection_or_device_order_changes() {
-        nwg::init().unwrap();
-        let mut window = nwg::MessageWindow::default();
-        nwg::MessageWindow::builder().build(&mut window).unwrap();
-        let tray = TrayCtl::new(window.handle.hwnd().unwrap() as win32::Handle);
-        let readings = crate::mock::parse("mouse|Mouse A|78|0\nkeyboard|Keyboard B|96|1");
+    fn taskbar_strip_lists_every_connected_device_with_battery_in_display_order() {
+        let reading = |key: &str, family: DeviceFamily, percent: Option<u8>,
+            connected: bool| DeviceReading {
+            key: key.into(),
+            name: key.into(),
+            family,
+            battery: percent.map(|percent| Battery {
+                percent: Some(percent),
+                estimated_percent: None,
+                charging: Some(key == "mouse"),
+                voltage_mv: None,
+                approximate: false,
+                level: None,
+            }),
+            connected,
+            quality: crate::device::ReadingQuality::Live,
+        };
+        let readings = vec![
+            reading("mouse", DeviceFamily::Mouse, Some(81), true),
+            reading("keyboard", DeviceFamily::Keyboard, Some(64), true),
+            reading("offline", DeviceFamily::Headset, Some(50), false),
+        ];
         let mut cfg = Settings::default();
-        cfg.ensure_tray_device(&readings);
-        tray.sync(&readings, &cfg);
-        assert_eq!(tray.entries.borrow().len(), 1);
-        let uid = tray.entries.borrow()[0].id.uid;
-        assert_eq!(tray.entries.borrow()[0].key, readings[0].key);
-        cfg.tray_device = Some(readings[1].key.clone());
-        cfg.tray_device_name = readings[1].name.clone();
-        cfg.set_device_name(&readings[1].key, "办公键盘").unwrap();
-        tray.sync(&readings, &cfg);
-        assert!(tray.entries.borrow()[0].tip.starts_with("办公键盘"));
-        assert_eq!(tray.entries.borrow()[0].id.uid, uid);
-        assert_eq!(tray.entries.borrow()[0].key, readings[1].key);
-        tray.sync(&readings[..1], &cfg);
-        assert!(tray.entries.borrow()[0].tip.starts_with("办公键盘"));
-        assert_eq!(tray.entries.borrow().len(), 1);
-        assert!(tray.entries.borrow()[0].tip.contains(crate::tr!("未连接")));
-        assert_eq!(
-            tray.device_for_callback(0, ((uid << 16) | 0x400) as isize),
-            cfg.tray_device
-        );
-        tray.re_add();
-        cfg.tray_enabled = false;
-        tray.sync(&readings, &cfg);
-        assert!(tray.entries.borrow().is_empty());
+        cfg.device_tray
+            .entry("keyboard".into())
+            .or_default()
+            .kind = crate::tray_prefs::TrayKind::Headset;
+        let strip = taskbar_strip_content(&readings, &cfg).unwrap();
+        assert_eq!(strip.items.len(), 2);
+        assert_eq!(strip.items[0].level.map(|level| level.value), Some(81));
+        assert!(strip.items[0].charging);
+        assert_eq!(strip.items[0].kind, crate::tray_prefs::TrayKind::Mouse);
+        assert_eq!(strip.items[1].level.map(|level| level.value), Some(64));
+        assert!(!strip.items[1].charging);
+        assert_eq!(strip.items[1].kind, crate::tray_prefs::TrayKind::Headset);
+        assert!(taskbar_strip_content(&readings[2..], &cfg).is_none());
     }
 
     #[test]
-    fn queued_device_write_keeps_original_target() {
+    fn rog_refresh_preserves_concurrent_additional_reading() {
+        let mut shared = Shared::new(Settings::default());
+        shared.publish_additional(BackendId::Logitech, vec![snapshot(BackendId::Logitech, "logitech", 75)], 0, 1);
+        shared.replace_rog_records(BTreeMap::new());
+        assert_eq!(shared.readings.len(), 1);
+        assert_eq!(shared.readings[0].percent(), Some(75));
+    }
+
+    #[test]
+    fn compx_stage_edit_and_rate_share_their_backend_queue_and_stale_poll_guard() {
+        let shared=Arc::new(Mutex::new(Shared::new(Settings::default())));let signal=Signal::new(60);
+        let target=snapshot(BackendId::CompX,"compx",75).target;
+        let stage=crate::device::DpiStage {index:1,value:1600};
+        assert!(submit(&shared,&signal,Cmd::BasicDpiEdit {target:target.clone(),stage,context:crate::device::StageContext::Profile(0),expected_y:1600,x:800,y:1600}));
+        assert!(submit(&shared,&signal,Cmd::BasicPollingRate {target,hz:500}));
+        let mut state=lock_shared(&shared);
+        assert_eq!(state.source_pending[&BackendId::CompX].len(),2);
+        assert_eq!(state.source_write_gen[&BackendId::CompX],2);
+        assert!(!state.publish_additional(BackendId::CompX,vec![snapshot(BackendId::CompX,"compx",75)],1,1));
+        assert!(state.publish_additional(BackendId::Rapoo,vec![snapshot(BackendId::Rapoo,"rapoo",70)],0,1));
+    }
+    #[test]
+    fn dpi_draft_remembers_device_profile_and_both_original_axes() {
+        let mut reading=snapshot(BackendId::CompX,"compx",75);
+        reading.dpi.profile=Some(0);
+        reading.dpi.stages=vec![crate::device::DpiStage {index:1,value:800}];
+        reading.dpi.stage_y.insert(1,1600);
+        let original=crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1).unwrap();
+        reading.dpi.profile=Some(1);
+        assert_ne!(Some(original.clone()),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
+        reading.dpi.profile=Some(0);reading.dpi.stage_y.insert(1,800);
+        assert_ne!(Some(original.clone()),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
+        reading.dpi.stage_y.insert(1,1600);reading.target.key="replacement".into();
+        assert_ne!(Some(original),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
+    }
+    #[test]
+    fn tray_custom_presets_keep_order_disable_invalid_values_and_never_fake_readback() {
+        let mut shared = Shared::new(Settings::default());
+        let mut reading = snapshot(BackendId::Logitech,"preset-mouse",75);
+        reading.dpi = Dpi { current:Some(800), current_y:Some(800),values:vec![400,800,1600],
+            writable:true,write_effect:Some(crate::device::DpiWriteEffect::Current),..Default::default() };
+        shared.cfg.dpi_presets.insert("preset-mouse".into(),crate::device::DpiPresets {
+            enabled:true,values:vec![800,1200,1600], ..Default::default() });
+        shared.publish_additional(BackendId::Logitech,vec![reading.clone()],0,1);
+        let popup = popup_dpi_states(&shared);
+        let p = &popup["preset-mouse"];
+        assert!(p.custom && p.value_control && p.writable);
+        assert_eq!(p.stages.iter().map(|s|s.value).collect::<Vec<_>>(),vec![800,1200,1600]);
+        assert_eq!(p.active,Some(0)); assert_eq!(p.disabled,vec![1]);
+        reading.dpi.current = Some(1600); reading.dpi.current_y = Some(800);
+        shared.publish_additional(BackendId::Logitech,vec![reading],0,2);
+        assert_eq!(popup_dpi_states(&shared)["preset-mouse"].active,None);
+        shared.publish_additional(BackendId::Logitech,crate::backends::Poll::default(),0,3);
+        assert!(!popup_dpi_states(&shared)["preset-mouse"].writable);
+    }
+    #[test]
+    fn stored_preset_command_binds_original_stage_and_rejects_deleted_or_disabled_presets() {
+        let mut reading=snapshot(BackendId::CompX,"stored",75);
+        let stage=crate::device::DpiStage {index:2,value:800};
+        reading.dpi=Dpi {current:Some(800),current_y:Some(800),values:vec![800,1600],writable:true,
+            stage_editable:true,write_effect:Some(crate::device::DpiWriteEffect::Stored),stages:vec![stage],active_stage:Some(2),
+            profile:Some(1),stage_y:[(2,800)].into(),..Default::default()};
+        let mut cfg=Settings::default();
+        cfg.dpi_presets.insert("stored".into(),crate::device::DpiPresets {enabled:true,values:vec![1600], ..Default::default()});
+        assert!(matches!(dpi_preset_command(&cfg,&reading,1600),Some(Cmd::BasicDpiPreset {
+            stage:s,context:crate::device::StageContext::Profile(1),expected_y:800,value:1600,.. }) if s == stage));
+        assert!(dpi_preset_command(&cfg,&reading,800).is_none());
+        cfg.dpi_presets.get_mut("stored").unwrap().enabled=false;
+        assert!(dpi_preset_command(&cfg,&reading,1600).is_none());
+        cfg.dpi_presets.get_mut("stored").unwrap().enabled=true;
+        reading.dpi.disable_writes();
+        assert!(dpi_preset_command(&cfg,&reading,1600).is_none());
+    }
+    #[test]
+    fn razer_config_context_reaches_main_window_tray_and_its_own_worker() {
+        let mut reading=snapshot(BackendId::Razer,"razer",75);
+        let stage=crate::device::DpiStage {index:1,value:800};
+        reading.dpi.configuration_token=Some(0x1234);reading.dpi.stages=vec![stage];reading.dpi.stage_y.insert(1,1600);
+        reading.dpi.stage_writable=true;reading.dpi.stage_editable=true;
+        let draft=crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1).unwrap();
+        assert_eq!(draft.context,crate::device::StageContext::Configuration(0x1234));
+        let mut state=Shared::new(Settings::default());state.publish_additional(BackendId::Razer,vec![reading.clone()],0,1);
+        let popup=popup_dpi_states(&state);assert_eq!(popup["razer"].context,Some(draft.context));assert!(popup["razer"].writable);
+        reading.dpi.configuration_token=Some(0x5678);
+        assert_ne!(Some(draft.clone()),crate::ui::widget::BasicDpiDraft::from_snapshot(&reading,1));
+        let shared=Arc::new(Mutex::new(state));let signal=Signal::new(60);
+        assert!(submit(&shared,&signal,Cmd::BasicDpiStage {target:reading.target.clone(),stage,context:draft.context}));
+        assert!(submit(&shared,&signal,Cmd::BasicDpiEdit {target:reading.target,stage,context:draft.context,expected_y:1600,x:1600,y:3200}));
+        let state=lock_shared(&shared);assert_eq!(state.source_pending[&BackendId::Razer].len(),2);
+        assert_eq!(state.source_write_gen[&BackendId::Razer],2);
+    }
+    #[test]
+    fn razer_first_serial_identity_promotes_preferences_from_the_discovery_key() {
+        let mut first=snapshot(BackendId::Razer,"temporary",75);
+        first.target=Target::new(BackendId::Razer,first.target.hid().unwrap(),0);
+        let discovery_key=first.target.key.clone();
+        let mut shared=Shared::new(Settings::default());
+        shared.cfg.device_names.insert(discovery_key.clone(),"My mouse".into());
+        shared.publish_additional(BackendId::Razer,vec![first.clone()],0,1);
+        first.target.key="confirmed-unit".into();first.target.verified_identity=true;
+        shared.publish_additional(BackendId::Razer,vec![first],0,2);
+        assert!(!shared.devices.contains_key(&discovery_key));
+        assert_eq!(shared.cfg.device_names.get("confirmed-unit").map(String::as_str),Some("My mouse"));
+    }
+    #[test]
+    fn razer_sibling_fallback_preserves_preferences_and_latest_receiver_identity() {
+        let mut first = snapshot(BackendId::Razer, "temporary", 75);
+        first.target.hid_mut().path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
+        first.target = Target::new(BackendId::Razer, first.target.hid().unwrap(), 0);
+        let discovery_key = first.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        let now = std::time::Instant::now();
+        shared.cfg.device_names.insert(discovery_key.clone(), "Custom mouse".into());
+        merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now);
+        first.target.hid_mut().path = first.target.hid().unwrap().path.replace("col01", "col02").replace("0001#", "0002#");
+        first.target.key = "a-first-serial".into();
+        first.target.verified_identity = true;
+        merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now + Duration::from_secs(1));
+        assert_eq!(shared.devices.len(), 1);
+        assert_eq!(shared.cfg.device_names["a-first-serial"], "Custom mouse");
+        first.target.key = "z-replacement-serial".into();
+        merge_additional_at(&mut shared, BackendId::Razer, vec![first.clone()].into(), now + Duration::from_secs(2));
+        assert!(!shared.devices["a-first-serial"].reading.connected);
+        first.target = Target::new(BackendId::Razer, first.target.hid().unwrap(), 0);
+        first.target.hid_mut().path = first.target.hid().unwrap().path.replace("col02", "col01").replace("0002#", "0001#");
+        first.dpi.writable = true;
+        merge_additional_at(&mut shared, BackendId::Razer, vec![first].into(), now + Duration::from_secs(3));
+        assert_eq!(shared.devices.len(), 2);
+        assert!(!shared.devices["a-first-serial"].reading.connected);
+        assert!(shared.devices["z-replacement-serial"].reading.connected);
+        assert!(!shared.devices["z-replacement-serial"].basic.as_ref().unwrap().dpi.writable);
+        assert!(!shared.cfg.device_names.contains_key("z-replacement-serial"));
+    }
+    #[test]
+    fn partial_dpi_read_preserves_independent_live_rate_but_failed_poll_disables_all_writes() {
+        let mut shared=Shared::new(Settings::default());
+        let mut first=snapshot(BackendId::CompX,"compx",75);
+        first.dpi.current=Some(800);first.dpi.stage_editable=true;
+        first.polling_rate=crate::device::PollingRate {current:Some(1000),values:vec![500,1000],writable:true};
+        shared.publish_additional(BackendId::CompX,vec![first.clone()],0,1);
+        first.dpi=Dpi::default();first.polling_rate.current=Some(500);
+        shared.publish_additional(BackendId::CompX,vec![first],0,2);
+        let basic=shared.devices["compx"].basic.as_ref().unwrap();
+        assert_eq!(basic.dpi.current,Some(800));assert!(!basic.dpi.stage_editable);
+        assert_eq!(basic.polling_rate.current,Some(500));assert!(basic.polling_rate.writable);
+        shared.publish_additional(BackendId::CompX,crate::backends::Poll::default(),0,3);
+        let basic=shared.devices["compx"].basic.as_ref().unwrap();
+        assert!(!basic.dpi.stage_editable);assert!(!basic.polling_rate.writable);
+    }
+
+    #[test]
+    fn failed_poll_keeps_last_battery_and_card_but_never_write_permission() {
+        let mut shared = Shared::new(Settings::default());
+        let mut first = snapshot(BackendId::Logitech, "logitech", 75);
+        first.dpi.writable = true;
+        shared.publish_additional(BackendId::Logitech, vec![first], 0, 1);
+        let poll = crate::backends::Poll { snapshots: vec![],
+            present_channels: Some(["logitech".to_string()].into_iter().collect()) };
+        shared.publish_additional(BackendId::Logitech, poll, 0, 2);
+        let device = &shared.devices["logitech"];
+        assert!(device.reading.connected);
+        assert_eq!(device.reading.percent(), Some(75));
+        assert_eq!(device.reading.quality, crate::device::ReadingQuality::Cached);
+        assert!(!device.basic.as_ref().unwrap().dpi.writable);
+        assert!(!device.basic_status.as_ref().unwrap().connection_known);
+        shared.publish_additional(BackendId::Logitech, crate::backends::Poll::default(), 0, 3);
+        assert!(shared.devices["logitech"].reading.connected);
+        shared.publish_additional(BackendId::Logitech, crate::backends::Poll {
+            snapshots: vec![], present_channels: Some(Default::default()) }, 0, 4);
+        assert!(!shared.devices["logitech"].reading.connected);
+        assert_eq!(shared.devices["logitech"].reading.battery.as_ref().unwrap().percent, Some(75));
+    }
+
+    #[test]
+    fn partial_read_and_invalid_battery_do_not_erase_or_refresh_previous_valid_charge() {
+        let mut shared = Shared::new(Settings::default());
+        let first = snapshot(BackendId::Logitech, "logitech", 75);
+        shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 1);
+        let measured = shared.devices["logitech"].basic_status.as_ref().unwrap().measured_at;
+        let mut partial = first.clone(); partial.battery = None;
+        shared.publish_additional(BackendId::Logitech, vec![partial], 0, 2);
+        assert_eq!(shared.devices["logitech"].reading.percent(), Some(75));
+        let mut invalid = first;
+        invalid.battery.as_mut().unwrap().percent = Some(255);
+        shared.publish_additional(BackendId::Logitech, vec![invalid], 0, 3);
+        assert_eq!(shared.devices["logitech"].reading.percent(), Some(75));
+        assert_eq!(shared.devices["logitech"].basic_status.as_ref().unwrap().measured_at, measured);
+    }
+
+    #[test]
+    fn cached_low_battery_does_not_create_or_rearm_a_notification() {
+        let mut reading = DeviceReading { connected: true, quality: crate::device::ReadingQuality::Cached,
+            battery: snapshot(BackendId::Logitech, "logitech", 10).battery, ..Default::default() };
+        let mut armed = true;
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+        assert!(armed);
+        reading.quality = crate::device::ReadingQuality::Live;
+        assert_eq!(low_battery_reading(&reading, &mut armed), Some(10));
+        assert!(!armed);
+    }
+
+    #[test]
+    fn rapoo_reports_stay_visible_past_global_refresh_interval_and_recover_after_silence() {
+        let now = std::time::Instant::now();
+        let signal = Signal::new(60);
+        let interval_ms = signal.work_interval_ms(BackendId::Rapoo.publish_interval_limit_ms());
+        assert_eq!(interval_ms, 2000);
+        assert_eq!(signal.work_interval_ms(BackendId::Logitech.publish_interval_limit_ms()), 60000);
+        let mut shared = Shared::new(Settings::default());
+        let first = snapshot(BackendId::Rapoo, "rapoo", 75);
+        let mut measurement = now;
+        for second in 0..=150 {
+            let tick = now + Duration::from_secs(second);
+            let reporting = second <= 90 || second >= 111;
+            if reporting && second % 3 == 0 { measurement = tick; }
+            if second * 1000 % interval_ms == 0 {
+                let snapshots = if tick.duration_since(measurement) < BackendId::Rapoo.sample_lifetime() {
+                    let mut reading = first.clone(); reading.battery_at = Some(measurement);
+                    vec![reading]
+                } else { Vec::new() };
+                merge_additional_at(&mut shared, BackendId::Rapoo, crate::backends::Poll { snapshots,
+                    present_channels: Some(["rapoo".into()].into_iter().collect()) }, tick);
+            }
+            shared.expire_additional_at(tick);
+            let device = &shared.devices["rapoo"];
+            assert!(device.reading.connected);
+            if second <= 90 || second >= 112 {
+                assert_eq!(device.reading.percent(), Some(75), "battery lost at second {second}");
+            } else if (100..111).contains(&second) {
+                assert_eq!(device.reading.percent(), None);
+                assert_eq!(device.reading.battery.as_ref().unwrap().percent, Some(75));
+            }
+        }
+        signal.wake_probe.store(true, Ordering::Relaxed);
+        assert_eq!(signal.work_interval_ms(BackendId::Rapoo.publish_interval_limit_ms()), 2000);
+        assert_eq!(signal.work_interval_ms(None), WAKE_PROBE_INTERVAL_MS);
+    }
+
+    #[test]
+    fn gamepad_estimates_refresh_independently_expire_and_recover_in_device_readings() {
+        let backend = BackendId::DualSense;
+        let now = std::time::Instant::now();
+        let signal = Signal::new(60);
+        assert_eq!(signal.work_interval_ms(backend.publish_interval_limit_ms()), 2000);
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(backend, "controller", 55);
+        sample.target.family = DeviceFamily::Gamepad;
+        sample.battery_at = Some(now);
+        sample.battery = Some(Battery { percent: None, estimated_percent: Some(55), charging: Some(false),
+            voltage_mv: None, approximate: true, level: Some(BatteryLevel::Good) });
+        merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+        assert_eq!(shared.readings[0].battery_text(true), "≈55%");
+        assert_eq!(shared.readings[0].family, DeviceFamily::Gamepad);
+        let mut armed = true;
+        assert_eq!(low_battery_reading(&shared.readings[0], &mut armed), None);
+        let poll = crate::backends::Poll { snapshots: Vec::new(),
+            present_channels: Some(["controller".into()].into_iter().collect()) };
+        merge_additional_at(&mut shared, backend, poll, now + Duration::from_secs(3));
+        assert_eq!(shared.readings[0].battery_text(false), "≈55");
+        shared.expire_additional_at(now + backend.sample_lifetime());
+        assert_eq!(shared.readings[0].battery_text(true), "—");
+        sample.battery_at = Some(now + Duration::from_secs(9));
+        sample.battery.as_mut().unwrap().estimated_percent = Some(45);
+        merge_additional_at(&mut shared, backend, vec![sample].into(), now + Duration::from_secs(9));
+        assert_eq!(shared.readings[0].battery_text(true), "≈45%");
+        assert!(shared.devices["controller"].basic.as_ref().unwrap().dpi.stages.is_empty());
+        merge_additional_at(&mut shared, backend, crate::backends::Poll {
+            snapshots: Vec::new(), present_channels: Some(Default::default()),
+        }, now + Duration::from_secs(10));
+        assert!(!shared.readings[0].connected);
+        assert_eq!(shared.readings[0].battery_text(true), "—");
+    }
+
+    #[test]
+    fn headset_query_timeouts_expire_and_explicit_offline_clears_before_wake() {
+        for backend in [BackendId::Inzone, BackendId::HyperX] {
+        let now = std::time::Instant::now();
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(backend, "headset", 61);
+        sample.target.family = DeviceFamily::Headset;
+        sample.battery_at = Some(now);
+        merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+        assert_eq!(shared.devices["headset"].reading.battery_text(true), "61%");
+        let silent = crate::backends::Poll { snapshots: Vec::new(),
+            present_channels: Some(["headset".into()].into_iter().collect()) };
+        merge_additional_at(&mut shared, backend, silent, now + Duration::from_secs(10));
+        assert!(shared.devices["headset"].reading.connected);
+        assert_eq!(shared.devices["headset"].reading.quality, crate::device::ReadingQuality::Cached);
+        assert_eq!(shared.devices["headset"].basic_status.as_ref().unwrap().measured_at, Some(now));
+        shared.expire_additional_at(now + backend.sample_lifetime());
+        assert_eq!(shared.devices["headset"].reading.battery_text(true), "—");
+        let mut offline = sample.clone();
+        offline.connected = false; offline.battery = None; offline.battery_at = None;
+        offline.battery_unavailable = true;
+        merge_additional_at(&mut shared, backend, vec![offline].into(), now + Duration::from_secs(121));
+        assert!(!shared.devices["headset"].reading.connected);
+        assert!(shared.devices["headset"].reading.battery.is_none());
+        sample.battery_at = Some(now + Duration::from_secs(122));
+        sample.battery.as_mut().unwrap().percent = Some(59);
+        merge_additional_at(&mut shared, backend, vec![sample].into(), now + Duration::from_secs(122));
+        assert!(shared.devices["headset"].reading.connected);
+        assert_eq!(shared.devices["headset"].reading.battery_text(true), "59%");
+        assert_eq!(shared.devices["headset"].reading.quality, crate::device::ReadingQuality::Live);
+        assert_eq!(shared.devices["headset"].reading.family, DeviceFamily::Headset);
+        }
+    }
+
+    #[test]
+    fn queried_device_silence_keeps_sample_age_then_wake_restores_tray_without_manual_refresh() {
+        for (backend, family) in [(BackendId::VgnKeyboard, DeviceFamily::Keyboard),
+            (BackendId::VgnBeiying, DeviceFamily::Keyboard),
+            (BackendId::MchoseQhw, DeviceFamily::Keyboard), (BackendId::Keyboard20, DeviceFamily::Keyboard),
+            (BackendId::MchoseGlw, DeviceFamily::Keyboard),
+            (BackendId::Edifier, DeviceFamily::Headset), (BackendId::EweadnS9Pro, DeviceFamily::Mouse),
+            (BackendId::EweadnS9, DeviceFamily::Mouse),
+            (BackendId::Dareu, DeviceFamily::Mouse),
+            (BackendId::VgnDragonfly3, DeviceFamily::Mouse),
+            (BackendId::MchoseMouse, DeviceFamily::Mouse), (BackendId::GearHub, DeviceFamily::Mouse), (BackendId::G3m, DeviceFamily::Mouse), (BackendId::Aula, DeviceFamily::Mouse),
+            (BackendId::EightBitDo, DeviceFamily::Gamepad),
+            (BackendId::Flydigi, DeviceFamily::Gamepad)] {
+        let now = std::time::Instant::now();
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(backend, "keyboard", 93);
+        sample.target.family = family;
+        sample.battery_at = Some(now);
+        sample.battery.as_mut().unwrap().charging = None;
+        merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+        for second in [10, 60, 119, 120, 130] {
+            let time = now + Duration::from_secs(second);
+            let sleeping = crate::backends::Poll { snapshots: Vec::new(),
+                present_channels: Some(["keyboard".into()].into_iter().collect()) };
+            merge_additional_at(&mut shared, backend, sleeping, time);
+            shared.expire_additional_at(time);
+            let device = &shared.devices["keyboard"];
+            assert!(device.reading.connected);
+            assert_eq!(device.basic_status.as_ref().unwrap().measured_at, Some(now));
+            assert_eq!(device.reading.battery_text(true), if second < 120 { "93%" } else { "—" });
+        }
+        let woke = now + Duration::from_secs(140);
+        sample.battery_at = Some(woke); sample.battery.as_mut().unwrap().percent = Some(92);
+        merge_additional_at(&mut shared, backend, vec![sample].into(), woke);
+        assert_eq!(shared.readings[0].battery_text(true), "92%");
+        assert_eq!(shared.readings[0].quality, crate::device::ReadingQuality::Live);
+        assert_eq!(shared.readings[0].family, family);
+        }
+    }
+
+    #[test]
+    fn xinput_slots_clear_wired_and_replaced_battery_without_affecting_other_devices() {
+        let mut shared = Shared::new(Settings::default());
+        let backend = BackendId::XInput;
+        let now = std::time::Instant::now();
+        let mut first = snapshot(backend, "unused", 50);
+        first.target = crate::backends::xinput::target(0);
+        first.battery_at = Some(now);
+        first.battery = Some(Battery { percent: None, estimated_percent: Some(50), charging: None,
+            voltage_mv: None, approximate: true, level: Some(BatteryLevel::Medium) });
+        let key = first.target.key.clone();
+        let mut other = first.clone(); other.target = crate::backends::xinput::target(1);
+        let other_key = other.target.key.clone();
+        merge_additional_at(&mut shared, backend, vec![first.clone(), other.clone()].into(), now);
+        assert_eq!(shared.devices[&key].reading.battery_text(true), "≈50%");
+        let mut wired = first.clone(); wired.battery = None; wired.battery_at = None;
+        wired.battery_unavailable = true;
+        merge_additional_at(&mut shared, backend, vec![wired, other.clone()].into(), now + Duration::from_secs(1));
+        assert_eq!(shared.devices[&key].reading.battery_text(true), "—");
+        assert!(shared.devices[&key].reading.connected);
+        assert_eq!(shared.devices[&other_key].reading.battery_text(true), "≈50%");
+        first.battery_at = Some(now + Duration::from_secs(2));
+        merge_additional_at(&mut shared, backend, vec![first, other.clone()].into(), now + Duration::from_secs(2));
+        merge_additional_at(&mut shared, backend, vec![other.clone()].into(), now + Duration::from_secs(3));
+        assert!(!shared.devices[&key].reading.connected);
+        let mut replacement = snapshot(backend, "unused", 99);
+        replacement.target = crate::backends::xinput::target(0);
+        replacement.battery = None; replacement.battery_at = None;
+        merge_additional_at(&mut shared, backend, vec![replacement, other].into(), now + Duration::from_secs(4));
+        assert!(shared.devices[&key].reading.connected);
+        assert_eq!(shared.devices[&key].reading.battery_text(true), "—");
+        assert_eq!(shared.devices[&other_key].reading.battery_text(true), "≈50%");
+    }
+
+    #[test]
+    fn additional_identity_promotion_preserves_name_type_tray_and_order() {
+        let mut shared = Shared::new(Settings::default());
+        let mut first = snapshot(BackendId::Logitech, "interface", 75);
+        first.target.key = Target::new(BackendId::Logitech, first.target.hid().unwrap(), first.target.address).key;
+        let old = first.target.key.clone();
+        shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 1);
+        shared.active_key = Some(old.clone());
+        shared.primary_key = Some(old.clone());
+        shared.cfg.tray_device = Some(old.clone());
+        shared.cfg.device_names.insert(old.clone(), "Custom device".into());
+        let presets = crate::device::DpiPresets {enabled:true,values:vec![800,1600], ..Default::default()};
+        shared.cfg.dpi_presets.insert(old.clone(),presets.clone());
+        shared.cfg.device_order = vec![old.clone()];
+        let pref = crate::tray_prefs::DeviceTray { kind: crate::tray_prefs::TrayKind::Generic,
+            ..Default::default() };
+        shared.cfg.device_tray.insert(old.clone(), pref);
+        let new = crate::device::stable_key("verified-unit");
+        first.target.key = new.clone();
+        first.target.verified_identity = true;
+        shared.publish_additional(BackendId::Logitech, vec![first], 0, 2);
+        assert!(!shared.devices.contains_key(&old));
+        assert_eq!(shared.key_aliases[&old], new);
+        assert_eq!(shared.active_key.as_ref(), Some(&new));
+        assert_eq!(shared.primary_key.as_ref(), Some(&new));
+        assert_eq!(shared.cfg.tray_device.as_ref(), Some(&new));
+        assert_eq!(shared.cfg.device_names[&new], "Custom device");
+        assert_eq!(shared.cfg.dpi_presets[&new],presets);
+        assert!(!shared.cfg.dpi_presets.contains_key(&old));
+        assert_eq!(shared.cfg.device_tray[&new], pref);
+        assert_eq!(shared.cfg.device_order, vec![new]);
+        assert!(shared.device_keys_dirty);
+    }
+
+    #[test]
+    fn missing_identity_keeps_card_without_authorizing_writes_or_inheriting_on_replacement() {
+        let mut shared = Shared::new(Settings::default());
+        let mut first = snapshot(BackendId::Logitech, "interface", 75);
+        let link_key = Target::new(BackendId::Logitech, first.target.hid().unwrap(), first.target.address).key;
+        let old = crate::device::stable_key("first-unit");
+        first.target.key = old.clone();
+        first.target.verified_identity = true;
+        first.dpi.writable = true;
+        shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 1);
+        shared.cfg.device_names.insert(old.clone(), "Custom first device".into());
+        shared.cfg.dpi_presets.insert(old.clone(),crate::device::DpiPresets {enabled:true,values:vec![800], ..Default::default()});
+        first.target.key = link_key;
+        first.target.verified_identity = false;
+        shared.publish_additional(BackendId::Logitech, vec![first.clone()], 0, 2);
+        assert_eq!(shared.devices.len(), 1);
+        assert!(shared.devices[&old].reading.connected);
+        assert!(!shared.devices[&old].basic.as_ref().unwrap().dpi.writable);
+        let new = crate::device::stable_key("replacement-unit");
+        first.target.key = new.clone();
+        first.target.verified_identity = true;
+        shared.publish_additional(BackendId::Logitech, vec![first], 0, 3);
+        assert!(!shared.devices[&old].reading.connected);
+        assert!(shared.devices[&new].reading.connected);
+        assert!(!shared.cfg.device_names.contains_key(&new));
+        assert!(!shared.cfg.dpi_presets.contains_key(&new));
+        assert_eq!(shared.cfg.dpi_presets[&old].values,vec![800]);
+        assert_eq!(shared.cfg.device_names[&old], "Custom first device");
+        assert!(!shared.device_keys_dirty);
+    }
+
+    #[test]
+    fn writes_reject_only_their_own_backend_stale_readings() {
         let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
         let signal = Signal::new(60);
-        let reading = crate::mock::parse("mouse|Test mouse|70|0").remove(0);
-        let link = hid::Link {
-            mode: "Wired".into(),
-            report_id: 1,
-            iface: hid::HidInterface {
-                path: "test-interface-a".into(),
-                vendor_id: 1,
-                product_id: 2,
-                usage_page: 0xff01,
-                usage: 1,
-                input_len: 64,
-                output_len: 64,
-                product: "test".into(),
-                serial: String::new(),
-            },
-            all_interfaces: vec![],
-        };
-        {
-            let mut s = lock_shared(&shared);
-            s.active_key = Some(reading.key.clone());
-            s.devices.insert(
-                reading.key.clone(),
-                DeviceSnapshot {
-                    reading,
-                    state: None,
-                    ident: Default::default(),
-                    link: Some(link),
-                    full_at: std::time::Instant::now(),
-                },
-            );
+        let target = snapshot(BackendId::Logitech, "logitech", 75).target;
+        assert!(submit(&shared, &signal, Cmd::BasicDpi { target, dpi: 800 }));
+        let mut state = lock_shared(&shared);
+        assert_eq!(state.write_gen, 0);
+        assert!(!state.publish_additional(BackendId::Logitech, vec![snapshot(BackendId::Logitech, "logitech", 50)], 0, 1));
+        assert_eq!(state.completed_requests[&BackendId::Logitech], 0);
+        assert!(state.publish_additional(BackendId::StandardHid, vec![snapshot(BackendId::StandardHid, "standard", 70)], 0, 1));
+        assert!(state.publish_additional(BackendId::Logitech, vec![snapshot(BackendId::Logitech, "logitech", 75)], 1, 1));
+        assert_eq!(state.devices["logitech"].reading.percent(), Some(75));
+    }
+
+    #[test]
+    fn rog_basic_dpi_reaches_the_rog_command_queue() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let target = snapshot(BackendId::Rog, "rog", 75).target;
+        assert!(submit(&shared, &signal, Cmd::BasicDpi { target, dpi: 800 }));
+        let state = lock_shared(&shared);
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.write_gen, 1);
+        assert!(state.source_pending.is_empty());
+    }
+
+    #[test]
+    fn onboard_dpi_preserves_fifth_slot_and_uses_its_backend_queue() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let mut reading = snapshot(BackendId::Logitech, "logitech", 75);
+        let stage = crate::device::DpiStage { index: 4, value: 3200 };
+        reading.dpi = Dpi { current: Some(3200),
+            stages: vec![crate::device::DpiStage { index: 0, value: 800 }, stage],
+            active_stage: Some(4), profile: Some(1), stage_writable: true, ..Default::default() };
+        let target = reading.target.clone();
+        lock_shared(&shared).publish_additional(BackendId::Logitech, vec![reading], 0, 1);
+        let popup = popup_dpi_states(&lock_shared(&shared));
+        assert_eq!(popup["logitech"].stages[1], stage);
+        assert_eq!(popup["logitech"].active, Some(4));
+        assert!(!popup["logitech"].value_control);
+        assert!(submit(&shared, &signal, Cmd::BasicDpiStage { target, stage, context: crate::device::StageContext::Profile(1) }));
+        let state = lock_shared(&shared);
+        assert!(state.pending.is_empty());
+        assert_eq!(state.source_pending[&BackendId::Logitech].len(), 1);
+        assert_eq!(state.source_write_gen[&BackendId::Logitech], 1);
+    }
+
+    #[test]
+    fn configuration_bound_stages_use_their_backend_queue_and_disable_writes_after_partial_reads() {
+        for (backend, key, last) in [(BackendId::Rapoo, "rapoo", 6), (BackendId::Dareu, "dareu", 4),
+            (BackendId::MchoseMouse, "mchose", 5), (BackendId::GearHub, "gearhub", 7), (BackendId::Aula, "aula", 5)] {
+        let shared=Arc::new(Mutex::new(Shared::new(Settings::default())));let signal=Signal::new(60);
+        let mut reading=snapshot(backend,key,70);
+        reading.dpi=Dpi {current:Some(800),current_y:Some(1600),active_stage:Some(1),profile:Some(2),
+            configuration_token:Some(42),stage_writable:true,
+            stages:vec![crate::device::DpiStage {index:1,value:800},crate::device::DpiStage {index:last,value:25600}],
+            stage_y:[(1,1600),(last,30000)].into(),..Default::default()};
+        let target=reading.target.clone();
+        lock_shared(&shared).publish_additional(backend,vec![reading.clone()],0,1);
+        let p=popup_dpi_states(&lock_shared(&shared));let dpi=&p[key];
+        assert!(!dpi.custom && !dpi.value_control && dpi.writable);
+        assert_eq!(dpi.stages[1].index,last);assert_eq!(dpi.context,Some(crate::device::StageContext::Configuration(42)));
+        assert_eq!(dpi.current_y,Some(1600));assert_eq!(dpi.stage_y[&last],30000);
+        assert!(submit(&shared,&signal,Cmd::BasicDpiStage {target,stage:dpi.stages[1],context:dpi.context.unwrap()}));
+        assert_eq!(lock_shared(&shared).source_pending[&backend].len(),1);
+        reading.dpi=Dpi {current:Some(800),current_y:Some(1600),..Default::default()};
+        lock_shared(&shared).publish_additional(backend,vec![reading],1,2);
+        assert!(!popup_dpi_states(&lock_shared(&shared))[key].writable);
+        assert_eq!(lock_shared(&shared).readings[0].percent(),Some(70));
         }
-        assert!(submit(&shared, &signal, Cmd::Sleep(1)));
-        let mut s = lock_shared(&shared);
-        s.active_key = Some("another-device".into());
-        assert_eq!(
-            s.pending.pop_front().unwrap().1.unwrap().iface.path,
-            "test-interface-a"
-        );
-    }
-    use super::*;
-
-    #[test]
-    fn toast_appends_hint_only_on_failure() {
-        let ok = CmdResult {
-            label: "备份".into(),
-            ok: Some("已生效".into()),
-            err: None,
-            hint: "不该出现",
-        };
-        assert_eq!(ok.toast(), "✔ 备份已生效");
-
-        let bad = CmdResult {
-            label: "备份".into(),
-            ok: None,
-            err: Some("设备无应答".into()),
-            hint: "请确认接收器已插好",
-        };
-        let t = bad.toast();
-        assert!(t.contains("设备无应答"), "{t}");
-        assert!(t.contains("请确认接收器已插好"), "{t}");
-
-        let no_hint = CmdResult {
-            label: "备份".into(),
-            ok: None,
-            err: Some("设备无应答".into()),
-            hint: "",
-        };
-        assert!(!no_hint.toast().contains('；'), "{}", no_hint.toast());
-    }
-    /// DPI 走的是十进制，这条不能被上面的十六进制改动带偏。
-    #[test]
-    fn dpi_numbers_stay_decimal() {
-        assert_eq!(parse_num("1600"), Some(1600));
-        assert_eq!(parse_num(" 400 "), Some(400));
-        assert_eq!(parse_num("0x640"), Some(1600));
-        assert_eq!(parse_num(""), None);
-        assert_eq!(parse_num("16OO"), None); // 字母 O 不是零
     }
 
     #[test]
-    fn color_parser_forms() {
-        assert_eq!(parse_color("").unwrap(), None);
-        assert_eq!(parse_color("ff1929").unwrap(), Some([0xFF, 0x19, 0x29]));
-        assert_eq!(parse_color("#ff1929").unwrap(), Some([0xFF, 0x19, 0x29]));
-        assert_eq!(parse_color("FF1929").unwrap(), Some([0xFF, 0x19, 0x29]));
-        assert!(parse_color("ff192").is_err());
-        assert!(parse_color("gggggg").is_err());
+    fn rapoo_serial_preference_migration_requires_an_unambiguous_receiver_and_runs_once() {
+        let mut a=snapshot(BackendId::Rapoo,"a",70);a.target.hid_mut().serial ="same".into();
+        a.target.hid_mut().vendor_id =0x24ae;a.target.hid_mut().product_id =0x1415;
+        let old=crate::device::stable_key("Rapoo nRF54L:24ae:1415:same:1");
+        let mut cfg=Settings::default();cfg.device_names.insert(old.clone(),"Custom".into());
+        cfg.device_tray.insert(old.clone(),Default::default());cfg.tray_device=Some(old.clone());
+        let mut shared=Shared::new(cfg.clone());
+        shared.publish_additional(BackendId::Rapoo,vec![a.clone()],0,1);
+        assert_eq!(shared.cfg.device_names["a"],"Custom");
+        assert_eq!(shared.cfg.tray_device.as_deref(),Some("a"));
+        assert!(!shared.cfg.device_tray.contains_key(&old));
+        shared.device_keys_dirty=false;
+        shared.publish_additional(BackendId::Rapoo,vec![a.clone()],0,2);
+        assert!(!shared.device_keys_dirty);
+        let mut b=a.clone();b.target.key="b".into();b.target.hid_mut().path ="b".into();
+        let mut shared=Shared::new(cfg);
+        shared.publish_additional(BackendId::Rapoo,vec![a,b],0,1);
+        assert!(shared.cfg.device_names.contains_key(&old));
+        assert!(!shared.cfg.device_names.contains_key("a"));assert!(!shared.cfg.device_names.contains_key("b"));
+        assert_eq!(shared.readings.len(),2);
     }
 
-    /// 命令标签要能认人 —— 结果提示里它是最前面的那几个字。
     #[test]
-    fn cmd_labels_are_readable() {
-        assert!(Cmd::Light {
-            mode: 0,
-            bright: None,
-            rgb: None,
-            dir: None,
-            random: None,
-            speed: None,
+    fn rog_read_started_before_a_write_cannot_complete_refresh() {
+        let mut state = Shared::new(Settings::default());
+        state.write_gen = 1;
+        assert!(!state.complete_rog_refresh(0, 2));
+        assert_eq!(state.completed_requests[&BackendId::Rog], 0);
+        assert!(state.complete_rog_refresh(1, 2));
+        assert_eq!(state.completed_requests[&BackendId::Rog], 2);
+    }
+
+    #[test]
+    fn refresh_finishes_only_after_all_backends_reach_requested_epoch() {
+        let mut shared = Shared::new(Settings::default());
+        shared.complete_refresh(BackendId::Rog, 3);
+        for backend in crate::backends::ADDITIONAL_BACKENDS {
+            if backend != BackendId::StandardHid { shared.complete_refresh(backend, 3); }
         }
-        .label()
-        .starts_with("灯光"));
-        assert!(Cmd::Button {
-            slot: 1,
-            dst: 0x01F0,
-            confirmed: true
+        assert_eq!(shared.refresh_generation, 0);
+        shared.complete_refresh(BackendId::StandardHid, 2);
+        assert_eq!(shared.refresh_generation, 2);
+        shared.complete_refresh(BackendId::StandardHid, 3);
+        shared.complete_refresh(BackendId::Rog, 1);
+        assert_eq!(shared.refresh_generation, 3);
+    }
+
+    #[test]
+    fn refresh_signal_is_observed_by_multiple_subscribers() {
+        let signal = Arc::new(Signal::new(60));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let threads: Vec<_> = (0..2).map(|_| {
+            let signal = Arc::clone(&signal);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut seen = 0;
+                barrier.wait();
+                assert!(signal.wait_for_work(&mut seen));
+                seen
+            })
+        }).collect();
+        barrier.wait();
+        signal.request_refresh();
+        for thread in threads { assert_eq!(thread.join().unwrap(), 1); }
+    }
+
+    #[test]
+    fn unknown_and_coarse_battery_cannot_create_percentage_notifications() {
+        let mut reading = DeviceReading { connected: true, ..Default::default() };
+        let mut armed = true;
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+        reading.battery = Some(Battery { estimated_percent: Some(20), percent: None, charging: None, voltage_mv: None,
+            approximate: true, level: Some(BatteryLevel::Low) });
+        assert!(reading.is_low());
+        assert_eq!(reading.battery_text(true), "≈20%");
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+        assert!(armed);
+        for level in [BatteryLevel::Critical, BatteryLevel::Low, BatteryLevel::Medium,
+            BatteryLevel::Good, BatteryLevel::Full] {
+            reading.battery.as_mut().unwrap().level = Some(level);
+            assert_eq!(reading.is_low(), matches!(level, BatteryLevel::Critical | BatteryLevel::Low));
+            assert_eq!(low_battery_reading(&reading, &mut armed), None);
+            assert!(armed);
         }
-        .label()
-        .starts_with("按键槽"));
-        assert!(Cmd::Sleep(0xFF).label().contains("永不"));
-        assert!(Cmd::LowBatt(20).label().contains("20%"));
+        reading.battery.as_mut().unwrap().percent = Some(80);
+        reading.battery.as_mut().unwrap().approximate = false;
+        assert!(!reading.is_low());
+        reading.battery.as_mut().unwrap().percent = Some(0);
+        reading.battery.as_mut().unwrap().approximate = true;
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
+        reading.battery.as_mut().unwrap().approximate = false;
+        assert_eq!(low_battery_reading(&reading, &mut armed), Some(0));
+        assert!(!armed);
+        armed = true;
+        reading.connected = false;
+        assert_eq!(low_battery_reading(&reading, &mut armed), None);
     }
+}
 
-    /// 输入框初值必须和页面显示的值一致，否则点进去数字会跳。
+#[cfg(test)]
+mod tray_click_tests {
+    use super::TrayClicks;
+
     #[test]
-    fn edit_initial_matches_device_values() {
-        let mut st = proto::State::default();
-        // 真实读数：四档 DPI 都有编码（全 0 会被判成「没读到」）
-        st.enc = [15, 15, 15, 15];
-        st.low_warn = 15;
-        st.light_rgb = [0x11, 0x22, 0x33];
-        assert_eq!(edit_initial(Edit::LowWarn, Some(&st)), "15");
-        assert_eq!(edit_initial(Edit::LightColor, Some(&st)), "112233");
-        // 读不到设备时给空串，绝不编值
-        assert_eq!(edit_initial(Edit::LowWarn, None), "");
-        assert_eq!(edit_initial(Edit::Dpi(0), None), "");
-        assert_eq!(edit_initial(Edit::DpiColor(0), None), "");
-        assert!(!device_known(None));
-        assert!(!device_known(Some(&proto::State::default())));
-        assert!(device_known(Some(&st)));
-    }
-
-    /// 三种状态不能混：休眠是正常态，错误要用户排查。
-    #[test]
-    fn tray_tip_distinguishes_states() {
-        let q = Quick {
-            level: 84,
-            charging: false,
-            voltage_mv: 3968,
-            poll_code: 3,
-            active_stage: 2,
-        };
-        assert!(tray_tip(Some(q), &Status::Ok).contains("84"));
-        assert_eq!(tray_tip(None, &Status::Asleep), "休眠中");
-        assert_eq!(
-            tray_tip(None, &Status::Error("x".into())),
-            "读取出错"
-        );
-        assert_eq!(tray_tip(None, &Status::Idle), "尚未读取");
-    }
-
-    /// 2.4G 下不能再显示成「有线」——用户报过的 bug。
-    ///
-    /// 旧判据是「接收器 SN 是否为空」，但那个字段由设备自己回报，
-    /// 2.4G 下也可能是空串。现在以 `hid::open_link` 实测的 `link_mode` 为准。
-    #[test]
-    fn conn_text_follows_measured_link_mode() {
-        let mut s = Shared::new(crate::settings::Settings::default());
-
-        // 实测无线：即使接收器 SN 读成空，也必须显示 2.4G 无线。
-        s.link_mode = "Wireless24G".to_string();
-        s.ident = Some(proto::Identity {
-            dongle_sn: String::new(),
-            ..Default::default()
-        });
-        assert_eq!(conn_text(&s), "2.4G 无线");
-        assert_eq!(link_code(&s), 2);
-
-        // 实测有线：即使接收器 SN 非空，也必须有线。
-        s.link_mode = "Wired".to_string();
-        s.ident = Some(proto::Identity {
-            dongle_sn: "C00000000001".to_string(),
-            ..Default::default()
-        });
-        assert_eq!(conn_text(&s), "有线");
-        assert_eq!(link_code(&s), 1);
-
-        // 还没读到实测值时才退回旧判据。
-        s.link_mode.clear();
-        assert_eq!(conn_text(&s), "2.4G 无线");
-        s.ident = None;
-        assert_eq!(conn_text(&s), "连接未知");
-    }
-
-    /// 链路模式必须从快照真正抄进 `Shared`，否则托盘提示永远拿不到实测值。
-    #[test]
-    fn apply_outcome_carries_link_mode() {
-        let mut s = Shared::new(crate::settings::Settings::default());
-        assert!(s.link_mode.is_empty());
-
-        let mut snap = snapshot::Snapshot::default();
-        snap.link_mode = "Wireless24G".to_string();
-        let out = snapshot::FetchOutcome {
-            snapshot: std::sync::Arc::new(snap),
-            elapsed: std::time::Duration::from_millis(120),
-            frames_read: 0, // 走「一帧都没读到」的早退分支，链路模式仍要抄进去
-        };
-        let _ = apply_outcome(&out, &mut s, 0);
-        assert_eq!(s.link_mode, "Wireless24G");
-        assert_eq!(conn_text(&s), "2.4G 无线");
+    fn single_click_and_duplicate_select_only_toggle_popup_once() {
+        let mut clicks = TrayClicks::default();
+        clicks.press(false);
+        assert!(clicks.release(1000, false));
+        assert!(!clicks.release(1001, false));
+        assert_eq!(clicks.finish_single(), Some(false));
+        assert_eq!(clicks.finish_single(), None);
+        assert!(!clicks.double_click(1200, 500));
     }
 
     #[test]
-    fn join_bounded_waits_for_finishing_thread() {
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let d = std::sync::Arc::clone(&done);
-        let h = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(60));
-            d.store(true, Ordering::Relaxed);
-        });
-        join_bounded(h, Duration::from_millis(2000));
-        assert!(done.load(Ordering::Relaxed), "预算内应当等到线程结束");
+    fn double_notification_without_first_local_click_falls_back_to_single() {
+        let mut clicks = TrayClicks::default();
+        assert!(!clicks.double_click(1000, 500));
+        clicks.press(false);
+        assert!(clicks.release(1010, false));
+        assert_eq!(clicks.finish_single(), Some(false));
     }
 
     #[test]
-    fn join_bounded_gives_up_after_budget() {
-        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(600)));
-        let t0 = std::time::Instant::now();
-        join_bounded(h, Duration::from_millis(100));
-        let el = t0.elapsed();
-        assert!(
-            el >= Duration::from_millis(80) && el < Duration::from_millis(450),
-            "超预算就该放弃，不该干等：{el:?}"
-        );
-    }
-    #[test]
-    fn request_quit_sets_flag_and_wakes_workers() {
-        let s = Signal::new(60);
-        assert!(!s.shutdown.load(Ordering::Relaxed));
-        s.request_quit();
-        assert!(s.shutdown.load(Ordering::Relaxed));
-        // 托盘菜单和关闭对话框可能先后触发，必须幂等
-        s.request_quit();
-        assert!(s.shutdown.load(Ordering::Relaxed));
-    }
-
-
-    #[test]
-    fn low_battery_alert_fires_once_per_crossing() {
-        let mut armed = true;
-        assert!(low_battery_alert(19, false, &mut armed));
-        assert!(!low_battery_alert(18, false, &mut armed), "同一次掉电只提醒一次");
-        assert!(!low_battery_alert(15, false, &mut armed));
+    fn genuine_double_click_consumes_pending_single_and_trailing_releases() {
+        let mut clicks = TrayClicks::default();
+        clicks.press(false);
+        assert!(clicks.release(1000, false));
+        assert!(clicks.double_click(1100, 500));
+        assert!(!clicks.double_click(1101, 500));
+        assert!(!clicks.release(1110, false));
+        assert_eq!(clicks.finish_single(), None);
     }
 
     #[test]
-    fn low_battery_alert_rearms_after_recharge() {
-        let mut armed = true;
-        assert!(low_battery_alert(20, false, &mut armed));
-        assert!(!low_battery_alert(22, false, &mut armed), "没回到复位线以上不上膛");
-        assert!(!low_battery_alert(26, false, &mut armed));
-        assert!(low_battery_alert(20, false, &mut armed), "回充过之后可以再提醒");
+    fn double_click_does_not_reopen_popup_on_release() {
+        let mut clicks = TrayClicks::default();
+        clicks.press(false);
+        assert!(clicks.release(1000, false));
+        assert!(clicks.double_click(1100, 500));
+        assert_eq!(clicks.finish_single(), None);
+        assert!(!clicks.release(1110, false));
+        assert!(!clicks.release(1111, false));
+        clicks.press(false);
+        assert!(clicks.release(1300, false));
+        assert_eq!(clicks.finish_single(), Some(false));
     }
 
     #[test]
-    fn low_battery_alert_stays_quiet_while_charging() {
-        let mut armed = true;
-        assert!(!low_battery_alert(5, true, &mut armed));
-        assert!(armed, "充电时上膛");
+    fn expired_click_and_cancelled_click_cannot_open_main_window() {
+        let mut clicks = TrayClicks::default();
+        assert!(clicks.release(1000, false));
+        assert!(!clicks.double_click(1600, 500));
+        assert!(clicks.release(1700, false));
+        clicks.cancel();
+        assert!(!clicks.double_click(1750, 500));
+        assert_eq!(clicks.finish_single(), None);
     }
-
 
     #[test]
-    fn stale_outcome_is_detected_by_generation() {
-        assert!(!outcome_is_stale(7, 7), "同一代次的结果应当采用");
-        assert!(outcome_is_stale(7, 8), "读完之后用户写过设备，这轮要丢");
-        assert!(outcome_is_stale(0, 1));
+    fn popup_open_state_is_captured_before_deactivation() {
+        let mut clicks = TrayClicks::default();
+        clicks.press(true);
+        assert!(clicks.release(1000, false));
+        assert_eq!(clicks.finish_single(), Some(true));
     }
-
 
     #[test]
-    fn activity_due_is_throttled() {
-        let now = std::time::Instant::now();
-        assert!(activity_due(None, now), "第一次活动总要触发");
-        assert!(!activity_due(Some(now), now), "紧接着的第二次要节流");
-        assert!(activity_due(Some(now - ACTIVITY_MIN_GAP), now));
+    fn system_message_timestamp_wrap_keeps_double_click_valid() {
+        let mut clicks = TrayClicks::default();
+        assert!(clicks.release(u32::MAX - 20, false));
+        assert!(clicks.double_click(20, 500));
     }
-
 }

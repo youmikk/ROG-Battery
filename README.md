@@ -1,33 +1,116 @@
-# R Battery · rog-mouse-ctl
+# R Battery
 
-**ROG 鼠标参数控制工具** —— 无需安装 Armoury Crate 或厂商驱动，即可读取和修改鼠标的
-DPI、回报率、按键去抖、按键映射与电量状态。单文件运行，全程不联网。
+**简体中文** | [English](README.en.md)
 
-[![绿色版下载](https://img.shields.io/badge/%E7%BB%BF%E8%89%B2%E7%89%88-%E4%B8%8B%E8%BD%BD%E6%9C%80%E6%96%B0%E7%89%88-2EA44F?style=for-the-badge&logo=github&logoColor=white)](https://github.com/youmikk/ROG-Battery/releases)
-[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-R%20Battery-0067B8?style=for-the-badge&logo=windows&logoColor=white)](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN&gl=CN)
+轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并逐步支持 Logitech、雷柏、VGN、VXE、ATK、Razer、Lamzu、WLMouse、MCHOSE、狼蛛、黑爵、达尔优、漫步者、八位堂、HECATE、Sony、HyperX、Cherry 和 Arctis Nova 的部分设备，以及 XInput 与标准 HID 电量查询。通过 Windows HID 和系统接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
 
-[![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery?style=flat-square&label=release)](https://github.com/youmikk/ROG-Battery/releases)
-[![Downloads](https://img.shields.io/github/downloads/youmikk/ROG-Battery/total?style=flat-square&label=downloads)](https://github.com/youmikk/ROG-Battery/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4?style=flat-square&logo=windows&logoColor=white)](#系统要求)
-[![Size](https://img.shields.io/badge/size-1.0%20MB-4B5563?style=flat-square)](#安装)
-[![Dependencies](https://img.shields.io/badge/dependencies-none-2EA44F?style=flat-square)](#从源码构建)
+[![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
+[![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#系统要求)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-R%20Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
 
-- 单个 exe，约 **1.0 MB**，无运行时依赖，无需管理员权限，不联网
-- 提供图形界面（五页）与命令行两种形态
-- 直接通过 Windows 自带的 HID 接口通信，不注册后台服务
+[下载绿色版](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [更新日志](CHANGELOG.md)
 
-> **适用范围**：本项目实现的是 ROG 鼠标共用的私有 HID 参数协议，并非某一型号的专用工具。
-> 已验证设备为 **ROG HARPE ACE MINI**（`0B05:1ACE`，USB 直连或经 ROG OMNI 接收器）。
-> 内置 PID 对照表覆盖 15 款鼠标、13 款键盘、2 款手柄与 5 种接收器，详见
-> [支持的型号](#支持的型号)。其他 ROG 鼠标使用同一命令族，但各型号支持的能力存在差异；
-> 不支持的项会在界面上标注「本型号不支持」，不会伪装为执行成功。
+各品牌只支持已接入协议的部分设备，并非全系兼容。新增适配已通过协议模拟测试，仍待逐型号实机验证；具体实现范围见[兼容性说明](COMPATIBILITY.md)。
+
+## 1.4.9
+
+本版先提供绿色版。任务栏电量条改为与系统托盘一致的紧凑尺寸：单设备只显示数字，多设备逐台显示设备类型和百分比，并按任务栏实际可用空间完整排列。VGN / VXE 新增五组 2.4G 键盘接收器的严格只读电量查询；`258A:024F` 使用已核对的充电位，其余型号保持充电未知。
+
+## 1.4.8
+
+本版先提供绿色版。新增通知区域左侧任务栏电量条，并继续完善国内常见品牌：雷柏、VGN / VXE / ATK、迈从、狼蛛、黑爵、达尔优、漫步者、八位堂和 HECATE。新增设备协议通过本地模拟回归，仍待逐型号实机验收，具体接收器和型号范围见[兼容性说明](COMPATIBILITY.md)。
+
+迈从鼠标新增 A7 V2 与部分 L7 的 Feature 协议电量、型号及实际档位读取，A7 V2 Ultra+ / L7 Pro+ 开放已有档位切换。旧 A7 Ultra 接收器存在不返回电量的记录，不保证所有同名设备可用；A7 V3 和旧 A5 属于其他协议，尚未接入。
+
+黑爵 AJ179 PRO 新增 2.4G 电量，以及 USB / 2.4G 实际 X/Y 档位读取和切换。按鼠标自身编号识别型号，读取当前配置后再切档，保留所有档位数值和灯色；充电与有线电量保持未知，蓝牙暂未接入，待实机验收。
+
+狼蛛 SC380 PRO 新增 2.4G 电量、实际 X/Y DPI 档位读取与切换。型号签名确认后读取原配置，切档保留其他设置并完整读回；充电状态保持未知，有线和其他狼蛛型号暂未接入，待实机验收。
+
+狼蛛 F75、F87 PRO 的 2.4G 电量与充电查询也已接入。两者与部分迈从键盘共用 `3554:FA09` 接收器，程序会按完整型号码选择协议，并在读取前后确认设备身份；F87 的官方无线集合存在冲突，暂不启用。
+
+八位堂 Pro 3 在 D-input 模式下增加只读电量和充电显示。程序按标准手柄集合与唯一 Input Report `04` 限定接口，只接收现有状态报文，不发送模式、震动或灯光命令；XInput 模式继续使用系统电量接口。
+
+VGN Dragonfly3 SE 接收器新增电量查询。仅匹配 `391D:1A01 / FF01:0010` 和 65 字节无编号输入输出；程序只发送固定 `55 30` 查询，不读取配置或切换档位，有线回复会清除旧电量，充电状态保持未知。
+
+HECATE G3M PRO 新增 2.4G 接收器百分比读取。程序仅匹配 `320F:706E / FF1C:0092` 和 64 字节 Report `04`，不读取 DPI、灯光或其他配置；充电状态保持未知。
+
+## 1.4.7
+
+新增 Sony DualSense / DualSense Edge 的 USB、蓝牙电量读取，区间值显示为带 ≈ 的数字。协议回归已通过，实机验收待完成，范围见[兼容性说明](COMPATIBILITY.md)。
+
+同时接入 Windows XInput 手柄电量，兼容性取决于当前驱动是否返回有效电池等级。系统槽位分别显示，四级估值带 ≈，有线或未知电池类型不显示虚构的电量和充电状态；对应硬件验收待完成。
+
+新增 Sony INZONE H5、H9 II 接收器电量查询，分别匹配控制接口，保留设备返回的百分比与充电信息；不包含耳机设置写入，实机验收待完成。
+
+同时接入 HyperX Cloud Alpha 2 Wireless 基站的电量、充电和电压查询，读取前后确认耳机连接，过滤其他基站消息；实机验收待完成。
+
+键盘增加 CHERRY MX 2.0S WL Pro 的 USB / 2.4G 电量与充电查询，限定已核对的型号和管理接口；蓝牙与其他 Cherry 型号不在本次范围，实机验收待完成。
+
+标准 HID 按描述符范围换算的电量也统一显示 ≈，精确百分比继续使用普通数字。1.4.7 先提供绿色版，微软商城提交待稳定性验收后单独进行。
+
+## 1.4.6
+
+支持数值 DPI 写入的设备可在性能页设置 1～4 档软件预设，自动按 DPI 升序排列，并从主窗口或托盘切换。减少启用档数会收起最高档并保留数值，增加时恢复。预设不改变设备真实档位列表；会修改鼠标保存 DPI 的连接会在页面提示。此改动已通过本地回归及界面渲染检查，逐型号实机验收待完成。
+
+此外已接入雷柏当前配置的实际档位读取与切换、部分迈从键盘和 Arctis Nova 耳机的电量协议；只返回等级的设备显示带 ≈ 的估算电量，精确读数保持原有数字样式。这些新增能力仍待对应设备实机验收，范围见[兼容性说明](COMPATIBILITY.md)。
+
+1.4.6 先提供绿色版；微软商城提交在完成稳定性验收后单独进行。
+
+## 1.4.5
+
+- 新增部分 VGN / VXE / ATK 鼠标的电量、实际 X/Y DPI 档位和回报率功能。
+- 新增 Razer 电量与设置适配；已确认连接能力的型号可切换、编辑 DPI 档位和设置回报率。
+- 新增部分 Lamzu / WLMouse 设备的电量、档位和回报率只读查询。
+- 新增 ATK N9 V2 Ultimate、MCHOSE V9 Turbo+ 耳机电量查询。
+- 完善 Logitech 扩展 DPI 和回报率功能，写入后读取确认。
+- 修复雷柏持续回报时电量间歇显示未知的问题；雷柏 DPI 仍为只读。
+- 改善短暂读取失败、缓存过期和设备身份变化的处理，保留 ROG 现有深度设置。
+
+## 使用
+
+从 Microsoft Store 安装，或下载 `rog-mouse-ctl.exe` 后直接运行，无需管理员权限。连接支持的设备后，程序会自动读取状态。
+
+### 设备与托盘
+
+首页显示检测到的设备，点击卡片进入详情。多设备时可返回设备首页切换；单设备直接打开详情。
+
+系统托盘保留一个电量数字入口。单击打开以托盘图标为中心的悬浮面板，可查看设备电量、刷新或进入设置；双击打开主窗口，右键打开菜单。
+
+通知区域左侧还会显示与系统托盘同尺寸的任务栏电量条。单设备只显示数字；多设备按当前设备顺序逐台显示类型图案和百分比，并保持足够间距。单击电量条打开快速查看面板，再点一次关闭；设置中可以单独关闭，全屏应用运行时会自动隐藏。
+
+详情页的设备偏好依次提供「标准托盘图标」「设备名称」「设备类型」。选择的设备用于 Windows 标准托盘图标；任务栏电量条会同时显示全部有电量数据的设备。名称可以编辑或恢复。类型默认自动识别，也可指定鼠标、键盘、耳机、手柄或其他，选择结果会同步到设备首页、详情和两处电量显示。修改类型不会增加设备本身不支持的功能。
+
+托盘设备列表中，鼠标可直接切换到已读取的 DPI 档位；耳机可进入音频控制页，调整扬声器和耳机音量、静音麦克风，或打开 Windows 声音设置。系统默认播放设备由 Windows 管理，应用不会调用未公开接口强制切换。
+
+### 语言
+
+点击右上角齿轮，进入 **设置 → 常规 → 语言**，可选「跟随系统」「简体中文」「English」，切换立即生效。
+
+“跟随系统”使用 Windows **显示语言**。仅把 English 移到 Windows“首选语言”列表首位，不一定会改变显示语言；这种情况下可直接在应用中选择 English。
+
+### 功能
+
+| 功能 | 说明 |
+| --- | --- |
+| 电量 | 电量、充电状态、设备信息、最近 48 小时历史和续航估算。 |
+| 鼠标性能 | ROG 支持的型号保留 DPI、回报率、去抖等深度设置；其他鼠标按协议能力提供 DPI 数值调节、实际档位切换、X/Y 档位编辑和回报率。雷柏可读取当前配置的实际档位并切换，仍待实机验收。 |
+| 按键 | 支持的型号可重映射按键、导出配置和恢复备份。 |
+| 灯光 | 提供 Windows 动态光效入口，灯效由系统管理。 |
+| 设置 | 明暗主题、开机自启、关闭行为、刷新间隔、存储位置及诊断日志。 |
+
+功能取决于设备型号、固件和连接方式，不支持的设置会在界面中说明。修改抬起距离会重置表面标定，操作前请留意提示。
+
+## 系统要求
+
+- Windows 10 1809（17763）及以上，x64。
+- Windows 动态光效需要受支持的 Windows 11 版本和兼容设备。
+- 支持的 USB HID 设备或无线接收器连接；蓝牙是否可用取决于设备提供的协议。
+
+Armoury Crate 等软件占用设备时可能造成读写失败，建议先退出相关软件。设备休眠时，唤醒后再刷新。
 
 ## 支持的型号
 
-程序内置一张 PID 对照表（75 个 PID、5 种无线接收器），型号名按 PID 查表得出，不依赖固件自报，
-
-> 表里收录代表「已知型号名，且使用同一套电量 / 参数协议」。具体某一款能改哪些参数仍取决于该型号，
-> 不支持的项会在界面上标注「本型号不支持」。
+已验证 ROG HARPE ACE MINI 的 USB 直连和 ROG OMNI 接收器连接。内置型号表收录以下产品；收录表示可以识别型号，不代表每项功能都已在该硬件上验证。耳机等设备能否读取电量取决于其 HID 协议，不能仅凭设备类型判断兼容性。
 
 ### 鼠标（15 款）
 
@@ -86,129 +169,68 @@ DPI、回报率、按键去抖、按键映射与电量状态。单文件运行�
 | ROG SpeedNova 8K 无线接收器 | `0x1AD0` / `0x1AD1` |
 | 华硕无线接收器 | `0x1D54` |
 
-## 截图
+## 数据与隐私
 
-| 电量 | 性能 |
-| --- | --- |
-| ![电量页](msix/store/screenshots/01-battery.png) | ![性能页](msix/store/screenshots/02-performance.png) |
-| 环形电量、环下预计可用时间、最近 48 小时曲线 | 四档 DPI（含每档指示灯颜色）、回报率、去抖、抬起距离 |
-
-| 按键 | 灯光 |
-| --- | --- |
-| ![按键页](msix/store/screenshots/03-buttons.png) | ![灯光页](msix/store/screenshots/04-lighting.png) |
-| 八个物理按键重映射，支持配置导出与备份恢复 | 交由 Windows 动态光效管理，不占用设备 |
-
-| 设置 | 深色主题 |
-| --- | --- |
-| ![设置页](msix/store/screenshots/05-settings.png) | ![深色主题](msix/store/screenshots/06-dark-theme.png) |
-| 配色、开机自启、关闭行为、文件保存位置 | 跟随系统或手动切换，任务栏数字同步适配明暗 |
-
----
-
-## 功能
-
-### 电量
-
-- 环形电量显示，配合电压、当前档位 DPI 与变化速率
-- 环下方给出预计可用时间，充电时给出预计充满时间，数据来自本机采样
-- 最近 48 小时电量曲线，采样点带时间轴
-- 设备信息：型号、序列号、接收器固件、连接方式（USB / 2.4G）
-
-### 性能
-
-| 项 | 说明 |
-| --- | --- |
-| DPI 四档 | 100–42000，步进 50；每档可单独配置指示灯颜色；「切换」用于换档，「应用」用于写入数值 |
-| 回报率 | 125 / 250 / 500 / 1000 Hz，越高响应越快，功耗也越高 |
-| 按键去抖 | 关闭，或 8–32 ms 共七档；数值越大，双击越不易被识别为两次单击 |
-| 角度吸附 | 斜向移动时自动贴合水平或垂直 |
-| 角度微调 | 可调范围 −20 至 +20 |
-| 抬起距离（LOD） | Low 省电，High 更易追踪。**修改此项会重置鼠标的表面标定**，界面有明确提示 |
-
-### 灯光
-
-灯效交由 **Windows 11 动态光效**统一管理：纯色、呼吸、渐变、波浪、闪烁均由系统提供。
-本程序仅负责识别设备并提供跳转至系统设置页的入口，**不占用设备**。设备是否受支持会在页面上标注。
-
-### 按键
-
-八个物理按键可分别映射到不同功能码，支持导出配置与从备份恢复；绑定为「禁用」前需二次确认。
-
-### 设置
-
-- 配色：跟随系统 / 浅色 / 深色（默认跟随系统）
-- 开机自启：优先写入注册表 Run 键，写入失败时自动降级到启动文件夹
-- 关闭按钮行为：每次询问 / 最小化到托盘 / 直接退出，可记住选择
-- 托盘图标开关、刷新间隔、休眠档位、低电量阈值、充满效果
-- 历史文件与设置文件的**保存位置可修改**
-
-### 托盘
-
-图标直接绘制当前电量数字，并按任务栏明暗自动换色（≤20% 红色、≤50% 橙色，其余为白或深灰）。
-悬停显示四行：型号、连接方式、电量、当前 DPI 与档位。左键或右键均可打开菜单
-（显示主窗口、立即刷新、退出）。
-
-### 其他
-
-单实例运行，重复启动会将已有窗口置于前台；启动首帧不闪黑；关闭前可确认。
-
----
-
-## 安装
-
-**方式一：Microsoft Store** —— [在商店打开](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN&gl=CN)（`9NRC8HCD4BZ7`），支持自动更新。
-
-**方式二：绿色版** —— 从 [Releases](https://github.com/youmikk/ROG-Battery/releases) 下载 `rog-mouse-ctl.exe`，双击即可运行。
-无安装程序，除开机自启外不写注册表。
-
-两种方式的数据位置：
+应用不联网，不上传设备信息或使用数据。设置、设备别名、电量历史、缓存、备份和诊断日志均保存在本机。
 
 | 数据 | 默认位置 |
 | --- | --- |
-| 设置 | `%APPDATA%\rog-mouse-ctl\settings.ini` |
-| 电量历史 | `%LOCALAPPDATA%\rog-battery\history.tsv` |
+| 设置 | `%APPDATA%/rog-mouse-ctl/settings.ini` |
+| 电量历史 | `%LOCALAPPDATA%/rog-battery/history.tsv` |
+| 快照缓存 | `%LOCALAPPDATA%/rog-mouse-ctl/snapshot.cache` |
+| 默认备份目录 | `%USERPROFILE%/Documents/rog-mouse-ctl/backups/` |
 
-通过 MSIX 安装时，上述路径会被系统重定向到 `%LOCALAPPDATA%\Packages\<包族名>\LocalCache\`，卸载时一并清理。
-两个文件的位置均可在「设置 → 存储路径」中修改。
-
-## 系统要求
-
-- Windows 10 1809（17763）及以上，x64
-- 灯效页的「打开动态光效设置」按钮需要 Windows 11 22H2 及以上
-- 支持 USB HID 的 ROG 鼠标、键盘与手柄；型号清单见 [支持的型号](#支持的型号)（已验证：ROG HARPE ACE MINI）
+设置和历史文件的位置可在应用内调整。商店版的应用数据由 Windows 管理；绿色版数据及自定义位置中的文件需手动清理。完整说明见 [隐私政策](PRIVACY.md)。
 
 ## 命令行
 
 ```powershell
-rog-mouse-ctl info            # 只读，读取全部参数（带缓存）
-rog-mouse-ctl quick           # 只读，仅读取电量，速度最快
-rog-mouse-ctl setdpi 2 1600   # 写入第 2 档 DPI
-rog-mouse-ctl backup          # 备份为文本
-rog-mouse-ctl estimate        # 查看电量历史与续航估算
+rog-mouse-ctl.exe info
+rog-mouse-ctl.exe quick
+rog-mouse-ctl.exe setdpi 2 1600
+rog-mouse-ctl.exe backup
+rog-mouse-ctl.exe estimate
+rog-mouse-ctl.exe --help
 ```
 
-全部子命令与返回码见 `rog-mouse-ctl.exe --help`。
+`setdpi` 等写入命令会修改设备配置，具体参数见帮助信息。
 
 ## 从源码构建
 
+安装 Rust GNU 工具链和 MinGW-w64 GCC，并确保 GCC 可在 PATH 中找到。
+
 ```powershell
-.\tools\vendor-import-libs.ps1     # 仅首次需要：生成 import library
-cargo build --release              # 产物为 target\release\rog-mouse-ctl.exe
-cargo test                         # 238 项测试
+rustup toolchain install stable-x86_64-pc-windows-gnu
+cargo +stable-x86_64-pc-windows-gnu build --release --locked
 ```
 
-## 已知限制
+产物为 `target/release/rog-mouse-ctl.exe`。仓库已包含所需 Windows 导入库和图标资源，无需额外安装运行时。更新图标时可使用 `windres -O coff -I assets -i assets/app.rc -o assets/app.o` 重新生成资源。
 
-- **灯效仅通过系统设置**：程序自身也能发送灯效命令，但会与 Windows 动态光效争用设备并导致闪烁，因此默认交由系统管理。
-- **修改 LOD 会重置表面标定**：厂商未提供仅修改 LOD 而不改动标定的命令，界面已给出提示。
-- **不能与 Armoury Crate 同时使用**：它常驻时会占用设备，导致读写失败，请先关闭其灯效或退出程序。
-- **鼠标休眠时所有命令均无响应**：移动鼠标后重试即可，不属于故障。
-- 加减速曲线、部分型号的独立灯区等能力，本机型号不支持，界面中对应项为禁用状态。
+本地发布验证会运行回归测试、构建绿色版，检查版本和 PE 子系统，并生成 SHA256 校验文件：
 
-## 隐私
+```powershell
+powershell -File tools/build-release.ps1
+```
 
-不联网、不收集任何数据、不上报崩溃信息。所有数据仅写入上述两个本地文件。详见 [PRIVACY.md](PRIVACY.md)。
+绿色版产物集中在 `dist/版本号/`。推送源码和版本标签后，GitHub Actions 会构建并发布绿色版。MSIX 打包与 Microsoft Store 提交由独立的手动工作流处理。
 
-## 许可
+开发分支可手动运行 GitHub Actions 生成测试包：绿色版工作流的 tag 留空；MSIX 工作流默认关闭「提交 Microsoft Store」。构建产物在对应运行的 Artifacts 中下载。完成稳定性验收后，选择要发布的源码版本，并开启商店提交选项。
+
+需要手动打 MSIX 时，安装 Windows SDK 后可运行：
+
+```powershell
+powershell -File msix/build-msix.ps1 -Verify
+powershell -File msix/make-upload.ps1
+```
+
+版本号由 `Cargo.toml` 管理，商店四段版本在 `msix/package.props.psd1` 中同步。发布前确认工作区干净，推送源码后创建对应的 `vX.Y.Z` 标签。标签、源码版本、程序自报版本和 MSIX 版本必须一致，否则流程会停止。标签仅触发绿色版发布；手动提交 Microsoft Store 还需配置商店凭据与产品 ID。
+
+## 反馈与许可
+
+各品牌独立读取，保留 ROG 深度设置。鼠标、键盘和耳机的支持范围分别核对，不能由品牌名称推断兼容性。罗技支持的板载模式保留实际档位，包括第五档；常用数值按钮不代表 G HUB 配置的档位。雷柏 nRF54L 的实际档位切换要求配置与新状态回报一致，支持范围和实机验证状态见[设备兼容性](COMPATIBILITY.md)。
+
+命令行 `devices` 可只读查看当前设备，`device-report` 输出设备描述符和当前运行的查询摘要。`device-report --probe` 先进行只读查询，再导出同次运行的电量、充电状态、当前 DPI、已读取的板载档位及通信结果，方便用户远程协助适配。报告不导出报文内容或设备唯一标识，也不自动上传。
+
+问题或兼容性反馈请提交 [GitHub issue](https://github.com/youmikk/ROG-Battery/issues)。提交日志前请检查并移除序列号、个人路径等内容。
 
 仓库暂未附 LICENSE 文件；补充之前版权归作者所有。如需用于其他项目，请先开 issue 说明。

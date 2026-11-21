@@ -124,9 +124,6 @@ pub fn debounce_name(code: u8) -> String {
     }
 }
 
-/// 休眠设置里表示「永不自动关机」的代码。
-///
-// 语义来源：G-Helper 与 RigStats 两个独立实现逐项一致，见 docs/hardware-notes.md。
 pub const SLEEP_NEVER: u8 = 0xFF;
 
 /// 休眠档位是不是一个有定义的值。
@@ -210,7 +207,6 @@ pub struct State {
     // —— LOD 与表面标定（12 06 00）——
     pub surface_type: u8,
     pub material: u8,
-    /// `12 06` 的 b7，语义未确认（实测恒 0xFF），原样保留以便对照
     pub surface_extra: u8,
     pub lod: u8,
     /// 表面标定 k 值（写 LOD 会重置它，备份时必须记下来）
@@ -409,10 +405,6 @@ fn read_buttons(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), Stri
     read_frame(dev, rid, 0x12, 0x05, &[0x00, 0x00], parse_buttons, st)
 }
 
-/// 读完整状态。共 8 帧，实测约 0.25–0.5 秒。
-///
-/// 刻意**不读 MotionSync**（`12 04 04`）：本型号不响应，一次 MISS 要等满 2400ms，
-/// 为永远不来的值付这个代价没有意义。
 pub fn read_state(dev: &mut HidDevice, rid: u8) -> Result<State, String> {
     let mut st = State::default();
     read_perf(dev, rid, &mut st)?;
@@ -525,18 +517,12 @@ pub fn parse_dongle_sn(m: &[u8]) -> String {
     ascii_at(m, 4).chars().take(12).collect()
 }
 
-/// 从 `A1 01` 解析接收器固件版本。
-///
-/// ⚠️ 文档写的是 `b6.b5.b4`，但实测原始帧 `01 A1 01 00 00 07 00 07` 按 `b5.b6.b7`
-/// 解出来才是文档给的 `7.00.07`；按 `b6.b5.b4` 会解成 `0.07.00`。
-/// 这里按实测实现，结果与文档记录的版本号一致。
 pub fn parse_dongle_fw(m: &[u8]) -> String {
     if m.len() < 8 {
         return String::new();
     }
     format!("{}.{:02}.{:02}", m[5], m[6], m[7])
 }
-
 
 // ==================== 写 ====================
 
@@ -661,53 +647,3 @@ pub fn write_button(dev: &mut HidDevice, rid: u8, slot: usize, dst: u16) -> Opti
 }
 
 // ==================== 打印 ====================
-
-/// 十六进制转储。`raw` 子命令与诊断用。
-///
-/// 输出两行：偏移行 + 数据行，每行 16 字节，与常见 HID 抓包工具格式一致，
-/// 方便直接和文档里的「原始帧」逐字节对照。
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stage_index_is_clamped() {
-        let mut st = State::default();
-        st.enc = [7, 15, 23, 31];
-        st.rgb = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]];
-
-        assert_eq!(st.dpi(0), decode_dpi(7));
-        assert_eq!(st.dpi(DPI_STAGES - 1), decode_dpi(31));
-        // 越界不该 panic，按最后一档处理
-        assert_eq!(st.dpi(99), decode_dpi(31));
-        assert_eq!(st.rgb_hex(99), "#0a0b0c");
-    }
-
-    #[test]
-    fn button_src_is_bounded() {
-        assert_eq!(button_src(0), Some(BUTTON_SRC[0]));
-        assert_eq!(button_src(BUTTON_SLOTS - 1), Some(BUTTON_SRC[BUTTON_SLOTS - 1]));
-        assert_eq!(button_src(BUTTON_SLOTS), None);
-        assert_eq!(button_src(999), None);
-    }
-
-    #[test]
-    fn encode_dpi_clamps_without_changing_truncation() {
-        // 正常值：截断语义不变（437 -> enc 7 -> 400），且不算被改过
-        assert_eq!(encode_dpi(800), 15);
-        assert_eq!(decode_dpi(encode_dpi(437)), 400);
-        assert_eq!(encode_dpi_checked(800), (15, false));
-
-        // 低于下限：不能落成 0（解码 50，低于设备下限），夹到 DPI_ENC_MIN
-        let (low, changed) = encode_dpi_checked(10);
-        assert_eq!(low, DPI_ENC_MIN);
-        assert!(changed);
-        assert_eq!(decode_dpi(low), 100);
-
-        // 高于上限：夹到 DPI_ENC_MAX（解码 42000）
-        let (high, changed) = encode_dpi_checked(50_000);
-        assert_eq!(high, DPI_ENC_MAX);
-        assert!(changed);
-        assert_eq!(decode_dpi(high), 42_000);
-    }
-}

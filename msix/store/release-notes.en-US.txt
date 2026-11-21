@@ -1,0 +1,17 @@
+New
+- The taskbar battery strip now shows multiple devices at once. A single device is number-only; multiple devices include a type glyph and percentage.
+- Added battery support for five VGN / VXE 2.4 GHz keyboard receivers.
+- Expanded support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, Logitech, Razer, Sony, HyperX and CHERRY devices.
+- Added Chinese and English interfaces with a language selector. Follow system is the default.
+- Added low-battery Windows notifications, audio controls, device ordering and basic DPI stage switching.
+
+Improvements
+- The taskbar battery strip now uses system-tray-sized content and keeps every visible device entry whole within the available taskbar space.
+- Improved recovery after sleep, cache expiry, wake-up and temporary query failures.
+- Brand backends read independently while existing ROG controls are retained.
+
+Fixes
+- Fixed intermittent unknown battery readings on selected receivers, stale identities after device replacement and duplicate cards.
+- Fixed crowded device glyphs and percentages in the taskbar strip.
+
+Support covers selected devices with implemented protocols and depends on model, firmware and connection type.

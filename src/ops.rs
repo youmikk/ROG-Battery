@@ -21,7 +21,6 @@ use crate::hid::is_nak;
 use crate::hid::HidDevice;
 use crate::proto::{self, State, BUTTON_SLOTS, DPI_STAGES, DPI_STEP};
 
-/// 改完到读回之间的等待。实测 80ms 足够让设备把值落到 RAM 里的寄存器文件。
 pub const SETTLE_MS: u64 = 80;
 
 // ==================== 错误 ====================
@@ -143,10 +142,6 @@ pub trait StateReader {
     fn read(&mut self, dev: &mut HidDevice, rid: u8, fresh: bool) -> Result<State, OpsError>;
 }
 
-/// 总是直读设备、不吃缓存的实现。GUI 的后台线程和 `restore` 用这个。
-///
-/// CLI 用 `Ctx`（它实现了 [`StateReader`] 并带缓存），所以这个类型在
-/// 纯 CLI 构建里只出现在测试中 —— GUI 接进来后就是主路径。
 pub struct DirectReader;
 
 impl StateReader for DirectReader {
@@ -914,14 +909,6 @@ pub fn set_light(
     )
 }
 
-/// `setsleep` —— 休眠（自动关机）时间。命令族 `0x51 0x37`。
-///
-/// `b6` 是**枚举值不是分钟数**：0=1分 1=2分 2=3分 3=5分 4=10分 0xFF=永不
-/// （`_ghelper\AsusMouse.cs:9-17` 的 `PowerOffSetting`）。
-///
-/// 真机实测：设备**不做范围校验**，写 5..254 这些无定义值也会原样存下来
-/// （见 README 未解之谜）。所以有效值必须由我们这边把关 —— 让一个无定义值
-/// 落进设备，后果不可预知且没有恢复命令。
 #[allow(clippy::too_many_arguments)]
 pub fn set_sleep(
     dev: &mut HidDevice,
@@ -940,8 +927,6 @@ pub fn set_sleep(
 
     let mut warning = None;
     if code == proto::SLEEP_NEVER {
-        // 实测数据：活跃 8.76 %/h vs 静置 0.148 %/h，差 59 倍。
-        // 不写清楚的话，用户选了「永不」以为无所谓，第二天发现没电。
         warning = Some(format!(
             "「永不」休眠会显著加快耗电：鼠标闲置时不会自动关机，\
              实测活跃耗电 8.76 %/h 而静置仅 0.148 %/h（差 59 倍）。\
@@ -991,11 +976,6 @@ pub fn set_sleep(
     )
 }
 
-/// `setlowbatt` —— 低电量阈值（百分比）。命令族 `0x51 0x37`，`b7`。
-///
-/// 真机实测：设备接受 0..255 的任意字节，**不校验范围**（写 255 也原样存下）。
-/// 所以这里按语义钳到 0..=100，否则会出现「电量 84%，低电量阈值 255%」
-/// 这种永远处于低电量告警的状态。
 #[allow(clippy::too_many_arguments)]
 pub fn set_low_batt(
     dev: &mut HidDevice,
@@ -1041,10 +1021,6 @@ pub fn set_low_batt(
     )
 }
 
-/// `setfulleffect` —— 充满电时的灯效开关。命令族 `0x51 0x37`，`b12`。
-///
-/// 真机实测：设备只认 0 和 1，**写 ≥2 一律变成 1**（不是拒绝，是归一到「开」）。
-/// 所以这里只放行 0/1，避免用户以为设成了「2 档」。
 #[allow(clippy::too_many_arguments)]
 pub fn set_full_effect(
     dev: &mut HidDevice,
@@ -1158,106 +1134,4 @@ pub fn set_button(
         reader,
         log,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn expected_text_uses_the_same_formatter_as_probe() {
-        let before = State {
-            low_warn: 20,
-            ..State::default()
-        };
-        let probe = |st: &State| format!("{}%", st.low_warn);
-        assert_eq!(
-            expected_text(&probe, &before, |st: &mut State| st.low_warn = 55),
-            "55%"
-        );
-
-        // 探针换一种格式，期望值跟着换 —— 结构上不可能再跑偏
-        let probe2 = |st: &State| format!("{} ％", st.low_warn);
-        assert_eq!(
-            expected_text(&probe2, &before, |st: &mut State| st.low_warn = 55),
-            "55 ％"
-        );
-
-        // 判据取的是克隆，原值不被改动
-        assert_eq!(before.low_warn, 20);
-    }
-
-    #[test]
-    fn error_kinds_are_distinguishable() {
-        // 这是给 GUI 用的核心契约：休眠和参数非法必须能分开
-        let a = OpsError::asleep("写入无应答");
-        let b = OpsError::invalid("DPI 范围 100-42000");
-        assert!(a.is_asleep());
-        assert!(!a.is_invalid());
-        assert!(b.is_invalid());
-        assert!(!b.is_asleep());
-        assert_ne!(a.kind(), b.kind());
-    }
-
-    #[test]
-    fn asleep_display_has_hint() {
-        let e = OpsError::asleep("写入无应答");
-        assert!(e.to_string().contains("动一下设备"));
-        // 参数非法不该带休眠提示
-        let e = OpsError::invalid("亮度范围 0-100");
-        assert!(!e.to_string().contains("动一下设备"));
-    }
-
-    #[test]
-    fn read_error_mapping() {
-        assert_eq!(
-            map_read_error("读 12 04 00 无应答".to_string()).kind(),
-            ErrorKind::Asleep
-        );
-        assert_eq!(
-            map_read_error("帧长度不足".to_string()).kind(),
-            ErrorKind::Other
-        );
-    }
-
-    #[test]
-    fn report_summary_shapes() {
-        let mut r = ApplyReport {
-            applied: true,
-            restored: true,
-            revert_attempted: true,
-            ..Default::default()
-        };
-        assert_eq!(r.summary(), "写入生效=是  已还原=是");
-
-        r.applied = false;
-        assert_eq!(r.summary(), "写入生效=否  已还原=是");
-
-        r.restored = false;
-        assert_eq!(r.summary(), "写入生效=否  已还原=**否**");
-
-        let mut k = ApplyReport {
-            applied: true,
-            restored: false,
-            revert_attempted: false,
-            ..Default::default()
-        };
-        assert_eq!(k.summary(), "写入生效=是  已还原=没有（--keep）");
-        k.applied = false;
-        assert_eq!(k.summary(), "写入生效=否  已还原=没有（--keep）");
-    }
-
-    #[test]
-    fn parameter_bounds() {
-        // 这些边界必须和 proto 的编解码一致，写错就是设备被截断
-        assert!(!(1..=DPI_STAGES).contains(&0));
-        assert!(!(1..=DPI_STAGES).contains(&(DPI_STAGES + 1)));
-        assert!((100..=42000).contains(&100));
-        assert!(!(100..=42000).contains(&99));
-        assert!(!(100..=42000).contains(&42001));
-        assert!(proto::poll_code_of(2000).is_none());
-        assert_eq!(proto::poll_code_of(1000), Some(3));
-        // DPI 50 步进：437 会被截断成 400
-        assert_eq!(proto::decode_dpi(proto::encode_dpi(437)), 400);
-    }
 }

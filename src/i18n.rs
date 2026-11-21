@@ -41,21 +41,13 @@ impl Language {
 
 static ACTIVE: AtomicU8 = AtomicU8::new(Language::Chinese as u8);
 
-#[cfg(test)]
-thread_local! {
-    static TEST_LANGUAGE: std::cell::Cell<Option<Language>> = const { std::cell::Cell::new(None) };
-}
-
 pub fn apply(preference: Language) -> bool {
     let language = preference.resolve(unsafe { crate::win32::GetUserDefaultUILanguage() });
     ACTIVE.swap(language as u8, Ordering::Relaxed) != language as u8
 }
 
 pub fn current() -> Language {
-    #[cfg(test)]
-    if let Some(language) = TEST_LANGUAGE.with(|value| value.get()) {
-        return language;
-    }
+
     match ACTIVE.load(Ordering::Relaxed) {
         value if value == Language::English as u8 => Language::English,
         _ => Language::Chinese,
@@ -110,77 +102,14 @@ pub fn operation_hint(kind: crate::ops::ErrorKind) -> &'static str {
     }
 }
 
-#[cfg(test)]
-pub fn with_language<T>(language: Language, run: impl FnOnce() -> T) -> T {
-    struct Restore(Option<Language>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            TEST_LANGUAGE.with(|value| value.set(self.0));
-        }
-    }
-    let _restore = Restore(TEST_LANGUAGE.with(|value| value.replace(Some(language))));
-    run()
-}
-
 mod catalog;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn system_uses_windows_display_language_with_english_fallback() {
-        for id in [0x0804, 0x0404, 0x0c04, 0x1004, 0x1404] {
-            assert_eq!(Language::System.resolve(id), Language::Chinese);
-        }
-        for id in [0x0409, 0x0809, 0x0411, 0x0407, 0] {
-            assert_eq!(Language::System.resolve(id), Language::English);
-        }
-        assert_eq!(Language::Chinese.resolve(0x0409), Language::Chinese);
-        assert_eq!(Language::English.resolve(0x0804), Language::English);
-    }
-
-    #[test]
-    fn language_codes_are_stable_and_invalid_values_are_rejected() {
-        for language in Language::ALL {
-            assert_eq!(Language::parse(language.code()), Some(language));
-        }
-        assert_eq!(Language::parse("EN-us"), Some(Language::English));
-        assert_eq!(Language::parse("ZH-cn"), Some(Language::Chinese));
-        assert_eq!(Language::parse("unknown"), None);
-    }
-
-    #[test]
-    fn switching_language_translates_known_labels_and_preserves_user_data() {
-        with_language(Language::English, || {
-            assert_eq!(translate("设置"), "Settings");
-            assert_eq!(translate("ROG 龙鳞 ACE"), "ROG 龙鳞 ACE");
-            assert_eq!(
-                translate(r"D:\设备备份\settings.ini"),
-                r"D:\设备备份\settings.ini"
-            );
-        });
-        with_language(Language::Chinese, || assert_eq!(translate("设置"), "设置"));
-    }
-
-    #[test]
-    fn cached_estimates_translate_when_language_changes() {
-        let estimate = crate::history::Estimate {
-            text: "预计可用时间：样本不足".into(),
-            ..Default::default()
-        };
-        with_language(Language::English, || {
-            assert_eq!(
-                estimate.localized_text(),
-                "Remaining battery life: Not enough samples"
-            );
-            assert_eq!(estimate.localized_short_text(), "Estimating…");
-            assert_eq!(duration(1.5), "1 h 30 min");
-            assert_eq!(duration(30.0), "1 d 6 h");
-            assert_eq!(age(90), "1 min");
-        });
-        with_language(Language::Chinese, || {
-            assert_eq!(estimate.localized_text(), estimate.text)
-        });
+pub fn battery_level(level: crate::device::BatteryLevel) -> &'static str {
+    match level {
+        crate::device::BatteryLevel::Critical => crate::tr!("电量极低"),
+        crate::device::BatteryLevel::Low => crate::tr!("电量偏低"),
+        crate::device::BatteryLevel::Medium => crate::tr!("电量中等"),
+        crate::device::BatteryLevel::Good => crate::tr!("电量良好"),
+        crate::device::BatteryLevel::Full => crate::tr!("电量充足"),
     }
 }

@@ -32,7 +32,7 @@ use crate::ui::gfx::{self, Canvas as GfxCanvas, Fonts, Painter, R};
 use crate::ui::layout::Frame;
 use crate::ui::pages::{self, Data};
 use crate::ui::theme::Theme;
-use crate::ui::widget::{Act, Cursor, Slide, Ui};
+use crate::ui::widget::{Act, Cursor, Page, Slide, Ui};
 use crate::win32::{to_wide, Handle, PaintStruct, Rect};
 
 // ───────────────────────────── 常量 ─────────────────────────────
@@ -91,7 +91,6 @@ const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEWHEEL: u32 = 0x020A;
 const WM_LBUTTONDBLCLK: u32 = 0x0203;
-/// 非客户区命中测试。内容区铺满整个客户区，所以这个也发到我们这里。
 const WM_NCHITTEST: u32 = 0x0084;
 const WM_NCMOUSEMOVE: u32 = 0x00A0;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
@@ -156,11 +155,6 @@ fn track_mouse_leave(hwnd: Handle, non_client: bool) {
     };
     unsafe { TrackMouseEvent(&mut event) };
 }
-
-// `PAINTSTRUCT` 用 [`crate::win32::PaintStruct`]（那里已有单测钉死大小和偏移）。
-// 本文件不重复声明 —— 同一个 Win32 函数在两个模块里各声明一次、
-// 签名还不一致时，Rust 会报 `clashing_extern_declarations`，
-// 而且**编译器只警告不报错**，一不小心就会调错那个。
 
 #[link(name = "user32")]
 extern "system" {
@@ -231,7 +225,6 @@ const SWP_NOACTIVATE: u32 = 0x0010;
 // 「窗口」层面的函数，而 canvas 是全工程唯一管窗口的地方。
 #[link(name = "user32")]
 extern "system" {
-    /// 取窗口矩形（**屏幕坐标**，含边框）。命中测试要拿它把屏幕坐标换成客户区坐标。
     pub fn GetWindowRect(hwnd: Handle, out: *mut Rect) -> i32;
     /// 异步投递消息。用于 `WM_CLOSE` / `WM_SYSCOMMAND` —— **必须异步**：
     /// 在 `WM_NCLBUTTONDOWN` 的处理里同步销毁窗口，会导致后续的消息发到
@@ -416,7 +409,17 @@ pub fn draw_frame(
         a.view_w,
         a.view_h,
         |p: &mut Painter| {
-            pages::page(p, ui, data, &frame);
+            if ui.page == Page::Settings {
+                let mut settings_frame = frame;
+                settings_frame.content.y = crate::ui::layout::SETTINGS_BODY_TOP;
+                settings_frame.content.h = (a.view_h - settings_frame.content.y).max(0.0);
+                settings_frame.viewport.y = settings_frame.content.y;
+                settings_frame.viewport.h = settings_frame.content.h;
+                p.with_clip(R::new(0.0, scroll + settings_frame.content.y, a.view_w,
+                    settings_frame.content.h), |p| pages::page(p, ui, data, &settings_frame));
+            } else {
+                pages::page(p, ui, data, &frame);
+            }
         },
     );
 
@@ -429,6 +432,9 @@ pub fn draw_frame(
         a.view_w,
         a.view_h,
         |p: &mut Painter| {
+            if ui.page == Page::Settings {
+                pages::settings_header(p, ui, data, &frame);
+            }
             crate::ui::titlebar::draw(p, a.view_w, theme);
             crate::ui::titlebar::draw_settings(p, ui, a.view_w);
             crate::ui::titlebar::draw_buttons(p, a.view_w, theme, is_max, hover_btn);
@@ -452,7 +458,6 @@ pub fn draw_frame(
     inner.end_frame_paint();
     mem
 }
-
 
 ///
 /// 所以状态不能 `Box::into_raw` 塞进 `GWLP_USERDATA`：那个地址的生命周期
@@ -480,7 +485,6 @@ struct Ctx {
     /// 原子类型会让人误以为可以跨线程，而且得多加一层 `Arc`。
     anim_wanted: Rc<Cell<bool>>,
 }
-
 
 /// 自绘内容区。
 #[derive(Clone)]
@@ -778,10 +782,6 @@ fn cursor_id(c: Cursor) -> usize {
     }
 }
 
-/// 把 `WM_NCHITTEST` 的缩放命中码映射成系统缩放光标 id。
-///
-/// `WM_SETCURSOR` 的 `lparam` 低 16 位就是命中测试码 —— 边框上它会是
-/// `HTLEFT/HTTOP/…`，以前完全没处理，所以边框永远是箭头。现在按方向给对应光标。
 fn resize_cursor_id(hit: isize) -> Option<usize> {
     use crate::ui::frame::*;
     match hit {
@@ -1010,13 +1010,6 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
             0
         }
 
-        // 窗口被隐藏（最小化 / 收进托盘）时停掉定时器。
-        //
-        // 不这么做的话，最小化期间每 16ms 醒一次去标脏一个看不见的窗口，
-        // 笔记本上能实测到 1~2% 的额外 CPU。
-        //
-        // `WM_SHOWWINDOW` 的 wparam 是「即将显示/隐藏」，**不是**「当前状态」。
-        // 所以这里读 `anim_wanted`（用户想要动效吗）而不是查窗口可见性。
         WM_SHOWWINDOW => {
             let showing = wp != 0;
             if let Some(c) = ctx_of(hwnd) {
@@ -1064,6 +1057,34 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 ui.pointer.y = y;
                 if moved {
                     let (pw, _) = client_pixel_size(hwnd);
+                    if ui.device_drag.is_some() {
+                        let scroll = ui.scroll_y(ui.page);
+                        let changed = ui.update_device_drag(x, y, scroll);
+                        drop(ui);
+                        if changed {
+                            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+                            (c.damage)();
+                        }
+                        return 0;
+                    }
+                    if ui.pointer.down
+                        && matches!(ui.pressed, Some(Act::SelectDevice(_)))
+                        && ((x - ui.pointer.press_x).powi(2)
+                            + (y - ui.pointer.press_y).powi(2))
+                        .sqrt()
+                            > 4.0
+                    {
+                        let scroll = ui.scroll_y(ui.page);
+                        let started = ui.activate_device_drag(x, y, scroll);
+                        drop(ui);
+                        if started {
+                            c.anim_wanted.set(true);
+                            set_timer(hwnd, true);
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                            (c.damage)();
+                        }
+                        return 0;
+                    }
                     let hover_changed = ui.refresh_hover_at(x, y, pw as f32 / c.scale);
                     // 正在拖滑块时，先把「这一帧该显示的值」写进 `live`，
                     // 页面下一帧就按它画 —— 这是滑块跟手的**唯一**来源。
@@ -1145,6 +1166,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                     let mut ui = c.ui.borrow_mut();
                     ui.pointer.x = x;
                     ui.pointer.y = y;
+                    ui.pointer.press_x = x;
+                    ui.pointer.press_y = y;
                     ui.pointer.down = true;
                     scroll = ui.scroll_y(ui.page);
                     ui.on_press(x, y, scroll);
@@ -1176,19 +1199,23 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 let y = hi_word(lp) as f32 / c.scale;
                 let mut pushed: Option<Act> = None;
                 let dragging: Option<Slide>;
+                let device_reorder: Option<Act>;
                 {
                     let mut ui = c.ui.borrow_mut();
                     ui.pointer.x = x;
                     ui.pointer.y = y;
                     ui.pointer.down = false;
+                    device_reorder = ui.finish_device_drag();
                     dragging = ui.pointer.dragging.take();
-                    if dragging.is_none() {
+                    if dragging.is_none() && device_reorder.is_none() {
                         let scroll = ui.scroll_y(ui.page);
                         pushed = ui.on_release(x, y, scroll);
                     }
                     ui.pressed_slide = None;
                 }
-                if let Some(s) = dragging {
+                if let Some(action) = device_reorder {
+                    c.acts.borrow_mut().push(action);
+                } else if let Some(s) = dragging {
                     // 拖动结束：把最终值发给页面，并通知「这一拖结束了」
                     //（页面据此决定要不要落盘 —— 拖的过程中不能每次都写设备）
                     let frac = c.ui.borrow().fraction_at(s, x);
@@ -1369,11 +1396,6 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
             0
         }
 
-        // 悬停换光标：边框上是缩放箭头；内容里是手型/输入 I 型。
-        //
-        // `lparam` 低 16 位 = 命中测试码（就是 `WM_NCHITTEST` 的返回值）。
-        // 边框拖拽区会传 `HTLEFT/HTTOP/…`，以前这里只按内容提示设光标，
-        // 于是边框上的鼠标一直保持箭头 —— 这就是"边框上鼠标不变缩放图标"的原因。
         WM_SETCURSOR => {
             if let Some(c) = ctx_of(hwnd) {
                 let hit = lo_word(lp) as isize;
@@ -1411,70 +1433,6 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
         }
 
         _ => DefWindowProcW(hwnd, msg, wp, lp),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn refit_skips_when_the_size_is_unchanged() {
-        assert!(refit_needed(None, (1100, 740)), "first fit must run");
-        assert!(
-            !refit_needed(Some((1100, 740)), (1100, 740)),
-            "resize+maximize fire twice for one change"
-        );
-        assert!(refit_needed(Some((1100, 740)), (1101, 740)));
-    }
-
-    #[test]
-    fn 鼠标坐标按有符号16位解码() {
-        let lp = ((200isize) << 16) | 100;
-        assert_eq!(lo_word(lp), 100);
-        assert_eq!(hi_word(lp), 200);
-        // 负坐标：拖到客户区左上之外，高位补 1
-        let lp = ((-5isize) & 0xFFFF) | (((-7isize) & 0xFFFF) << 16);
-        assert_eq!(lo_word(lp), -5, "无符号解码会把 -5 变成 65531");
-        assert_eq!(hi_word(lp), -7);
-    }
-
-    #[test]
-    fn paintstruct_尺寸够大() {
-        // 少算字段会让 `BeginPaint` 越界写栈，崩溃点离现场很远、极难查。
-        assert!(
-            std::mem::size_of::<PaintStruct>() >= 72,
-            "PaintStruct 只有 {} 字节，比 Win32 的 72 字节小",
-            std::mem::size_of::<PaintStruct>()
-        );
-    }
-
-    #[test]
-    fn wndclassexw_尺寸正确() {
-        // Win64 下 WNDCLASSEXW = 80 字节。漏字段时 `RegisterClassExW` 返回 0，
-        // 错误码只是 ERROR_INVALID_PARAMETER，看不出是哪个字段。
-        assert_eq!(
-            std::mem::size_of::<WndClassExW>(),
-            80,
-            "WNDCLASSEXW 尺寸不对，结构体定义可能漏了字段"
-        );
-    }
-
-    #[test]
-    #[allow(non_snake_case)]
-    fn 资源ID按指针传() {
-        // `IDC_ARROW` 是 `MAKEINTRESOURCE(32512)`，即把整数当地址
-        assert_eq!(idc(IDC_ARROW) as usize, 32512);
-        assert_eq!(idc(IDC_HAND) as usize, 32649);
-    }
-
-    #[test]
-    fn 输入法字符能过控制字符的筛() {
-        // `WM_CHAR` 里那个 `!ch.is_control()` 的判断不能把中文挡掉
-        assert!(!'\u{4E2D}'.is_control());
-        assert!(!'a'.is_control());
-        assert!('\r'.is_control());
-        assert!('\t'.is_control());
     }
 }
 

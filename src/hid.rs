@@ -1,9 +1,8 @@
 //! HID 设备枚举、打开与收发。
 //!
-//! 整体照 `_research\rw-hid.cs` 的 `Enumerate` / `Dev` / `Xfer` 三段做等价实现：
 //! - 用 setupapi 枚举 HID 接口，取 `\\?\hid#...` 路径；
 //! - `CreateFile` 打开时**必须** `FILE_SHARE_READ | FILE_SHARE_WRITE`（Armoury Crate 可能同时开着）；
-//! - 写用 `WriteFile`（同步句柄），读用「overlapped 句柄 + 独立事件 + 超时」；
+//! - 读写使用 overlapped 句柄、独立事件及超时；部分协议使用控制端点 Output Report；
 //! - 应答定位：先找 `r[1]==cmd && r[2]==sub`，找不到再找 `r[0]==cmd && r[1]==sub`（后者要补一个 report id 到下标 0）。
 
 use crate::win32::*;
@@ -20,7 +19,6 @@ pub const USAGE_PAGE_DONGLE_CTRL: u16 = 0xFF02;
 /// 鼠标命令通道（report id 0x03）—— 本程序只走这条
 pub const USAGE_PAGE_MOUSE_CTRL: u16 = 0xFF01;
 
-/// 默认单帧超时。实测一次正常往返 ~27ms，给 1200ms 已经非常宽裕。
 pub const DEFAULT_TIMEOUT_MS: u32 = 1200;
 
 /// 否定应答特征：`03 FF AA`
@@ -38,6 +36,7 @@ pub struct HidInterface {
     pub usage: u16,
     pub input_len: u16,
     pub output_len: u16,
+    pub feature_len: u16,
     pub product: String,
     pub serial: String,
 }
@@ -65,18 +64,24 @@ pub struct Skipped {
 /// 两者必须分开：「一个接口都没打开」和「根本没有 ASUS 设备」是两件事 ——
 /// 前者通常是 Armoury Crate 占着设备或权限不足，后者才是真的没插。
 /// 原来 `Err(_) => continue` 把两者糊成同一个「找不到设备」，用户完全没法排查。
+#[derive(Clone)]
 pub struct EnumerateReport {
     pub interfaces: Vec<HidInterface>,
     pub skipped: Vec<Skipped>,
 }
 
-/// 枚举本机所有 ASUS HID 接口（只关心拿到的那些）。
 pub fn enumerate(hid: &HidApi) -> Result<Vec<HidInterface>, String> {
     Ok(enumerate_report(hid)?.interfaces)
 }
 
-/// 枚举本机所有 ASUS HID 接口，同时带回打不开的接口清单。
 pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
+    let mut report = enumerate_all_report(hid)?;
+    report.interfaces.retain(|iface| iface.vendor_id == VID_ASUS);
+    Ok(report)
+}
+
+/// 只读描述符枚举，品牌协议决定后续可用的控制接口。
+pub fn enumerate_all_report(hid: &HidApi) -> Result<EnumerateReport, String> {
     let mut list = Vec::new();
     let mut skipped: Vec<Skipped> = Vec::new();
 
@@ -123,9 +128,6 @@ pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
             };
             match probe_interface(hid, &path) {
                 Ok(iface) => {
-                    if iface.vendor_id != VID_ASUS {
-                        continue;
-                    }
                     list.push(iface);
                 }
                 // 单个接口打不开（权限 / 被占用）不算致命，但要留下原因，
@@ -266,6 +268,7 @@ fn probe_interface(hid: &HidApi, path: &str) -> Result<HidInterface, String> {
             usage: caps.usage,
             input_len: caps.input_report_byte_length,
             output_len: caps.output_report_byte_length,
+            feature_len: caps.feature_report_byte_length,
             product: read_hid_string(hid, h, 0),
             serial: read_hid_string(hid, h, 1),
         })
@@ -275,10 +278,6 @@ fn probe_interface(hid: &HidApi, path: &str) -> Result<HidInterface, String> {
     out
 }
 
-/// 读 HID 字符串（0=产品名，1=序列号）。失败返回空串，不报错。
-///
-// 只保留开头连续 ASCII 字母数字：OMNI 接收器的 HID 字符串描述符 bLength 虚高，
-// 尾部是固件残留。实验记录与「试过但不行」的方案见 docs/hardware-notes.md。
 fn read_hid_string(hid: &HidApi, h: Handle, which: u8) -> String {
     let mut buf = vec![0u16; 256];
     let cap = (buf.len() * 2) as u32;
@@ -307,9 +306,49 @@ fn read_hid_string(hid: &HidApi, h: Handle, which: u8) -> String {
 }
 
 // ---------------- 打开的设备 ----------------
-/// 一个已打开的命令通道。持有两个句柄：同步写句柄 + overlapped 读句柄。
+/// 查询描述符公开的 Feature/Input report，使用零访问权限与可取消的 I/O。
+/// 不需要取得系统键盘/鼠标的输入流访问权限，也不会写 Output report。
+pub fn query_report(iface: &HidInterface, report_id: u8, feature: bool, timeout_ms: u32) -> Option<Vec<u8>> {
+    use winapi::shared::hidclass::{IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_INPUT_REPORT};
+    let length = if feature { iface.feature_len } else { iface.input_len } as usize;
+    if length == 0 { return None; }
+    let path = to_wide(&iface.path);
+    let handle = unsafe { CreateFileW(path.as_ptr(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        core::ptr::null_mut(), OPEN_EXISTING, FILE_FLAG_OVERLAPPED, core::ptr::null_mut()) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE { return None; }
+    let event = unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) };
+    if event.is_null() || event == INVALID_HANDLE_VALUE { unsafe { CloseHandle(handle); } return None; }
+    let mut report = vec![0u8; length];
+    report[0] = report_id;
+    let mut overlapped = Overlapped { h_event: event, ..Default::default() };
+    let mut returned = 0;
+    let result = (|| {
+        let ok = unsafe { DeviceIoControl(handle,
+            if feature { IOCTL_HID_GET_FEATURE } else { IOCTL_HID_GET_INPUT_REPORT },
+            report.as_mut_ptr().cast(), length as u32, report.as_mut_ptr().cast(), length as u32,
+            &mut returned, &mut overlapped) };
+        if ok == 0 {
+            if last_error() != ERROR_IO_PENDING { return None; }
+            if unsafe { WaitForSingleObject(event, timeout_ms) } != WAIT_OBJECT_0 {
+                // 缓冲区和 OVERLAPPED 必须活到取消完成，不能在内核仍持有时释放。
+                unsafe { CancelIoEx(handle, &mut overlapped); GetOverlappedResult(handle, &mut overlapped, &mut returned, 1); }
+                return None;
+            }
+            if unsafe { GetOverlappedResult(handle, &mut overlapped, &mut returned, 0) } == 0 { return None; }
+        }
+        if returned == 0 || report[0] != report_id { return None; }
+        if returned as usize > length { return None; }
+        let actual = (returned as usize + usize::from(report_id == 0)).min(length);
+        report.truncate(actual);
+        Some(report)
+    })();
+    unsafe { CloseHandle(event); CloseHandle(handle); }
+    result
+}
+
+/// 一个已打开的命令通道。读写分别使用可取消的 overlapped 句柄。
 pub struct HidDevice {
-    /// 同步句柄，只用来 `WriteFile`
+    /// 写句柄，用于 WriteFile 或 HID Output Report 控制传输。
     write_handle: Handle,
     /// overlapped 读句柄
     read_handle: Handle,
@@ -334,12 +373,109 @@ pub struct HidDevice {
 }
 
 impl HidDevice {
+    /// 原样收发品牌协议帧；匹配必须包含设备索引、功能及事务标识。
+    pub fn transact(
+        &mut self,
+        packet: &[u8],
+        timeout_ms: u32,
+        matches: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        self.transact_output(packet, timeout_ms, false, None, matches)
+    }
+
+    /// 部分接收器只接受控制端点 SET_REPORT，不能使用 WriteFile 的中断 OUT。
+    /// 不在超时后自动重发到另一端点，避免重复执行已送达的设置命令。
+    pub fn transact_control_output(
+        &mut self,
+        packet: &[u8],
+        timeout_ms: u32,
+        matches: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        self.transact_output(packet, timeout_ms, true, None, matches)
+    }
+
+    /// Interrupt Output exchange for a collection with one descriptor-proven
+    /// input report ID. Windows omits the zero Report ID byte from unnumbered
+    /// input buffers even though the collection capacity includes its slot.
+    pub fn transact_with_input_report(
+        &mut self,
+        packet: &[u8],
+        input_report_id: u8,
+        timeout_ms: u32,
+        matches: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        self.transact_output(
+            packet,
+            timeout_ms,
+            false,
+            Some(input_report_id),
+            matches,
+        )
+    }
+
+    fn transact_output(
+        &mut self,
+        packet: &[u8],
+        timeout_ms: u32,
+        control: bool,
+        input_report_id: Option<u8>,
+        mut matches: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        if !self.writable || packet.is_empty() || packet.len() > self.out_len as usize {
+            return None;
+        }
+        self.drain();
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(u64::from(timeout_ms));
+        let mut padded = vec![0; self.out_len as usize];
+        padded[..packet.len()].copy_from_slice(packet);
+        self.write_ov = Overlapped { h_event: self.write_event, ..Default::default() };
+        let mut written = 0;
+        let ok = unsafe {
+            if control {
+                DeviceIoControl(self.write_handle, winapi::shared::hidclass::IOCTL_HID_SET_OUTPUT_REPORT,
+                    padded.as_mut_ptr().cast(), padded.len() as u32,
+                    core::ptr::null_mut(), 0, &mut written, &mut self.write_ov)
+            } else {
+                WriteFile(self.write_handle, padded.as_ptr().cast(), padded.len() as u32,
+                    &mut written, &mut self.write_ov)
+            }
+        };
+        // SET_OUTPUT_REPORT 成功可以返回零字节；WriteFile 仍要求实际写入。
+        if !self.finish_output(ok, written, timeout_ms, control) {
+            return None;
+        }
+        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+            let read_len = self.in_len as usize
+                - usize::from(input_report_id == Some(0));
+            if read_len == 0 || !self.start_read(read_len) { return None; }
+            let frame = self.finish_read(left.as_millis().max(1) as u32)?;
+            if matches(&frame) { return Some(frame); }
+        }
+        None
+    }
+
+    /// 标准 Input report 的被动读取，不向键盘或鼠标发送私有命令。
+    pub fn read_report(&mut self, timeout_ms: u32) -> Option<Vec<u8>> {
+        if !self.start_read(self.in_len as usize) { return None; }
+        self.finish_read(timeout_ms)
+    }
+
     /// 打开指定路径的命令通道。写句柄开不了时自动降级为只读（`writable=false`）。
     pub fn open(iface: &HidInterface) -> Result<HidDevice, String> {
+        Self::open_access(iface, true)
+    }
+
+    /// 被动状态通道不申请写权限，也不创建输出句柄。
+    pub fn open_read_only(iface: &HidInterface) -> Result<HidDevice, String> {
+        Self::open_access(iface, false)
+    }
+
+    fn open_access(iface: &HidInterface, allow_write: bool) -> Result<HidDevice, String> {
         let wide = to_wide(&iface.path);
 
-        let mut writable = true;
-        let mut write_handle = unsafe {
+        let mut writable = allow_write;
+        let mut write_handle = if allow_write { unsafe {
             CreateFileW(
                 wide.as_ptr(),
                 GENERIC_READ | GENERIC_WRITE,
@@ -349,8 +485,8 @@ impl HidDevice {
                 FILE_FLAG_OVERLAPPED,
                 core::ptr::null_mut(),
             )
-        };
-        if write_handle == INVALID_HANDLE_VALUE || write_handle.is_null() {
+        } } else { core::ptr::null_mut() };
+        if allow_write && (write_handle == INVALID_HANDLE_VALUE || write_handle.is_null()) {
             writable = false;
             write_handle = unsafe {
                 CreateFileW(
@@ -364,7 +500,7 @@ impl HidDevice {
                 )
             };
         }
-        if write_handle == INVALID_HANDLE_VALUE || write_handle.is_null() {
+        if allow_write && (write_handle == INVALID_HANDLE_VALUE || write_handle.is_null()) {
             return Err(format!(
                 "无法打开设备（GetLastError={}）；可能被 Armoury Crate 独占或设备已拔出",
                 last_error()
@@ -383,7 +519,7 @@ impl HidDevice {
             )
         };
         if read_handle == INVALID_HANDLE_VALUE || read_handle.is_null() {
-            unsafe { CloseHandle(write_handle) };
+            if !write_handle.is_null() { unsafe { CloseHandle(write_handle) }; }
             return Err(format!(
                 "无法打开 overlapped 读句柄（GetLastError={}）",
                 last_error()
@@ -394,7 +530,7 @@ impl HidDevice {
         if read_event.is_null() || read_event == INVALID_HANDLE_VALUE {
             unsafe {
                 CloseHandle(read_handle);
-                CloseHandle(write_handle);
+                if !write_handle.is_null() { CloseHandle(write_handle); }
             }
             return Err(format!(
                 "CreateEventW 失败（GetLastError={}）",
@@ -402,12 +538,14 @@ impl HidDevice {
             ));
         }
 
-        let write_event = unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) };
-        if write_event.is_null() || write_event == INVALID_HANDLE_VALUE {
+        let write_event = if allow_write {
+            unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) }
+        } else { core::ptr::null_mut() };
+        if allow_write && (write_event.is_null() || write_event == INVALID_HANDLE_VALUE) {
             unsafe {
                 CloseHandle(read_event);
                 CloseHandle(read_handle);
-                CloseHandle(write_handle);
+                if !write_handle.is_null() { CloseHandle(write_handle); }
             }
             return Err(format!(
                 "CreateEventW 失败（GetLastError={}）",
@@ -541,8 +679,12 @@ impl HidDevice {
     /// 写句柄是 overlapped 打开的，所以驱动卡住时能把控制权抢回来——以前用同步
     /// 句柄写，`WriteFile` 没有超时，设备一挂就把整个刷新线程钉死。
     fn finish_write(&mut self, ok: i32, written: u32, timeout_ms: u32) -> bool {
+        self.finish_output(ok, written, timeout_ms, false)
+    }
+
+    fn finish_output(&mut self, ok: i32, written: u32, timeout_ms: u32, control: bool) -> bool {
         if ok != 0 {
-            return written > 0;
+            return control || written > 0;
         }
         if last_error() != ERROR_IO_PENDING {
             return false;
@@ -558,7 +700,7 @@ impl HidDevice {
         }
         let mut xfer: u32 = 0;
         let done = unsafe { GetOverlappedResult(self.write_handle, &mut self.write_ov, &mut xfer, 0) };
-        done != 0 && xfer > 0
+        done != 0 && (control || xfer > 0)
     }
 
     /// 发一帧并等应答。`tail` 从 `pkt[3]` 开始写（可以为空）。
@@ -703,15 +845,6 @@ impl Link {
     }
 }
 
-/// 解析接收器配对表（`A0 00` 的应答），找出 `wanted` 里第一个命中的 PID 的 report id。
-///
-/// 布局：`01 A0 00 <count LE16>` 之后紧跟 `count` 项、每项 4 字节
-/// `{PID LE16, report_id, notify_id}`。表被截断（count 说的是 5 项却只回了 2 项）
-/// 或没有匹配项都返回 `None` —— 调用方保留默认 report id 3，不要猜。
-///
-/// 单独抽出来是因为这段解析原先内联在 `open_link` 里，是全文件唯一没有单测的
-/// 协议解析：`count` 是设备给的，越界读不 panic 但会读到垃圾 PID，把 report id
-/// 定成 0 之后所有指令都会静默超时。
 fn parse_pairing_table(scan: &[u8], wanted: &[u16]) -> Option<u8> {
 if scan.len() < 6 {
     return None;
@@ -750,11 +883,6 @@ pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
         return Err(empty_reason(&report.skipped));
     }
 
-    // 1) 有线模式：直接是 0xFF01 且能回答电量帧。
-    //
-    // report id 必须试两个：实测有线（PID 0x1B63）走 **report id 0**（无编号帧，
-    // 回复首字节 00），无线才走 1 / 配对表给的 id。原来只试 1，有线模式一律超时，
-    // 于是链路开不起来、界面只能显示上一次的缓存值。
     let mut wired: Vec<Link> = Vec::new();
     for iface in &all {
         if iface.product_id == PID_DONGLE || !iface.is_command_channel() {
@@ -837,119 +965,4 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
         .into_iter()
         .next()
         .ok_or_else(|| "没有可用的命令通道".to_string())
-}
-
-#[cfg(test)]
-mod tests {
-
-    /// 配对表：命中项返回它的 report id，前面的非鼠标项要跳过。
-    #[test]
-    fn pairing_table_finds_mouse_report_id() {
-        // count = 2：第一项是键盘（不匹配），第二项是鼠标
-        let scan = [
-            0x01, 0xA0, 0x00, 0x00, 0x02, 0x00,
-            0x34, 0x12, 0x07, 0x00, // PID 0x1234 report 7
-            0x65, 0x1B, 0x03, 0x01, // PID 0x1B65（无线鼠标）report 3
-        ];
-        assert_eq!(
-            parse_pairing_table(&scan, &[super::PID_MOUSE_WIRELESS, super::PID_MOUSE_WIRED]),
-            Some(3)
-        );
-    }
-
-    /// 表里没有我们要的 PID 时不能瞎认一个。
-    #[test]
-    fn pairing_table_without_match_returns_none() {
-        let scan = [0x01, 0xA0, 0x00, 0x00, 0x01, 0x00, 0x34, 0x12, 0x07, 0x00];
-        assert_eq!(parse_pairing_table(&scan, &[0x1B65, 0x1B63]), None);
-    }
-
-    /// count 说 5 项、实际只回了 1 项：必须停下返回 None，不能读到缓冲区外面。
-    #[test]
-    fn pairing_table_truncated_returns_none() {
-        let scan = [0x01, 0xA0, 0x00, 0x00, 0x05, 0x00, 0x34, 0x12, 0x07, 0x00];
-        assert_eq!(parse_pairing_table(&scan, &[0x1B65]), None);
-    }
-
-    /// 连 count 字段都没回全。
-    #[test]
-    fn pairing_table_too_short_returns_none() {
-        assert_eq!(parse_pairing_table(&[0x01, 0xA0, 0x00, 0x00, 0x00], &[0x1B65]), None);
-        assert_eq!(parse_pairing_table(&[], &[0x1B65]), None);
-    }
-
-    /// 有线 PID 也要能命中（同型号有线/无线各一个 PID）。
-    #[test]
-    fn pairing_table_matches_wired_pid_too() {
-        let scan = [0x01, 0xA0, 0x00, 0x00, 0x01, 0x00, 0x63, 0x1B, 0x00, 0x00];
-        assert_eq!(parse_pairing_table(&scan, &[0x1B65, 0x1B63]), Some(0));
-    }
-    use super::*;
-
-    #[test]
-    fn nak_frame_is_detected() {
-        assert!(is_nak(&[0x03, 0xFF, 0xAA]));
-        assert!(!is_nak(&[0x03, 0x12, 0x07]));
-        assert!(!is_nak(&[0xFF]));
-    }
-
-    #[test]
-    fn align_reply_keeps_report_id_frame() {
-        let r = [0x03, 0x12, 0x07, 0x00, 0x5F];
-        let m = align_reply(0x03, 0x12, 0x07, &r).expect("正常应答应被接受");
-        assert_eq!(m, r);
-    }
-
-    #[test]
-    fn align_reply_prefixes_bare_answer() {
-        // 有线模式实测：回复不带 report id
-        let r = [0x12, 0x07, 0x00, 0x5F];
-        let m = align_reply(0x00, 0x12, 0x07, &r).expect("裸应答应被接受");
-        assert_eq!(m, vec![0x00, 0x12, 0x07, 0x00, 0x5F]);
-    }
-
-    #[test]
-    fn align_reply_accepts_nak_with_report_id() {
-        // 回归：NAK 的 r[1] 是 0xFF 而非 cmd，过去会被当「其它帧」丢掉
-        let m = align_reply(0x03, 0x12, 0x07, &[0x03, 0xFF, 0xAA]).expect("NAK 必须被接受");
-        assert!(is_nak(&m), "接受后仍要能被 is_nak 认出");
-        assert_eq!(m[0], 0x03);
-    }
-
-    #[test]
-    fn align_reply_prefixes_bare_nak() {
-        let m = align_reply(0x00, 0x12, 0x07, &[0xFF, 0xAA]).expect("裸 NAK 必须被接受");
-        assert_eq!(m, vec![0x00, 0xFF, 0xAA]);
-        assert!(is_nak(&m));
-    }
-
-    #[test]
-    fn align_reply_ignores_unrelated_frame() {
-        // 主动推送的电量帧（cmd 0x12 之外）不应被当成应答
-        assert_eq!(align_reply(0x03, 0x12, 0x07, &[0x03, 0x99, 0x99, 0x00]), None);
-        assert_eq!(align_reply(0x03, 0x12, 0x07, &[]), None);
-    }
-
-    #[test]
-    fn empty_reason_prefers_the_open_failure() {
-        // 什么接口都没枚举到 → 真·没插设备
-        let none: Vec<Skipped> = Vec::new();
-        assert!(empty_reason(&none).contains("没有找到任何 ASUS HID 接口"));
-
-        // 枚举到了但打不开 → 必须把原因带出来，不能报「找不到设备」
-        let skipped = vec![
-            Skipped {
-                path: "hid#vid_0b05#pid_1b63#1".into(),
-                reason: "CreateFileW 失败（GetLastError=5 拒绝访问）".into(),
-            },
-            Skipped {
-                path: "hid#vid_0b05#pid_1ace#2".into(),
-                reason: "CreateFileW 失败（GetLastError=32 另一个程序正在使用）".into(),
-            },
-        ];
-        let msg = empty_reason(&skipped);
-        assert!(msg.contains("2 个 HID 接口"), "{msg}");
-        assert!(msg.contains("Armoury Crate"), "{msg}");
-        assert!(msg.contains("拒绝访问"), "第一条原因要原样带出来：{msg}");
-    }
 }

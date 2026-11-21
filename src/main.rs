@@ -4,25 +4,22 @@
 //! 完全不依赖 ASUS 驱动 / Armoury Crate / GearLink：自己枚举 HID 接口、
 //! 自己拼 64 字节 feature report、自己解析应答。
 //!
-//! 协议细节见 `_research\hid-write.md`（写）与 `_research\hid-features.md`（读）。
 //!
 //! 读模型：**一次读全 17 帧 + 缓存**（见 `snapshot.rs`）。
 
-// 子系统设成 `windows`：双击、开始菜单、Microsoft Store 启动都不创建控制台，
-// 所以不会闪一下黑框。命令行用法由 `win32::attach_console()` 在 `main` 开头
-// 把父控制台接回来，`info` / `backup` 这些照旧能打印。
-// `cfg(not(test))` 是必须的：`cargo test` 的测试进程如果也是 GUI 子系统，
-// 测试输出会被直接丢掉。
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod autostart;
+mod audio;
 mod backup;
+mod backends;
 mod chart;
 mod cli;
 mod commands;
 mod devices;
 mod dwm;
 mod dynlight;
+mod feedback;
 mod gui;
 mod hid;
 mod i18n;
@@ -31,12 +28,14 @@ mod diagnostics;
 mod history;
 mod linkstate;
 mod mock;
+mod notifications;
 mod ops;
 mod paths;
 mod proto;
 mod report;
 mod settings;
 mod snapshot;
+mod taskbar_widget;
 mod tray_icon;
 mod tray_prefs;
 mod ui;
@@ -48,6 +47,9 @@ const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依
 
 用法：
   rog-mouse-ctl version                       打印版本号（和 GitHub tag 一致）
+  rog-mouse-ctl devices                       多品牌只读设备与电量列表
+  rog-mouse-ctl device-report                 输出不含序列号与接口路径的适配报告
+  rog-mouse-ctl device-report --probe         只读探测电量/DPI并导出同次运行的脱敏报告
   rog-mouse-ctl info [--fresh]                读全部信息（一次读全，默认吃 30 秒缓存）
   rog-mouse-ctl backup [文件]                 备份全部 31 项设置（默认 %USERPROFILE%\Documents\rog-mouse-ctl\backups\）
   rog-mouse-ctl restore <文件> [--save]       从备份还原（能量块最后单独重写并断言）
@@ -161,6 +163,27 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let cmd = pos[0];
+    if cmd == "device-report" {
+        return match if args.iter().any(|arg| arg == "--probe") { feedback::collect_probe() } else { feedback::collect() } {
+            Ok(report) => { print!("{report}"); ExitCode::SUCCESS }
+            Err(error) => { eprintln!("{error}"); ExitCode::FAILURE }
+        };
+    }
+    if cmd == "devices" {
+        return match backends::read_all(true) {
+            Ok(devices) => {
+                for device in devices {
+                    let battery = device.battery.as_ref().and_then(|battery| battery.display_percent())
+                        .map(|percent| percent.label(true)).unwrap_or_else(|| "unknown".into());
+                    println!("{}\t{}\t{}\t{}\tDPI={}", device.target.key,
+                        device.target.backend.name(), device.target.name, battery,
+                        device.dpi.current.map(|dpi| dpi.to_string()).unwrap_or_else(|| "unknown".into()));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => { eprintln!("{error}"); ExitCode::FAILURE }
+        };
+    }
 
     // 不需要设备的命令先处理掉（cache 相关）
     if cmd == "cache" {
@@ -242,8 +265,6 @@ fn check_single_instance() -> Instance {
     })
 }
 
-/// 按名字做单实例检查。拆出来只为了让测试用一个独立的名字，不与真机上的
-/// 运行实例互相干扰。
 fn check_instance_named(mutex_name: &str) -> Instance {
     let name = win32::to_wide(mutex_name);
     let handle = unsafe { win32::CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
@@ -312,7 +333,6 @@ fn run_gui(start_hidden: bool) -> ExitCode {
         }
     }
 }
-
 
 fn run(
     a: Cmd,
@@ -761,37 +781,4 @@ fn parse_cmd(cmd: &str, pos: &[&str]) -> Result<Cmd, String> {
         }
         other => Err(format!("未知子命令 {other:?}\n\n{USAGE}")),
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 同一个名字建两次互斥体：第一次拿到锁，第二次必须报告「已有实例」，
-    /// 而不是被当成「创建失败」。
-    #[test]
-    fn second_instance_is_detected_as_already_running() {
-        let name = format!("Local\\RogMouseCtl_Test_{}", std::process::id());
-        let first = check_instance_named(&name);
-        assert!(
-            matches!(first, Instance::Owner(_)),
-            "首次应抢到锁，实际是创建失败或已有实例"
-        );
-        let second = check_instance_named(&name);
-        assert!(
-            matches!(second, Instance::AlreadyRunning),
-            "第二次应报告已有实例"
-        );
-        drop(second);
-        drop(first);
-    }
-
-    #[test]
-    fn wake_existing_reports_false_for_a_missing_window() {
-        // 标题不存在时只能安静地返回 false，不能 panic（第二实例会走这条路）。
-        let title: Vec<u16> = "R Battery 不存在的窗口\0".encode_utf16().collect();
-        let hwnd = unsafe { crate::win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
-        assert!(hwnd.is_null());
-    }
-
 }

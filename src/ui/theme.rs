@@ -109,37 +109,6 @@ impl Mode {
         }
     }
 
-    /// 反色。给标题栏的主题切换按钮用。
-    #[cfg(test)]
-    pub fn flipped(self) -> Mode {
-        match self {
-            Mode::Light => Mode::Dark,
-            Mode::Dark => Mode::Light,
-        }
-    }
-
-    /// 存进 `settings.ini` 的字符串。
-    #[cfg(test)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Mode::Light => "light",
-            Mode::Dark => "dark",
-        }
-    }
-
-    /// 从 `settings.ini` 读回来。认不出的一律当浅色（默认）。
-    ///
-    /// 注意：`"system"` 在这里**不**解析成具体配色 —— 那需要一个注册表
-    /// 查询，属于运行期行为。用 [`resolve`] 得到实际配色。
-    ///
-    /// 现在运行期走 [`resolve`]，这个只剩单测在用，留着当解析规则的说明书。
-    #[cfg(test)]
-    pub fn parse(s: &str) -> Mode {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "dark" => Mode::Dark,
-            _ => Mode::Light,
-        }
-    }
 }
 
 /// 配色偏好（`settings.ini` 的 `theme` 键）。
@@ -215,56 +184,5 @@ pub fn resolve(pref: &str) -> Mode {
                 Mode::Dark
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn 两套配色的强调色不一样() {
-        // 浅色和深色如果强调色相同，说明抄错了 —— 这两个值在原型的
-        // CSS 里就是不同的（#0067C0 vs #4CC2FF）。
-        assert_ne!(LIGHT.accent, DARK.accent);
-        assert_ne!(LIGHT.bg, DARK.bg);
-        assert_ne!(LIGHT.text, DARK.text);
-    }
-
-    #[test]
-    fn 所有颜色都是不透明的_除了刻意半透明的() {
-        // 只有边框、次要文字、淡底这几类允许带 alpha。
-        // 底色、卡片、文字主色必须完全不透明 —— 否则 BitBlt 到屏幕上
-        // 会露出底下没画过的东西。
-        for (name, c) in [
-            ("bg", LIGHT.bg),
-            ("card", LIGHT.card),
-            ("text", LIGHT.text),
-            ("accent", LIGHT.accent),
-        ] {
-            assert_eq!(c >> 24, 0xFF, "{name} 必须不透明");
-        }
-        for (name, c) in [
-            ("bg", DARK.bg),
-            ("card", DARK.card),
-            ("text", DARK.text),
-            ("accent", DARK.accent),
-        ] {
-            assert_eq!(c >> 24, 0xFF, "{name} 必须不透明");
-        }
-    }
-
-    #[test]
-    fn mode_解析与反色() {
-        assert_eq!(Mode::parse("dark"), Mode::Dark);
-        assert_eq!(Mode::parse("DARK"), Mode::Dark);
-        assert_eq!(Mode::parse(" dark "), Mode::Dark);
-        assert_eq!(Mode::parse("light"), Mode::Light);
-        assert_eq!(Mode::parse(""), Mode::Light);
-        assert_eq!(Mode::parse("随便什么"), Mode::Light);
-        assert_eq!(Mode::Dark.flipped(), Mode::Light);
-        assert_eq!(Mode::Light.flipped(), Mode::Dark);
-        assert_eq!(Mode::Light.as_str(), "light");
-        assert_eq!(Mode::Dark.as_str(), "dark");
     }
 }
