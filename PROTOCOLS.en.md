@@ -21,6 +21,7 @@ Reviewed on 2026-11-21. The [Chinese research record](PROTOCOLS.md) contains the
 | [HeadsetControl](https://github.com/Sapd/HeadsetControl/tree/62e361b085d7716805a3bf524bc9cca3761e0e15) | `62e361b` | Nova 5, 7, 7P and 3P Wireless device files and the shared Nova status protocol: model IDs, offsets and battery generations | GPL-3.0 |
 | [Linux hid-playstation](https://github.com/torvalds/linux/blob/4dd10fbbeb9c33709edc89916e19c03c780a0751/drivers/hid/hid-playstation.c) | `4dd10fb` | DualSense USB / Bluetooth input layouts, battery status, CRC seeds and calibration Feature Reports | GPL-2.0-or-later for the reviewed file |
 | [sony-h5-tray](https://github.com/splitbrain/sony-h5-tray/tree/1d282db4ec641bfdefab1df14c3e6d05eb767706) | `1d282db` | H5 HCI frames, checksums and published captures in `src/proto.rs` / `src/hid.rs`, cross-checked with HeadsetControl's INZONE protocol and H5 / H9 II interface tables | MIT, Copyright (c) 2026 Andreas Gohr |
+| [cherry-battery-state](https://github.com/zcmk123/cherry-battery-state/tree/af82d4d98cbad872a586302ba44e6a6b75ba65f4) | `af82d4d` | Fixed query and fields in `cherry_battery.py`, cross-checked with MyFinder's `cherry.py` and [issue #482](https://github.com/wushuai0802/myfinder-device-battery/issues/482) for Pro identities and descriptors | README declares MIT; no separate LICENSE in the reviewed tree. No code or assets imported |
 
 The official `Logitech/Logitech-HIDPP` repository returned 404 during this review and is not counted as examined evidence. Protocol implementations are independently written; importing upstream code, generated catalogs or assets requires a separate license review.
 
@@ -147,3 +148,13 @@ MyFinder treats bit 7 of byte 6 as charging. HeadsetControl's separately capture
 Connection `52 01` returns `53 01` plus 0/1. ACK `FF 01` and NACK `FF 02` echo the command at offsets 14/15. Only a matching NACK terminates the query; ACKs, `FB` notifications and other commands are filtered. Connection is queried before and after battery to avoid publishing station-cached charge during power-off. Without transaction IDs or checksums, same-command traffic cannot be attributed reliably; NGENUITY coexistence requires hardware validation.
 
 NuPhy stock-firmware coverage is not expanded yet. FerrisPulse's `55` / `AA` path fills missing modes and settings from defaults or caches. Slone123c/nuphy-air75-v2-web-panel revision `02c54f3094afc655a84271159053a19abd83f1fb` explicitly describes custom firmware in its README and cannot establish the same battery commands on stock Air V2 firmware. Model, descriptor and valid-response evidence remains necessary.
+
+## In development: CHERRY MX 2.0S WL Pro
+
+The original `af82d4d` implementation supplies fixed-command and field evidence. Pro USB / receiver identities, `MI_01` / `FF1C:0092` and bidirectional Report `04` come from MyFinder `73d99e2` and issue #482. The catalog is not widened to the full Cherry VID; original `01AC` and Bluetooth `0687:01DE` do not inherit Pro queries.
+
+Descriptor handles request access=0 and inspect both button and value caps. Failure in either direction, mixed report IDs, wrong lengths or ambiguous candidate collections prevents a query. Uniqueness uses Windows USB interface groups, without full cross-interface physical-parent resolution; identical device instances retain separate identities.
+
+Replies require 64 bytes, the fixed prefix, status 0, percentage 1–100 and charger 0/1. Zero and all-zero request echoes cannot be reliably distinguished and never renew a sample. Contributor evidence includes a temporary 3–4 percentage-point difference from the vendor UI after switching connections; the adapter does not alter reported charge to match a screenshot. Long-term hardware stability remains unverified.
+
+On 2026-11-21, all 211 local regressions passed and the Windows x64 build completed without warnings. The added caps API loaded normally, and existing ROG mouse and VGN keyboard probes returned valid data. No Cherry hardware was available to verify low battery, stopped charging, long sleep or vendor-software coexistence.

@@ -21,6 +21,7 @@
 | [HeadsetControl](https://github.com/Sapd/HeadsetControl/tree/62e361b085d7716805a3bf524bc9cca3761e0e15) | `62e361b` | `lib/devices/steelseries_arctis_nova_5.hpp`、`steelseries_arctis_nova_7.hpp`、`steelseries_arctis_nova_7p.hpp`、`steelseries_arctis_nova_3p_wireless.hpp`、`protocols/steelseries_protocol.hpp`；Nova 型号、状态布局和电量代际 | GPL-3.0 |
 | [Linux hid-playstation](https://github.com/torvalds/linux/blob/4dd10fbbeb9c33709edc89916e19c03c780a0751/drivers/hid/hid-playstation.c) | `4dd10fb` | DualSense USB / 蓝牙输入结构、状态位、CRC 前缀及校准 Feature 报告 | 所查文件 GPL-2.0-or-later |
 | [sony-h5-tray](https://github.com/splitbrain/sony-h5-tray/tree/1d282db4ec641bfdefab1df14c3e6d05eb767706) | `1d282db` | `src/proto.rs`、`src/hid.rs`；H5 HCI 报文、校验和和公开抓取样例，与 HeadsetControl 的 INZONE 协议及 H5 / H9 II 接口表交叉核对 | MIT，Copyright (c) 2026 Andreas Gohr |
+| [cherry-battery-state](https://github.com/zcmk123/cherry-battery-state/tree/af82d4d98cbad872a586302ba44e6a6b75ba65f4) | `af82d4d` | `cherry_battery.py` 的固定电量查询及字段；与 MyFinder `cherry.py`、[议题 #482](https://github.com/wushuai0802/myfinder-device-battery/issues/482) 的 Pro 型号和描述符证据交叉核对 | README 声明 MIT；所查树未含独立 LICENSE，不引入代码或资源 |
 
 Logitech 官方 `Logitech/Logitech-HIDPP` 仓库在本次访问时返回 404，未将其内容作为已核对证据。HID++ 命令交叉核对 Solaar、libratbag 和 OpenMouse 的实际实现。
 
@@ -123,6 +124,7 @@ Razer 适配接入统一状态和能力模型，支持有效电量、独立充�
 - [x] 接入 XInput 系统槽位、有效无线电池等级与非 HID 连接证据，明确无电池时清除旧数字；回归通过，对应硬件验收待完成。
 - [x] 接入 Sony INZONE H5 / H9 II 接收器电量，按型号限制接口，核对事务、来源、校验和与离线回报；对应硬件验收待完成。
 - [x] 接入 HyperX Cloud Alpha 2 基站电量，分开解析充电与电压，前后确认连接并过滤无关消息；对应硬件验收待完成。
+- [x] 接入 CHERRY MX 2.0S WL Pro 的固定 USB / 接收器电量查询，增加按钮及数值 caps 的报告 ID 验证；对应硬件验收待完成。
 
 协议与验证方面继续推进：
 
@@ -196,3 +198,13 @@ HeadsetControl 的 `sony_inzone_protocol.hpp`、H5 / H9 II 型号定义和接口
 连接请求 `52 01` 返回 `53 01` 加 0/1；确认包 `FF 01` 和拒绝包 `FF 02` 在偏移 14/15 回显命令。只把匹配的拒绝作为当前查询失败；ACK、`FB` 通知和其他命令继续过滤。电量前后均查询连接，防止关机期间发布基站旧值。此协议缺少事务号与校验和，无法保证其他进程同命令回复的归属，必须通过 NGENUITY 共存验收确认实际行为。
 
 NuPhy 原厂键盘的接入暂未扩大：FerrisPulse 的 `55` / `AA` 路径会用默认模式和缓存设置补全未知值；另查 Slone123c/nuphy-air75-v2-web-panel `02c54f3094afc655a84271159053a19abd83f1fb`，其 README 明确为自定义固件，不能用来证明 Air V2 原厂固件支持同一电量命令。后续须补齐型号、描述符及有效回复证据。
+
+## 开发中：CHERRY MX 2.0S WL Pro
+
+原项目 `af82d4d` 仅用于核对固定输出命令及字节含义；实际 Pro 型号的 USB / 接收器身份、`MI_01` / `FF1C:0092` 和双向 Report `04` 依据 MyFinder `73d99e2` 与议题 #482。型号目录没有扩展成整个 Cherry VID；原项目所述 `01AC` 与蓝牙 `0687:01DE` 均不沿用 Pro 私有查询。
+
+描述符读取通过 access=0 句柄完成，同时枚举按钮和数值 caps。任一方向失败、报告 ID 混合、长度不符或候选集合不唯一时不发送请求。管理集合检查按 Windows USB 接口组进行，尚未引入跨接口的物理 parent 查询；不同实例的同型号设备分别保存身份。
+
+有效回复限制为 64 字节、固定前缀、状态 0、1～100 百分比和 0/1 充电字节。0% 与全零回显无法可靠区分，保持未知且不刷新时间。公开贡献者记录曾在切换连接后与官方 UI 短时相差 3～4 个百分点；程序不将设备读数修正成界面截图，硬件长期稳定性仍待验证。
+
+2026-11-21 本地 211 项回归通过，Windows x64 构建无警告；新增 caps API 正常加载，既有 ROG 鼠标和 VGN 键盘仍返回有效读数。没有 Cherry 实机，本次测试不证明低电量、停止充电、长休眠和官方驱动共存行为。

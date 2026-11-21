@@ -91,6 +91,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::PageCommand => &super::backends::page_command::PageCommand,
             super::backends::BackendId::Headset => &super::backends::headset::Headset,
             super::backends::BackendId::Keyboard20 => &super::backends::keyboard20::Keyboard20,
+            super::backends::BackendId::Cherry => &super::backends::cherry::Cherry,
             super::backends::BackendId::Nova => &super::backends::steelseries::Nova,
             super::backends::BackendId::Inzone => &super::backends::inzone::Inzone,
             super::backends::BackendId::HyperX => &super::backends::hyperx::HyperX,

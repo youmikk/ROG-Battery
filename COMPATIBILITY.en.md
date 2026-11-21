@@ -50,6 +50,18 @@ Only the `03F0:08BE` control station's `FF13:FF00` collection with 64-byte input
 
 Protocol regressions use four published HeadsetControl / MyFinder frames plus synthetic faults and query transcripts, covering charge, voltage, rejection, power-off and expiry. No matching headset is attached locally; USB transport, power recovery and NGENUITY coexistence await hardware acceptance. This feature is not part of the 1.4.6 tag.
 
+## In development: CHERRY MX 2.0S WL Pro
+
+The adapter matches receiver `046A:01E0` / `MX 2.0S Pro Dongle` and USB `046A:01DE` / `MX 2.0S WL Pro`, requiring `MI_01`, `FF1C:0092` and 64-byte input/output. Eligible management collections must be unique within the Windows USB interface instance. Both button and value capabilities must establish input/output Report `04` only; otherwise no query is sent. Full physical-parent resolution across USB interfaces is not implemented.
+
+Only the zero-padded `04 20 00 1A 06` battery query is sent, without keymap, lighting, pairing or firmware operations. A valid reply must match the full length and five-byte prefix, status byte 7 equal to 0, percentage byte 8 in 1–100, and charger byte 9 equal to 0/1. Device percentages are retained without adjusting them to the vendor UI.
+
+The hardware meaning of 0% is unverified and zero payloads cannot be reliably distinguished from request echoes, so this adapter does not publish 0%. Unknown states, charging enums, truncation and echoes never renew a sample. Failed queries do not establish disconnection. Background polling waits at most ten seconds; prior samples expire after 120 seconds and fresh responses restore them.
+
+USB and receiver paths retain separate identities; identical keyboards are not merged by name or serial. A keyboard connected through both transports may show two cards, with independent tray visibility. Bluetooth `0687:01DE` and other Cherry products such as `046A:01AC` are excluded from this private adapter.
+
+Evidence includes the original project's fixed query and MyFinder issue #482's identity, report-descriptor and reply-prefix records. Regression padding is synthetic. No matching keyboard is attached locally; low/full battery, stopped charging, long sleep recovery, multiple units and Cherry Utility coexistence await acceptance. Upstream reported a temporary 3–4 percentage-point difference after changing connections; its cause remains unresolved despite later agreement. This feature is not part of the 1.4.6 tag.
+
 ## Version 1.4.6: software DPI presets
 
 - The main window and tray share 1–4 enabled presets per device, sorted by value. The count selector only changes the software list and retains hidden values; actual device stages are never reordered or removed.
