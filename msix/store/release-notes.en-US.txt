@@ -3,6 +3,7 @@ New
 - Added battery support for five VGN / VXE 2.4 GHz keyboard receivers.
 - Added battery support for EWEADN S9 PRO 8K / S9, MCHOSE G87 V2, Flydigi APEX5 and GameSir Nova / Cyclone 2.
 - Added ATK N9 V2 ULTRA headset support and separate charging, full, external-power and offline states for ATK / MCHOSE headsets.
+- Added MCHOSE V9 PRO headset support after receiver firmware validation; versions below 0008 do not receive battery queries.
 - Expanded support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, EWEADN, Flydigi, GameSir, Logitech, Razer, Sony, HyperX and CHERRY devices.
 - Added Chinese and English interfaces with a language selector. Follow system is the default.
 - Added low-battery Windows notifications, audio controls, device ordering and basic DPI stage switching.

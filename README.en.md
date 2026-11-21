@@ -8,6 +8,10 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
+## Version 1.4.12
+
+This version is released as a portable build first. It adds MCHOSE V9 PRO headset support after reading receiver firmware through a descriptor-proven `FF22` Feature `AA/64`; versions below `0008` are blocked, while unknown versions retain the conservative fallback. This is the acceptance baseline for tomorrow; no further unverified protocol is being added.
+
 ## Version 1.4.11
 
 This version is released as a portable build first. FF90 headset handling now adds ATK N9 V2 ULTRA and distinguishes ATK discharging, charging and full states. MCHOSE V9 Turbo+ now separates external power with unknown level from explicit offline, so silence or external power is never shown as 0% / 100%.
