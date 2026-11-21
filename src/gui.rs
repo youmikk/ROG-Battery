@@ -4152,7 +4152,7 @@ mod backend_tests {
 
     #[test]
     fn keyboard_sleep_keeps_sample_age_then_wake_restores_tray_without_manual_refresh() {
-        let backend = BackendId::VgnKeyboard;
+        for backend in [BackendId::VgnKeyboard, BackendId::MchoseQhw, BackendId::Keyboard20] {
         let now = std::time::Instant::now();
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
         let mut shared = Shared::new(Settings::default());
@@ -4178,6 +4178,7 @@ mod backend_tests {
         assert_eq!(shared.readings[0].battery_text(true), "92%");
         assert_eq!(shared.readings[0].quality, crate::device::ReadingQuality::Live);
         assert_eq!(shared.readings[0].family, DeviceFamily::Keyboard);
+        }
     }
 
     #[test]

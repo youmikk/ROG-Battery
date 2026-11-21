@@ -48,8 +48,14 @@ impl Descriptor {
     }
 
     pub fn only_input_output_report(&self, interface: &HidInterface, id: u8, length: u16) -> bool {
+        self.only_input_output_report_lengths(interface, id, length, length)
+    }
+
+    pub fn only_input_output_report_lengths(&self, interface: &HidInterface, id: u8,
+        input: u16, output: u16) -> bool {
         self.caps.usage_page == interface.usage_page && self.caps.usage == interface.usage
-            && self.caps.input_report_byte_length == length && self.caps.output_report_byte_length == length
+            && input > 0 && output > 0
+            && self.caps.input_report_byte_length == input && self.caps.output_report_byte_length == output
             && [0, 1].into_iter().all(|kind| self.report_ids(kind)
                 .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|actual| *actual == id)))
     }

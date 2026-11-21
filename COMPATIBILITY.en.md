@@ -8,6 +8,27 @@ This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
 
+## In development: MCHOSE keyboards
+
+M HUB and CZ SDK were inspected separately; their keyboard protocols are not interchangeable. Queries require the matching collection, input/output capacities and actual report IDs. Missing descriptor evidence or multiple eligible controls in one Windows USB interface group prevents I/O.
+
+| Scope | Required endpoint | Battery and identity behavior |
+| --- | --- | --- |
+| G98 V3 2.4G | `3837:1015`, exact product `MCHOSE G98 V3 2.4G`, `FF80:0001`, Report `4D` only in both directions | Independent QHW command `0904`, matching sequence, percentage 0–100; charger 0/1/2 means discharging/charging/full |
+| Shared BY receiver | `3554:FA09`, `FF02:0002` or `FF04:0002`, 20-byte input/output with Report `13` only | Generic receiver or MCHOSE product names prompt six-byte model identification; an unknown model retains its product or a neutral 2.4G keyboard name, with valid percentage and unknown charging |
+| Selected MCHOSE BY receiver | `41E4:2001`, `FF04:0002`, the same 20-byte Report `13`, exact product `2.4G Wireless Receiver` or `MCHOSE 2.4G Wireless` | Requires an M HUB model-table match before battery; missing/unknown identity stops the query. Cross-interface FF02 sibling pairing is not implemented |
+| Existing Z75S | `258A:01BB`, `FF02:0002`, 20-byte Report `13` | Retains complete Z75S identity and existing battery checksum checks; ordinary keyboard input collections are excluded |
+
+The BY model-code table contains G87, K99 / V2, G98 / Pro / V2, X75 / V2, G75 Pro / V2, UT98, Z75 / Z75S, KX75, GX87 / V2, K87 and G87 V2. These identify replies on qualifying connections; **they do not establish hardware compatibility for 18 models**. The separate `3837:3033` G87 V2 GLW protocol is not implemented by this table.
+
+FA09 retains the captured Windows SET_REPORT transport. Z75S and the new `41E4:2001` path use interrupt OUT, without retrying on another endpoint. BY sends only model `05` and battery `4A`, allowing up to 2.2 seconds per query. Identification is renewed each poll, so failure cannot permanently block recovery. Instance identities stay separate; wired/wireless deduplication is not implemented.
+
+Shared BY replies follow M HUB's single-packet header. Byte 4 is not presumed to be a length and the trailer does not inherit another firmware's checksum rule. Recognized models may also supply `13 0A ... 05` battery notifications in the current bounded query window. Unknown models use only `4A` and no MCHOSE charging interpretation. Zero may be a sleeping-receiver placeholder and is suppressed on this BY wireless path. For recognized models, charging requires high nibble 1 and percentage below 100, following the official UI; a full flag never changes the measured percentage. VGN V98 Pro V3 retains its separate strict decoder.
+
+G98 V3 uses separately proven descriptor capacities for input/output and a 1.5-second query window. The response checkCode algorithm is unconfirmed; actual report ID, complete length, fixed header, sequence and field ranges are validated without inventing a checksum rule. No heartbeat, occupancy declaration, lighting or settings writes are sent. Receiver-cached sleep replies, independent cold-start reads, padding and full-charge transitions need hardware validation.
+
+All these paths use a ten-second maximum background wait and 120-second sample lifetime. Failure does not renew a sample; fresh background replies restore the display. On 2026-11-21, all 236 local regressions and a warning-free Windows x64 release build passed. Existing ROG and VGN read-only probes succeeded; no newly added keyboard was available. Published frames are offline regression evidence, with other vectors synthetic. This work follows the 1.4.7 tag and has not been submitted to the Microsoft Store.
+
 ## In development: shared VGN / VXE keyboard receivers
 
 Adds `320F:5088`, `FF1C:0092`, 64-byte input/output receiver queries. VGN HUB lists S99, V98 Pro / V2, N75 Pro and VXE75 / V2 in this protocol family. Exactly one management collection per Windows USB interface group is required, and both input/output descriptors must contain only Report `04`. Wired `320F:5055` is excluded; the existing V98 Pro V3 backend is separate.

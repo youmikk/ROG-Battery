@@ -79,12 +79,14 @@ Prioritize commonly used Chinese brands and basic DPI, retaining detailed ROG su
 - [x] Implement Rapoo nRF54L profile-scoped X/Y stage reads and basic switching with protocol regressions. Hardware switching, wake and official-driver coexistence remain pending.
 - [ ] Extend existing upstream battery protocols, recording mouse, keyboard, headset and gamepad coverage separately.
 - [x] Implement MCHOSE 20-byte keyboard status with Z75S identity checks and Arctis Nova percentage/level status. Protocol and refresh regressions passed; hardware acceptance remains pending.
+- [x] Add selected shared VGN / VXE `320F:5088` keyboard battery queries with independent slow-response, sleep and background-recovery handling. Hardware acceptance remains pending.
+- [x] Add MCHOSE G98 V3 QHW battery, BY model identification and notifications, with separate firmware-specific reply validation. Hardware acceptance remains pending.
 
-1. Hardware validation for CompX, Logitech and Razer changes, including writes, wake recovery, device replacement and competing official software.
-2. Additional CompX/Beken runtime layouts and transport data; newer Logitech onboard layouts, static feature/identity caching and continuous notification routing.
-3. More Razer connection data, including paired-device and transport limits on shared high-rate receivers.
-4. Validated page-command writes and sibling-collection notifications; separate treatment for Beast X 4K.
-5. Prioritize AULA, AJAZZ and Dareu keyboards/mice, Edifier headsets, and Flydigi, GameSir and 8BitDo controllers. Require actual readback evidence; overseas additions come later and unreadable settings stay unknown.
+1. Improve integrated Rapoo, VGN / VXE / ATK and MCHOSE support first: battery, basic DPI, sleep recovery, replacement and vendor-software coexistence. Record missing hardware acceptance explicitly.
+2. Extend runtime mouse identities and transports for these brands, separate MCHOSE keyboard protocols and receiver collection pairing. Keyboard queries must not inherit mouse setting commands.
+3. Add evidence-backed AULA, AJAZZ and Dareu keyboard/mouse protocols and Edifier headsets. Prioritize common battery/basic controls without filling unknown settings from catalogs.
+4. Expand Flydigi, GameSir and 8BitDo gamepad battery support, distinguishing percentages from levels and checking transport changes and system-API fallbacks.
+5. Maintain shipped overseas-brand features; additional models, complex onboard layouts and advanced settings follow common domestic devices.
 6. Distributable compatibility data, account-free feedback service and Beta updates. The current feedback path remains a user-submitted GitHub form and sanitized report.
 
 Custom presets are included in version 1.4.6. Local regressions and Chinese/English render checks passed; per-model hardware acceptance remains pending. CompX presets bind the active stage at click time and verify the active stage and X/Y before and after writing. The current official Rapoo nRF54L driver uses profile-specific addresses and up to seven stages, unlike fixed-address, six-stage reference implementations. The implementation reads the actual profile and complete X/Y tables separately from the older VT9Pro protocol.
@@ -168,3 +170,27 @@ The device list has `388D:0024` wired, `0025` wireless and `0029` single-mode, c
 Only online and battery commands are allowed. Each phase is bounded, requires nonempty data with zero offset, attempts END after failures and requires END acknowledgement before publication. Online status is rechecked; charging remains unknown. The vendor UI's initial wired value of 100 is not reused as a measurement. Wired suppression currently uses model presence without proven pairing identity, potentially affecting another identical keyboard; this limit is documented.
 
 All 218 local regressions and the release build passed. No matching Lofree hardware was available to verify Windows collections, response sizes and sleep recovery. The 1.4.7 tag remains unchanged; this work is on the development branch.
+
+## In development: shared VGN / VXE 320F:5088 keyboards
+
+The saved official [VGN HUB](https://drive.vgnlab.com.cn/) bundle `assets/index-BfN6tzNB.js`, SHA256 `2dc306331d30f874eec8a006f975ef5cac3ed2f18d3bef58e5dd089dc8d5cd5f`, was inspected directly. The `weisheng` driver sends Report `04` with payload `00 00 1A 06 00 00 00`, and reads payload byte 7 when byte 2 is `1A`. MyFinder `73d99e2` supplies independent protocol and published-prefix evidence. Vendor code and assets are not distributed.
+
+Queries require `320F:5088 / FF1C:0092`, 64-byte input/output with Report `04` only, and one management collection per USB interface group. This protocol does not use Cherry's `04 20` prefix. A published response took approximately 1.03 seconds; the new backend allows 2.5 seconds and runs independently of V98 Pro V3. Sleep `FF`, echoes and invalid reports cannot renew the sample. Values expire after 120 seconds and the maximum background wait before another query is ten seconds.
+
+Shared IDs/product strings cannot exclude Rainy75 or establish a VGN model. Product names and instance identities are retained; charging, cross-process attribution without transaction IDs and full sleep cycles need hardware verification. All 223 regressions and the release build passed, including shared UI/tray expiry and background recovery; upstream observations are not local hardware acceptance.
+
+## In development: MCHOSE QHW and BY keyboards
+
+The current [M HUB](https://www.mchose.com.cn/) entry was checked on 2026-11-21. Application `assets/main-DIt5vAcV.js` has SHA256 `cb10c9d3d29505bef2e2d3207dbe223601ff84c46d772b4a0f1e93ef02391c1b`; the official manifest points to `cizhou/CZ_SHARED_DATA/main.002bbdb0f17b5f7135ee.js`, SHA256 `d47d1d0e9e86efbbc1888d17f3bc5cd5caba73c06149a6f1fe26bb3d9386cbc3`. No vendor implementation license was found. Files were inspected statically for protocol facts, without executing or distributing their code/assets, and cross-checked with MyFinder `73d99e2`.
+
+The QHW catalog identifies G98 V3 wireless as `3837:1015 / MCHOSE G98 V3 2.4G / FF80:0001`. `getBattery` calls `_simpleGet(2308, [])`: Report `4D`, little-endian command `0904`, payload `01 03 00 04 09 00 ss cc`. Sequence increments modulo 256 and output checksum XOR excludes version, giving `0E XOR ss`. Reply version, flags, command, bizCode and sequence must match, with data length exactly two. Payload fields are charger enum and percentage; enum 2 is full, not actively charging. The official parser extracts the reply checkCode without proving its algorithm, so no incoming XOR rule is invented.
+
+Input and output capacities are proven independently from Windows descriptors, with minimum lengths 11/9 including the report ID. Writes use the actual output capacity and replies must match actual input length. `NORMAL_MAX_PACKET_LENGTH=31` is a code limit, not a hardware descriptor measurement. Only battery GET is sent. Independent cold-start reads and stale sleep responses remain hardware questions.
+
+BY `keyboardPwds` contains six-byte firmware model identifiers, not login credentials. Report `13` / command `05` reads the code at full-frame byte 5. The decoder never shifts bytes to force an expected model. Official `handleCommandResponse` checks packet count/index and discards byte 4 and the last byte; FA09 and new `41E4:2001` therefore do not inherit an unproven length-metadata or reply-checksum rule. Actual Report ID, 20-byte length, command, single-packet framing and echo rejection remain required. Z75S and separate VGN V98 Pro V3 retain their existing strict validation.
+
+Recognized models also accept `0A`, type `05` battery notifications during the bounded battery-query window. M HUB's `batteryParser(false)` skips bytes 2–4 and takes percentage/flags at 6/7. Both flag nibbles must be 0/1; high nibble 1 means charging only below 100%, and full flags never replace the percentage. Unknown FA09 models accept only valid `4A` percentages, with unknown charging. Other named brands do not receive an extra MCHOSE identity query. Wireless BY zero is suppressed because it may be a sleep placeholder.
+
+FA09 retains captured SET_REPORT transport; Z75S and `41E4:2001` use interrupt OUT without fallback resends. The latter is restricted to exact generic product names, `FF04:0002` and recognized model codes. Cross-USB-interface FF02 sibling pairing is not implemented. All entries require bidirectional Report `13` descriptor evidence and an unambiguous interface-group control collection; feature-only AULA/FA09 paths receive no command.
+
+All 236 local regressions and a warning-free release build passed. Coverage includes QHW sequence wrap, invalid replies and distinct capacities; BY unknown identity, notifications, sleep placeholders and background recovery. MyFinder #476's two complete frames are retained verbatim: the identity does not prove G75 Pro, while battery gives a neutral 100% with unknown charging. #312 provides a prefix with synthetic trailing test padding. Existing ROG read 79% / DPI 800 and VGN read 100% / charging in a read-only probe; no newly supported keyboard was present for hardware acceptance.
