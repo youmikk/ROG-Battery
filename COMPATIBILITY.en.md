@@ -10,7 +10,7 @@ Version 1.4.8 release validation (2026-11-22): all 319 local regressions passed;
 
 Version 1.4.9 acceptance candidate: all 326 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and copied-executable SHA256. The new multi-device taskbar layout is covered by synthetic readings and width-boundary tests. Existing wired VGN V98 Pro V3 hardware still returned 100% and charging. None of the five new wireless VGN / VXE identities is attached locally, so matching hardware acceptance remains pending.
 
-Version 1.4.10 portable validation: all 354 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and SHA256. A live mock-device run displayed separate mouse, keyboard, headset and gamepad cards. New EWEADN, MCHOSE G87 V2, Flydigi and GameSir protocols still need matching hardware acceptance; S9 PRO 8K already has user hardware readings.
+Version 1.4.10 portable validation: all 354 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and SHA256. A live mock-device run displayed separate mouse, keyboard, headset and gamepad cards. The post-1.4.10 FF90 headset state expansion passes 356 local regressions. New EWEADN, MCHOSE G87 V2, Flydigi and GameSir protocols still need matching hardware acceptance; S9 PRO 8K already has user hardware readings.
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed and the Windows x64 release build completed without warnings. Synthetic keyboard, headset and gamepad render checks covered Chinese/English, light/dark themes and 100% / 125% scaling; these were not hardware-connection evidence.
 
@@ -42,7 +42,7 @@ Limited to `089D:062F / FF01:0010`, a 33-byte output and a 16–34 byte Windows 
 
 The fixed request is `00 30` plus 31 zeroes; its checksum covers bytes 5–31 and is zero. A reply must be 15–33 bytes, begin `30 00`, declare enough data for bytes 4–14, contain ASCII `M156` at bytes 4–7, put a 0–100 percentage at byte 13 and the connected value `01` at byte 14. No charging field is established, so charging remains unknown. `30 02`, M302, passive `D1`, malformed lengths and other status values create no reading.
 
-All 354 local regressions and the warning-free Windows x64 release build pass, covering actual input capacities, every percentage, bad headers/lengths/identity/status and exact VID/PID/collection boundaries. Packet facts were independently implemented from HaloBattery PR #352 under MIT. No local S9 hardware was available; real caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
+All 356 local regressions and the warning-free Windows x64 release build pass, covering actual input capacities, every percentage, bad headers/lengths/identity/status and exact VID/PID/collection boundaries. Packet facts were independently implemented from HaloBattery PR #352 under MIT. No local S9 hardware was available; real caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
 
 ## In development: MCHOSE G87 V2
 
@@ -50,13 +50,13 @@ All 354 local regressions and the warning-free Windows x64 release build pass, c
 
 Only three read-only configuration requests are sent: command `04` reads base data, then command `05` reads the active profile in 56+8 byte segments. Base data maps the current index to a real profile slot; a valid `0..3` permutation is honored, while the documented legacy direct index remains supported otherwise. Complete configuration byte 32 encodes a 0–100 percentage in bits 0–6 and charging in bit 7. Replies must match the `AA` marker, command, requested length and offset. Reply checksum and other header flags remain unconfirmed and are not guessed; failure never becomes 0%.
 
-All 354 local regressions and the warning-free Windows x64 release build pass, covering zero/nonzero input report IDs, all three requests, slot permutations, malformed headers/lengths/offsets/levels and exact identity boundaries. No local G87 V2 was available. Real descriptors, sleep caching, cold start, reads during profile changes and coexistence with MCHOSE software remain pending.
+All 356 local regressions and the warning-free Windows x64 release build pass, covering zero/nonzero input report IDs, all three requests, slot permutations, malformed headers/lengths/offsets/levels and exact identity boundaries. No local G87 V2 was available. Real descriptors, sleep caching, cold start, reads during profile changes and coexistence with MCHOSE software remain pending.
 
 ## In development: Flydigi APEX5
 
 Limited to `37D7:2501 / FFA0:0001`, 32-byte input/output and Reports `04` / `03`. The only request is the fixed GET_INFO frame `03 5A A5 01 02 03` plus 26 zeroes. IMU, rumble, trigger, lighting, mode and configuration commands are unreachable. A reply must match the `04 5A A5 01 01 00 80` header and mode `01/02`.
 
-Byte 12 bits 0–3 encode five battery tiers, displayed as `≈` estimates of `0/20/40/60/80/100%`. Bits 4–7 accept only 0 or 1. A high nibble of 1 is a charging sentinel; it produces neither a sixth tier nor a fabricated percentage and shows charging only. Other tiers or charge values are rejected. All 354 local regressions and the warning-free release build pass. No local APEX5 was available; real descriptors, sleep, charging transitions and desktop-software coexistence remain pending.
+Byte 12 bits 0–3 encode five battery tiers, displayed as `≈` estimates of `0/20/40/60/80/100%`. Bits 4–7 accept only 0 or 1. A high nibble of 1 is a charging sentinel; it produces neither a sixth tier nor a fabricated percentage and shows charging only. Other tiers or charge values are rejected. All 356 local regressions and the warning-free release build pass. No local APEX5 was available; real descriptors, sleep, charging transitions and desktop-software coexistence remain pending.
 
 ## In development: GameSir Nova / Cyclone 2
 
@@ -64,7 +64,15 @@ The Nova family is limited to `3537:1098/100F/1040` and an unnumbered `FF7A` inp
 
 Cyclone 2 is limited to `3537:100B / FFF0:0040`, 64-byte input/output and Reports `12/0F`. The fixed read-only request is `0F 03`. Reply Report `12` accepts only 0/1 at byte 35 and a 0–100 percentage at byte 36. Both paths send only device-information reads; no rumble, trigger, lighting, button or mode command is reachable.
 
-All 354 local regressions and the warning-free Windows x64 release build pass, covering exact Nova/Cyclone VID/PID, collection, capacity, report IDs, requests, 0%/100%, the charging sentinel and malformed frames. No matching GameSir controller was available locally. Windows descriptors, sleep/wake, wired/2.4 GHz transitions, multiple identical units and GameSir Nexus coexistence remain pending.
+All 356 local regressions and the warning-free Windows x64 release build pass, covering exact Nova/Cyclone VID/PID, collection, capacity, report IDs, requests, 0%/100%, the charging sentinel and malformed frames. No matching GameSir controller was available locally. Windows descriptors, sleep/wake, wired/2.4 GHz transitions, multiple identical units and GameSir Nexus coexistence remain pending.
+
+## In development: ATK N9 V2 ULTRA / MCHOSE V9 headsets
+
+The FF90 `55:65` headset backend adds `373B:12D6` ATK N9 V2 ULTRA and limits ATK input capacity to the descriptor-proven 22–64 bytes. ATK states `02/03/04` mean discharging, charging and full. State `04` preserves the reported percentage instead of forcing 100%.
+
+MCHOSE V9 Turbo+ remains limited to `3837:600A / FF90:0001` and 64-byte input/output. State `02` decodes a 0–100 percentage, `00/03` means external power with unknown level, and `1A` explicitly means offline. Silence does not mean offline. The `3837:6008` lighting device and all other identities remain excluded.
+
+All 356 local regressions and the warning-free Windows x64 release build pass, covering ATK's dynamic input capacity and three states, MCHOSE external-power/offline handling and strict descriptors. `291D:385D` MCHOSE V9 PRO still needs its receiver firmware `0008` gate and proven `FF22` Feature `AA`; this version does not claim support. All new headset paths still need matching hardware acceptance.
 
 ## In development: AULA SC380 PRO
 
