@@ -26,7 +26,15 @@ Limited to `372E:1026` on `FF00:0001` or `FF06:0001`. Within one USB interface g
 
 The reader sends one 64-byte Feature request `03 20 50 00 00 4F 81` plus 57 zeroes; checksum `20` covers the payload without the Report ID. It waits 100 ms, then performs one GET_FEATURE of Report `03`. UUID, wireless-online, reset, pairing, configuration, macro, display and firmware commands are unreachable. Both the user-verified 16-byte reply and the descriptor-backed 64-byte reply are supported. Byte 6 bits 0–6 are a 1–100 percentage and bit 7 is charging; the short form additionally requires presence byte 5 to equal `01`. Wrong headers, empty packets, request echoes, out-of-range levels and silence create no fresh sample.
 
-Developed after the 1.4.9 tag, with all 338 local regressions and a warning-free Windows x64 release build passing. User issue #315 confirmed the 16-byte format, 23%–98% readings and charging transitions on Windows x64. This project has no independent S9 PRO hardware. The same VID/PID is also used by other S7/S9 catalog entries, so the current name is not a runtime paired-model proof. Real descriptor shapes, 64-byte replies, sleep caching, wake-up and coexistence with EWEADN HUB remain pending.
+User issue #315 confirmed the S9 PRO 8K 16-byte format, 23%–98% readings and charging transitions on Windows x64. This project has no independent S9 PRO hardware. The same `372E:1026` is also used by other S7/S9 catalog entries, so the current name is not a runtime paired-model proof. Real descriptor shapes, 64-byte replies, sleep caching, wake-up and coexistence with EWEADN HUB remain pending.
+
+## In development: EWEADN S9 (M156)
+
+Limited to `089D:062F / FF01:0010`, a 33-byte output and a 16–34 byte Windows input capacity. A descriptor must prove one unnumbered Report 0 in each direction. Wired `088D:062E`, `FF00:0000`, M302 and other product names are excluded. The read length is the descriptor capacity minus one; the upstream fixed 33-byte buffer is not assumed for every firmware.
+
+The fixed request is `00 30` plus 31 zeroes; its checksum covers bytes 5–31 and is zero. A reply must be 15–33 bytes, begin `30 00`, declare enough data for bytes 4–14, contain ASCII `M156` at bytes 4–7, put a 0–100 percentage at byte 13 and the connected value `01` at byte 14. No charging field is established, so charging remains unknown. `30 02`, M302, passive `D1`, malformed lengths and other status values create no reading.
+
+All 342 local regressions and the warning-free Windows x64 release build pass, covering actual input capacities, every percentage, bad headers/lengths/identity/status and exact VID/PID/collection boundaries. Packet facts were independently implemented from HaloBattery PR #352 under MIT. No local S9 hardware was available; real caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
 
 ## In development: MCHOSE G87 V2
 
@@ -34,7 +42,7 @@ Developed after the 1.4.9 tag, with all 338 local regressions and a warning-free
 
 Only three read-only configuration requests are sent: command `04` reads base data, then command `05` reads the active profile in 56+8 byte segments. Base data maps the current index to a real profile slot; a valid `0..3` permutation is honored, while the documented legacy direct index remains supported otherwise. Complete configuration byte 32 encodes a 0–100 percentage in bits 0–6 and charging in bit 7. Replies must match the `AA` marker, command, requested length and offset. Reply checksum and other header flags remain unconfirmed and are not guessed; failure never becomes 0%.
 
-All 338 local regressions and the warning-free Windows x64 release build pass, covering zero/nonzero input report IDs, all three requests, slot permutations, malformed headers/lengths/offsets/levels and exact identity boundaries. No local G87 V2 was available. Real descriptors, sleep caching, cold start, reads during profile changes and coexistence with MCHOSE software remain pending.
+All 342 local regressions and the warning-free Windows x64 release build pass, covering zero/nonzero input report IDs, all three requests, slot permutations, malformed headers/lengths/offsets/levels and exact identity boundaries. No local G87 V2 was available. Real descriptors, sleep caching, cold start, reads during profile changes and coexistence with MCHOSE software remain pending.
 
 ## In development: AULA SC380 PRO
 

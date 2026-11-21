@@ -4278,6 +4278,7 @@ mod backend_tests {
             (BackendId::MchoseQhw, DeviceFamily::Keyboard), (BackendId::Keyboard20, DeviceFamily::Keyboard),
             (BackendId::MchoseGlw, DeviceFamily::Keyboard),
             (BackendId::Edifier, DeviceFamily::Headset), (BackendId::EweadnS9Pro, DeviceFamily::Mouse),
+            (BackendId::EweadnS9, DeviceFamily::Mouse),
             (BackendId::Dareu, DeviceFamily::Mouse),
             (BackendId::VgnDragonfly3, DeviceFamily::Mouse),
             (BackendId::MchoseMouse, DeviceFamily::Mouse), (BackendId::GearHub, DeviceFamily::Mouse), (BackendId::G3m, DeviceFamily::Mouse), (BackendId::Aula, DeviceFamily::Mouse),

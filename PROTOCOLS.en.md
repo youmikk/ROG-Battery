@@ -193,6 +193,16 @@ The descriptor must prove one unique `FF02:0002` management collection per USB i
 
 All five new identities still require matching wireless hardware. The existing wired `258A:024E` V98 Pro V3 path remains separate and returned a valid 100% plus charging in this project; that result does not validate the wireless transports. Descriptors, 0%, charging transitions, sleep recovery and coexistence with VGN HUB require later hardware records.
 
+## In development: EWEADN S9 (M156)
+
+Only the `089D:062F / FF01:0010` M156 query is independently implemented from packet facts published under MIT in HaloBattery PR #352 and MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc` files/tests `eweadn.py`. It accepts a 33-byte output and a 16–34 byte Windows input capacity and requires a descriptor proving one unnumbered Report 0 in each direction. Wired `088D:062E`, `FF00:0000`, M302 and other product names are excluded; passive `D1` notifications are not used.
+
+The output request is `00 30` plus 31 zeroes. The first byte is Windows' Report ID slot; payload byte 0 is `30` and the remaining payload bytes are zero, so the checksum over payload bytes 5–31 is zero. Input capacity comes from the actual descriptor, and every read uses capacity minus one rather than assuming a fixed 33 bytes.
+
+A reply must be 15–33 bytes, begin `30 00`, declare enough data for bytes 4–14 without exceeding the frame, contain ASCII `M156` at bytes 4–7, place a 0–100 percentage at byte 13 and the observed connected value `01` at byte 14. No charging field is established, so charging remains unknown. `30 02`, other states, wrong identity, truncation and request echoes never become 0%. One send may ignore unrelated input for up to one second and accept the first valid M156 frame; no extra online or configuration command is sent.
+
+All 342 local regressions and the warning-free Windows x64 release build pass, covering 15–33 byte inputs, every percentage, strict identity and malformed frames. No local S9 was available. Real Windows caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
+
 ## In development: EWEADN S9 PRO 8K
 
 The read-only `372E:1026` basics query is independently implemented from pinned EWEADN HUB `vendor-bytech`, MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc`'s `eweadn_s9pro.py`, and user hardware evidence in issue #315. Other S7/S9 catalog entries share the same VID/PID, so the current display name is not established by a runtime model query.
