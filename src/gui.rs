@@ -4276,6 +4276,7 @@ mod backend_tests {
         for (backend, family) in [(BackendId::VgnKeyboard, DeviceFamily::Keyboard),
             (BackendId::VgnBeiying, DeviceFamily::Keyboard),
             (BackendId::MchoseQhw, DeviceFamily::Keyboard), (BackendId::Keyboard20, DeviceFamily::Keyboard),
+            (BackendId::MchoseGlw, DeviceFamily::Keyboard),
             (BackendId::Edifier, DeviceFamily::Headset), (BackendId::EweadnS9Pro, DeviceFamily::Mouse),
             (BackendId::Dareu, DeviceFamily::Mouse),
             (BackendId::VgnDragonfly3, DeviceFamily::Mouse),

@@ -3,6 +3,7 @@ pub mod logitech;
 pub mod lofree;
 pub mod mchose_qhw;
 pub mod mchose_mouse;
+pub mod mchose_glw;
 mod channel;
 pub mod cherry;
 mod descriptor;
@@ -56,6 +57,7 @@ pub enum BackendId {
     Keyboard20,
     MchoseQhw,
     MchoseMouse,
+    MchoseGlw,
     Edifier,
     EweadnS9Pro,
     Dareu,
@@ -73,9 +75,9 @@ pub enum BackendId {
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 28] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 29] = [
     BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
-    BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::Edifier, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
+    BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::StandardHid,
 ];
 
@@ -96,6 +98,7 @@ impl BackendId {
             Self::Keyboard20 => "MCHOSE keyboard",
             Self::MchoseQhw => "MCHOSE QHW keyboard",
             Self::MchoseMouse => "MCHOSE Feature mouse",
+            Self::MchoseGlw => "MCHOSE G87 V2",
             Self::Edifier => "EDIFIER Halo Space",
             Self::EweadnS9Pro => "EWEADN S9 PRO 8K",
             Self::Dareu => "DAREU Jm",
@@ -116,7 +119,7 @@ impl BackendId {
 
     pub fn precedes_standard(self) -> bool {
         matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnKeyboard | Self::CompX | Self::Razer
-            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::GearHub | Self::G3m | Self::Aula | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
+            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseGlw | Self::Edifier | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::GearHub | Self::G3m | Self::Aula | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
     }
 
     pub fn sample_lifetime(self) -> std::time::Duration {
@@ -125,7 +128,7 @@ impl BackendId {
             Self::Logitech => 180,
             Self::CompX => 45,
             Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => 120,
-            Self::Vgn | Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::GearHub | Self::G3m | Self::Aula | Self::StandardHid => 120,
+            Self::Vgn | Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseGlw | Self::Edifier | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::GearHub | Self::G3m | Self::Aula | Self::StandardHid => 120,
             Self::Rog => 0,
         })
     }
@@ -134,7 +137,7 @@ impl BackendId {
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
             Self::Rapoo | Self::DualSense | Self::XInput => Some(2_000),
-            Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::Edifier | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::GearHub | Self::G3m | Self::Aula | Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
+            Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseGlw | Self::Edifier | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::GearHub | Self::G3m | Self::Aula | Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
             _ => None,
         }
     }
@@ -209,7 +212,7 @@ impl Target {
             razer::collection_group(interface)
         } else if interface.serial.is_empty() || matches!(backend, BackendId::Rapoo | BackendId::CompX
             | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Cherry | BackendId::Lofree | BackendId::Nova | BackendId::Inzone | BackendId::HyperX
-            | BackendId::DualSense | BackendId::VgnBeiying | BackendId::VgnDragonfly3 | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::Edifier | BackendId::EweadnS9Pro | BackendId::Dareu | BackendId::EightBitDo | BackendId::GearHub | BackendId::G3m | BackendId::Aula) {
+            | BackendId::DualSense | BackendId::VgnBeiying | BackendId::VgnDragonfly3 | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::MchoseGlw | BackendId::Edifier | BackendId::EweadnS9Pro | BackendId::Dareu | BackendId::EightBitDo | BackendId::GearHub | BackendId::G3m | BackendId::Aula) {
             interface.path.to_ascii_lowercase()
         } else {
             format!(
@@ -363,6 +366,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Keyboard20 => &keyboard20::Keyboard20,
         BackendId::MchoseQhw => &mchose_qhw::MchoseQhw,
         BackendId::MchoseMouse => &mchose_mouse::MchoseMouse,
+        BackendId::MchoseGlw => &mchose_glw::MchoseGlw,
         BackendId::Edifier => &edifier::Edifier,
         BackendId::EweadnS9Pro => &eweadn_s9pro::EweadnS9Pro,
         BackendId::Dareu => &dareu::Dareu,

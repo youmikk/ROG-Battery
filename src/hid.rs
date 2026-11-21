@@ -380,7 +380,7 @@ impl HidDevice {
         timeout_ms: u32,
         matches: impl FnMut(&[u8]) -> bool,
     ) -> Option<Vec<u8>> {
-        self.transact_output(packet, timeout_ms, false, matches)
+        self.transact_output(packet, timeout_ms, false, None, matches)
     }
 
     /// 部分接收器只接受控制端点 SET_REPORT，不能使用 WriteFile 的中断 OUT。
@@ -391,7 +391,26 @@ impl HidDevice {
         timeout_ms: u32,
         matches: impl FnMut(&[u8]) -> bool,
     ) -> Option<Vec<u8>> {
-        self.transact_output(packet, timeout_ms, true, matches)
+        self.transact_output(packet, timeout_ms, true, None, matches)
+    }
+
+    /// Interrupt Output exchange for a collection with one descriptor-proven
+    /// input report ID. Windows omits the zero Report ID byte from unnumbered
+    /// input buffers even though the collection capacity includes its slot.
+    pub fn transact_with_input_report(
+        &mut self,
+        packet: &[u8],
+        input_report_id: u8,
+        timeout_ms: u32,
+        matches: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
+        self.transact_output(
+            packet,
+            timeout_ms,
+            false,
+            Some(input_report_id),
+            matches,
+        )
     }
 
     fn transact_output(
@@ -399,6 +418,7 @@ impl HidDevice {
         packet: &[u8],
         timeout_ms: u32,
         control: bool,
+        input_report_id: Option<u8>,
         mut matches: impl FnMut(&[u8]) -> bool,
     ) -> Option<Vec<u8>> {
         if !self.writable || packet.is_empty() || packet.len() > self.out_len as usize {
@@ -426,7 +446,9 @@ impl HidDevice {
             return None;
         }
         while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
-            if !self.start_read(self.in_len as usize) { return None; }
+            let read_len = self.in_len as usize
+                - usize::from(input_report_id == Some(0));
+            if read_len == 0 || !self.start_read(read_len) { return None; }
             let frame = self.finish_read(left.as_millis().max(1) as u32)?;
             if matches(&frame) { return Some(frame); }
         }

@@ -26,7 +26,15 @@ Limited to `372E:1026` on `FF00:0001` or `FF06:0001`. Within one USB interface g
 
 The reader sends one 64-byte Feature request `03 20 50 00 00 4F 81` plus 57 zeroes; checksum `20` covers the payload without the Report ID. It waits 100 ms, then performs one GET_FEATURE of Report `03`. UUID, wireless-online, reset, pairing, configuration, macro, display and firmware commands are unreachable. Both the user-verified 16-byte reply and the descriptor-backed 64-byte reply are supported. Byte 6 bits 0–6 are a 1–100 percentage and bit 7 is charging; the short form additionally requires presence byte 5 to equal `01`. Wrong headers, empty packets, request echoes, out-of-range levels and silence create no fresh sample.
 
-Developed after the 1.4.9 tag, with all 332 local regressions and a warning-free Windows x64 release build passing. User issue #315 confirmed the 16-byte format, 23%–98% readings and charging transitions on Windows x64. This project has no independent S9 PRO hardware. The same VID/PID is also used by other S7/S9 catalog entries, so the current name is not a runtime paired-model proof. Real descriptor shapes, 64-byte replies, sleep caching, wake-up and coexistence with EWEADN HUB remain pending.
+Developed after the 1.4.9 tag, with all 338 local regressions and a warning-free Windows x64 release build passing. User issue #315 confirmed the 16-byte format, 23%–98% readings and charging transitions on Windows x64. This project has no independent S9 PRO hardware. The same VID/PID is also used by other S7/S9 catalog entries, so the current name is not a runtime paired-model proof. Real descriptor shapes, 64-byte replies, sleep caching, wake-up and coexistence with EWEADN HUB remain pending.
+
+## In development: MCHOSE G87 V2
+
+`3837:3033` is shared by multiple keyboards, so this path requires the exact product string `MCHOSE G87 V2 2.4G`, collection `0001:0000` and 65-byte input/output capacities. A descriptor must prove that input declares one report ID (which may be zero) and output declares only Report 0. Multiple matching collections in one interface group are refused. Other MCHOSE mice, QHW/BY keyboards, K99 V3 and ordinary keyboard/mouse collections do not enter this reader.
+
+Only three read-only configuration requests are sent: command `04` reads base data, then command `05` reads the active profile in 56+8 byte segments. Base data maps the current index to a real profile slot; a valid `0..3` permutation is honored, while the documented legacy direct index remains supported otherwise. Complete configuration byte 32 encodes a 0–100 percentage in bits 0–6 and charging in bit 7. Replies must match the `AA` marker, command, requested length and offset. Reply checksum and other header flags remain unconfirmed and are not guessed; failure never becomes 0%.
+
+All 338 local regressions and the warning-free Windows x64 release build pass, covering zero/nonzero input report IDs, all three requests, slot permutations, malformed headers/lengths/offsets/levels and exact identity boundaries. No local G87 V2 was available. Real descriptors, sleep caching, cold start, reads during profile changes and coexistence with MCHOSE software remain pending.
 
 ## In development: AULA SC380 PRO
 

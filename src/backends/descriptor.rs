@@ -110,6 +110,26 @@ impl Descriptor {
             && self.report_ids(0).is_some_and(|ids| !ids.is_empty()
                 && ids.iter().all(|id| allowed.contains(id)))
     }
+
+    /// Return the sole input and output report IDs after proving both Windows
+    /// capacities. Repeated caps for one report ID are one report, not several.
+    pub fn single_input_output_report_ids(
+        &self,
+        interface: &HidInterface,
+        input: u16,
+        output: u16,
+    ) -> Option<(u8, u8)> {
+        if self.caps.usage_page != interface.usage_page
+            || self.caps.usage != interface.usage
+            || input == 0
+            || output == 0
+            || self.caps.input_report_byte_length != input
+            || self.caps.output_report_byte_length != output
+        {
+            return None;
+        }
+        Some((single_id(self.report_ids(0)?)?, single_id(self.report_ids(1)?)?))
+    }
 }
 
 impl Drop for Descriptor {
@@ -129,6 +149,11 @@ fn collect_ids(buttons: u16, values: u16,
         ids.extend(entries);
     }
     Some(ids)
+}
+
+fn single_id(ids: Vec<u8>) -> Option<u8> {
+    let first = *ids.first()?;
+    ids.iter().all(|id| *id == first).then_some(first)
 }
 
 fn feature_byte_report_lengths(
@@ -205,5 +230,13 @@ mod tests {
         assert!(feature_byte_report_lengths(&[field(3, 64), field(3, 64)], 64).is_none());
         assert!(feature_byte_report_lengths(&[field(3, 64)], 128).is_none());
         assert!(feature_byte_report_lengths(&[], 64).is_none());
+    }
+
+    #[test]
+    fn report_id_uniqueness_collapses_repeated_caps_but_rejects_two_ids() {
+        assert_eq!(single_id(vec![0, 0, 0]), Some(0));
+        assert_eq!(single_id(vec![7, 7]), Some(7));
+        assert_eq!(single_id(vec![]), None);
+        assert_eq!(single_id(vec![0, 7]), None);
     }
 }

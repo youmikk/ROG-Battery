@@ -224,6 +224,22 @@ FA09 retains captured SET_REPORT transport; Z75S and `41E4:2001` use interrupt O
 
 All 236 local regressions and a warning-free release build passed. Coverage includes QHW sequence wrap, invalid replies and distinct capacities; BY unknown identity, notifications, sleep placeholders and background recovery. MyFinder #476's two complete frames are retained verbatim: the identity does not prove G75 Pro, while battery gives a neutral 100% with unknown charging. #312 provides a prefix with synthetic trailing test padding. Existing ROG read 79% / DPI 800 and VGN read 100% / charging in a read-only probe; no newly supported keyboard was present for hardware acceptance.
 
+## In development: MCHOSE G87 V2 GLW keyboard
+
+This reader is independently implemented from pinned static M HUB/CZ SDK evidence and MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc` files `mchose_glw_keyboard.py` and `mchose_keyboard_hid.py`. `3837:3033` is shared by multiple keyboards, so entry requires the exact product `MCHOSE G87 V2 2.4G`, collection `0001:0000` and 65-byte input/output capacities. A descriptor must prove a sole input report ID, which may be zero, and a sole output Report 0. Multiple matching collections in one interface group are refused.
+
+Windows HidP capacities include the Report ID slot. For an unnumbered input, the actual ReadFile buffer is one byte shorter; the new transfer path uses the descriptor-proven ID to adjust the read length and is restricted to this collection. Only 64-byte payloads with a leading Report ID are allowed:
+
+```text
+55 04 00 SS 38 00 00 00 ...    // read 56 bytes of base information
+55 05 00 SS 38 OO OO 00 ...    // read the first 56 bytes of the active profile
+55 05 00 SS 08 OO OO 00 ...    // read the final 8 bytes of the active profile
+```
+
+`SS` is the wrapping sum of payload bytes 4–63 and `OO OO` is the little-endian active-profile offset. Base byte 0 is the current index; a complete `0..3` permutation at bytes 2–5 maps to a real slot, while other layouts retain the documented legacy direct index. Each `05` response must declare 56 or 8 bytes and echo the offset. The combined 64-byte configuration uses byte 32 bits 0–6 for 0–100 percentage and bit 7 for charging.
+
+Replies must match the `AA` marker, command, length and offset. Reply checksum and other header flags are unconfirmed and are neither required nor guessed. Base repair, mode changes, polling-rate, DPI, lighting, macro, pairing and firmware commands are unreachable. All 338 regressions and the warning-free release build pass, covering zero/nonzero input IDs, request checksums, all three read exchanges, slot permutations and malformed frames. No G87 V2 hardware was available; real caps, sleep, cold start, profile changes and vendor-software coexistence remain pending.
+
 ## In development: Edifier Halo Space
 
 Battery command `D0` is independently implemented from FerrisPulse `335fb15`'s [public protocol record](https://github.com/Ferris-echo/FerrisPulse/blob/335fb15ba98be94a85e13061dc0812a04b3aadf6/docs/EDIFIER_HALO_SPACE_PROTOCOL.md), helper and packet tests. It specifies `2D99:E049 / FF14:0001`, 64-byte input/output, input prefix `2F BB EC` and output `2E AA EC`. `FF13` is a distinct collection. Upstream's broad collection fallback and permissive alternate headers are not used.
