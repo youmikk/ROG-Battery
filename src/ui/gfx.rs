@@ -52,6 +52,11 @@ extern "system" {
         scan0: *const u8,
         bitmap: *mut *mut c_void,
     ) -> i32;
+    pub(crate) fn GdipCreateHBITMAPFromBitmap(
+        bitmap: *mut c_void,
+        hbitmap: *mut crate::win32::Handle,
+        background: u32,
+    ) -> i32;
     pub(crate) fn GdipDisposeImage(image: *mut c_void) -> i32;
     fn GdipCreateBitmapFromHICON(hicon: crate::win32::Handle, out: *mut *mut c_void) -> i32;
     fn GdipSetClipPath(g: *mut c_void, path: *mut c_void, combine: i32) -> i32;

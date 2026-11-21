@@ -947,6 +947,22 @@ fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::
         .collect()
 }
 
+fn taskbar_strip_content(
+    readings: &[crate::device::DeviceReading],
+    cfg: &Settings,
+) -> Option<crate::taskbar_widget::StripContent> {
+    let reading = cfg
+        .tray_device
+        .as_ref()
+        .and_then(|key| readings.iter().find(|reading| &reading.key == key))
+        .or_else(|| readings.first())?;
+    Some(crate::taskbar_widget::StripContent {
+        level: reading.display_percent(),
+        charging: reading.is_charging(),
+        kind: cfg.device_kind(reading),
+    })
+}
+
 fn dpi_preset_command(cfg: &Settings, basic: &crate::backends::Snapshot, value: u16) -> Option<Cmd> {
     let presets = cfg.dpi_presets.get(&basic.target.key)?;
     if !presets.enabled || !presets.values.contains(&value) || !basic.connected
@@ -1101,6 +1117,8 @@ fn join_bounded(h: std::thread::JoinHandle<()>, budget: Duration) {
 
 /// 托盘图标回调消息号。`WM_APP + 100`，避开 nwg 自己用的那些。
 const TRAY_CALLBACK_MSG: u32 = 0x8000 + 100;
+/// Taskbar-adjacent strip callback. It routes into the same quick-view popup.
+const TASKBAR_CALLBACK_MSG: u32 = 0x8000 + 101;
 
 #[derive(Clone, Copy, Default)]
 struct TrayClicks {
@@ -2256,11 +2274,26 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
             env.set_cfg(|c| c.tray_enabled = on);
             env.tray.set_visibility(on);
             // 关掉托盘时如果窗口是隐藏的，用户就再也找不到程序了。
-            if !on {
+            if !on && !env.cfg().taskbar_widget_enabled {
                 env.window.set_visible(true);
             }
             env.say(crate::trf!(
                 "✔ 托盘图标已{}",
+                if on {
+                    crate::tr!("开启")
+                } else {
+                    crate::tr!("关闭")
+                }
+            ));
+        }
+        Pref::TaskbarWidget => {
+            let on = !env.cfg().taskbar_widget_enabled;
+            env.set_cfg(|c| c.taskbar_widget_enabled = on);
+            if !on && !env.cfg().tray_enabled {
+                env.window.set_visible(true);
+            }
+            env.say(crate::trf!(
+                "✔ 任务栏电量条已{}",
                 if on {
                     crate::tr!("开启")
                 } else {
@@ -2988,6 +3021,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     if cfg.tray_enabled {
         tray.set_visibility(true);
     }
+    let message_hwnd = msg_window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as win32::Handle;
+    let taskbar_widget = Rc::new(crate::taskbar_widget::TaskbarWidget::new(
+        message_hwnd,
+        TASKBAR_CALLBACK_MSG,
+    ));
+    taskbar_widget.sync(
+        cfg.taskbar_widget_enabled,
+        None,
+        crate::autostart::system_uses_light_theme(),
+    );
 
     let mut notice = nwg::Notice::default();
     nwg::Notice::builder()
@@ -3326,11 +3369,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let shared_language = Arc::clone(&shared);
     let audio_min = audio.clone();
     let tray_broadcast = Arc::clone(&tray_tb);
+    let taskbar_broadcast = Rc::clone(&taskbar_widget);
     // 第二个参数是**处理器 id**（nwg 要求 > 0xFFFF），要过滤的消息在回调里判。
     let min_handler =
         nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
             if taskbar_created != 0 && msg == taskbar_created {
                 tray_broadcast.re_add();
+                taskbar_broadcast.recreate();
             }
 
             // SIZE_MINIMIZED = 1
@@ -3353,6 +3398,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         .map_err(|e| crate::trf!("绑 WM_SIZE 处理器失败：{e}", e = e))?;
 
     let wh = window.handle.clone();
+    let taskbar_updates = Rc::clone(&taskbar_widget);
     let handler = nwg::full_bind_event_handler(&wh, move |evt, evt_data, _handle| {
         use nwg::Event as E;
 
@@ -3594,6 +3640,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         s.refresh_generation,
                     );
                     drop(s);
+                    taskbar_updates.sync(
+                        cfg.taskbar_widget_enabled,
+                        taskbar_strip_content(&readings, &cfg),
+                        crate::autostart::system_uses_light_theme(),
+                    );
                     if notify_low && crate::notifications::supported() {
                         for (key, name, level) in low_alerts {
                             if let Err(error) = crate::notifications::show_low_battery(
@@ -3610,7 +3661,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         }
                     }
                     popup_events.update(&readings, &cfg, &dpi, generation);
-                    if !cfg.tray_enabled {
+                    if !cfg.tray_enabled && !cfg.taskbar_widget_enabled {
                         popup_events.hide();
                     }
                 }
@@ -3629,8 +3680,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 通道已经不参与，所以这里用裸处理器。
     let shared_tray = Arc::clone(&shared);
     const CLICK_TIMER: usize = 87;
+    const TASKBAR_TIMER: usize = 89;
     let clicks = Cell::new(TrayClicks::default());
     let anchor = Cell::new(win32::Rect::default());
+    let taskbar_strip = Rc::clone(&taskbar_widget);
     let tray_handler = unsafe {
         nwg::bind_raw_event_handler(&msg_window.handle, 0x10005, move |h, msg, wp, lp| {
             let message_hwnd = h as win32::Handle;
@@ -3638,6 +3691,30 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 clicks.set(TrayClicks::default());
                 win32::KillTimer(message_hwnd, CLICK_TIMER);
                 tray_tb.re_add();
+                return Some(0);
+            }
+            if msg == 0x0113 && wp == TASKBAR_TIMER {
+                taskbar_strip.tick();
+                return Some(0);
+            }
+            if msg == TASKBAR_CALLBACK_MSG {
+                if popup_tray.was_open() {
+                    popup_tray.hide();
+                } else if let Some(rect) = taskbar_strip.screen_rect() {
+                    let (readings, cfg, dpi, generation) = {
+                        let s = lock_shared(&shared_tray);
+                        (
+                            s.readings.clone(),
+                            s.cfg.clone(),
+                            popup_dpi_states(&s),
+                            s.refresh_generation,
+                        )
+                    };
+                    popup_tray.update(&readings, &cfg, &dpi, generation);
+                    if cfg.tray_enabled || cfg.taskbar_widget_enabled {
+                        popup_tray.show(rect);
+                    }
+                }
                 return Some(0);
             }
             if msg == 0x0113 && wp == CLICK_TIMER {
@@ -3659,7 +3736,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                             )
                         };
                         popup_tray.update(&readings, &cfg, &dpi, generation);
-                        if cfg.tray_enabled {
+                        if cfg.tray_enabled || cfg.taskbar_widget_enabled {
                             popup_tray.show(anchor.get());
                         }
                     }
@@ -3767,6 +3844,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         })
     }
     .map_err(|e| crate::trf!("绑托盘回调失败：{e}", e = e))?;
+    unsafe {
+        win32::SetTimer(message_hwnd, TASKBAR_TIMER, 1000, 0);
+    }
 
     // ── 菜单事件处理器 ──────────────────────────────────────
     let signal_m = Arc::clone(&signal);
@@ -3790,7 +3870,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // 初始化全部就绪、消息循环马上开始 —— 这一刻才把窗口显示出来。
     // 若是开机自启拉起（且托盘已开启），就留在托盘后台，不弹窗打扰用户。
     // SW_SHOWNORMAL = 1。
-    if !(start_hidden && cfg.tray_enabled) {
+    if !(start_hidden && (cfg.tray_enabled || cfg.taskbar_widget_enabled)) {
         unsafe {
             let _ = crate::win32::ShowWindow(hwnd, 1);
         }

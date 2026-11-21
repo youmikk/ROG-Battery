@@ -7,6 +7,8 @@ use crate::win32::Handle;
 
 /// 图标布局基准尺寸。
 pub const ICON_SIZE: i32 = 32;
+pub const TASKBAR_STRIP_WIDTH: i32 = 78;
+pub const TASKBAR_STRIP_HEIGHT: i32 = 32;
 
 pub fn render_device(
     level: Option<crate::device::BatteryPercent>,
@@ -20,6 +22,91 @@ pub fn render_device(
         &crate::ui::theme::DARK
     };
     render_device_at(level, charging, kind, content, theme, icon_size())
+}
+
+/// Render the taskbar-adjacent battery pill as a premultiplied 32-bit HBITMAP.
+/// The caller owns the bitmap and must release it with `DeleteObject`.
+pub fn render_taskbar_strip(
+    level: Option<crate::device::BatteryPercent>,
+    charging: bool,
+    kind: crate::tray_prefs::TrayKind,
+    light_taskbar: bool,
+    scale: f32,
+) -> Option<Handle> {
+    use crate::ui::gfx::{Painter, R};
+    use gdiplus::*;
+    if !crate::ui::gfx::start() {
+        return None;
+    }
+    let theme = if light_taskbar {
+        &crate::ui::theme::LIGHT
+    } else {
+        &crate::ui::theme::DARK
+    };
+    let scale = scale.max(0.75);
+    let width = (TASKBAR_STRIP_WIDTH as f32 * scale).round() as i32;
+    let height = (TASKBAR_STRIP_HEIGHT as f32 * scale).round() as i32;
+    unsafe {
+        let mut bitmap = ptr::null_mut();
+        if GdipCreateBitmapFromScan0(
+            width,
+            height,
+            0,
+            PIXEL_FORMAT_32BPP_ARGB,
+            ptr::null(),
+            &mut bitmap,
+        ) != 0
+            || bitmap.is_null()
+        {
+            return None;
+        }
+        let mut graphics = ptr::null_mut();
+        if GdipGetImageGraphicsContext(bitmap, &mut graphics) != 0 || graphics.is_null() {
+            GdipDisposeImage(bitmap);
+            return None;
+        }
+        GdipGraphicsClear(graphics, 0);
+        GdipSetSmoothingMode(graphics, 4);
+        GdipSetTextRenderingHint(graphics, 4);
+        let ink = match level {
+            None => theme.text3,
+            Some(percent) if percent.value <= 20 => theme.red,
+            _ => theme.text,
+        };
+        let painted = Painter::on_graphics(graphics, theme, 32.0, scale, |p| {
+            p.card(
+                R::new(0.5, 2.5, TASKBAR_STRIP_WIDTH as f32 - 1.0, 27.0),
+                8.0,
+                theme.card,
+                theme.border,
+            );
+            device_glyph(
+                p,
+                R::new(5.0, 5.0, 22.0, 22.0),
+                kind,
+                ink,
+            );
+            let text = level
+                .map(|value| value.label(true))
+                .unwrap_or_else(|| "—".into());
+            p.icon_text(
+                &text,
+                R::new(30.0, 4.0, 42.0, 24.0),
+                if text.len() >= 4 { 18.0 } else { 21.0 },
+                ink,
+                false,
+            );
+            if charging {
+                p.dot(TASKBAR_STRIP_WIDTH as f32 - 8.0, 8.0, 2.2, theme.green);
+            }
+        });
+        let mut result = ptr::null_mut();
+        let converted = painted.is_some()
+            && GdipCreateHBITMAPFromBitmap(bitmap, &mut result, 0) == 0;
+        GdipDeleteGraphics(graphics);
+        GdipDisposeImage(bitmap);
+        (converted && !result.is_null()).then_some(result)
+    }
 }
 
 fn render_device_at(
@@ -259,7 +346,7 @@ mod gdiplus {
 
     // 位图图标专用的 5 个入口也是 GDI+ 那一套，声明在 `ui::gfx`（唯一一份）。
     pub(crate) use crate::ui::gfx::{
-        GdipCreateBitmapFromScan0, GdipCreateHICONFromBitmap, GdipDisposeImage,
+        GdipCreateBitmapFromScan0, GdipCreateHBITMAPFromBitmap, GdipCreateHICONFromBitmap, GdipDisposeImage,
         GdipDrawImageRectI, GdipFillEllipse, GdipFillRectangleI, GdipGetImageGraphicsContext,
         GdipGraphicsClear,
         GdipSetCompositingMode, GdipSetInterpolationMode, GdipSetPixelOffsetMode,

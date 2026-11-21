@@ -66,6 +66,8 @@ Click a device card to open its details. With multiple devices, return to the ov
 
 One numeric tray icon shows the selected device's battery level. Click it once to open a panel centered on the tray icon, with device battery levels, refresh, and settings. Double-click to open the main window, or right-click for the menu.
 
+A compact battery strip appears immediately left of the notification area. It follows the selected tray device, uses its device-type icon and a clearly readable percentage, and opens the same quick-view panel on click. Clicking it again closes the panel. It can be disabled independently in Settings and hides automatically while a full-screen application is active.
+
 Device preferences provide tray selection, device name, and device type, in that order. Names can be edited or restored. Types default to automatic detection and can be set to Mouse, Keyboard, Headset, Gamepad, or Other. Your choice applies throughout the main window and tray. Changing the type does not add hardware capabilities.
 
 In the tray device list, a mouse opens its known DPI stages, while a headset opens audio controls for speaker or headset volume, microphone mute, and Windows sound settings. Windows remains responsible for changing the default playback device; the app does not call undocumented interfaces.

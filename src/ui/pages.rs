@@ -2842,7 +2842,7 @@ fn settings_general(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 
 fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.h2(p, crate::tr!("托盘与通知"), true);
-    let rows = 2.0 + if d.native_notifications_supported { 1.0 } else { 0.0 };
+    let rows = 3.0 + if d.native_notifications_supported { 1.0 } else { 0.0 };
     let card = c.card(p, layout::ROW_H * rows);
     let mut y = card.y;
     // 托盘
@@ -2858,6 +2858,21 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, d.cfg.tray_enabled, true);
         ui.hot(sw, Act::Toggle(Pref::TrayEnabled));
+        row_rule(p, card, area);
+        y += layout::ROW_H;
+    }
+    {
+        let area = row_area(card, y);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("在任务栏显示电量"),
+            Some(crate::tr!("点击电量条打开快速查看")),
+            40.0,
+        );
+        let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
+        p.switch(sw, d.cfg.taskbar_widget_enabled, true);
+        ui.hot(sw, Act::Toggle(Pref::TaskbarWidget));
         row_rule(p, card, area);
         y += layout::ROW_H;
     }
