@@ -1,7 +1,8 @@
 New
 - The taskbar battery strip now shows multiple devices at once. A single device is number-only; multiple devices include a type glyph and percentage.
 - Added battery support for five VGN / VXE 2.4 GHz keyboard receivers.
-- Expanded support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, Logitech, Razer, Sony, HyperX and CHERRY devices.
+- Added battery support for EWEADN S9 PRO 8K / S9, MCHOSE G87 V2, Flydigi APEX5 and GameSir Nova / Cyclone 2.
+- Expanded support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, EWEADN, Flydigi, GameSir, Logitech, Razer, Sony, HyperX and CHERRY devices.
 - Added Chinese and English interfaces with a language selector. Follow system is the default.
 - Added low-battery Windows notifications, audio controls, device ordering and basic DPI stage switching.
 

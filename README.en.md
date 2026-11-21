@@ -8,6 +8,10 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
+## Version 1.4.10
+
+This version is released as a portable build first. It adds read-only battery support for EWEADN S9 PRO 8K, EWEADN S9 (M156), MCHOSE G87 V2, Flydigi APEX5 and GameSir Nova / Cyclone 2. The user-verified S9 PRO 8K path reported 23%–98% and charging data. Every path sends only reviewed queries; no configuration, rumble, lighting or mode writes are exposed.
+
 ## Version 1.4.9
 
 This version is released as a portable build first. The taskbar battery strip now uses compact dimensions that match the system tray. A single device shows only its number; multiple devices are shown in order with a type glyph and percentage, using enough spacing and only whole entries that fit in the available taskbar space. VGN / VXE adds strict read-only battery support for five 2.4 GHz keyboard receivers; `258A:024F` uses the documented charging bit while charging remains unknown on the other IDs.

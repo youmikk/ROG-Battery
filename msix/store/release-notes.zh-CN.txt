@@ -1,7 +1,8 @@
 新增
 - 任务栏电量条支持同时显示多台设备，单设备只显示数字，多设备显示设备类型与百分比。
 - 新增 VGN / VXE 五组 2.4G 键盘接收器电量查询。
-- 完善雷柏、VGN / VXE / ATK、迈从、狼蛛、黑爵、达尔优、漫步者、八位堂、HECATE、Logitech、Razer、Sony、HyperX 与 CHERRY 的部分设备支持。
+- 新增前行者 S9 PRO 8K / S9、迈从 G87 V2、飞智 APEX5、盖世小鸡 Nova / Cyclone 2 电量查询。
+- 完善雷柏、VGN / VXE / ATK、迈从、狼蛛、黑爵、达尔优、漫步者、八位堂、HECATE、前行者、飞智、盖世小鸡、Logitech、Razer、Sony、HyperX 与 CHERRY 的部分设备支持。
 - 新增中文、英文界面与语言选择，默认跟随 Windows 显示语言。
 - 新增低电量 Windows 通知、音频控制、设备排序与基础 DPI 档位切换。
 

@@ -4,13 +4,21 @@
 
 Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with simulated protocol coverage and Logitech hardware validation pending. Battery observations now distinguish live, cached and stale readings; failed queries alone do not establish disconnection. See [protocol research](PROTOCOLS.en.md) for upstream catalogs and capability boundaries.
 
-This document lists additions in 1.4.9, 1.4.8, 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
+This document lists additions in 1.4.10, 1.4.9, 1.4.8, 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
 Version 1.4.8 release validation (2026-11-22): all 319 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. The taskbar battery strip was verified to display, open the quick-view panel on click and close it on a second click. The existing VGN read-only probe returned valid data; new models still require hardware acceptance.
 
 Version 1.4.9 acceptance candidate: all 326 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and copied-executable SHA256. The new multi-device taskbar layout is covered by synthetic readings and width-boundary tests. Existing wired VGN V98 Pro V3 hardware still returned 100% and charging. None of the five new wireless VGN / VXE identities is attached locally, so matching hardware acceptance remains pending.
 
+Version 1.4.10 portable validation: all 354 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and SHA256. A live mock-device run displayed separate mouse, keyboard, headset and gamepad cards. New EWEADN, MCHOSE G87 V2, Flydigi and GameSir protocols still need matching hardware acceptance; S9 PRO 8K already has user hardware readings.
+
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed and the Windows x64 release build completed without warnings. Synthetic keyboard, headset and gamepad render checks covered Chinese/English, light/dark themes and 100% / 125% scaling; these were not hardware-connection evidence.
+
+## Version 1.4.10
+
+This version reunifies the multi-brand backends on `main` and adds strict read-only battery paths for EWEADN S9 PRO 8K, EWEADN S9 M156, MCHOSE G87 V2, Flydigi APEX5 and GameSir Nova / Cyclone 2. Exact identities, report gates, decoded fields, error handling and validation limits remain documented in their sections below.
+
+None of the new paths exposes configuration or state writes. Apart from user hardware evidence for S9 PRO 8K, this project has no independent matching hardware. The Microsoft Store package version is synchronized but will not be submitted before stability acceptance.
 
 ## 1.4.9 acceptance candidate
 
