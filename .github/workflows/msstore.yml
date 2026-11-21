@@ -1,8 +1,6 @@
 name: MSIX 打包
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
@@ -132,7 +130,7 @@ jobs:
           if-no-files-found: error
 
       - name: 上传并提交到商店
-        if: vars.MSSTORE_PRODUCT_ID != '' && (github.event_name == 'push' || inputs.submit_to_store == true)
+        if: vars.MSSTORE_PRODUCT_ID != '' && github.event_name == 'workflow_dispatch' && inputs.submit_to_store == true
         shell: pwsh
         env:
           AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
@@ -144,7 +142,7 @@ jobs:
           ./tools/msstore-publish.ps1 -ProductId '${{ vars.MSSTORE_PRODUCT_ID }}' -PackagePath $up.FullName
 
       - name: 商店提交状态
-        if: vars.MSSTORE_PRODUCT_ID != '' && (github.event_name == 'push' || inputs.submit_to_store == true)
+        if: vars.MSSTORE_PRODUCT_ID != '' && github.event_name == 'workflow_dispatch' && inputs.submit_to_store == true
         shell: pwsh
         run: |
           Write-Host '包已提交，最终上架状态以 Partner Center 为准。'

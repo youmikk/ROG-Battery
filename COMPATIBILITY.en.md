@@ -4,22 +4,22 @@
 
 Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with simulated protocol coverage and Logitech hardware validation pending. Battery observations now distinguish live, cached and stale readings; failed queries alone do not establish disconnection. See [protocol research](PROTOCOLS.en.md) for upstream catalogs and capability boundaries.
 
-This document lists additions in 1.4.5 and existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
+This document lists additions in 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
-## In development: software DPI presets (unreleased)
+## Version 1.4.6: software DPI presets
 
 - The main window and tray share 1–4 enabled presets per device, sorted by value. The count selector only changes the software list and retains hidden values; actual device stages are never reordered or removed.
 - Presets use reviewed numerical DPI write capabilities on Logitech, CompX and Razer connections. Read-only connections, onboard-only Logitech mode and independent axes that prohibit scalar writes remain restricted.
 - Apply saves the local preset. Use writes the device and verifies readback. CompX modifies the active onboard stage; Razer storage behavior follows the reviewed connection data. Stage changes while queued are rejected or reported during readback verification.
 - Local configuration, ordering, restoration, tray state and protocol regressions passed. Hardware acceptance and power-cycle persistence remain pending. Rapoo preset writes are not enabled.
 
-## In development: actual Rapoo nRF54L stages (unreleased)
+## Version 1.4.6: actual Rapoo nRF54L stages
 
 Reads the active profile, enabled count, up to seven X/Y stages and active index. The main window and tray switch existing device stages without changing values or stage count. Full configuration fingerprints and telemetry gate writes; full readback and a newer status report confirm the result. Configuration failure does not replace valid battery data. Unknown or mismatched interfaces are not written.
 
 Local transcripts cover collection pairing, both ACK layouts, seven slots, independent axes, profile changes, lost ACK, ignored writes, neighbor changes, expired status and backend command routing. Hardware switching and official-driver coexistence remain unverified; no supported Rapoo interface is currently available locally. The read-only scope below describes released version 1.4.5.
 
-## In development: MCHOSE keyboards and Arctis Nova headsets (unreleased)
+## Version 1.4.6: MCHOSE keyboards and Arctis Nova headsets
 
 The keyboard adapter queries only `FF02:0002` control collections with 20-byte input and output reports. Ordinary key-input collections are excluded.
 
@@ -45,7 +45,7 @@ Protocol regressions cover malformed frames, identity handshakes, identical rece
 
 Estimates carry ≈ throughout the main window, tray list, taskbar icon, tooltip and diagnostic report. HID++ uses Solaar's representative values 5/20/50/90; original Nova models use their own 0/25/50/75/100 mapping. Exact readings take priority. Estimates remain separate from measurements and cannot trigger exact-percentage notifications; missing levels and uncalibrated voltage-only readings remain unknown.
 
-Development verification (2026-11-17): 180 local regressions passed and the Windows x64 release build completed without warnings. Render checks cover Chinese/English, light/dark themes at 100% / 125% scaling and 16/20/24/32-pixel tray icons, including exact, estimated, unknown and stale readings. The read-only probe still returned 100% and charging for VGN V98 Pro V3.
+Version 1.4.6 feature verification (2026-11-17): 180 local regressions passed and the Windows x64 release build completed without warnings. Render checks cover Chinese/English, light/dark themes at 100% / 125% scaling and 16/20/24/32-pixel tray icons, including exact, estimated, unknown and stale readings. The read-only probe still returned 100% and charging for VGN V98 Pro V3.
 
 ## Version 1.4.5: CompX mice and polling rates
 

@@ -8,11 +8,13 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New mouse and headset adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
-## In development (unreleased)
+## Version 1.4.6
 
 Devices with supported numerical DPI writes can save 1–4 software presets on the Performance page, sorted by DPI, and switch from the main window or tray. Reducing the stage count hides the highest values and keeps them for restoration. Presets remain separate from actual device stages; connections that write stored DPI show a note. Local regressions and render checks passed; per-model hardware acceptance remains pending.
 
-Development also adds profile-scoped Rapoo stage reads and switching, selected MCHOSE keyboard battery queries, and Arctis Nova headset status. Level-only readings display estimated percentages prefixed with ≈; exact readings retain the existing numeric style. Hardware acceptance remains pending; see [development compatibility](COMPATIBILITY.en.md).
+This version also adds profile-scoped Rapoo stage reads and switching, selected MCHOSE keyboard battery queries, and Arctis Nova headset status. Level-only readings display estimated percentages prefixed with ≈; exact readings retain the existing numeric style. Hardware acceptance remains pending; see [compatibility notes](COMPATIBILITY.en.md).
+
+Version 1.4.6 is released as a portable build first. Microsoft Store submission is handled separately after stability acceptance.
 
 ## Version 1.4.5
 
@@ -49,7 +51,7 @@ The default is **Follow system**, which uses the Windows **display language**. M
 | Feature | Details |
 | --- | --- |
 | Battery | Battery level, charging state, device information, 48-hour history, and runtime estimates. |
-| Mouse performance | Existing detailed ROG DPI, polling-rate, debounce and related settings; other mice expose numerical DPI, actual stage switching, X/Y stage editing and rates according to protocol capabilities. Rapoo currently provides read-only current DPI. |
+| Mouse performance | Existing detailed ROG DPI, polling-rate, debounce and related settings; other mice expose numerical DPI, actual stage switching, X/Y stage editing and rates according to protocol capabilities. Rapoo can read and switch stages in the current profile; hardware acceptance is pending. |
 | Buttons | Button remapping, configuration export, and backup restoration on supported models. |
 | Lighting | Opens Windows Dynamic Lighting; Windows manages the effects. |
 | Settings | Theme, startup, close behavior, refresh interval, storage locations, and diagnostic logs. |
@@ -124,7 +126,7 @@ Keep the version in `Cargo.toml` aligned with the four-part Store version in `ms
 
 ## Feedback and license
 
-Backends poll independently and existing ROG controls are retained. Mouse, keyboard and headset support is assessed separately; a brand name alone does not establish compatibility. Supported Logitech onboard modes retain actual stages, including the fifth stage; common-value buttons are not G HUB's configured stages. Rapoo currently reads battery and current DPI on selected nRF54L mice without stage switching. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status.
+Backends poll independently and existing ROG controls are retained. Mouse, keyboard and headset support is assessed separately; a brand name alone does not establish compatibility. Supported Logitech onboard modes retain actual stages, including the fifth stage; common-value buttons are not G HUB's configured stages. Rapoo nRF54L stage switching requires matching configuration and fresh telemetry. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status.
 
 The `devices` command reads device status; `device-report` exports descriptors and the current process's query summary. `device-report --probe` runs read-only queries first and exports battery, charging status, current DPI, available onboard stages and communication results from the same process for user-assisted testing. Reports exclude payloads and unique device identifiers and are never uploaded automatically.
 
