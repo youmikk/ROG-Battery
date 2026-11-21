@@ -4282,7 +4282,8 @@ mod backend_tests {
             (BackendId::Dareu, DeviceFamily::Mouse),
             (BackendId::VgnDragonfly3, DeviceFamily::Mouse),
             (BackendId::MchoseMouse, DeviceFamily::Mouse), (BackendId::GearHub, DeviceFamily::Mouse), (BackendId::G3m, DeviceFamily::Mouse), (BackendId::Aula, DeviceFamily::Mouse),
-            (BackendId::EightBitDo, DeviceFamily::Gamepad)] {
+            (BackendId::EightBitDo, DeviceFamily::Gamepad),
+            (BackendId::Flydigi, DeviceFamily::Gamepad)] {
         let now = std::time::Instant::now();
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
         let mut shared = Shared::new(Settings::default());
