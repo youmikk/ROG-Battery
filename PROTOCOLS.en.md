@@ -71,7 +71,7 @@ Razer exposes battery, charging, current X/Y, complete stage records and separat
 
 ## Remaining work
 
-Prioritize multi-brand battery coverage and basic DPI controls, retaining detailed ROG support. Advanced settings for other brands must not displace keyboard and headset battery coverage.
+Prioritize commonly used Chinese brands and basic DPI, retaining detailed ROG support. First improve Rapoo, VGN / VXE / ATK and MCHOSE model coverage, keyboards and sleep recovery, followed by AULA, AJAZZ, Dareu and Edifier with established protocol evidence. Pause new overseas-brand coverage while maintaining shipped support. Common-device battery coverage and stability take priority over advanced settings.
 
 - [x] Save 1–4 custom DPI presets per device, sorted by value after editing. A stage-count selector hides the highest values and retains them for restoration; the main window and tray share the enabled list.
 - [x] Distinguish actual device stages from software presets; require confirmed numerical write capability, validate supported values and verify readback.
@@ -84,7 +84,7 @@ Prioritize multi-brand battery coverage and basic DPI controls, retaining detail
 2. Additional CompX/Beken runtime layouts and transport data; newer Logitech onboard layouts, static feature/identity caching and continuous notification routing.
 3. More Razer connection data, including paired-device and transport limits on shared high-rate receivers.
 4. Validated page-command writes and sibling-collection notifications; separate treatment for Beast X 4K.
-5. Corsair, SteelSeries and further headset/gamepad families, without replacing unreadable settings with defaults.
+5. Prioritize AULA, AJAZZ and Dareu keyboards/mice, Edifier headsets, and Flydigi, GameSir and 8BitDo controllers. Require actual readback evidence; overseas additions come later and unreadable settings stay unknown.
 6. Distributable compatibility data, account-free feedback service and Beta updates. The current feedback path remains a user-submitted GitHub form and sanitized report.
 
 Custom presets are included in version 1.4.6. Local regressions and Chinese/English render checks passed; per-model hardware acceptance remains pending. CompX presets bind the active stage at click time and verify the active stage and X/Y before and after writing. The current official Rapoo nRF54L driver uses profile-specific addresses and up to seven stages, unlike fixed-address, six-stage reference implementations. The implementation reads the actual profile and complete X/Y tables separately from the older VT9Pro protocol.
@@ -158,3 +158,13 @@ Descriptor handles request access=0 and inspect both button and value caps. Fail
 Replies require 64 bytes, the fixed prefix, status 0, percentage 1–100 and charger 0/1. Zero and all-zero request echoes cannot be reliably distinguished and never renew a sample. Contributor evidence includes a temporary 3–4 percentage-point difference from the vendor UI after switching connections; the adapter does not alter reported charge to match a screenshot. Long-term hardware stability remains unverified.
 
 On 2026-11-21, all 211 local regressions passed and the Windows x64 build completed without warnings. The added caps API loaded normally, and existing ROG mouse and VGN keyboard probes returned valid data. No Cherry hardware was available to verify low battery, stopped charging, long sleep or vendor-software coexistence.
+
+## In development: Lofree HYZEN
+
+The official [Lofree HUB](https://hyzen.lofree.tech/) `assets/index-D0x9DTYM.js` was directly inspected on 2026-11-21; SHA256 `078b76071f7f4cdf7851611c3a2cd5fba90b6da18502b3a844845404a059dafa`. No open-source license was found for this script. Only protocol facts were independently implemented; vendor scripts, assets and obfuscated code are not distributed.
+
+The device list has `388D:0024` wired, `0025` wireless and `0029` single-mode, collection `FF1C:0092`. Battery calls pass `AA` or `1A`, empty data and offset 0 to `Dx`, using Report `04`. Wireless payloads are 31 bytes, or 32 with the Windows report ID. START / END use payload offset 2 values 1/2; data uses command at offset 2, address at 4/5 and data from offset 7. MyFinder `73d99e2`'s `lofree.py` was cross-checked. Its test comment references issue #82, but that issue currently describes another device and is not counted as Lofree hardware evidence.
+
+Only online and battery commands are allowed. Each phase is bounded, requires nonempty data with zero offset, attempts END after failures and requires END acknowledgement before publication. Online status is rechecked; charging remains unknown. The vendor UI's initial wired value of 100 is not reused as a measurement. Wired suppression currently uses model presence without proven pairing identity, potentially affecting another identical keyboard; this limit is documented.
+
+All 218 local regressions and the release build passed. No matching Lofree hardware was available to verify Windows collections, response sizes and sleep recovery. The 1.4.7 tag remains unchanged; this work is on the development branch.

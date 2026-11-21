@@ -8,6 +8,16 @@ This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
 
+## In development: Lofree HYZEN
+
+Only receiver `388D:0025`, collection `FF1C:0092`, with 32-byte input/output is matched. Wired `0024` and single-mode `0029` are not battery-query targets. A present `0024` suppresses receiver polling, following the official driver's wired exclusion. Without a proven cable/receiver pairing identity, this may also suppress a different HYZEN receiver when multiple keyboards are attached; hardware work remains.
+
+Only Report `04` START, online `AA` / battery `1A`, and END exchanges are used. Data must have a nonzero payload length no greater than 24, offset 0, and matching command/phase. Zero charge requires a valid data payload; zero-length echoes cannot produce battery. Online states are limited to 0/1 and percentage to 0–100. Charging remains unknown.
+
+END is attempted even after START or data failure; unconfirmed END prevents publishing a new number. Connection is checked before and after battery, with explicit offline clearing old charge. Failures do not renew sample age and cached values expire after 120 seconds. Each transaction waits at most about three seconds; a normal sample includes connection, battery and reconfirmation, without blocking other brand workers.
+
+On 2026-11-21, all 218 local regressions and the Windows x64 build passed without warnings. The official web driver was cross-checked with MyFinder; no matching keyboard is attached locally. Windows transport, payload lengths, charging-cable transitions, long sleep, multiple units and vendor-software coexistence still require acceptance. This work follows the 1.4.7 tag.
+
 ## Version 1.4.7: DualSense gamepads
 
 The adapter matches Sony `054C:0CE6` DualSense and `054C:0DF2` DualSense Edge, only on `0001:0005` Game Pad collections with 64-byte USB or 78-byte Bluetooth input descriptors. This feature is included from version 1.4.7.

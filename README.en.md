@@ -8,6 +8,10 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
+## In development
+
+Further work prioritizes commonly used Chinese brands: Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu and Edifier. Battery, basic DPI and sleep recovery come first, with existing detailed ROG support retained. Lofree HYZEN receiver battery queries are integrated on the development branch with hardware acceptance pending; they are not part of the 1.4.7 tag.
+
 ## Version 1.4.7
 
 USB and Bluetooth battery reads are added for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).
