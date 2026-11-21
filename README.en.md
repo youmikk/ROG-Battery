@@ -8,6 +8,10 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New mouse and headset adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
+## In development
+
+The development branch adds USB and Bluetooth battery reads for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. This feature is not part of the 1.4.6 tag. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).
+
 ## Version 1.4.6
 
 Devices with supported numerical DPI writes can save 1–4 software presets on the Performance page, sorted by DPI, and switch from the main window or tray. Reducing the stage count hides the highest values and keeps them for restoration. Presets remain separate from actual device stages; connections that write stored DPI show a note. Local regressions and render checks passed; per-model hardware acceptance remains pending.
@@ -111,9 +115,9 @@ Local release validation runs regression tests, builds the portable executable, 
 powershell -File tools/build-release.ps1
 ```
 
-Portable outputs are collected in `dist/version/`. Push the source and matching release tag to let GitHub Actions build and publish the portable version, package and validate MSIX, and submit it to Microsoft Store using the configured credentials.
+Portable outputs are collected in `dist/version/`. Pushing the source and matching release tag lets GitHub Actions build and publish the portable version. MSIX packaging and Microsoft Store submission use a separate manual workflow.
 
-Development branches can use manual GitHub Actions runs to create test packages: leave the portable workflow's tag empty and disable "submit to Microsoft Store" in the MSIX workflow. Download build outputs from the run's Artifacts. Release tags retain the normal Store submission flow.
+Development branches can use manual GitHub Actions runs to create test packages: leave the portable workflow's tag empty; "submit to Microsoft Store" is off by default in the MSIX workflow. Download build outputs from the run's Artifacts. After stability acceptance, select the source revision to release and enable the Store submission option.
 
 For manual MSIX packaging, install the Windows SDK and run:
 
@@ -122,7 +126,7 @@ powershell -File msix/build-msix.ps1 -Verify
 powershell -File msix/make-upload.ps1
 ```
 
-Keep the version in `Cargo.toml` aligned with the four-part Store version in `msix/package.props.psd1`. Publish from a clean working tree: push the source commit, then create the matching `vX.Y.Z` tag. The tag, source version, executable version, and package version must agree. Pushing a release tag triggers portable release and MSIX workflows. Store submission also requires the configured credentials and product ID.
+Keep the version in `Cargo.toml` aligned with the four-part Store version in `msix/package.props.psd1`. Publish from a clean working tree: push the source commit, then create the matching `vX.Y.Z` tag. The tag, source version, executable version, and package version must agree. Tags trigger only the portable release. Manual Store submission also requires the configured credentials and product ID.
 
 ## Feedback and license
 

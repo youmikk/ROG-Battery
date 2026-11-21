@@ -13,6 +13,7 @@ pub mod razer;
 mod razer_capabilities;
 pub mod rog;
 pub mod standard;
+pub mod sony;
 pub mod steelseries;
 pub mod status;
 pub mod trace;
@@ -33,12 +34,14 @@ pub enum BackendId {
     Headset,
     Keyboard20,
     Nova,
+    DualSense,
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 10] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 11] = [
     BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::CompX, BackendId::Razer,
-    BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::Nova, BackendId::StandardHid,
+    BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::Nova,
+    BackendId::DualSense, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -54,18 +57,19 @@ impl BackendId {
             Self::Headset => "FF90 headset",
             Self::Keyboard20 => "MCHOSE keyboard",
             Self::Nova => "Arctis Nova",
+            Self::DualSense => "Sony DualSense",
             Self::StandardHid => "Standard HID",
         }
     }
 
     pub fn precedes_standard(self) -> bool {
         matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::CompX | Self::Razer
-            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova)
+            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova | Self::DualSense)
     }
 
     pub fn sample_lifetime(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
-            Self::Rapoo => 8,
+            Self::Rapoo | Self::DualSense => 8,
             Self::Logitech => 180,
             Self::CompX => 45,
             Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova => 120,
@@ -77,7 +81,7 @@ impl BackendId {
     /// 被动状态采样需要及时发布到界面，不能沿用主动查询的长间隔。
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
-            Self::Rapoo => Some(2_000),
+            Self::Rapoo | Self::DualSense => Some(2_000),
             Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova => Some(10_000),
             _ => None,
         }
@@ -111,7 +115,8 @@ impl Target {
         let identity = if backend == BackendId::Razer {
             razer::collection_group(interface)
         } else if interface.serial.is_empty() || matches!(backend, BackendId::Rapoo | BackendId::CompX
-            | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Nova) {
+            | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Nova
+            | BackendId::DualSense) {
             interface.path.to_ascii_lowercase()
         } else {
             format!(
@@ -258,6 +263,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Headset => &headset::Headset,
         BackendId::Keyboard20 => &keyboard20::Keyboard20,
         BackendId::Nova => &steelseries::Nova,
+        BackendId::DualSense => &sony::DualSense,
         BackendId::StandardHid => &standard::StandardHid,
     };
     let mut poll = Poll { present_paths: Some(present_paths),

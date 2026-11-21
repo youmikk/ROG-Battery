@@ -77,6 +77,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Headset => &super::backends::headset::Headset,
             super::backends::BackendId::Keyboard20 => &super::backends::keyboard20::Keyboard20,
             super::backends::BackendId::Nova => &super::backends::steelseries::Nova,
+            super::backends::BackendId::DualSense => &super::backends::sony::DualSense,
             super::backends::BackendId::StandardHid => &super::backends::standard::StandardHid,
             super::backends::BackendId::Rog => &super::backends::rog::Rog,
         };

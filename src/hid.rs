@@ -441,10 +441,19 @@ impl HidDevice {
 
     /// 打开指定路径的命令通道。写句柄开不了时自动降级为只读（`writable=false`）。
     pub fn open(iface: &HidInterface) -> Result<HidDevice, String> {
+        Self::open_access(iface, true)
+    }
+
+    /// 被动状态通道不申请写权限，也不创建输出句柄。
+    pub fn open_read_only(iface: &HidInterface) -> Result<HidDevice, String> {
+        Self::open_access(iface, false)
+    }
+
+    fn open_access(iface: &HidInterface, allow_write: bool) -> Result<HidDevice, String> {
         let wide = to_wide(&iface.path);
 
-        let mut writable = true;
-        let mut write_handle = unsafe {
+        let mut writable = allow_write;
+        let mut write_handle = if allow_write { unsafe {
             CreateFileW(
                 wide.as_ptr(),
                 GENERIC_READ | GENERIC_WRITE,
@@ -454,8 +463,8 @@ impl HidDevice {
                 FILE_FLAG_OVERLAPPED,
                 core::ptr::null_mut(),
             )
-        };
-        if write_handle == INVALID_HANDLE_VALUE || write_handle.is_null() {
+        } } else { core::ptr::null_mut() };
+        if allow_write && (write_handle == INVALID_HANDLE_VALUE || write_handle.is_null()) {
             writable = false;
             write_handle = unsafe {
                 CreateFileW(
@@ -469,7 +478,7 @@ impl HidDevice {
                 )
             };
         }
-        if write_handle == INVALID_HANDLE_VALUE || write_handle.is_null() {
+        if allow_write && (write_handle == INVALID_HANDLE_VALUE || write_handle.is_null()) {
             return Err(format!(
                 "无法打开设备（GetLastError={}）；可能被 Armoury Crate 独占或设备已拔出",
                 last_error()
@@ -488,7 +497,7 @@ impl HidDevice {
             )
         };
         if read_handle == INVALID_HANDLE_VALUE || read_handle.is_null() {
-            unsafe { CloseHandle(write_handle) };
+            if !write_handle.is_null() { unsafe { CloseHandle(write_handle) }; }
             return Err(format!(
                 "无法打开 overlapped 读句柄（GetLastError={}）",
                 last_error()
@@ -499,7 +508,7 @@ impl HidDevice {
         if read_event.is_null() || read_event == INVALID_HANDLE_VALUE {
             unsafe {
                 CloseHandle(read_handle);
-                CloseHandle(write_handle);
+                if !write_handle.is_null() { CloseHandle(write_handle); }
             }
             return Err(format!(
                 "CreateEventW 失败（GetLastError={}）",
@@ -507,12 +516,14 @@ impl HidDevice {
             ));
         }
 
-        let write_event = unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) };
-        if write_event.is_null() || write_event == INVALID_HANDLE_VALUE {
+        let write_event = if allow_write {
+            unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) }
+        } else { core::ptr::null_mut() };
+        if allow_write && (write_event.is_null() || write_event == INVALID_HANDLE_VALUE) {
             unsafe {
                 CloseHandle(read_event);
                 CloseHandle(read_handle);
-                CloseHandle(write_handle);
+                if !write_handle.is_null() { CloseHandle(write_handle); }
             }
             return Err(format!(
                 "CreateEventW 失败（GetLastError={}）",

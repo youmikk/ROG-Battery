@@ -4073,6 +4073,41 @@ mod backend_tests {
     }
 
     #[test]
+    fn gamepad_estimates_refresh_independently_expire_and_recover_in_device_readings() {
+        let backend = BackendId::DualSense;
+        let now = std::time::Instant::now();
+        let signal = Signal::new(60);
+        assert_eq!(signal.work_interval_ms(backend.publish_interval_limit_ms()), 2000);
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(backend, "controller", 55);
+        sample.target.family = DeviceFamily::Gamepad;
+        sample.battery_at = Some(now);
+        sample.battery = Some(Battery { percent: None, estimated_percent: Some(55), charging: Some(false),
+            voltage_mv: None, approximate: true, level: Some(BatteryLevel::Good) });
+        merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+        assert_eq!(shared.readings[0].battery_text(true), "≈55%");
+        assert_eq!(shared.readings[0].family, DeviceFamily::Gamepad);
+        let mut armed = true;
+        assert_eq!(low_battery_reading(&shared.readings[0], &mut armed), None);
+        let poll = crate::backends::Poll { snapshots: Vec::new(),
+            present_paths: Some(["controller".into()].into_iter().collect()) };
+        merge_additional_at(&mut shared, backend, poll, now + Duration::from_secs(3));
+        assert_eq!(shared.readings[0].battery_text(false), "≈55");
+        shared.expire_additional_at(now + backend.sample_lifetime());
+        assert_eq!(shared.readings[0].battery_text(true), "—");
+        sample.battery_at = Some(now + Duration::from_secs(9));
+        sample.battery.as_mut().unwrap().estimated_percent = Some(45);
+        merge_additional_at(&mut shared, backend, vec![sample].into(), now + Duration::from_secs(9));
+        assert_eq!(shared.readings[0].battery_text(true), "≈45%");
+        assert!(shared.devices["controller"].basic.as_ref().unwrap().dpi.stages.is_empty());
+        merge_additional_at(&mut shared, backend, crate::backends::Poll {
+            snapshots: Vec::new(), present_paths: Some(Default::default()),
+        }, now + Duration::from_secs(10));
+        assert!(!shared.readings[0].connected);
+        assert_eq!(shared.readings[0].battery_text(true), "—");
+    }
+
+    #[test]
     fn additional_identity_promotion_preserves_name_type_tray_and_order() {
         let mut shared = Shared::new(Settings::default());
         let mut first = snapshot(BackendId::Logitech, "interface", 75);

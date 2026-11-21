@@ -12,6 +12,10 @@
 
 各品牌只支持已接入协议的部分设备，并非全系兼容。新增鼠标及耳机适配已通过协议模拟测试，仍待逐型号实机验证；具体实现范围见[兼容性说明](COMPATIBILITY.md)。
 
+## 开发中
+
+开发分支已接入 Sony DualSense / DualSense Edge 的 USB、蓝牙电量读取，区间值显示为带 ≈ 的数字。此功能不在 1.4.6 标签内，协议回归已通过，实机验收待完成，范围见[兼容性说明](COMPATIBILITY.md)。
+
 ## 1.4.6
 
 支持数值 DPI 写入的设备可在性能页设置 1～4 档软件预设，自动按 DPI 升序排列，并从主窗口或托盘切换。减少启用档数会收起最高档并保留数值，增加时恢复。预设不改变设备真实档位列表；会修改鼠标保存 DPI 的连接会在页面提示。此改动已通过本地回归及界面渲染检查，逐型号实机验收待完成。
@@ -174,9 +178,9 @@ cargo +stable-x86_64-pc-windows-gnu build --release --locked
 powershell -File tools/build-release.ps1
 ```
 
-绿色版产物集中在 `dist/版本号/`。推送源码和版本标签后，GitHub Actions 会构建并发布绿色版，同时打包 MSIX 和商店上传包、验证包内程序，并通过配置好的凭据提交 Microsoft Store。
+绿色版产物集中在 `dist/版本号/`。推送源码和版本标签后，GitHub Actions 会构建并发布绿色版。MSIX 打包与 Microsoft Store 提交由独立的手动工作流处理。
 
-开发分支可手动运行 GitHub Actions 生成测试包：绿色版工作流的 tag 留空；MSIX 工作流关闭「提交 Microsoft Store」。构建产物在对应运行的 Artifacts 中下载。正式版本标签仍按发布流程提交商店。
+开发分支可手动运行 GitHub Actions 生成测试包：绿色版工作流的 tag 留空；MSIX 工作流默认关闭「提交 Microsoft Store」。构建产物在对应运行的 Artifacts 中下载。完成稳定性验收后，选择要发布的源码版本，并开启商店提交选项。
 
 需要手动打 MSIX 时，安装 Windows SDK 后可运行：
 
@@ -185,7 +189,7 @@ powershell -File msix/build-msix.ps1 -Verify
 powershell -File msix/make-upload.ps1
 ```
 
-版本号由 `Cargo.toml` 管理，商店四段版本在 `msix/package.props.psd1` 中同步。发布前确认工作区干净，推送源码后创建对应的 `vX.Y.Z` 标签。标签、源码版本、程序自报版本和 MSIX 版本必须一致，否则流程会停止。标签会触发绿色版发布和 MSIX 打包；配置商店凭据与产品 ID 后会提交 Microsoft Store。
+版本号由 `Cargo.toml` 管理，商店四段版本在 `msix/package.props.psd1` 中同步。发布前确认工作区干净，推送源码后创建对应的 `vX.Y.Z` 标签。标签、源码版本、程序自报版本和 MSIX 版本必须一致，否则流程会停止。标签仅触发绿色版发布；手动提交 Microsoft Store 还需配置商店凭据与产品 ID。
 
 ## 反馈与许可
 

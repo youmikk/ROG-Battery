@@ -2,7 +2,7 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
-核对日期：2026-11-17。本文记录上游源码中的协议、型号识别和状态处理依据。上游目录项、上游测试、协议实现和本项目实机验证是不同证据，不能合并成“已兼容全部型号”。
+核对日期：2026-11-21。本文记录上游源码中的协议、型号识别和状态处理依据。上游目录项、上游测试、协议实现和本项目实机验证是不同证据，不能合并成“已兼容全部型号”。
 
 ## 源码范围与许可证
 
@@ -19,6 +19,7 @@
 | [orpheus](https://github.com/lindestad/orpheus/tree/693538c8dc885340eff0b4844ed82f37de48b76d) | `693538c` | `src/protocols.rs`、`Cargo.toml`；Feature64、EEPROM16、IPI Pix、HID++、Razer 的传输与能力边界 | MIT |
 | [Voltide](https://github.com/sdparklab/Voltide/tree/c1872c4c93124d62c05bf5887fe89c32c6be8dd6) | `c1872c4` | `Core/DeviceManager.cs`、`Core/Models.cs`、`Interop/HidNative.cs`；`Providers/` 中 Vxe、ATKA9Airadd、Rapoo、Razer、Mchose、AsusHeadset、ATKN9V2Ultimate、MchoseV9Headset、DualSense、XInput 实现 | MIT，Copyright (c) 2026 Joko |
 | [HeadsetControl](https://github.com/Sapd/HeadsetControl/tree/62e361b085d7716805a3bf524bc9cca3761e0e15) | `62e361b` | `lib/devices/steelseries_arctis_nova_5.hpp`、`steelseries_arctis_nova_7.hpp`、`steelseries_arctis_nova_7p.hpp`、`steelseries_arctis_nova_3p_wireless.hpp`、`protocols/steelseries_protocol.hpp`；Nova 型号、状态布局和电量代际 | GPL-3.0 |
+| [Linux hid-playstation](https://github.com/torvalds/linux/blob/4dd10fbbeb9c33709edc89916e19c03c780a0751/drivers/hid/hid-playstation.c) | `4dd10fb` | DualSense USB / 蓝牙输入结构、状态位、CRC 前缀及校准 Feature 报告 | 所查文件 GPL-2.0-or-later |
 
 Logitech 官方 `Logitech/Logitech-HIDPP` 仓库在本次访问时返回 404，未将其内容作为已核对证据。HID++ 命令交叉核对 Solaar、libratbag 和 OpenMouse 的实际实现。
 
@@ -101,7 +102,7 @@ Voltide 的价值主要在 Windows 传输例外和社区回帧，DPI、档位、
 | `RapooProvider.cs`：VT3S `24AE:1411` 持续保持只读句柄，报告 7；复用旧采样时保留时间 | 与 MyFinder、FerrisPulse 及本项目 VT1 的持续监听方向一致 | 保留本项目按接口监听、独立发布及采样过期机制；不照搬单个全局 session 或把旧采样刷新成实时 |
 | `DeviceManager.cs`：一次枚举供各 provider 使用；其约 400ms 的说明是上游环境记录 | 减少重复设备树扫描，与品牌通信并行不冲突 | 共享 500ms 描述符快照，含暂时打不开的接口；枚举失败仍为错误。设备查询继续独立，不采用全局串行刷新 |
 | ATK N9 V2 与 MCHOSE V9 Turbo+：`FF90`、64 字节、`55:65`，WriteFile，目标耳机 `01` | 相同协议可跨品牌；ATK 鼠标控制报告经验不能直接套用耳机 | 已用共用适配器接入并通过模拟报文测试；上游注释提供实机/社区依据，本项目实测待完成 |
-| DualSense USB/蓝牙报告布局不同；XInput 返回四档等级 | 扩展需要协议之外的数据精度模型 | 以后分别处理；不把有线模式当作充电，也不把四档变成精确百分比 |
+| DualSense USB/蓝牙报告布局不同；XInput 返回四档等级 | 扩展需要协议之外的数据精度模型 | DualSense 已交叉核对 Linux 协议并接入开发分支；XInput 继续单独处理，不把有线模式当作充电或满电 |
 
 所查 Voltide 的 Razer 换算使用 `raw <= 100 ? raw : raw / 255 * 100`：原始 100 显示 100%，101 却约 40%。本项目依据 OpenRazer 与 Non-Synapse 始终按 0–255 换算，并另查充电命令。还检查 transaction ID、命令类、命令、数据长度与 XOR，避免只匹配事务号就接收旧报告。部分 Voltide provider 按 PID 去重，会合并同型号接收器；本项目保留 Windows 实例身份。所查仓库未发现独立测试文件，因此注释中的实机记录仍按上游证据标注。
 
@@ -117,6 +118,7 @@ Razer 适配接入统一状态和能力模型，支持有效电量、独立充�
 - [x] 接入雷柏 nRF54L 当前配置的完整 X/Y 档位读取与基础切换，协议回归通过；实机切档、休眠与官方驱动共存验收待完成。
 - [ ] 优先接入上游有明确实现的多品牌电量协议，分别记录鼠标、键盘、耳机和手柄的覆盖及验证状态。
 - [x] 接入迈从 20 字节键盘状态与 Z75S 型号握手，Arctis Nova 百分比 / 等级状态；协议与刷新回归通过，对应硬件验收待完成。
+- [x] 接入 DualSense / Edge USB、蓝牙电量，区间数字标注 ≈，检查报告类型、长度及 CRC；协议回归通过，对应硬件验收待完成。
 
 协议与验证方面继续推进：
 
@@ -149,4 +151,14 @@ Arctis Nova 的型号与状态偏移由 HeadsetControl 交叉核对，Windows 65
 
 这批实现只读电量，沿用每接口串行通信、采样时间、缓存过期和脱敏诊断。不引入上游代码或资源。范围、传输限制和未完成实机验证见兼容性文档。
 
-后续手柄研究发现 Voltide 的 XInput 适配把有线连接显示为 100% 充电，并把四级电量映射成未标注的百分比；有线模式不证明满电或充电，等级换算必须带 ≈，不当作精确测量。DualSense 的十级电量及蓝牙报告完整性需另行核对后接入。
+后续手柄研究发现 Voltide 的 XInput 适配把有线连接显示为 100% 充电，并把四级电量映射成未标注的百分比；有线模式不证明满电或充电，等级换算必须带 ≈，不当作精确测量。
+
+## 开发中：DualSense 电量
+
+已交叉核对 Voltide 的 Windows 通道行为与 Linux `hid-playstation.c` 的报告结构、状态解析和 CRC。USB 输入为 Report `01` / 64 字节，状态偏移 53；蓝牙完整输入为 Report `31` / 78 字节，状态偏移 54，末四字节保存小端 CRC32。计算先放入前缀 `A1`，再放入前 74 字节；初始化全 1、最终取反。精简蓝牙 Report `01` 不含电量，即使 Windows 补齐缓冲长度也不能按 USB 偏移读取。
+
+状态低半字节 0～9 对应十个百分点区间，取中间值 5～95；10 为 100。上半字节 0 放电、1 充电、2 已充满；A/B/F 表示故障，不借用 Linux 的容量 0 作为有效电量。所有区间值放入估算字段，数字显示始终带 ≈。无效值或损坏报文不替换有效采样、不更新其时间。
+
+输入句柄只读，打开后先等输入；仅观察到蓝牙精简报告时查询 41 字节校准 Feature `05`，检查独立前缀 `A3` 的 CRC，随后等待完整输入。功能报告本身不提供电量，也不授权设置。没有 Output / SetFeature、灯光、震动或按键设置操作。单次输入接收同时限制总时长与报文数，避免无效报告流阻塞其他设备。
+
+适配器轮询等待上限为两秒，电量有效期八秒，超时保留原测量时间并按期隐藏；新报告恢复数字。Windows 实例隔离同型号设备；跨 USB / 蓝牙的同一设备去重尚未接入。诊断不保留输入载荷。本机没有对应手柄，实机传输、休眠及 Steam / DS4Windows 共存验收待完成。

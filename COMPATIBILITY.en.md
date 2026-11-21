@@ -6,6 +6,18 @@ Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with
 
 This document lists additions in 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
+## In development: DualSense gamepads
+
+The adapter matches Sony `054C:0CE6` DualSense and `054C:0DF2` DualSense Edge, only on `0001:0005` Game Pad collections with 64-byte USB or 78-byte Bluetooth input descriptors. This work follows the 1.4.6 tag.
+
+- USB Report `01` carries battery status at offset 53; Bluetooth Report `31` uses offset 54 and requires CRC32 with prefix `A1`. A padded Bluetooth minimal Report `01` is never parsed as USB battery data.
+- Bands 0–9 display ≈5%–≈95%; band 10 or the fully charged state displays ≈100%. Charging stays separate. Voltage, temperature and charging errors never become 0%, and invalid bands are not clamped to full.
+- Input handles request read access only. Observed Bluetooth minimal mode prompts a calibration Feature `05` GET to request extended reports, with its `A3` CRC checked. Battery still comes from independently validated input reports; no rumble, lighting or settings output is sent.
+- The background polling wait is capped at two seconds. Timeouts and faults do not renew the last sample; numbers disappear after eight seconds and return on a fresh valid report. Identical controllers retain separate Windows interface identities. Cross-transport deduplication of one controller connected over USB and Bluetooth is not implemented.
+- Diagnostics retain protocol identifiers, lengths, timing and outcomes, without button, stick, touch or unique identity data. Estimates cannot trigger exact-percentage notifications.
+
+On 2026-11-21, all 187 local regressions passed and the Windows x64 build completed without warnings. Coverage includes USB / Bluetooth layouts, CRC, invalid and truncated reports, minimal mode, identical models, expiry and recovery. Neither controller is currently attached locally; hardware transport, sleep recovery and Steam / DS4Windows coexistence remain unverified. The read-only hardware probe still returned valid ROG and VGN keyboard battery readings.
+
 ## Version 1.4.6: software DPI presets
 
 - The main window and tray share 1–4 enabled presets per device, sorted by value. The count selector only changes the software list and retains hidden values; actual device stages are never reordered or removed.
