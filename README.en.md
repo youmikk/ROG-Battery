@@ -16,6 +16,8 @@ Windows XInput battery reads are also integrated when the current driver returns
 
 Sony INZONE H5 and H9 II receiver battery queries are integrated on the development branch, with model-specific control interfaces and separate percentage and charging data. No headset settings are written; hardware acceptance remains pending.
 
+HyperX Cloud Alpha 2 Wireless base-station battery, charging and voltage queries are also integrated, checking headset connection before and after battery reads and filtering unrelated traffic. Hardware acceptance remains pending.
+
 ## Version 1.4.6
 
 Devices with supported numerical DPI writes can save 1–4 software presets on the Performance page, sorted by DPI, and switch from the main window or tray. Reducing the stage count hides the highest values and keeps them for restoration. Presets remain separate from actual device stages; connections that write stored DPI show a note. Local regressions and render checks passed; per-model hardware acceptance remains pending.

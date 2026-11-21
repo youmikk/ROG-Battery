@@ -137,3 +137,13 @@ Report `02` contains Sony HCI in a 64-byte transport frame. Battery GET uses eve
 Payload bytes are charger state and percentage. Values 0–100 retain reported percentages; `FF` is offline / no cached value; 101–254 are rejected. Only charger values 0/1 establish false/true. Other nonzero values and full charge do not imply charging. Timeouts do not renew sample age, explicit offline clears charge, and fresh replies restore it. Buds have multiple battery components and are deliberately excluded from this two-byte layout.
 
 The independent implementation sends only status queries, using existing per-interface serialization and lifecycle rules. Protocol and state regressions pass; hardware acceptance is pending. Published frames and synthetic negative tests are not local hardware captures.
+
+## In development: HyperX Cloud Alpha 2 battery
+
+HeadsetControl `62e361b`'s `hyperx_cloud_alpha_2_wireless.hpp` and tests were checked against MyFinder `73d99e2`'s `hyperx_alpha2.py` and tests. Their published frames agree on station `03F0:08BE`, collection `FF13:FF00`, 64-byte reports and `50 02` / `51 02`. Neither the `0ABE` audio function nor invariant `61 02` audio settings supplies battery.
+
+MyFinder treats bit 7 of byte 6 as charging. HeadsetControl's separately captured charging sample identifies byte 3 as charger state and bytes 6/7 as little-endian voltage. The 51% / 67% captures carry `00 0F` / `86 0F`, meaning 3840 / 3974 mV; they cannot establish charging. The 91% charging capture explicitly sets byte 3 to 1. These published packet facts are regression inputs; unknown charging values remain unknown.
+
+Connection `52 01` returns `53 01` plus 0/1. ACK `FF 01` and NACK `FF 02` echo the command at offsets 14/15. Only a matching NACK terminates the query; ACKs, `FB` notifications and other commands are filtered. Connection is queried before and after battery to avoid publishing station-cached charge during power-off. Without transaction IDs or checksums, same-command traffic cannot be attributed reliably; NGENUITY coexistence requires hardware validation.
+
+NuPhy stock-firmware coverage is not expanded yet. FerrisPulse's `55` / `AA` path fills missing modes and settings from defaults or caches. Slone123c/nuphy-air75-v2-web-panel revision `02c54f3094afc655a84271159053a19abd83f1fb` explicitly describes custom firmware in its README and cannot establish the same battery commands on stock Air V2 firmware. Model, descriptor and valid-response evidence remains necessary.

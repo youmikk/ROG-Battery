@@ -39,6 +39,17 @@ The adapter matches only Sony `054C:0EBF` H5 on collection `FF04:0002`, and `054
 
 Protocol tests cover a published H5 notification, transaction wraparound, echoes, unrelated events, checksum errors, valid zero, offline and wake. UI-state regressions cover expiry and recovery. Neither headset is attached locally; USB communication, power recovery, receiver mode changes and INZONE Hub coexistence await hardware acceptance. This feature is not part of the 1.4.6 tag.
 
+## In development: HyperX Cloud Alpha 2 Wireless
+
+Only the `03F0:08BE` control station's `FF13:FF00` collection with 64-byte input/output reports is matched. The `03F0:0ABE` audio function, `FF13:0001` sibling, original Alpha, and Cloud II / III protocols are excluded. Only connection and battery queries are sent; audio settings are not written.
+
+- `52 01` / `53 01` queries connection; `50 02` / `51 02` reads percentage, independent charging state and little-endian voltage. Percentages 0–100 remain exact device reports. Unknown charger bytes and 0 / `FFFF` voltage stay unknown, without deriving charging from voltage bits or full charge.
+- Length, report and subcommand must match. Echoes, ACKs, audio replies and unsolicited notifications are ignored; a matching NACK stops the query. Only connection values 0/1 are accepted.
+- Connection is checked before and after battery. A power-off during the read cannot publish station-cached charge. Failed reconfirmation cannot renew the prior sample; explicit offline clears it. Polling waits at most ten seconds, cached samples expire after 120 seconds, and identical stations keep separate interface identities.
+- The protocol has no transaction number or checksum. Same-command replies from another process cannot be reliably distinguished. Filtering and bounded queue draining do not replace NGENUITY coexistence testing; cross-mode USB deduplication is not claimed.
+
+Protocol regressions use four published HeadsetControl / MyFinder frames plus synthetic faults and query transcripts, covering charge, voltage, rejection, power-off and expiry. No matching headset is attached locally; USB transport, power recovery and NGENUITY coexistence await hardware acceptance. This feature is not part of the 1.4.6 tag.
+
 ## Version 1.4.6: software DPI presets
 
 - The main window and tray share 1–4 enabled presets per device, sorted by value. The count selector only changes the software list and retains hidden values; actual device stages are never reordered or removed.

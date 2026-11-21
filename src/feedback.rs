@@ -93,6 +93,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Keyboard20 => &super::backends::keyboard20::Keyboard20,
             super::backends::BackendId::Nova => &super::backends::steelseries::Nova,
             super::backends::BackendId::Inzone => &super::backends::inzone::Inzone,
+            super::backends::BackendId::HyperX => &super::backends::hyperx::HyperX,
             super::backends::BackendId::DualSense => &super::backends::sony::DualSense,
             super::backends::BackendId::XInput => unreachable!("XInput is queried without HID"),
             super::backends::BackendId::StandardHid => &super::backends::standard::StandardHid,

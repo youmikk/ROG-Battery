@@ -4116,8 +4116,8 @@ mod backend_tests {
     }
 
     #[test]
-    fn inzone_query_timeouts_expire_and_explicit_offline_clears_before_wake() {
-        let backend = BackendId::Inzone;
+    fn headset_query_timeouts_expire_and_explicit_offline_clears_before_wake() {
+        for backend in [BackendId::Inzone, BackendId::HyperX] {
         let now = std::time::Instant::now();
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
         let mut shared = Shared::new(Settings::default());
@@ -4147,6 +4147,7 @@ mod backend_tests {
         assert_eq!(shared.devices["headset"].reading.battery_text(true), "59%");
         assert_eq!(shared.devices["headset"].reading.quality, crate::device::ReadingQuality::Live);
         assert_eq!(shared.devices["headset"].reading.family, DeviceFamily::Headset);
+        }
     }
 
     #[test]

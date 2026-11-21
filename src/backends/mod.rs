@@ -5,6 +5,7 @@ mod enumeration;
 pub mod compx;
 mod feature;
 pub mod headset;
+pub mod hyperx;
 pub mod inzone;
 pub mod keyboard20;
 pub mod page_command;
@@ -37,15 +38,16 @@ pub enum BackendId {
     Keyboard20,
     Nova,
     Inzone,
+    HyperX,
     DualSense,
     XInput,
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 13] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 14] = [
     BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::Nova,
-    BackendId::Inzone, BackendId::DualSense, BackendId::XInput, BackendId::StandardHid,
+    BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -62,6 +64,7 @@ impl BackendId {
             Self::Keyboard20 => "MCHOSE keyboard",
             Self::Nova => "Arctis Nova",
             Self::Inzone => "Sony INZONE",
+            Self::HyperX => "HyperX Alpha 2",
             Self::DualSense => "Sony DualSense",
             Self::XInput => "XInput",
             Self::StandardHid => "Standard HID",
@@ -70,7 +73,7 @@ impl BackendId {
 
     pub fn precedes_standard(self) -> bool {
         matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::CompX | Self::Razer
-            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova | Self::Inzone | Self::DualSense)
+            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
     }
 
     pub fn sample_lifetime(self) -> std::time::Duration {
@@ -78,7 +81,7 @@ impl BackendId {
             Self::Rapoo | Self::DualSense | Self::XInput => 8,
             Self::Logitech => 180,
             Self::CompX => 45,
-            Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova | Self::Inzone => 120,
+            Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova | Self::Inzone | Self::HyperX => 120,
             Self::Vgn | Self::StandardHid => 120,
             Self::Rog => 0,
         })
@@ -88,7 +91,7 @@ impl BackendId {
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
             Self::Rapoo | Self::DualSense | Self::XInput => Some(2_000),
-            Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova | Self::Inzone => Some(10_000),
+            Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
             _ => None,
         }
     }
@@ -162,7 +165,7 @@ impl Target {
         let identity = if backend == BackendId::Razer {
             razer::collection_group(interface)
         } else if interface.serial.is_empty() || matches!(backend, BackendId::Rapoo | BackendId::CompX
-            | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Nova | BackendId::Inzone
+            | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Nova | BackendId::Inzone | BackendId::HyperX
             | BackendId::DualSense) {
             interface.path.to_ascii_lowercase()
         } else {
@@ -314,6 +317,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Keyboard20 => &keyboard20::Keyboard20,
         BackendId::Nova => &steelseries::Nova,
         BackendId::Inzone => &inzone::Inzone,
+        BackendId::HyperX => &hyperx::HyperX,
         BackendId::DualSense => &sony::DualSense,
         BackendId::XInput => unreachable!("XInput does not enumerate HID interfaces"),
         BackendId::StandardHid => &standard::StandardHid,
