@@ -4,9 +4,11 @@
 
 Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with simulated protocol coverage and Logitech hardware validation pending. Battery observations now distinguish live, cached and stale readings; failed queries alone do not establish disconnection. See [protocol research](PROTOCOLS.en.md) for upstream catalogs and capability boundaries.
 
-This document lists additions in 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
+This document lists additions in 1.4.8, 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
-Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. Synthetic keyboard, headset and gamepad render checks cover Chinese/English, light/dark themes and 100% / 125% scaling in device pages and the tray; these are not hardware-connection evidence. Existing ROG and VGN read-only probes returned valid data; new models still require hardware acceptance.
+Version 1.4.8 release validation (2026-11-22): all 319 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. The taskbar battery strip was verified to display, open the quick-view panel on click and close it on a second click. The existing VGN read-only probe returned valid data; new models still require hardware acceptance.
+
+Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed and the Windows x64 release build completed without warnings. Synthetic keyboard, headset and gamepad render checks covered Chinese/English, light/dark themes and 100% / 125% scaling; these were not hardware-connection evidence.
 
 ## In development: AULA SC380 PRO
 

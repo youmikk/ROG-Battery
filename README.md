@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md)
 
-轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并逐步支持 Logitech、雷柏、VGN、VXE、ATK、Razer、Lamzu、WLMouse、MCHOSE、狼蛛、黑爵、达尔优、漫步者、八位堂、Sony、HyperX、Cherry 和 Arctis Nova 的部分设备，以及 XInput 与标准 HID 电量查询。通过 Windows HID 和系统接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
+轻量的 Windows 外设电量与鼠标设置工具，保留 ROG 深度适配，并逐步支持 Logitech、雷柏、VGN、VXE、ATK、Razer、Lamzu、WLMouse、MCHOSE、狼蛛、黑爵、达尔优、漫步者、八位堂、HECATE、Sony、HyperX、Cherry 和 Arctis Nova 的部分设备，以及 XInput 与标准 HID 电量查询。通过 Windows HID 和系统接口读取设备状态；单文件运行，无后台服务，不联网，ROG 设备无需安装 Armoury Crate。
 
 [![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#系统要求)
@@ -12,9 +12,9 @@
 
 各品牌只支持已接入协议的部分设备，并非全系兼容。新增适配已通过协议模拟测试，仍待逐型号实机验证；具体实现范围见[兼容性说明](COMPATIBILITY.md)。
 
-## 开发中
+## 1.4.8
 
-后续优先完善国内常见品牌：雷柏、VGN / VXE / ATK、迈从，以及狼蛛、黑爵、达尔优和漫步者等。先补电量、基础 DPI 与休眠恢复，ROG 保持现有深度适配。开发分支已接入部分 VGN / VXE 共用键盘接收器、迈从 G98 V3、洛斐 HYZEN 和漫步者 Halo Space 电量，完善迈从 BY 键盘识别，并新增达尔优部分 A950 系列的电量与实际 DPI 档位切换。这些变更待实机验收，不在 1.4.7 标签内，具体接收器和型号范围见[兼容性说明](PROTOCOLS.md)。
+本版先提供绿色版。新增通知区域左侧任务栏电量条，并继续完善国内常见品牌：雷柏、VGN / VXE / ATK、迈从、狼蛛、黑爵、达尔优、漫步者、八位堂和 HECATE。新增设备协议通过本地模拟回归，仍待逐型号实机验收，具体接收器和型号范围见[兼容性说明](COMPATIBILITY.md)。
 
 迈从鼠标新增 A7 V2 与部分 L7 的 Feature 协议电量、型号及实际档位读取，A7 V2 Ultra+ / L7 Pro+ 开放已有档位切换。旧 A7 Ultra 接收器存在不返回电量的记录，不保证所有同名设备可用；A7 V3 和旧 A5 属于其他协议，尚未接入。
 

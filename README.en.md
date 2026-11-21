@@ -2,15 +2,15 @@
 
 [简体中文](README.md) | **English**
 
-A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, Sony, HyperX, Cherry and Arctis Nova devices, plus XInput and standard HID battery queries. It communicates through Windows HID and system APIs, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
+A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, Sony, HyperX, Cherry and Arctis Nova devices, plus XInput and standard HID battery queries. It communicates through Windows HID and system APIs, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
 Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
-## In development
+## Version 1.4.8
 
-Further work prioritizes commonly used Chinese brands: Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu and Edifier. Battery, basic DPI and sleep recovery come first, with existing detailed ROG support retained. The development branch adds selected shared VGN / VXE keyboard receivers, MCHOSE G98 V3, Lofree HYZEN and Edifier Halo Space battery queries, improved MCHOSE BY identification, and battery plus actual DPI-stage switching for selected Dareu A950 models. Hardware acceptance is pending; these changes are not part of the 1.4.7 tag. Exact receiver and model limits are documented in the [compatibility notes](PROTOCOLS.en.md).
+This version is released as a portable build first. It adds the taskbar battery strip and continues support for commonly used Chinese brands including Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo and HECATE. New protocols pass local simulated regressions but still require per-model hardware acceptance. Exact receiver and model limits are documented in the [compatibility notes](COMPATIBILITY.en.md).
 
 MCHOSE mouse work adds Feature-protocol battery, identity and actual-stage reads for A7 V2 and selected L7 models, with existing-stage switching on A7 V2 Ultra+ / L7 Pro+. Some older A7 Ultra receivers are documented not to return battery; a shared name does not guarantee compatibility. A7 V3 and old A5 protocols are not implemented yet.
 
