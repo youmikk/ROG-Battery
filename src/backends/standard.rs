@@ -2,6 +2,7 @@
 //! 只读取描述符公开的电量字段；不把毫伏或剩余容量当百分比。
 use super::*;
 use crate::win32::*;
+use crate::device::BatteryPercent;
 use winapi::shared::hidpi::HIDP_VALUE_CAPS;
 
 pub struct StandardHid;
@@ -89,7 +90,7 @@ impl Descriptor {
         values
     }
 
-    fn percent(&self, report_type: u32, cap: &HIDP_VALUE_CAPS, report: &mut [u8]) -> Option<u8> {
+    fn percent(&self, report_type: u32, cap: &HIDP_VALUE_CAPS, report: &mut [u8]) -> Option<BatteryPercent> {
         if report.first().copied() != Some(cap.ReportID) {
             return None;
         }
@@ -122,12 +123,21 @@ impl Drop for Descriptor {
     }
 }
 
-fn normalize_percent(value: u32, minimum: i32, maximum: i32) -> Option<u8> {
+fn normalize_percent(value: u32, minimum: i32, maximum: i32) -> Option<BatteryPercent> {
     if minimum < 0 || maximum <= minimum || value < minimum as u32 || value > maximum as u32 {
         return None;
     }
     let span = (maximum - minimum) as u64;
-    Some(((u64::from(value - minimum as u32) * 100 + span / 2) / span) as u8)
+    Some(BatteryPercent { value: ((u64::from(value - minimum as u32) * 100 + span / 2) / span) as u8,
+        approximate: minimum != 0 || maximum != 100 })
+}
+
+fn battery(value: BatteryPercent) -> Battery {
+    // Keep descriptor-scaled strengths separate from native percentages. In
+    // particular a 0..4 descriptor supplies five levels, not exact 25% steps.
+    Battery { percent: (!value.approximate).then_some(value.value),
+        estimated_percent: value.approximate.then_some(value.value),
+        charging: None, voltage_mv: None, approximate: value.approximate, level: None }
 }
 
 fn reserved_by_rog(interface: &HidInterface) -> bool {
@@ -235,7 +245,7 @@ impl DeviceBackend for StandardHid {
                 }
             }
             if percent.is_none() && !caps.is_empty() {
-                if let Ok(mut device) = crate::hid::HidDevice::open(target.hid()?) {
+                if let Ok(mut device) = crate::hid::HidDevice::open_read_only(target.hid()?) {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(80);
                     while let Some(left) =
                         deadline.checked_duration_since(std::time::Instant::now())
@@ -257,7 +267,7 @@ impl DeviceBackend for StandardHid {
         // Input 电量报告可能只在变化时发送。接口仍在时保留最近有效读数，
         // 避免每次短读取超时都把设备误显示为断开；过期后等待新报告。
         static CACHE: std::sync::OnceLock<
-            std::sync::Mutex<std::collections::BTreeMap<String, (u8, std::time::Instant)>>,
+            std::sync::Mutex<std::collections::BTreeMap<String, (BatteryPercent, std::time::Instant)>>,
         > = std::sync::OnceLock::new();
         let mut cache = CACHE
             .get_or_init(Default::default)
@@ -277,14 +287,7 @@ impl DeviceBackend for StandardHid {
             connected: true,
             battery_unavailable: false, battery_at, polling_rate: Default::default(),
             dpi: Dpi::default(),
-            battery: Some(Battery {
-                estimated_percent: None,
-                percent,
-                charging: None,
-                voltage_mv: None,
-                approximate: false,
-                level: None,
-            }),
+            battery: percent.map(battery),
         })
     }
 }
@@ -317,11 +320,49 @@ mod tests {
     }
     #[test]
     fn descriptor_range_and_null_values_are_respected() {
-        assert_eq!(normalize_percent(127, 0, 255), Some(50));
-        assert_eq!(normalize_percent(0, 0, 100), Some(0));
-        assert_eq!(normalize_percent(100, 0, 100), Some(100));
+        assert_eq!(normalize_percent(127, 0, 255), Some(BatteryPercent { value: 50, approximate: true }));
+        assert_eq!(normalize_percent(0, 0, 100), Some(BatteryPercent { value: 0, approximate: false }));
+        assert_eq!(normalize_percent(100, 0, 100), Some(BatteryPercent { value: 100, approximate: false }));
         assert_eq!(normalize_percent(255, 0, 100), None);
         assert_eq!(normalize_percent(2, 5, 100), None);
         assert_eq!(normalize_percent(5, 5, 5), None);
+        assert_eq!(normalize_percent(0, -1, 100), None);
+        assert_eq!(normalize_percent(u32::MAX, 0, i32::MAX), None);
+    }
+
+    #[test]
+    fn scaled_strengths_remain_estimates_even_at_zero_and_full_but_native_percentages_stay_exact() {
+        for raw in 0..=4 {
+            let b = battery(normalize_percent(raw, 0, 4).unwrap());
+            assert_eq!(b.percent, None);
+            assert_eq!(b.estimated_percent, Some(raw as u8 * 25));
+            assert_eq!(b.display_percent().unwrap().label(true), format!("≈{}%", raw * 25));
+        }
+        for raw in 0..=100 {
+            let b = battery(normalize_percent(raw, 0, 100).unwrap());
+            assert_eq!(b.percent, Some(raw as u8));
+            assert_eq!(b.estimated_percent, None);
+            assert_eq!(b.display_percent().unwrap().label(true), format!("{raw}%"));
+        }
+        assert_eq!(normalize_percent(127, 0, 255).unwrap().label(false), "≈50");
+        assert_eq!(normalize_percent(15, 10, 20).unwrap().label(true), "≈50%");
+        assert_eq!(normalize_percent(i32::MAX as u32, 0, i32::MAX).unwrap().label(true), "≈100%");
+    }
+
+    #[test]
+    fn scaled_strength_keeps_its_precision_through_cached_and_stale_readings() {
+        let now = std::time::Instant::now();
+        let mut state = status::Status::default();
+        let b = battery(normalize_percent(1, 0, 4).unwrap());
+        let lifetime = BackendId::StandardHid.sample_lifetime();
+        state.observe_sample(Some(true), Some(&b), Some(now), now, lifetime);
+        state.observe_sample(Some(true), Some(&b), Some(now), now + lifetime, lifetime);
+        assert_eq!(state.measured_at, Some(now));
+        let mut reading = crate::device::DeviceReading { battery: state.battery.clone(),
+            connected: true, quality: state.quality, ..Default::default() };
+        assert_eq!(reading.battery_text(true), "—");
+        reading.quality = crate::device::ReadingQuality::Cached;
+        assert_eq!(reading.battery_text(true), "≈25%");
+        assert_eq!(reading.percent(), None);
     }
 }
