@@ -64,21 +64,13 @@ fn proven(api: &HidApi, i: &HidInterface) -> bool {
 }
 
 fn candidates<'a>(api: &HidApi, interfaces: &'a [HidInterface]) -> Vec<&'a HidInterface> {
-    interfaces
-        .iter()
-        .filter(|i| {
-            proven(api, i)
-                && interfaces
-                    .iter()
-                    .filter(|other| {
-                        proven(api, other)
-                            && channel::collection_group(i)
-                                == channel::collection_group(other)
-                    })
-                    .count()
-                    == 1
-        })
-        .collect()
+    // Descriptor checks open Windows handles. Prove each collection once per scan.
+    let proven: Vec<_> = interfaces.iter().filter(|i| proven(api, i)).collect();
+    let mut groups = BTreeMap::new();
+    for interface in &proven {
+        *groups.entry(channel::collection_group(interface)).or_insert(0usize) += 1;
+    }
+    proven.into_iter().filter(|i| groups[&channel::collection_group(i)] == 1).collect()
 }
 fn query() -> [u8; 64] {
     let mut p = [0; 64];
@@ -93,7 +85,7 @@ enum Reading {
 }
 
 fn reading(model: Model, r: &[u8]) -> Option<Reading> {
-    if r[..2] != [0x55, 0x65] || r.len() > 64 {
+    if !(22..=64).contains(&r.len()) || !r.starts_with(&[0x55, 0x65]) || r == query() {
         return None;
     }
     match model {
@@ -471,6 +463,33 @@ mod tests {
         assert!(connected);
         assert_eq!(parsed_battery.unwrap().charging, Some(true));
         assert!(!battery(Reading::Offline).1);
+    }
+
+    #[test]
+    fn short_battery_reports_are_rejected_before_reading_fields() {
+        for model in [Model::AtkUltimate, Model::AtkUltra, Model::MchoseV9, Model::MchoseV9Pro] {
+            let frame = reply(model, 45, 2);
+            let minimum = if matches!(model, Model::AtkUltimate | Model::AtkUltra) { 22 } else { 64 };
+            for length in 0..minimum {
+                assert_eq!(reading(model, &frame[..length]), None, "{model:?}, length {length}");
+            }
+            let mut oversized = frame;
+            oversized.resize(65, 0);
+            assert_eq!(reading(model, &oversized), None);
+        }
+    }
+
+    #[test]
+    fn battery_request_echo_cannot_become_external_power() {
+        for model in [Model::AtkUltimate, Model::AtkUltra, Model::MchoseV9, Model::MchoseV9Pro] {
+            assert_eq!(reading(model, &query()), None, "{model:?}");
+            assert_eq!(reading(model, &reply(model, 1, 2)),
+                Some(Reading::Level { percent: 1, charging: false }));
+        }
+        for model in [Model::MchoseV9, Model::MchoseV9Pro] {
+            assert_eq!(reading(model, &reply(model, 0, 0)), Some(Reading::ExternalPower));
+            assert_eq!(reading(model, &reply(model, 1, 3)), Some(Reading::ExternalPower));
+        }
     }
 
     #[test]

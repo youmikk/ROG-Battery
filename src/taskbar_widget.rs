@@ -6,6 +6,7 @@
 
 use crate::win32::{Handle, Rect};
 use core::ffi::c_void;
+mod render;
 use std::{
     cell::{Cell, RefCell},
     ptr,
@@ -22,6 +23,7 @@ const WS_POPUP: u32 = 0x8000_0000;
 const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
 const HWND_TOPMOST: Handle = !0usize as Handle;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_NOZORDER: u32 = 0x0004;
 const SWP_SHOWWINDOW: u32 = 0x0040;
 const ULW_ALPHA: u32 = 0x0000_0002;
 const WM_DESTROY: u32 = 0x0002;
@@ -111,6 +113,8 @@ extern "system" {
     fn DestroyWindow(hwnd: Handle) -> i32;
     fn GetWindowLongW(hwnd: Handle, index: i32) -> i32;
     fn GetForegroundWindow() -> Handle;
+    fn GetShellWindow() -> Handle;
+    fn GetWindow(hwnd: Handle, command: u32) -> Handle;
     fn IsWindowVisible(hwnd: Handle) -> i32;
     fn GetDpiForWindow(hwnd: Handle) -> u32;
     fn PostMessageW(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> i32;
@@ -146,7 +150,9 @@ pub struct TaskbarWidget {
     enabled: Cell<bool>,
     light: Cell<bool>,
     content: RefCell<Option<StripContent>>,
-    rendered: RefCell<Option<(Option<StripContent>, bool, u32, usize)>>,
+    layout: RefCell<Option<(StripContent, bool, u32, render::Layout)>>,
+    rendered: Cell<Option<(usize, i32)>>,
+    rendered_size: Cell<(i32, i32)>,
 }
 
 unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
@@ -176,7 +182,9 @@ impl TaskbarWidget {
             enabled: Cell::new(false),
             light: Cell::new(false),
             content: RefCell::new(None),
-            rendered: RefCell::new(None),
+            layout: RefCell::new(None),
+            rendered: Cell::new(None),
+            rendered_size: Cell::new((0, 0)),
         }
     }
 
@@ -211,7 +219,7 @@ impl TaskbarWidget {
 
     pub fn screen_rect(&self) -> Option<Rect> {
         let hwnd = self.hwnd.get();
-        if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
+        if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 || unsafe { IsWindowVisible(hwnd) } == 0 {
             return None;
         }
         let mut rect = Rect::default();
@@ -219,9 +227,11 @@ impl TaskbarWidget {
     }
 
     fn ensure_window(&self) {
-        if !self.hwnd.get().is_null() && unsafe { IsWindow(self.hwnd.get()) } != 0 {
+        if !self.hwnd.get().is_null() && unsafe { IsWindow(self.hwnd.get()) } != 0
+            && unsafe { IsWindow(self.taskbar.get()) } != 0 {
             return;
         }
+        self.destroy();
         let taskbar = unsafe {
             crate::win32::FindWindowW(crate::win32::to_wide("Shell_TrayWnd").as_ptr(), ptr::null())
         };
@@ -279,8 +289,8 @@ impl TaskbarWidget {
                 WS_POPUP | WS_CLIPSIBLINGS,
                 0,
                 0,
-                crate::tray_icon::TASKBAR_STRIP_MIN_WIDTH,
-                crate::tray_icon::TASKBAR_STRIP_HEIGHT,
+                1,
+                1,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 crate::win32::GetModuleHandleW(ptr::null()),
@@ -315,25 +325,28 @@ impl TaskbarWidget {
         let mut tray_rect = Rect::default();
         let foreground = unsafe { GetForegroundWindow() };
         let mut foreground_rect = Rect::default();
-        let monitor = unsafe { crate::win32::MonitorFromWindow(foreground, 2) };
+        // Only a full-screen window covering this taskbar's monitor hides it.
+        let monitor = unsafe { crate::win32::MonitorFromWindow(taskbar, 2) };
         let mut monitor_info: crate::win32::MonitorInfo = unsafe { core::mem::zeroed() };
         monitor_info.cb_size = core::mem::size_of::<crate::win32::MonitorInfo>() as u32;
         let foreground_fullscreen = !foreground.is_null()
             && foreground != taskbar
             && foreground != hwnd
+            && foreground != unsafe { GetShellWindow() }
+            && unsafe { IsWindowVisible(foreground) } != 0
             && unsafe { GetWindowRect(foreground, &mut foreground_rect) } != 0
             && !monitor.is_null()
             && unsafe { crate::win32::GetMonitorInfoW(monitor, &mut monitor_info) } != 0
-            && foreground_rect.left <= monitor_info.rc_monitor.left
-            && foreground_rect.top <= monitor_info.rc_monitor.top
-            && foreground_rect.right >= monitor_info.rc_monitor.right
-            && foreground_rect.bottom >= monitor_info.rc_monitor.bottom;
+            && covers_monitor(foreground_rect, monitor_info.rc_monitor);
         if tray.is_null()
             || unsafe { GetWindowRect(taskbar, &mut bar) } == 0
             || unsafe { GetWindowRect(tray, &mut tray_rect) } == 0
             || unsafe { IsWindowVisible(taskbar) } == 0
             || unsafe { GetWindowLongW(taskbar, GWL_EXSTYLE) } as u32 & WS_EX_LAYOUTRTL != 0
             || bar.bottom - bar.top > bar.right - bar.left
+            || monitor.is_null()
+            || unsafe { crate::win32::GetMonitorInfoW(monitor, &mut monitor_info) } == 0
+            || !horizontal_taskbar_exposed(bar, tray_rect, monitor_info.rc_monitor)
             || foreground_fullscreen
         {
             unsafe { ShowWindow(hwnd, 0) };
@@ -342,31 +355,37 @@ impl TaskbarWidget {
         let dpi = unsafe { GetDpiForWindow(taskbar) };
         let scale = (if dpi == 0 { 96 } else { dpi }) as f32 / 96.0;
         let content = self.content.borrow().clone();
+        let Some(content) = content.filter(|content| !content.items.is_empty()) else {
+            unsafe { ShowWindow(hwnd, 0) };
+            return;
+        };
+        let mut layout = self.layout.borrow_mut();
+        if !layout.as_ref().is_some_and(|(old, light, old_dpi, _)| {
+            old == &content && *light == self.light.get() && *old_dpi == dpi
+        }) {
+            let Some(measured) = render::Layout::new(&content.items, self.light.get(), scale) else {
+                unsafe { ShowWindow(hwnd, 0) };
+                return;
+            };
+            *layout = Some((content, self.light.get(), dpi, measured));
+            self.rendered.set(None);
+        }
+        let measured = &layout.as_ref().unwrap().3;
         let available_width =
             (tray_rect.left - bar.left - (scale * 2.0).round() as i32).max(0);
-        let visible = content.as_ref().map_or(0, |content| {
-            visible_item_count(&content.items, available_width, scale)
-        });
+        let visible = measured.visible_count(available_width);
         if visible == 0 {
             unsafe { ShowWindow(hwnd, 0) };
             return;
         }
-        let render_key = (content.clone(), self.light.get(), dpi, visible);
-        if self.rendered.borrow().as_ref() != Some(&render_key) {
-            let items = content
-                .as_ref()
-                .map(|content| content.items[..visible].to_vec())
-                .unwrap_or_default();
-            let Some(bitmap) = crate::tray_icon::render_taskbar_strip(
-                &items,
-                self.light.get(),
-                scale,
-            ) else {
+        let height = bar.bottom - bar.top;
+        let render_key = (visible, height);
+        if self.rendered.get() != Some(render_key) {
+            let Some(raster) = measured.raster(visible, height) else { return; };
+            let Some(bitmap) = raster.bitmap() else {
                 unsafe { ShowWindow(hwnd, 0) };
                 return;
             };
-            let width = (crate::tray_icon::taskbar_strip_width(&items) as f32 * scale).round() as i32;
-            let height = (crate::tray_icon::TASKBAR_STRIP_HEIGHT as f32 * scale).round() as i32;
             let screen = unsafe { crate::win32::GetDC(ptr::null_mut()) };
             if screen.is_null() {
                 unsafe { crate::win32::DeleteObject(bitmap) };
@@ -382,8 +401,8 @@ impl TaskbarWidget {
             }
             let previous = unsafe { crate::win32::SelectObject(memory, bitmap) };
             let size = Size {
-                cx: width,
-                cy: height,
+                cx: raster.width,
+                cy: raster.height,
             };
             let source = Point { x: 0, y: 0 };
             let blend = BlendFunction {
@@ -418,26 +437,30 @@ impl TaskbarWidget {
                 );
                 return;
             }
-            *self.rendered.borrow_mut() = Some(render_key);
+            self.rendered.set(Some(render_key));
+            self.rendered_size.set((raster.width, raster.height));
         }
-        let items = content
-            .as_ref()
-            .map(|content| &content.items[..visible])
-            .unwrap_or_default();
-        let width = (crate::tray_icon::taskbar_strip_width(items) as f32 * scale).round() as i32;
-        let height = (crate::tray_icon::TASKBAR_STRIP_HEIGHT as f32 * scale).round() as i32;
+        let (width, height) = self.rendered_size.get();
         let x = tray_rect.left - width - (scale * 2.0).round() as i32;
         let y = bar.top + (bar.bottom - bar.top - height) / 2;
-        unsafe {
-            SetWindowPos(
+        let desired = Rect::new(x, y, x + width, y + height);
+        let mut current = Rect::default();
+        let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+        if !visible || unsafe { GetWindowRect(hwnd, &mut current) } == 0 || current != desired {
+            // A timer tick must not keep raising the strip above its quick-view panel.
+            let flags = SWP_NOACTIVATE | SWP_SHOWWINDOW | if visible { SWP_NOZORDER } else { 0 };
+            unsafe { SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
                 x,
                 y,
                 width,
                 height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+                flags,
+            ); }
+        } else if unsafe { GetWindow(hwnd, 3) } == taskbar { // GW_HWNDPREV
+            // Explorer raised the taskbar above the strip. Other windows retain their order.
+            unsafe { SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE); }
         }
     }
 
@@ -447,23 +470,24 @@ impl TaskbarWidget {
             unsafe { DestroyWindow(hwnd) };
         }
         self.taskbar.set(ptr::null_mut());
-        *self.rendered.borrow_mut() = None;
+        self.layout.borrow_mut().take();
+        self.rendered.set(None);
+        self.rendered_size.set((0, 0));
     }
 }
 
-fn visible_item_count(
-    items: &[StripItem],
-    available_width: i32,
-    scale: f32,
-) -> usize {
-    (1..=items.len())
-        .rev()
-        .find(|count| {
-            (crate::tray_icon::taskbar_strip_width(&items[..*count]) as f32 * scale).round()
-                as i32
-                <= available_width
-        })
-        .unwrap_or(0)
+fn covers_monitor(window: Rect, monitor: Rect) -> bool {
+    monitor.right > monitor.left && monitor.bottom > monitor.top
+        && window.left <= monitor.left && window.top <= monitor.top
+        && window.right >= monitor.right && window.bottom >= monitor.bottom
+}
+
+fn horizontal_taskbar_exposed(bar: Rect, tray: Rect, monitor: Rect) -> bool {
+    bar.right > bar.left && bar.bottom > bar.top
+        && bar.top >= monitor.top && bar.bottom <= monitor.bottom
+        && tray.right > tray.left && tray.bottom > tray.top
+        && tray.left >= bar.left && tray.right <= bar.right
+        && tray.top < bar.bottom && tray.bottom > bar.top
 }
 
 impl Drop for TaskbarWidget {
@@ -477,33 +501,28 @@ impl Drop for TaskbarWidget {
 mod tests {
     use super::*;
 
-    fn item(value: u8) -> StripItem {
-        StripItem {
-            level: Some(crate::device::BatteryPercent {
-                value,
-                approximate: false,
-            }),
-            charging: false,
-            kind: crate::tray_prefs::TrayKind::Mouse,
-        }
+    #[test]
+    fn only_fullscreen_on_the_taskbar_monitor_hides_the_strip() {
+        let primary = Rect::new(0, 0, 1920, 1080);
+        let secondary = Rect::new(-1920, 0, 0, 1080);
+        assert!(covers_monitor(primary, primary));
+        assert!(!covers_monitor(secondary, primary));
+        assert!(!covers_monitor(Rect::new(0, 0, 1920, 1032), primary));
+        assert!(covers_monitor(Rect::new(-1920, 0, 1920, 1080), primary));
+        assert!(!covers_monitor(primary, Rect::default()));
     }
 
     #[test]
-    fn only_whole_items_are_shown_in_available_space() {
-        let items = [item(75), item(100), item(50), item(5), item(88)];
-        assert_eq!(crate::tray_icon::taskbar_strip_width(&[]), 0);
-        let one = crate::tray_icon::taskbar_strip_width(&items[..1]);
-        let two = crate::tray_icon::taskbar_strip_width(&items[..2]);
-        let five = crate::tray_icon::taskbar_strip_width(&items);
-        assert!(one >= 32 && one < two && two < five);
-        assert_eq!(visible_item_count(&items, one - 1, 1.0), 0);
-        assert_eq!(visible_item_count(&items, one, 1.0), 1);
-        assert_eq!(visible_item_count(&items, two, 1.0), 2);
-        assert_eq!(visible_item_count(&items, five, 1.0), 5);
-        assert_eq!(
-            visible_item_count(&items, (two as f32 * 1.5).round() as i32 - 1, 1.5),
-            1
-        );
-        assert_eq!(visible_item_count(&[], 400, 1.0), 0);
+    fn autohidden_taskbar_does_not_leave_floating_text_on_the_desktop() {
+        let monitor = Rect::new(-1920, 0, 0, 1080);
+        let bar = Rect::new(-1920, 1032, 0, 1080);
+        let tray = Rect::new(-220, 1032, 0, 1080);
+        assert!(horizontal_taskbar_exposed(bar, tray, monitor));
+        assert!(!horizontal_taskbar_exposed(Rect::new(-1920, 1078, 0, 1126), tray, monitor));
+        assert!(!horizontal_taskbar_exposed(Rect::new(-1920, -46, 0, 2), tray, monitor));
+        assert!(horizontal_taskbar_exposed(Rect::new(-1920, 0, 0, 48),
+            Rect::new(-220, 0, 0, 48), monitor));
+        assert!(!horizontal_taskbar_exposed(bar, Rect::default(), monitor));
     }
+
 }

@@ -1205,6 +1205,10 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                     ui.pointer.x = x;
                     ui.pointer.y = y;
                     ui.pointer.down = false;
+                    if ui.device_drag.is_some() {
+                        let scroll = ui.scroll_y(ui.page);
+                        ui.update_device_drag(x, y, scroll);
+                    }
                     device_reorder = ui.finish_device_drag();
                     dragging = ui.pointer.dragging.take();
                     if dragging.is_none() && device_reorder.is_none() {

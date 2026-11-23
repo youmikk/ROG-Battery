@@ -173,7 +173,7 @@ pub enum Pref {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Act {
     SelectDevice(usize),
-    ReorderDevice(usize, usize),
+    ReorderDevice(usize, usize, u64),
     RenameDevice,
     ToggleDeviceTray,
     /// 切页。
@@ -374,6 +374,7 @@ pub struct Ui {
     pub selected_device: Option<String>,
     pub tray_device_keys: Vec<String>,
     pub device_keys: Vec<String>,
+    pub device_list_revision: u64,
     pub initial_route_done: bool,
     /// 当前配色。`settings.ini` 的 `theme` 键存它的字符串形式。
     pub mode: super::theme::Mode,
@@ -500,6 +501,7 @@ impl Default for Ui {
             selected_device: None,
             tray_device_keys: Vec::new(),
             device_keys: Vec::new(),
+            device_list_revision: 0,
             initial_route_done: false,
             // 默认浅色主题。
             mode: super::theme::Mode::Light,
@@ -542,11 +544,14 @@ impl Default for Ui {
 
 impl Ui {
     pub fn sync_devices(&mut self, devices: &[crate::device::DeviceReading]) {
-        self.device_keys = devices.iter().map(|d| d.key.clone()).collect();
-        if self.device_drag.is_some_and(|drag| {
-            drag.source >= devices.len() || drag.target >= devices.len()
-        }) {
-            self.device_drag = None;
+        let keys: Vec<_> = devices.iter().map(|d| d.key.clone()).collect();
+        if keys != self.device_keys {
+            // Index-based gestures belong to the list on which the press began.
+            if self.device_drag.is_some() || matches!(self.pressed, Some(Act::SelectDevice(_))) {
+                self.cancel_press();
+            }
+            self.device_keys = keys;
+            self.device_list_revision = self.device_list_revision.wrapping_add(1);
         }
         if !self.initial_route_done && !devices.is_empty() {
             self.initial_route_done = true;
@@ -927,13 +932,13 @@ impl Ui {
     }
 
     pub fn activate_device_drag(&mut self, x: f32, y: f32, scroll: f32) -> bool {
-        if self.device_keys.len() < 2 {
+        if !self.pointer.down || self.device_keys.len() < 2 {
             return false;
         }
         let Some(Act::SelectDevice(source)) = self.pressed else {
             return false;
         };
-        if self.hit(x, y, scroll) != Some(Act::SelectDevice(source)) {
+        if source >= self.device_keys.len() {
             return false;
         }
         let Some(card) = self
@@ -952,12 +957,13 @@ impl Ui {
             previous_target: source,
             pointer_x: x,
             pointer_y: y + scroll,
-            grab_dx: x - card.x,
-            grab_dy: y + scroll - card.y,
+            grab_dx: self.pointer.press_x - card.x,
+            grab_dy: self.pointer.press_y + scroll - card.y,
             started_at: now,
             target_changed_at: now,
         });
         self.pressed = None;
+        self.update_device_drag(x, y, scroll);
         true
     }
 
@@ -982,7 +988,9 @@ impl Ui {
 
     pub fn finish_device_drag(&mut self) -> Option<Act> {
         let drag = self.device_drag.take()?;
-        (drag.source != drag.target).then_some(Act::ReorderDevice(drag.source, drag.target))
+        (drag.source != drag.target).then_some(Act::ReorderDevice(
+            drag.source, drag.target, self.device_list_revision,
+        ))
     }
 
     /// 客户区与非客户区共用悬停更新，避免跨区后留下旧高亮。
@@ -1077,5 +1085,79 @@ impl Ui {
     /// 清掉某条滑块的临时值（松手提交后调用，回落到设备值）。
     pub fn clear_live_frac(&mut self, s: Slide) {
         self.live[s.idx()] = None;
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    fn readings(keys: &[&str]) -> Vec<crate::device::DeviceReading> {
+        keys.iter().map(|key| crate::device::DeviceReading {
+            key: (*key).into(), name: (*key).into(), family: crate::device::DeviceFamily::Mouse,
+            battery: None, connected: true, quality: crate::device::ReadingQuality::Unknown,
+        }).collect()
+    }
+
+    fn pressed_card() -> Ui {
+        let mut ui = Ui::default();
+        ui.sync_devices(&readings(&["mouse", "keyboard", "headset", "gamepad"]));
+        for (index, (x, y)) in [(10.0, 100.0), (230.0, 100.0), (10.0, 260.0), (230.0, 260.0)]
+            .into_iter().enumerate() {
+            ui.hots.push(Hot { rect: R::new(x, y, 200.0, 140.0), act: Act::SelectDevice(index) });
+        }
+        ui.pointer = Pointer { press_x: 270.0, press_y: 270.0, down: true, ..Default::default() };
+        ui.on_press(270.0, 270.0, 20.0);
+        assert_eq!(ui.pressed, Some(Act::SelectDevice(3)));
+        ui
+    }
+
+    #[test]
+    fn fast_drag_starts_after_crossing_the_source_card_and_keeps_grab_point() {
+        let mut ui = pressed_card();
+        // Windows can coalesce intermediate moves, leaving the first one over another card.
+        assert!(ui.activate_device_drag(30.0, 110.0, 20.0));
+        let drag = ui.device_drag.unwrap();
+        assert_eq!((drag.source, drag.target), (3, 0));
+        assert_eq!((drag.grab_dx, drag.grab_dy), (40.0, 30.0));
+        assert_eq!((drag.pointer_x, drag.pointer_y), (30.0, 130.0));
+        assert_eq!(ui.finish_device_drag(), Some(Act::ReorderDevice(3, 0, ui.device_list_revision)));
+        assert_eq!(ui.on_release(30.0, 110.0, 20.0), None);
+    }
+
+    #[test]
+    fn device_list_replacement_cancels_drag_even_when_count_is_unchanged() {
+        let mut ui = pressed_card();
+        assert!(ui.activate_device_drag(275.0, 270.0, 20.0));
+        ui.sync_devices(&readings(&["mouse", "keyboard", "replacement", "gamepad"]));
+        assert!(ui.device_drag.is_none());
+        assert!(!ui.pointer.down);
+        assert_eq!(ui.finish_device_drag(), None);
+        assert_eq!(ui.on_release(30.0, 110.0, 20.0), None);
+    }
+
+    #[test]
+    fn fresh_battery_samples_preserve_drag_but_reordering_cancels_a_pending_click() {
+        let mut ui = pressed_card();
+        assert!(ui.activate_device_drag(275.0, 270.0, 20.0));
+        ui.sync_devices(&readings(&["mouse", "keyboard", "headset", "gamepad"]));
+        assert!(ui.device_drag.is_some());
+        let mut ui = pressed_card();
+        ui.sync_devices(&readings(&["gamepad", "keyboard", "headset", "mouse"]));
+        assert_eq!(ui.on_release(270.0, 270.0, 20.0), None);
+        assert!(!ui.activate_device_drag(275.0, 270.0, 20.0));
+    }
+
+    #[test]
+    fn queued_drag_keeps_the_revision_of_the_list_on_release() {
+        let mut ui = pressed_card();
+        assert!(ui.activate_device_drag(30.0, 110.0, 20.0));
+        let Some(Act::ReorderDevice(_, _, revision)) = ui.finish_device_drag() else {
+            panic!("expected device reorder");
+        };
+        ui.sync_devices(&readings(&["mouse", "keyboard", "headset", "gamepad"]));
+        assert_eq!(revision, ui.device_list_revision);
+        ui.sync_devices(&readings(&["gamepad", "keyboard", "headset", "mouse"]));
+        assert_ne!(revision, ui.device_list_revision);
     }
 }

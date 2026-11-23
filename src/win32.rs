@@ -674,6 +674,7 @@ pub fn register_window_message(name: &str) -> u32 {
 #[link(name = "user32")]
 extern "system" {    /// 查找顶层窗口（单实例检测用）。
     pub fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
+    pub fn IsWindowVisible(hwnd: Handle) -> i32;
     /// 把已有窗口置顶激活。
     pub fn SetForegroundWindow(hwnd: Handle) -> i32;
     /// 显示/还原窗口。

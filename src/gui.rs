@@ -244,9 +244,10 @@ fn low_battery_alert(level: u8, charging: bool, armed: &mut bool) -> bool {
     true
 }
 
-fn persist_device_order(shared: &Arc<Mutex<Shared>>, order: Vec<String>) {
+fn persist_device_reorder(shared: &mut Shared, displayed: &[String], from: usize, to: usize) {
     // 排列是用户偏好，与品牌读数分开保存。
-    let mut shared = lock_shared(shared);
+    // Validate and save while holding the same lock as backend publication.
+    let Some(order) = reordered_device_keys(displayed, &shared.readings, from, to) else { return; };
     let mut cfg = shared.cfg.clone();
     cfg.set_device_order(order);
     match settings::save(&cfg) {
@@ -259,6 +260,36 @@ fn persist_device_order(shared: &Arc<Mutex<Shared>>, order: Vec<String>) {
             &format!("error={error}"),
         ),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowCloseAction {
+    Ask,
+    Hide,
+    Minimize,
+    Quit,
+}
+
+fn window_close_action(mode: &str, tray_enabled: bool, taskbar_visible: bool) -> WindowCloseAction {
+    match mode {
+        "ask" => WindowCloseAction::Ask,
+        "minimize" if tray_enabled || taskbar_visible => WindowCloseAction::Hide,
+        "minimize" => WindowCloseAction::Minimize,
+        _ => WindowCloseAction::Quit,
+    }
+}
+
+fn reordered_device_keys(
+    displayed: &[String], readings: &[crate::device::DeviceReading], from: usize, to: usize,
+) -> Option<Vec<String>> {
+    if from == to || from >= displayed.len() || to >= displayed.len()
+        || displayed.iter().ne(readings.iter().map(|reading| &reading.key)) {
+        return None;
+    }
+    let mut order = displayed.to_vec();
+    let key = order.remove(from);
+    order.insert(to, key);
+    Some(order)
 }
 
 fn low_battery_reading(reading: &crate::device::DeviceReading, armed: &mut bool) -> Option<u8> {
@@ -1408,6 +1439,7 @@ struct UiEnv<'a> {
     signal: &'a Signal,
     window: &'a nwg::Window,
     tray: &'a TrayCtl,
+    taskbar: &'a crate::taskbar_widget::TaskbarWidget,
     name_dialog: &'a crate::ui::device_name::Dialog,
 }
 
@@ -1512,19 +1544,15 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.signal.request_refresh();
             env.canvas.repaint_now();
         }
-        Act::ReorderDevice(from, to) => {
-            let mut order = lock_shared(env.shared)
-                .readings
-                .iter()
-                .map(|reading| reading.key.clone())
-                .collect::<Vec<_>>();
-            if from < order.len() && to < order.len() && from != to {
-                let key = order.remove(from);
-                order.insert(to, key);
-                persist_device_order(env.shared, order);
-                env.canvas.with_ui_mut(|ui| ui.device_drag = None);
-                env.canvas.repaint_now();
+        Act::ReorderDevice(from, to, revision) => {
+            let displayed = env.canvas.with_ui(|ui| {
+                (ui.device_list_revision == revision).then(|| ui.device_keys.clone())
+            });
+            if let Some(displayed) = displayed {
+                persist_device_reorder(&mut lock_shared(env.shared), &displayed, from, to);
             }
+            env.canvas.with_ui_mut(|ui| ui.device_drag = None);
+            env.canvas.repaint_now();
         }
         Act::ToggleDeviceTray => {
             if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
@@ -1598,7 +1626,14 @@ fn handle_act(a: Act, env: &UiEnv) {
             }
 
             if choice == crate::ui::widget::CloseChoice::Minimize {
-                env.window.set_visible(false);
+                let cfg = env.cfg();
+                let action = window_close_action("minimize", cfg.tray_enabled,
+                    cfg.taskbar_widget_enabled && env.taskbar.screen_rect().is_some());
+                if action == WindowCloseAction::Hide {
+                    env.window.set_visible(false);
+                } else if let Some(hwnd) = env.window.handle.hwnd() {
+                    unsafe { win32::ShowWindow(hwnd as _, 6); }
+                }
                 env.audio.set_active(1, false);
                 // 藏起来了，把位图和字体还回去；恢复后首帧自动重建。
                 env.canvas.release_render_memory();
@@ -3453,11 +3488,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         match evt {
             E::OnWindowClose => {
                 let s = lock_shared(&shared_e);
-                let mode = s.cfg.close_mode.clone();
-                let tray_on = s.cfg.tray_enabled;
+                let action = window_close_action(&s.cfg.close_mode, s.cfg.tray_enabled,
+                    s.cfg.taskbar_widget_enabled && taskbar_updates.screen_rect().is_some());
                 drop(s);
 
-                if mode == "ask" {
+                if action == WindowCloseAction::Ask {
                     // 取消直接关闭，弹出模态确认对话框
                     if let nwg::EventData::OnWindowClose(d) = evt_data {
                         d.close(false);
@@ -3468,12 +3503,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         u.close_remember = false;
                     });
                     canvas_e.repaint_now();
-                } else if mode == "minimize" && tray_on {
+                } else if matches!(action, WindowCloseAction::Hide | WindowCloseAction::Minimize) {
                     // 最小化到托盘
                     if let nwg::EventData::OnWindowClose(d) = evt_data {
                         d.close(false);
                     }
-                    window.set_visible(false);
+                    if action == WindowCloseAction::Hide {
+                        window.set_visible(false);
+                    } else {
+                        unsafe { win32::ShowWindow(hwnd, 6); }
+                    }
                     audio.set_active(1, false);
                     // 同上：收进托盘后不再重绘，渲染内存全部归还。
                     canvas_e.release_render_memory();
@@ -3577,8 +3616,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                                 submit(&shared_e, &signal_e, Cmd::BasicDpiStage { target: basic.target, stage, context });
                             }
                         }
-                        Action::ReorderDevices(order) => {
-                            persist_device_order(&shared_e, order);
+                        Action::ReorderDevices(displayed, from, to) => {
+                            persist_device_reorder(&mut lock_shared(&shared_e), &displayed, from, to);
                         }
                         Action::Settings | Action::Main => {
                             popup_events.hide();
@@ -3630,6 +3669,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         signal: &signal_e,
                         window: &window,
                         tray: &tray,
+                        taskbar: &taskbar_updates,
                         name_dialog: &name_dialog,
                     };
                     for a in acts {
@@ -3743,6 +3783,13 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             }
             if msg == 0x0113 && wp == TASKBAR_TIMER {
                 taskbar_strip.tick();
+                // A hidden window must remain reachable when the last battery
+                // expires, Explorer restarts or the taskbar strip is unavailable.
+                let tray_enabled = lock_shared(&shared_tray).cfg.tray_enabled;
+                if !tray_enabled && taskbar_strip.screen_rect().is_none()
+                    && win32::IsWindowVisible(hwnd) == 0 {
+                    win32::ShowWindow(hwnd, 7); // SW_SHOWMINNOACTIVE
+                }
                 return Some(0);
             }
             if msg == TASKBAR_CALLBACK_MSG {
@@ -3958,6 +4005,33 @@ mod backend_tests {
     use super::*;
     use crate::backends::{BackendId, Snapshot, Target};
     use crate::device::{Battery, BatteryLevel, DeviceFamily, DeviceReading, Dpi};
+
+    #[test]
+    fn close_to_background_keeps_the_window_reachable_with_either_indicator() {
+        for (tray, taskbar) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(window_close_action("minimize", tray, taskbar), WindowCloseAction::Hide);
+            assert_eq!(window_close_action("ask", tray, taskbar), WindowCloseAction::Ask);
+            assert_eq!(window_close_action("quit", tray, taskbar), WindowCloseAction::Quit);
+        }
+        assert_eq!(window_close_action("minimize", false, false), WindowCloseAction::Minimize);
+        assert_eq!(window_close_action("quit", false, false), WindowCloseAction::Quit);
+    }
+
+    #[test]
+    fn queued_device_reorder_cannot_reorder_a_changed_list() {
+        let displayed = vec!["mouse".into(), "keyboard".into(), "headset".into()];
+        let mut readings: Vec<_> = displayed.iter().map(|key: &String| DeviceReading {
+            key: key.clone(), ..Default::default()
+        }).collect();
+        assert_eq!(reordered_device_keys(&displayed, &readings, 2, 0),
+            Some(vec!["headset".into(), "mouse".into(), "keyboard".into()]));
+        readings.swap(0, 1);
+        assert!(reordered_device_keys(&displayed, &readings, 2, 0).is_none());
+        readings.swap(0, 1);
+        readings[1].key = "replacement".into();
+        assert!(reordered_device_keys(&displayed, &readings, 2, 0).is_none());
+        assert!(reordered_device_keys(&displayed, &[], 2, 0).is_none());
+    }
 
     fn snapshot(backend: BackendId, key: &str, percent: u8) -> Snapshot {
         Snapshot { target: Target { key: key.into(), name: "Test mouse".into(), family: DeviceFamily::Mouse,

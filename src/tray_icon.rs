@@ -7,21 +7,6 @@ use crate::win32::Handle;
 
 /// 图标布局基准尺寸。
 pub const ICON_SIZE: i32 = 32;
-pub const TASKBAR_STRIP_HEIGHT: i32 = 32;
-pub const TASKBAR_STRIP_MIN_WIDTH: i32 = 48;
-
-pub fn taskbar_strip_width(items: &[crate::taskbar_widget::StripItem]) -> i32 {
-    if items.is_empty() {
-        return 0;
-    }
-    let multi = items.len() > 1;
-    16 + items
-        .iter()
-        .map(|item| taskbar_item_width(item, multi))
-        .sum::<i32>()
-        + (items.len().saturating_sub(1) as i32 * 14)
-}
-
 pub fn render_device(
     level: Option<crate::device::BatteryPercent>,
     charging: bool,
@@ -34,148 +19,6 @@ pub fn render_device(
         &crate::ui::theme::DARK
     };
     render_device_at(level, charging, kind, content, theme, icon_size())
-}
-
-/// Render the taskbar-adjacent battery row as one premultiplied 32-bit HBITMAP.
-///
-/// A single device stays numeric. Multiple devices use the native taskbar scale:
-/// a 16 px type glyph, 13 px percentage text and a fixed gap between devices.
-/// The caller owns the bitmap and must release it with `DeleteObject`.
-pub fn render_taskbar_strip(
-    items: &[crate::taskbar_widget::StripItem],
-    light_taskbar: bool,
-    scale: f32,
-) -> Option<Handle> {
-    use crate::ui::gfx::Painter;
-    use gdiplus::*;
-    if !crate::ui::gfx::start() {
-        return None;
-    }
-    if items.is_empty() {
-        return None;
-    }
-    let theme = if light_taskbar {
-        &crate::ui::theme::LIGHT
-    } else {
-        &crate::ui::theme::DARK
-    };
-    let scale = scale.max(0.75);
-    let width = (taskbar_strip_width(items) as f32 * scale).round() as i32;
-    let height = (TASKBAR_STRIP_HEIGHT as f32 * scale).round() as i32;
-    unsafe {
-        let mut bitmap = ptr::null_mut();
-        if GdipCreateBitmapFromScan0(
-            width,
-            height,
-            0,
-            PIXEL_FORMAT_32BPP_ARGB,
-            ptr::null(),
-            &mut bitmap,
-        ) != 0
-            || bitmap.is_null()
-        {
-            return None;
-        }
-        let mut graphics = ptr::null_mut();
-        if GdipGetImageGraphicsContext(bitmap, &mut graphics) != 0 || graphics.is_null() {
-            GdipDisposeImage(bitmap);
-            return None;
-        }
-        GdipGraphicsClear(graphics, 0);
-        GdipSetSmoothingMode(graphics, 4);
-        GdipSetTextRenderingHint(graphics, 4);
-        let multi = items.len() > 1;
-        let painted = Painter::on_graphics(
-            graphics,
-            theme,
-            taskbar_strip_width(items).max(TASKBAR_STRIP_HEIGHT) as f32,
-            scale,
-            |p| {
-                let mut x = 8.0;
-                for (index, item) in items.iter().enumerate() {
-                    paint_taskbar_item(p, item, theme, x, multi);
-                    x += taskbar_item_width(item, multi) as f32;
-                    if index + 1 < items.len() {
-                        x += 14.0;
-                    }
-                }
-            }
-        );
-        let mut result = ptr::null_mut();
-        let converted = painted.is_some()
-            && GdipCreateHBITMAPFromBitmap(bitmap, &mut result, 0) == 0;
-        GdipDeleteGraphics(graphics);
-        GdipDisposeImage(bitmap);
-        (converted && !result.is_null()).then_some(result)
-    }
-}
-
-fn taskbar_item_width(item: &crate::taskbar_widget::StripItem, multi: bool) -> i32 {
-    let label = taskbar_label(item, multi);
-    let digits = item.level.map_or(0, |level| level.value.to_string().len()) as i32;
-    let mut text = match digits {
-        0 => 8,
-        1 => 17,
-        2 => 24,
-        _ => 30,
-    };
-    if multi {
-        text += 7; // percent sign
-    }
-    if item.level.is_some_and(|level| level.approximate) {
-        text += 9;
-    }
-    let charge = i32::from(item.charging && item.level.is_some()) * 5;
-    if multi {
-        16 + 5 + text + charge
-    } else {
-        text.max(label.chars().count() as i32 * 7) + charge
-    }
-}
-
-fn taskbar_label(item: &crate::taskbar_widget::StripItem, multi: bool) -> String {
-    item.level
-        .map(|level| level.label(multi))
-        .unwrap_or_else(|| "—".into())
-}
-
-fn paint_taskbar_item(
-    p: &mut crate::ui::gfx::Painter,
-    item: &crate::taskbar_widget::StripItem,
-    theme: &crate::ui::theme::Theme,
-    x: f32,
-    multi: bool,
-) {
-    use crate::ui::gfx::R;
-    let ink = match item.level {
-        None => theme.text3,
-        Some(percent) if percent.value <= 20 => theme.red,
-        _ => theme.text,
-    };
-    let label = taskbar_label(item, multi);
-    let mut text_x = x;
-    if multi {
-        device_glyph(
-            p,
-            R::new(x, 8.0, 16.0, 16.0),
-            item.kind,
-            ink,
-        );
-        text_x += 21.0;
-    }
-    let text_width = taskbar_item_width(item, multi) as f32
-        - if multi { 21.0 } else { 0.0 }
-        - if item.charging && item.level.is_some() { 5.0 } else { 0.0 };
-    p.icon_text(
-        &label,
-        R::new(text_x, 4.0, text_width, 24.0),
-        if multi { 12.5 } else { 13.0 },
-        ink,
-        false,
-    );
-    if item.charging && item.level.is_some() {
-        p.dot(text_x + text_width + 2.0, 9.0, 1.8, theme.green);
-    }
 }
 
 fn render_device_at(
@@ -434,7 +277,7 @@ mod gdiplus {
 
     // 位图图标专用的 5 个入口也是 GDI+ 那一套，声明在 `ui::gfx`（唯一一份）。
     pub(crate) use crate::ui::gfx::{
-        GdipCreateBitmapFromScan0, GdipCreateHBITMAPFromBitmap, GdipCreateHICONFromBitmap, GdipDisposeImage,
+        GdipCreateBitmapFromScan0, GdipCreateHICONFromBitmap, GdipDisposeImage,
         GdipDrawImageRectI, GdipFillEllipse, GdipFillRectangleI, GdipGetImageGraphicsContext,
         GdipGraphicsClear,
         GdipSetCompositingMode, GdipSetInterpolationMode, GdipSetPixelOffsetMode,
@@ -696,45 +539,5 @@ fn render_glyph(
             }
             None
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(value: u8, approximate: bool, charging: bool) -> crate::taskbar_widget::StripItem {
-        crate::taskbar_widget::StripItem {
-            level: Some(crate::device::BatteryPercent { value, approximate }),
-            charging,
-            kind: crate::tray_prefs::TrayKind::Mouse,
-        }
-    }
-
-    #[test]
-    fn taskbar_width_reserves_icon_text_percent_and_inter_device_space() {
-        let single = [item(75, false, false)];
-        let two = [item(75, false, false), item(100, false, false)];
-        let approximate = [item(75, true, false)];
-        let charging = [item(75, false, true)];
-        assert_eq!(taskbar_label(&single[0], false), "75");
-        assert_eq!(taskbar_label(&two[1], true), "100%");
-        assert_eq!(taskbar_strip_width(&single), 40);
-        assert_eq!(taskbar_strip_width(&two), 140);
-        assert_eq!(
-            taskbar_strip_width(&approximate),
-            taskbar_strip_width(&single) + 9
-        );
-        assert_eq!(
-            taskbar_strip_width(&two),
-            taskbar_item_width(&two[0], true)
-                + taskbar_item_width(&two[1], true)
-                + 30
-        );
-        assert!(taskbar_strip_width(&two) > taskbar_strip_width(&single));
-        assert_eq!(
-            taskbar_strip_width(&charging),
-            taskbar_strip_width(&single) + 5
-        );
     }
 }

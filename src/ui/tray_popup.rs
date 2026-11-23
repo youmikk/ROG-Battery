@@ -39,7 +39,7 @@ pub enum Action {
     Settings,
     Main,
     Quit,
-    ReorderDevices(Vec<String>),
+    ReorderDevices(Vec<String>, usize, usize),
     TogglePanel(String),
     SetDpiStage(String, u8),
     SetDpiValue(String, u16),
@@ -119,6 +119,39 @@ struct DragState {
     target_changed_at: Instant,
 }
 
+impl DragState {
+    fn new(key: String, source: usize, row_top: f32, press_y: f32, pointer_y: f32) -> Self {
+        let now = Instant::now();
+        Self {
+            key,
+            source,
+            grab_offset_y: (press_y - row_top).clamp(0.0, ROW),
+            pointer_y,
+            target: source,
+            previous_target: source,
+            started_at: now,
+            target_changed_at: now,
+        }
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    #[test]
+    fn fast_drag_keeps_the_original_grab_point_when_the_pointer_skips_rows() {
+        let original_row = HEADER + 1.0 + 3.0 * ROW;
+        let pressed_y = original_row + 19.0;
+        for pointer_y in [HEADER + 12.0, original_row + 220.0] {
+            let drag = DragState::new("mouse".into(), 3, original_row, pressed_y, pointer_y);
+            assert_eq!(drag.grab_offset_y, 19.0);
+            assert_eq!(drag.pointer_y - drag.grab_offset_y, pointer_y - 19.0);
+            assert_eq!((drag.source, drag.target), (3, 3));
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PanelKind {
     Dpi,
@@ -195,6 +228,7 @@ extern "system" {
     fn UpdateWindow(hwnd: Handle) -> i32;
     fn SetFocus(hwnd: Handle) -> Handle;
     fn SetCapture(hwnd: Handle) -> Handle;
+    fn GetCapture() -> Handle;
     fn ReleaseCapture() -> i32;
     fn TrackMouseEvent(event: *mut TrackMouse) -> i32;
     fn MonitorFromRect(rect: *const Rect, flags: u32) -> Handle;
@@ -368,6 +402,9 @@ impl Popup {
                         let (order, target) = {
                             let mut state = s.borrow_mut();
                             let (x, y) = point(lp, state.scale);
+                            if state.drag.is_some() {
+                                move_dragged_device(&mut state, y);
+                            }
                             let hit = state
                                 .hits
                                 .iter()
@@ -383,16 +420,12 @@ impl Popup {
                                     .iter()
                                     .position(|reading| reading.key == drag.key)?;
                                 if source != drag.target {
+                                    let displayed = state.readings.iter()
+                                        .map(|reading| reading.key.clone()).collect::<Vec<_>>();
                                     let item = state.readings.remove(source);
                                     let target = drag.target.min(state.readings.len());
                                     state.readings.insert(target, item);
-                                    Some(
-                                        state
-                                            .readings
-                                            .iter()
-                                            .map(|reading| reading.key.clone())
-                                            .collect::<Vec<_>>(),
-                                    )
+                                    Some((displayed, source, target))
                                 } else {
                                     None
                                 }
@@ -409,10 +442,10 @@ impl Popup {
                         };
                         win32::KillTimer(hwnd, DRAG_ANIM_TIMER);
                         ReleaseCapture();
-                        if let Some(order) = order {
+                        if let Some((displayed, from, to)) = order {
                             {
                                 let mut state = s.borrow_mut();
-                                state.acts.push(Action::ReorderDevices(order));
+                                state.acts.push(Action::ReorderDevices(displayed, from, to));
                             }
                             notice.notice();
                             InvalidateRect(hwnd, std::ptr::null(), 0);
@@ -659,42 +692,22 @@ impl Popup {
         let mut state = self.state.borrow_mut();
         let mut layout_changed = state.readings.len() != readings.len();
         let anchor = state.anchor;
-        let drag_order = state.drag.as_ref().map(|_| {
-            state
-                .readings
-                .iter()
-                .map(|reading| reading.key.clone())
-                .collect::<Vec<_>>()
-        });
-        if state
+        let order_changed = state
             .readings
             .iter()
             .map(|r| &r.key)
-            .ne(readings.iter().map(|r| &r.key))
-        {
+            .ne(readings.iter().map(|r| &r.key));
+        if order_changed {
             state.pressed = None;
-            state.focus = None;
-        }
-        state.readings = readings.to_vec();
-        if let Some(order) = drag_order {
-            state.readings.sort_by_key(|reading| {
-                order
-                    .iter()
-                    .position(|key| key == &reading.key)
-                    .unwrap_or(usize::MAX)
-            });
-        }
-        if state
-            .drag
-            .as_ref()
-            .is_some_and(|drag| !state.readings.iter().any(|reading| reading.key == drag.key))
-        {
-            state.drag = None;
             state.mouse_down = None;
+            state.drag = None;
+            state.hover = None;
+            state.focus = None;
             unsafe {
                 win32::KillTimer(self.hwnd(), DRAG_ANIM_TIMER);
             }
         }
+        state.readings = readings.to_vec();
         state.cfg = cfg.clone();
         state.dpi = dpi.clone();
         if state.expanded.as_ref().is_some_and(|key| {
@@ -730,6 +743,11 @@ impl Popup {
             }
         }
         drop(state);
+        // ReleaseCapture dispatches WM_CAPTURECHANGED synchronously. Do not hold
+        // the RefCell borrow while the raw handler is called again.
+        if order_changed && unsafe { GetCapture() } == self.hwnd() {
+            unsafe { ReleaseCapture(); }
+        }
         if layout_changed && self.state.borrow().visible {
             let mut state = self.state.borrow_mut();
             state.anchor = anchor;
@@ -932,14 +950,13 @@ fn device_key_for_action(action: &Action) -> Option<&str> {
 }
 
 fn begin_device_drag(state: &mut State, pointer_y: f32) -> bool {
-    let Some(key) = state
-        .mouse_down
-        .as_ref()
-        .and_then(|down| device_key_for_action(&down.action))
-        .map(str::to_string)
-    else {
+    let Some(down) = state.mouse_down.as_ref() else {
         return false;
     };
+    let Some(key) = device_key_for_action(&down.action).map(str::to_string) else {
+        return false;
+    };
+    let press_y = down.start.1;
     let Some(source) = state.readings.iter().position(|reading| reading.key == key) else {
         return false;
     };
@@ -952,17 +969,7 @@ fn begin_device_drag(state: &mut State, pointer_y: f32) -> bool {
     {
         row_top += ROW + state.panel_height(&reading.key);
     }
-    let now = Instant::now();
-    state.drag = Some(DragState {
-        key,
-        source,
-        grab_offset_y: (pointer_y - row_top).clamp(0.0, ROW),
-        pointer_y,
-        target: source,
-        previous_target: source,
-        started_at: now,
-        target_changed_at: now,
-    });
+    state.drag = Some(DragState::new(key, source, row_top, press_y, pointer_y));
     state.pressed = None;
     state.mouse_down = None;
     state.hover = None;

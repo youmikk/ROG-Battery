@@ -8,9 +8,13 @@ A lightweight peripheral battery monitor and mouse settings utility for Windows,
 
 Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
 
+## Unreleased improvements
+
+The taskbar battery strip uses native Windows fonts and device icons, with widths measured from the rendered glyphs. Both single and multiple devices show an icon and percentage. Device reordering, background operation with only the strip enabled, and malformed headset reports are also fixed. The usage notes below describe the current source; the published download remains 1.4.12.
+
 ## Version 1.4.12
 
-This version is released as a portable build first. It adds MCHOSE V9 PRO headset support after reading receiver firmware through a descriptor-proven `FF22` Feature `AA/64`; versions below `0008` are blocked, while unknown versions retain the conservative fallback. This is the acceptance baseline for tomorrow; no further unverified protocol is being added.
+This version is released as a portable build first. It adds MCHOSE V9 PRO headset support after reading receiver firmware through a descriptor-proven `FF22` Feature `AA/64`; versions below `0008` are blocked, while unknown versions retain the conservative fallback. Per-model hardware validation is still pending.
 
 ## Version 1.4.11
 
@@ -84,7 +88,9 @@ Click a device card to open its details. With multiple devices, return to the ov
 
 One numeric tray icon shows the selected device's battery level. Click it once to open a panel centered on the tray icon, with device battery levels, refresh, and settings. Double-click to open the main window, or right-click for the menu.
 
-A battery strip with system-tray-sized content appears immediately left of the notification area. A single device shows only its number. Multiple devices are listed in order with a type glyph, percentage and clear spacing. Click the strip to open quick view and click it again to close; it can be disabled independently in Settings and hides automatically while a full-screen application is active.
+A compact battery strip appears immediately left of the notification area. Both single and multiple devices show their type icon and percentage in the current device order, using native fonts at the taskbar's scale. Click the strip to open quick view and click it again to close. It can be disabled independently in Settings and hides when the taskbar is automatically hidden or a full-screen application covers its monitor.
+
+Choosing Minimize when closing the window keeps the app running while either the tray icon or battery strip is available. If neither entry is available, the app retains an ordinary minimized window so it can still be reopened.
 
 Device preferences provide a primary tray icon, device name, and device type, in that order. The primary selection controls the standard Windows tray icon, while the taskbar strip shows every device with battery data. Names can be edited or restored. Types default to automatic detection and can be set to Mouse, Keyboard, Headset, Gamepad, or Other. Your choice applies throughout the main window and both battery displays. Changing the type does not add hardware capabilities.
 
