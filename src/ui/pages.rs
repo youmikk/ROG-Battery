@@ -533,7 +533,7 @@ fn ring_color(t: &Theme, has_state: bool, charging: bool, level: u8) -> u32 {
     if !has_state {
         t.track
     } else if charging {
-        t.green
+        super::theme::CHARGING_GREEN
     } else if level <= 20 {
         t.red
     } else {
@@ -1816,7 +1816,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
         .map(|p| p.points.iter().any(|pt| pt.charging))
         .unwrap_or(false)
     {
-        p.dot(card.x + 98.0, head_y + 9.0, 4.0, with_alpha(t.green, 0xB0));
+        p.dot(card.x + 98.0, head_y + 9.0, 4.0, with_alpha(super::theme::CHARGING_GREEN, 0xB0));
         p.text(
             crate::tr!("充电"),
             R::new(card.x + 106.0, head_y, 34.0, 18.0),
@@ -1951,7 +1951,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
             // 充电时段：整列淡绿底带。比在折线上换颜色更直观 ——
             // 一眼就能看出"这段在充、那段在放"。
             for band in &g.bands {
-                p.rect(*band, with_alpha(t.green, 0x12));
+                p.rect(*band, with_alpha(super::theme::CHARGING_GREEN, 0x12));
             }
 
             // 面积 + 曲线：平滑与插值已在 `chart::build` 做完。

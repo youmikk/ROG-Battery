@@ -1795,7 +1795,7 @@ fn draw_device_row(
             p,
             Icon::Bolt,
             R::new(w - if approximate { 118.0 } else { 109.0 }, r.cy() - 6.5, 12.0, 13.0),
-            t.accent,
+            super::theme::CHARGING_GREEN,
             0.0,
         );
     }

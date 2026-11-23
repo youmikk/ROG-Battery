@@ -185,7 +185,7 @@ impl Layout {
             color: if item.level.is_some_and(|v| v.value <= 20) { red } else { foreground },
         })).collect::<Option<Vec<_>>>()?;
         Some(Self { items, foreground,
-            charge_color: if light { 0xff16_8a43 } else { 0xff4a_de80 },
+            charge_color: crate::ui::theme::CHARGING_GREEN,
             padding: px(6.0, scale), icon_gap: px(4.0, scale),
             device_gap: px(10.0, scale), charge_gap: px(2.0, scale),
         })

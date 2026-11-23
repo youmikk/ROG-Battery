@@ -133,7 +133,7 @@ fn paint_device_content(
         }
     }
     if charging && level.is_some() {
-        p.dot(x + if combined { 6.5 } else { 29.0 }, 2.0, 1.8, theme.green);
+        p.dot(x + if combined { 6.5 } else { 29.0 }, 2.0, 1.8, crate::ui::theme::CHARGING_GREEN);
     }
 }
 

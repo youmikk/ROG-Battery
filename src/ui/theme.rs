@@ -1,5 +1,8 @@
 //! 浅色和深色界面的 ARGB 配色。
 
+/// 充电状态专用亮绿。
+pub const CHARGING_GREEN: u32 = 0xFF22_E66B;
+
 /// 一套配色。
 ///
 /// 所有字段都是 GDI+ 的 `ARGB` 格式：`0xAARRGGBB`。
