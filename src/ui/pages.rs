@@ -1411,7 +1411,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     };
     p.text(
         status,
-        R::new(cx - 45.0, cy + 19.0, 90.0, 17.0),
+        R::new(cx - 59.0, cy + 19.0, 118.0, 17.0),
         11.0,
         false,
         t.text2,
@@ -1420,10 +1420,12 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let x = hero.x + 166.0;
     let remaining = if !connected {
         crate::tr!("等待设备连接").to_string()
-    } else if charging {
-        crate::tr!("正在为设备充电").to_string()
+    } else if d.estimate.known && d.estimate.percent_per_hour > 0.0 {
+        d.estimate.localized_text()
     } else if d.estimate.known {
         crate::trf!("预计还能使用 {}", d.estimate.localized_short_text())
+    } else if charging {
+        crate::tr!("正在为设备充电").to_string()
     } else {
         crate::tr!("电量状态").to_string()
     };
@@ -1469,14 +1471,66 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         headset_audio(p, ui, d, c);
     }
     device_tray_settings(p, ui, d, c);
-    if d.basic.is_some() { return; }
-    if selected
-        .is_some_and(|r| d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse)
+    if d.basic.is_none() && d.state.is_some()
+        && selected.is_some_and(|reading| d.cfg.device_kind(reading) == crate::tray_prefs::TrayKind::Mouse)
     {
-        return;
+        rog_battery_settings(p, ui, d, c);
     }
 
-    // ---- 电量历史 ----
+    c.h2(p, crate::tr!("电量历史"), false);
+
+    let chart = c.card(p, 220.0);
+    draw_chart(p, chart, d, ui);
+    // 卡片不会自己推进游标（它的返回值才是位置），必须手动前移 ——
+    // 漏了这一步，「电源管理」的标题会画在图表卡片上面。
+    c.y = chart.bottom();
+
+    // ---- 续航明细 ----
+    //
+    // 结论已经放到电量环下面了，这里不再重复整句，只留「怎么算出来的」，
+    // 免得同一句话在一屏里出现两次。样本不足时这里才显示原因。
+    if d.estimate.known {
+        c.y += 14.0;
+        let line = if d.estimate.stale_seconds > 0 {
+            // 沿用旧结论时必须说明白，否则等于拿旧斜率冒充当前状态。
+            crate::trf!(
+                "沿用 {}前的估算 · 当前读数没更新，暂时没法重算",
+                crate::i18n::age(d.estimate.stale_seconds)
+            )
+        } else if d.estimate.approximate {
+            crate::trf!(
+                "按最近 {} 个采样估算 · 变化 ≈{:+.1} %/h",
+                d.estimate.samples,
+                d.estimate.percent_per_hour
+            )
+        } else {
+            crate::trf!(
+                "按最近 {} 个采样估算 · 变化 {:+.2} %/h",
+                d.estimate.samples,
+                d.estimate.percent_per_hour
+            )
+        };
+        p.text_wrap(
+            &line,
+            R::new(c.x + 6.0, c.y, c.w - 12.0, 36.0),
+            font::HINT,
+            t.text3,
+        );
+        c.y += 40.0;
+    } else if !d.estimate.text.is_empty() {
+        c.y += 14.0;
+        p.text_wrap(
+            &d.estimate.localized_text(),
+            R::new(c.x + 6.0, c.y, c.w - 12.0, 36.0),
+            font::HINT,
+            t.text3,
+        );
+        c.y += 40.0;
+    }
+}
+
+fn rog_battery_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
+    let t = p.t;
     // ---- 设备设置 ----
     c.h2(p, crate::tr!("设备设置"), false);
     // 只管「标题 · 说明」，控件宽度由各行自己按控件类型定（下拉 150、
@@ -1552,55 +1606,6 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         ui.hot(sw, Act::Toggle(Pref::FullEffect));
     }
     c.y = card.bottom();
-
-    c.h2(p, crate::tr!("电量历史"), false);
-
-    let chart = c.card(p, 220.0);
-    draw_chart(p, chart, d, ui);
-    // 卡片不会自己推进游标（它的返回值才是位置），必须手动前移 ——
-    // 漏了这一步，「电源管理」的标题会画在图表卡片上面。
-    c.y = chart.bottom();
-
-    // ---- 续航明细 ----
-    //
-    // 结论已经放到电量环下面了，这里不再重复整句，只留「怎么算出来的」，
-    // 免得同一句话在一屏里出现两次。样本不足时这里才显示原因。
-    if d.estimate.known {
-        c.y += 14.0;
-        let line = if d.estimate.stale_seconds > 0 {
-            // 沿用旧结论时必须说明白，否则等于拿旧斜率冒充当前状态。
-            crate::trf!(
-                "沿用 {}前的估算 · 当前读数没更新，暂时没法重算",
-                crate::i18n::age(d.estimate.stale_seconds)
-            )
-        } else {
-            crate::trf!(
-                "按最近 {} 个采样估算 · 变化 {:+.2} %/h",
-                d.estimate.samples,
-                d.estimate.percent_per_hour
-            )
-        };
-        p.text(
-            &line,
-            R::new(c.x + 6.0, c.y, c.w - 12.0, 18.0),
-            font::HINT,
-            false,
-            t.text3,
-            Align::Left,
-        );
-        c.y += 22.0;
-    } else if !d.estimate.text.is_empty() {
-        c.y += 14.0;
-        p.text(
-            &d.estimate.localized_text(),
-            R::new(c.x + 6.0, c.y, c.w - 12.0, 18.0),
-            font::HINT,
-            false,
-            t.text3,
-            Align::Left,
-        );
-        c.y += 22.0;
-    }
 }
 
 fn headset_audio(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
@@ -1698,68 +1703,67 @@ fn cur_stage(s: &crate::proto::State) -> usize {
     idx.min(crate::proto::DPI_STAGES - 1)
 }
 
+/// Four equally spaced intervals must still include both measured extremes.
+/// Moving a fixed-size window up to fit its maximum can otherwise clip its
+/// minimum (for example, a 3–18% range becoming a 4–20% axis).
+fn chart_axis_bounds(minimum: i32, maximum: i32) -> (i32, i32) {
+    let first_step = ((maximum - minimum).max(1) + 3) / 4;
+    for step in first_step..=25 {
+        let mut lo = (minimum / step) * step;
+        let mut hi = lo + 4 * step;
+        if hi > 100 {
+            hi = 100;
+            lo = hi - 4 * step;
+        }
+        if lo <= minimum && hi >= maximum {
+            return (lo, hi);
+        }
+    }
+    (0, 100)
+}
+
 fn chart_geom(
     pl: &crate::chart::Plot,
     plot: R,
     lo: i32,
     span: f32,
 ) -> crate::ui::widget::ChartGeom {
-    let area_w = (crate::chart::AREA_W as f32).max(1.0);
-    let map_x = |px: i32| -> f32 {
-        let fx = (px - crate::chart::AREA_X) as f32 / area_w;
-        plot.x + fx.clamp(0.0, 1.0) * plot.w
-    };
-    let map_y = |level: u8| -> f32 {
-        let fy = (level as i32 - lo) as f32 / span;
-        plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
-    };
-    let map_fx = |fx: f32| -> f32 { plot.x + fx.clamp(0.0, 1.0) * plot.w };
-    let map_yf = |level: f32| -> f32 {
+    let map_x = |fx: f32| -> f32 { plot.x + fx.clamp(0.0, 1.0) * plot.w };
+    let map_y = |level: f32| -> f32 {
         let fy = (level - lo as f32) / span;
         plot.bottom() - fy.clamp(0.0, 1.0) * plot.h
     };
-
-    let pts: Vec<(f32, f32)> = pl
-        .points
-        .iter()
-        .map(|pt| (map_x(pt.x), map_y(pt.level)))
+    let pts = pl.points.iter().map(|point| (map_x(point.fx), map_y(point.level as f32)))
         .collect();
-
-    let mut bands: Vec<R> = Vec::new();
-    for w in pl.points.windows(2) {
-        if w[0].charging && w[1].charging {
-            let x0 = map_x(w[0].x);
-            let x1 = map_x(w[1].x);
-            if x1 - x0 > 0.5 {
-                bands.push(R::new(x0, plot.y, x1 - x0, plot.h));
+    let mut bands = Vec::new();
+    let segments = pl.segments.iter().map(|segment| {
+        let curve: Vec<(f32, f32)> = segment.curve.iter()
+            .map(|point| (map_x(point.fx), map_y(point.level))).collect();
+        let mut area = Vec::new();
+        if let (Some(first), Some(last)) = (curve.first(), curve.last()) {
+            if last.0 > first.0 {
+                if segment.charging {
+                    bands.push(R::new(first.0, plot.y, last.0 - first.0, plot.h));
+                }
+                if !segment.approximate {
+                    area.reserve(curve.len() + 2);
+                    area.push((first.0, plot.bottom()));
+                    area.extend(curve.iter().copied());
+                    area.push((last.0, plot.bottom()));
+                }
             }
         }
-    }
-
-    let curve: Vec<(f32, f32)> = pl
-        .curve
-        .iter()
-        .map(|c| (map_fx(c.fx), map_yf(c.level)))
-        .collect();
-
-    // 面积：曲线 + 首尾各拉到底边。起点用曲线自己的 x，不要用 plot.x ——
-    // 第一个采样点可能晚于窗口起点（休眠、刚装完），从 plot.x 硬拉
-    // 会多出一块三角形空填充，看着像画错了。
-    let area = if curve.len() >= 2 {
-        let x0 = curve.first().map(|p| p.0).unwrap_or(plot.x);
-        let x1 = curve.last().map(|p| p.0).unwrap_or(plot.right());
-        let mut a: Vec<(f32, f32)> = Vec::with_capacity(curve.len() + 2);
-        a.push((x0, plot.bottom()));
-        a.extend(curve.iter().copied());
-        a.push((x1, plot.bottom()));
-        a
-    } else {
-        Vec::new()
-    };
+        crate::ui::widget::ChartSegmentGeom {
+            samples: segment.samples.clone(),
+            curve,
+            area,
+            approximate: segment.approximate,
+        }
+    }).collect();
 
     crate::ui::widget::ChartGeom {
         key: (
-            pl as *const _ as usize,
+            pl.revision,
             plot.x.to_bits(),
             plot.y.to_bits(),
             plot.w.to_bits(),
@@ -1768,8 +1772,7 @@ fn chart_geom(
             (lo as f32 + span) as u32,
         ),
         pts,
-        curve,
-        area,
+        segments,
         bands,
     }
 }
@@ -1777,62 +1780,50 @@ fn chart_geom(
 fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui) {
     let t = p.t;
     let head_y = card.y + 16.0;
-    p.text(
-        crate::tr!("近 48 小时"),
-        R::new(card.x + 18.0, head_y, 90.0, 18.0),
-        13.0,
-        true,
-        t.text,
-        Align::Left,
-    );
-    // 采样点数 / 斜率靠右
-    let slope = if d.estimate.known {
+    let title = crate::tr!("近 48 小时");
+    let title_width = p.measure(title, 13.0, true).0.ceil() + 6.0;
+    p.text(title, R::new(card.x + 18.0, head_y, title_width, 18.0),
+        13.0, true, t.text, Align::Left);
+
+    let slope = if d.estimate.known && d.estimate.approximate {
+        format!("≈{:+.1} %/h", d.estimate.percent_per_hour)
+    } else if d.estimate.known {
         format!("{:+.2} %/h", d.estimate.percent_per_hour)
     } else {
         String::new()
     };
+    let slope_width = if slope.is_empty() { 0.0 } else { p.measure(&slope, 12.0, true).0.ceil() + 12.0 };
+    let right = card.right() - 18.0;
     if !slope.is_empty() {
-        p.text(
-            &slope,
-            R::new(card.right() - 100.0, head_y, 82.0, 18.0),
-            12.0,
-            true,
-            if d.estimate.percent_per_hour < 0.0 {
-                t.green
-            } else {
-                t.warn
-            },
-            Align::Right,
-        );
-    }
-    // 有充电段才画图例，否则纯放电历史不需要解释那条绿带。
-    if d.plot
-        .filter(|p| p.enough())
-        .map(|p| p.points.iter().any(|pt| pt.charging))
-        .unwrap_or(false)
-    {
-        p.dot(card.x + 98.0, head_y + 9.0, 4.0, with_alpha(super::theme::CHARGING_GREEN, 0xB0));
-        p.text(
-            crate::tr!("充电"),
-            R::new(card.x + 106.0, head_y, 34.0, 18.0),
-            font::TINY,
-            false,
-            t.text3,
-            Align::Left,
-        );
+        p.text(&slope, R::new(right - slope_width, head_y, slope_width, 18.0),
+            12.0, true,
+            if d.estimate.percent_per_hour < 0.0 { t.green } else { t.warn },
+            Align::Right);
     }
     let samples = crate::trf!("{} 个采样点", d.rows);
-    p.text(
-        &samples,
-        R::new(card.right() - 200.0, head_y, 94.0, 18.0),
-        11.5,
-        false,
-        t.text3,
-        Align::Right,
-    );
+    let samples_width = p.measure(&samples, 11.5, false).0.ceil() + 8.0;
+    let samples_right = right - slope_width - if slope.is_empty() { 0.0 } else { 14.0 };
+    p.text(&samples, R::new(samples_right - samples_width, head_y, samples_width, 18.0),
+        11.5, false, t.text3, Align::Right);
+
+    let mut legend_x = card.x + 18.0 + title_width + 14.0;
+    if d.plot.is_some_and(|plot| plot.has_charging_interval()) {
+        let label = crate::tr!("充电");
+        let width = p.measure(label, font::TINY, false).0.ceil() + 8.0;
+        p.dot(legend_x + 4.0, head_y + 9.0, 3.5,
+            with_alpha(super::theme::CHARGING_GREEN, 0xB0));
+        p.text(label, R::new(legend_x + 13.0, head_y, width, 18.0),
+            font::TINY, false, t.text3, Align::Left);
+        legend_x += width + 27.0;
+    }
+    if d.plot.is_some_and(|plot| plot.has_approximate()) {
+        let label = crate::i18n::translate("≈ 粗略电量");
+        p.text(label, R::new(legend_x, head_y,
+            (samples_right - samples_width - legend_x - 12.0).max(0.0), 18.0),
+            font::TINY, false, t.text3, Align::Left);
+    }
 
     // 绘图区：左边留 42px 给 Y 轴标签，底部留 20px 给 X 轴时间。
-    // 高度定死 132，和上面 `c.card(p, 206.0)` 的算法对应。
     let plot = R::new(card.x + 42.0, head_y + 26.0, card.w - 42.0 - 18.0, 146.0);
 
     // ── 坐标轴 ────────────────────────────────────────────────────────
@@ -1849,30 +1840,14 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
             }
             // 上下各留 2% 余量，否则折线贴着框边
             let (mn, mx) = (mn.saturating_sub(2) as i32, (mx as i32 + 2).min(100));
-            let step = (((mx - mn).max(1) as f32) / 4.0).ceil() as i32;
-            let step = step.max(1);
-            let mut lo = (mn / step) * step;
-            let mut hi = lo + step * 4;
-            while hi < mx {
-                lo += step;
-                hi += step;
-            }
-            if hi > 100 {
-                hi = 100;
-                lo = hi - step * 4;
-            }
-            if lo < 0 {
-                lo = 0;
-                hi = step * 4;
-            }
-            (lo, hi)
+            chart_axis_bounds(mn, mx)
         }
         None => (0, 100),
     };
     let span = (hi - lo).max(1) as f32;
 
     // 归一化坐标 → 像素的那几步在 `chart_geom` 里做，结果按
-    // (Plot, 绘图区, 纵轴范围) 缓存，不在每帧重算。
+    // (数据构建代号, 绘图区, 纵轴范围) 缓存，不在每帧重算。
     // 底轴：比网格线略深一点，给图表一条"地面"
     p.line(
         plot.x,
@@ -1905,7 +1880,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
             // 还没读完第一遍 —— 说「正在读取」，不要说「样本不足」。
             // 后者会让用户以为历史文件是空的（其实可能有 7 条）。
             p.text(
-                crate::chart::LOADING_TEXT,
+                crate::i18n::translate(crate::chart::LOADING_TEXT),
                 R::new(plot.x, plot.cy() - 10.0, plot.w, 20.0),
                 12.0,
                 false,
@@ -1915,7 +1890,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
         }
         Some(pl) if !pl.enough() => {
             p.text(
-                crate::chart::NOT_ENOUGH_TEXT,
+                crate::i18n::translate(crate::chart::NOT_ENOUGH_TEXT),
                 R::new(plot.x, plot.cy() - 10.0, plot.w, 20.0),
                 12.0,
                 false,
@@ -1929,7 +1904,7 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
             // 充电动画每 16ms 重绘整帧，但采样 30 秒才更新一次 —— 不缓存的话
             // 每秒白建 60 遍三份 Vec（最多两千多点），全在 UI 线程上。
             let key = (
-                pl as *const _ as usize,
+                pl.revision,
                 plot.x.to_bits(),
                 plot.y.to_bits(),
                 plot.w.to_bits(),
@@ -1949,12 +1924,18 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
                 p.rect(*band, with_alpha(super::theme::CHARGING_GREEN, 0x12));
             }
 
-            // 面积 + 曲线：平滑与插值已在 `chart::build` 做完。
-            if g.area.len() >= 2 {
-                p.fill_polygon(&g.area, with_alpha(t.accent, 0x4A), with_alpha(t.accent, 0x00));
+            // 每段各自填充和描边，休眠缺口与精度切换不相连。
+            // 粗略电量只显示报告的阶梯，不填充以免暗示连续精度。
+            for segment in &g.segments {
+                if !segment.approximate && segment.area.len() >= 3 {
+                    p.fill_polygon(&segment.area, with_alpha(t.accent, 0x32), with_alpha(t.accent, 0x00));
+                }
+                p.stroke_path(&segment.curve, t.accent, 2.0);
+                if segment.samples.len() == 1 {
+                    let (x, y) = pts[segment.samples.start];
+                    p.dot(x, y, 3.0, t.accent);
+                }
             }
-            // 整条曲线一次描边。逐段 `polyline` 在接缝处会叠出「串珠」感。
-            p.stroke_path(&g.curve, t.accent, 2.0);
 
             // 数据点：点多了就只标最新那个，否则满屏小圈
             if n <= 14 {
@@ -1967,11 +1948,18 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
                 }
             }
             if let Some((x, y)) = pts.last() {
-                // 末点常正好落在绘图区右边界上，圆环会被裁掉一半 → 往里收 5px
-                let mx = x.clamp(plot.x + 5.0, plot.right() - 5.0);
-                p.dot(mx, *y, 9.0, with_alpha(t.accent, 0x28));
-                p.dot(mx, *y, 5.0, t.card);
-                p.dot_ring(mx, *y, 4.6, t.accent, 2.6);
+                // 卡片右侧留有空间，末点留在真实时刻，不向左错开折线。
+                p.dot(*x, *y, 8.0, with_alpha(t.accent, 0x22));
+                p.dot(*x, *y, 4.4, t.card);
+                p.dot_ring(*x, *y, 4.0, t.accent, 2.2);
+                if let Some(last) = pl.points.last().filter(|point| point.approximate) {
+                    let label = format!("≈{}%", last.level);
+                    let width = p.measure(&label, font::TINY, true).0.ceil() + 16.0;
+                    let label_y = (*y - 22.0).clamp(plot.y + 2.0, plot.bottom() - 21.0);
+                    let label_rect = R::new((*x - width - 12.0).max(plot.x), label_y, width, 19.0);
+                    p.round(label_rect, 5.0, t.card);
+                    p.text(&label, label_rect, font::TINY, true, t.accent, Align::Center);
+                }
             }
 
             // X 轴：起点 / 中点 / 终点三个时间，比只有首尾更容易定位。
@@ -2014,6 +2002,60 @@ fn draw_chart(p: &mut Painter, card: R, d: &Data, ui: &mut crate::ui::widget::Ui
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod battery_chart_tests {
+    use super::{chart_axis_bounds, chart_geom, R};
+    use crate::history::{HistoryRow, HIST_GAP_BREAK_SEC};
+
+    #[test]
+    fn four_interval_axes_keep_every_reported_level_visible() {
+        for minimum in 0..=100 {
+            for maximum in minimum..=100 {
+                let (lo, hi) = chart_axis_bounds(minimum, maximum);
+                assert!(lo <= minimum && hi >= maximum,
+                    "{minimum}..{maximum} is clipped by {lo}..{hi}");
+                assert!(lo >= 0 && hi <= 100 && lo < hi);
+                assert_eq!((hi - lo) % 4, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_keeps_charging_fills_and_singletons_on_their_own_intervals() {
+        let resumed = 60 + HIST_GAP_BREAK_SEC + 1;
+        let rows = [
+            HistoryRow::new(0, 40, true, 2),
+            HistoryRow::new(60, 41, true, 2),
+            HistoryRow::new(resumed, 80, true, 2),
+        ];
+        let plot = crate::chart::build(&rows);
+        let rect = R::new(20.0, 40.0, 600.0, 120.0);
+        let geometry = chart_geom(&plot, rect, 0, 100.0);
+        assert_eq!(geometry.segments.len(), 2);
+        assert_eq!(geometry.bands.len(), 1);
+        assert_eq!(geometry.bands[0].right(), geometry.pts[1].0);
+        assert!(geometry.segments[0].area.iter().all(|point| point.0 <= geometry.pts[1].0));
+        assert!(geometry.segments[1].area.is_empty());
+        assert_eq!(geometry.segments[1].samples, 2..3);
+        assert_eq!(geometry.pts[2].0, rect.right());
+    }
+
+    #[test]
+    fn coarse_geometry_has_no_precision_fill_or_unconfirmed_charge_band() {
+        let mut rows = [HistoryRow::new(0, 60, true, 2), HistoryRow::new(60, 40, true, 2)];
+        for row in &mut rows {
+            row.approximate = true;
+            row.charging_known = false;
+        }
+        let plot = crate::chart::build(&rows);
+        let geometry = chart_geom(&plot, R::new(0.0, 0.0, 600.0, 100.0), 0, 100.0);
+        assert_eq!(geometry.segments.len(), 1);
+        assert_eq!(geometry.segments[0].curve.len(), 3);
+        assert!(geometry.segments[0].area.is_empty());
+        assert!(geometry.bands.is_empty());
     }
 }
 

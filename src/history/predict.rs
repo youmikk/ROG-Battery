@@ -1,7 +1,6 @@
 
 use super::format::{dur_short, dur_text, reason_text, Why};
 use super::{decide_charge, ChargeState, HistoryRow, HIST_GAP_BREAK_SEC};
-use std::sync::Mutex;
 
 const MAX_PREDICT_HOURS: f64 = 1000.0;
 
@@ -25,6 +24,8 @@ pub struct Estimate {
     pub hours: f64,
     /// 这条结论是「沿用」来的：距上一次成功估算过了多少秒。0 = 本次新鲜算出的。
     pub stale_seconds: i64,
+    /// Coarse battery steps support only rounded, approximate durations.
+    pub approximate: bool,
 }
 
 impl Estimate {
@@ -40,6 +41,7 @@ impl Estimate {
             })
             .into();
         }
+        if self.approximate { return self.coarse_duration(); }
         let d = crate::i18n::duration(self.hours);
         if self.percent_per_hour > 0.0 {
             crate::trf!("约 {d}后充满", d = d)
@@ -49,6 +51,14 @@ impl Estimate {
     }
 
     pub fn localized_text(&self) -> String {
+        if self.known && self.approximate {
+            let duration = self.coarse_duration();
+            return if crate::i18n::english() {
+                if self.percent_per_hour > 0.0 { format!("Time to full: {duration}") }
+                else { format!("Remaining battery life: {duration}") }
+            } else if self.percent_per_hour > 0.0 { format!("预计充满时间：{duration}") }
+            else { format!("预计可用时间：{duration}") };
+        }
         if !crate::i18n::english() {
             return self.text.clone();
         }
@@ -88,6 +98,7 @@ impl Estimate {
                 "估算中…".to_string()
             };
         }
+        if self.approximate { return self.coarse_duration(); }
         let d = dur_short(self.hours);
         if self.percent_per_hour > 0.0 {
             format!("约 {d}后充满")
@@ -95,52 +106,33 @@ impl Estimate {
             format!("约 {d}")
         }
     }
+
+    fn coarse_duration(&self) -> String {
+        let hours = self.hours.ceil().max(1.0) as u64;
+        if crate::i18n::english() {
+            if hours >= 240 { "≈ 10 days+".into() }
+            else if hours >= 48 { format!("≈ {} days", hours.div_ceil(24)) }
+            else { format!("≈ {hours} h") }
+        } else if hours >= 240 { "≈ 10 天以上".into() }
+        else if hours >= 48 { format!("≈ {} 天", hours.div_ceil(24)) }
+        else { format!("≈ {hours} 小时") }
+    }
 }
 
-/// 「沿用」的上限：30 分钟内有过可信结论才继续显示。
-///
-/// 再久就不该拿旧斜率骗人了 —— 中间可能插过线、换过档、休眠过。
-const STICKY_MAX_AGE_SEC: i64 = 1800;
-
-/// 最近一次成功估算。用于 [`predict_sticky`] 的「沿用」。
-static LAST_GOOD: Mutex<Option<(Estimate, i64)>> = Mutex::new(None);
-
-/// 带「沿用」的预测：计算本身仍交给 [`predict_from_rows`]，这里只加一层缓存。
-///
-/// 为什么需要：一次刷新里算不出来（刚跳变 / 刚插拔 / 一瞬间读不到设备）时，
-/// 界面会立刻从「约 7 天」掉回「估算中…」，观感上就是"随时都在估算"。
-/// 30 分钟内有过结论就继续用那一条，并用 `stale_seconds` 如实标注，不假装是新的。
-pub fn predict_sticky(
-    rows: &[HistoryRow],
-    now_level: u8,
-    now_charging: bool,
-    now_mode: i32,
-    now_sec: i64,
-) -> Estimate {
-    let fresh = predict_from_rows(rows, now_level, now_charging, now_mode, now_sec);
-    let mut slot = LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner());
-    if fresh.known {
-        *slot = Some((fresh.clone(), now_sec));
-        return fresh;
+/// `current` is an actual measurement, never a cached value timestamped "now".
+/// Every caller supplies only this device's rows; there is no global ETA cache.
+pub fn predict_device(rows: &[HistoryRow], current: HistoryRow) -> Estimate {
+    let mut observed: Vec<HistoryRow> = rows.iter().copied().filter(|r| r.ts <= current.ts).collect();
+    if let Some(last) = observed.last_mut().filter(|last| last.ts == current.ts) {
+        let boundary = last.break_before;
+        *last = current;
+        last.break_before |= boundary;
+    } else {
+        observed.push(current);
     }
-    if let Some((cached, at)) = slot.as_ref() {
-        let age = now_sec - *at;
-        if (0..=STICKY_MAX_AGE_SEC).contains(&age) {
-            let mut e = cached.clone();
-            e.stale_seconds = age;
-            return e;
-        }
-    }
-    fresh
-}
-
-pub fn predict_from_rows(
-    rows: &[HistoryRow],
-    now_level: u8,
-    now_charging: bool,
-    now_mode: i32,
-    now_sec: i64,
-) -> Estimate {
+    let now_level = current.level;
+    let now_charging = current.charging;
+    let now_mode = current.mode;
     // 已充满：没什么可预测的
     if decide_charge(now_level, now_charging, now_mode) == ChargeState::Full {
         return Estimate {
@@ -150,37 +142,19 @@ pub fn predict_from_rows(
         };
     }
 
-    // 第一步：取出「连续同相位」的一段（先不管方向）。
-    // 只算起始下标、不复制 —— 这条路径每个刷新周期都会跑，2000 行拷两份
-    // 纯属垃圾（而且它俩都是「从最新往回扫到第一个不满足就停」的连续尾段，
-    // 天然就是一个切片）。
-    let phase = &rows[phase_start(rows, now_charging)..];
+    // Use only the current continuous charge/precision interval.
+    let phase = &observed[phase_start(&observed, now_charging)..];
 
     // 同相位样本太少 → 说明刚切换过充电/放电，历史还没攒够。
     // 这时不要说「样本不足」糊弄过去，要告诉用户真实原因。
     if phase.len() < 3 {
         return Estimate {
             samples: phase.len(),
-            text: if rows.len() >= 3 {
+            text: if observed.len() >= 3 {
                 reason_text(Why::JustSwitched, now_charging)
             } else {
                 reason_text(Why::NotEnough, now_charging)
             },
-            ..Default::default()
-        };
-    }
-
-    // 第二步：当前读数和这段历史对不上（相差超过 1%）→ 读数跳变，历史作废
-    let last_level = phase[phase.len() - 1].level;
-    let conflict = if now_charging {
-        now_level + 1 < last_level
-    } else {
-        now_level > last_level + 1
-    };
-    if conflict {
-        return Estimate {
-            samples: phase.len(),
-            text: reason_text(Why::Jumped, now_charging),
             ..Default::default()
         };
     }
@@ -196,19 +170,24 @@ pub fn predict_from_rows(
         };
     }
 
-    // 第四步：把当前读数并进序列末尾。历史最后一条可能是十几分钟前的，
-    // 不并进去等于拿旧数据预测现在。
-    // 只有这里必须复制一次：要往末尾追加当前读数，不能借用历史行切片。
-    // 容量一次给够，避免 push 触发扩容。
-    let mut full: Vec<HistoryRow> = Vec::with_capacity(sel.len() + 1);
-    full.extend_from_slice(sel);
-    if let Some(last) = full.last() {
-        if last.ts < now_sec {
-            full.push(HistoryRow::new(now_sec, now_level, now_charging, now_mode));
-        }
+    let span = (current.ts - sel[0].ts) as f64 / 60.0;
+    let changes = sel.windows(2).filter(|w| w[0].level != w[1].level).count();
+    if !current.charging_known && (now_charging || changes < 2 || span < 30.0) {
+        return Estimate { text: "充电状态未知，等待稳定放电趋势".into(),
+            samples: sel.len(), span_minutes: span, ..Default::default() };
     }
-
-    predict_from_series(&full, now_level, now_charging, now_mode)
+    if current.approximate && (changes < 2 || span < 60.0) {
+        return Estimate { text: "仅有粗略电量，等待更多档位变化".into(),
+            samples: sel.len(), span_minutes: span, ..Default::default() };
+    }
+    let mut estimate = predict_from_series(sel, now_level, now_charging, now_mode);
+    estimate.approximate = current.approximate;
+    if estimate.known && estimate.approximate {
+        let duration = estimate.coarse_duration();
+        estimate.text = if now_charging { format!("预计充满时间：{duration}") }
+            else { format!("预计可用时间：{duration}") };
+    }
+    estimate
 }
 
 /// 纯函数核心：给定已含当前读数的升序样本，算斜率。
@@ -235,6 +214,10 @@ fn predict_from_series(
     let x0 = sel[0].ts as f64;
     let x1 = sel[sel.len() - 1].ts as f64;
     let span_minutes = (x1 - x0) / 60.0;
+    if span_minutes < 10.0 {
+        return Estimate { samples: sel.len(), span_minutes,
+            text: reason_text(Why::SpanTooShort, now_charging), ..Default::default() };
+    }
 
     // 用极差判断「到底动过没有」。只比首尾会漏掉「先降后升」那种情形：
     // 那种情况下首尾相等，但数据里明明有变化。
@@ -342,6 +325,7 @@ fn predict_from_series(
         span_minutes,
         hours,
         stale_seconds: 0,
+        approximate: false,
     }
 }
 
@@ -352,8 +336,10 @@ fn predict_from_series(
 pub(super) fn phase_start(rows: &[HistoryRow], charging: bool) -> usize {
     let mut start = rows.len();
     let mut prev_t: Option<i64> = None;
+    let Some(latest) = rows.last() else { return 0; };
     for r in rows.iter().rev() {
-        if r.charging != charging {
+        if r.charging != charging || r.charging_known != latest.charging_known
+            || r.approximate != latest.approximate || r.mode != latest.mode {
             break;
         }
         if let Some(pt) = prev_t {
@@ -363,8 +349,60 @@ pub(super) fn phase_start(rows: &[HistoryRow], charging: bool) -> usize {
         }
         start -= 1;
         prev_t = Some(r.ts);
+        if r.break_before { break; }
     }
     start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const TS: i64 = 1_800_000_000;
+    fn row(seconds: i64, level: u8, charging: bool) -> HistoryRow {
+        HistoryRow::new(TS + seconds, level, charging, 0)
+    }
+    #[test]
+    fn forecasts_are_independent_for_devices_and_charge_phases() {
+        let discharge = [row(0, 90, false), row(1800, 85, false), row(3600, 80, false)];
+        let charge = [row(0, 60, true), row(1800, 70, true), row(3600, 80, true)];
+        let a = predict_device(&discharge, discharge[2]);
+        let b = predict_device(&charge, charge[2]);
+        assert!(a.known && (a.hours - 8.0).abs() < 0.01);
+        assert!(b.known && (b.hours - 1.0).abs() < 0.01);
+        assert!(!predict_device(&discharge, row(3601, 80, true)).known);
+        assert!(!predict_device(&[], row(0, 80, false)).known);
+    }
+    #[test]
+    fn gaps_boundaries_and_precision_changes_discard_old_forecasts() {
+        let rows = [row(0, 90, false), row(1800, 85, false), row(3600, 80, false)];
+        assert!(!predict_device(&rows, row(12000, 79, false)).known);
+        let mut current = row(3601, 80, false); current.break_before = true;
+        assert!(!predict_device(&rows, current).known);
+        current.break_before = false; current.approximate = true;
+        assert!(!predict_device(&rows, current).known);
+        current.approximate = false; current.charging_known = false;
+        assert!(!predict_device(&rows, current).known);
+    }
+    #[test]
+    fn unknown_charge_requires_an_observed_discharge_trend() {
+        let mut rows = [row(0, 90, false), row(1800, 85, false), row(3600, 80, false)];
+        for r in &mut rows { r.charging_known = false; }
+        assert!(predict_device(&rows, rows[2]).known);
+        for (i, r) in rows.iter_mut().enumerate() { r.level = 80 + i as u8 * 5; }
+        assert!(!predict_device(&rows, rows[2]).known);
+    }
+    #[test]
+    fn coarse_battery_waits_for_multiple_steps_and_never_claims_minute_precision() {
+        let mut rows = [row(0, 75, false), row(1800, 50, false), row(3600, 25, false)];
+        for r in &mut rows { r.approximate = true; }
+        assert!(!predict_device(&rows[..2], rows[1]).known);
+        let estimate = predict_device(&rows, rows[2]);
+        assert!(estimate.known && estimate.approximate);
+        assert!(estimate.short_text().contains('≈'));
+        assert!(!estimate.short_text().contains("分钟"));
+        let short = [row(0, 90, false), row(60, 89, false), row(120, 88, false)];
+        assert!(!predict_device(&short, short[2]).known);
+    }
 }
 
 /// 「方向也一致」那一段在 `rows` 里的起始下标（终点恒为 `rows.len()`）。

@@ -308,6 +308,7 @@ struct DeviceSnapshot {
     full_at: std::time::Instant,
     basic: Option<crate::backends::Snapshot>,
     basic_status: Option<crate::backends::status::Status>,
+    battery_at: Option<std::time::Instant>,
 }
 
 fn diagnostic_link(link: &hid::Link) -> crate::diagnostics::DeviceInfo {
@@ -369,7 +370,7 @@ fn diagnostic_facts<'a>(
         family,
         frames,
         elapsed_ms,
-        history_rows: crate::history::read_rows().len(),
+        history_rows: crate::history::cached_row_count(),
         device,
     }
 }
@@ -461,8 +462,15 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             previous
                 .as_ref()
                 .map(|d| d.reading.key.clone())
-                .unwrap_or(link_key)
+                .unwrap_or(link_key.clone())
         };
+        if previous.is_none() && key != link_key {
+            let mut s = lock_shared(shared);
+            if outcome_is_stale(generation, s.write_gen) { return None; }
+            if !s.key_aliases.contains_key(&link_key) && s.promote_device_key(&link_key, &key) {
+                s.device_keys_dirty = true;
+            }
+        }
         if let Some(old) = previous.as_ref().filter(|old| {
             old.reading.key != key
                 && old.ident.mouse_sn.trim().is_empty()
@@ -504,6 +512,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         let record = DeviceSnapshot {
             basic: None,
             basic_status: None,
+            battery_at: is_connected.then_some(out.snapshot.taken).flatten(),
             reading: crate::device::DeviceReading {
                 key: key.clone(),
                 name: if name.is_empty() {
@@ -627,6 +636,13 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
             other.target.same_channel(&snapshot.target) && other.target.key != snapshot.target.key))
             .max_by_key(|device| device.full_at)
             .and_then(|device| device.basic.as_ref()).map(|other| other.target.clone());
+        if previous.is_none() && snapshot.target.verified_identity {
+            let discovery_key = snapshot.target.unverified_key();
+            if discovery_key != snapshot.target.key && !shared.key_aliases.contains_key(&discovery_key)
+                && shared.promote_device_key(&discovery_key, &snapshot.target.key) {
+                shared.device_keys_dirty = true;
+            }
+        }
         if let Some(previous) = previous {
             let link_key = previous.unverified_key();
             let had_identity = previous.verified_identity || previous.key != link_key;
@@ -650,6 +666,10 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
             }
         }
         let key = snapshot.target.key.clone();
+        if backend == crate::backends::BackendId::XInput && !shared.devices.contains_key(&key) {
+            // XInput identifies a slot, not a physical controller across restarts.
+            shared.history_tracker.interrupt(&key);
+        }
         let previous = shared.devices.get(&key);
         let mut status = previous.and_then(|device| device.basic_status.clone()).unwrap_or_default();
         status.observe_sample(Some(snapshot.connected), snapshot.battery.as_ref(), snapshot.battery_at,
@@ -669,6 +689,7 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
         };
         let ident = proto::Identity { model_name: snapshot.target.name.clone(), ..Default::default() };
         shared.devices.insert(key, DeviceSnapshot { reading, ident, state: None, link: None,
+            battery_at: status.measured_at,
             full_at: now, basic: Some(snapshot), basic_status: Some(status) });
     }
     shared.rebuild_readings();
@@ -715,14 +736,11 @@ struct Shared {
     status: Status,
     frames: usize,
     elapsed_ms: u128,
-    /// 历史样本（由历史线程每 30 秒重读一次）。
-    rows: Vec<crate::history::HistoryRow>,
-    /// 曲线点集。`None` = 历史线程还没读完第一遍。
-    ///
-    /// 用 `Arc` 而不是裸 `Plot`：绘制闭包每帧都要把数据拷出来（不能在锁里画），
-    /// 48 小时的采样点是上千个，每帧深拷贝一次纯属浪费。
-    plot: Option<Arc<crate::chart::Plot>>,
-    estimate: crate::history::Estimate,
+    history_tracker: crate::history::Tracker,
+    histories: BTreeMap<String, crate::history::HistoryView>,
+    /// Serializes disk work with clear/path changes without holding the UI lock.
+    history_gate: Arc<std::sync::Mutex<()>>,
+    history_epoch: u64,
     /// 本地设置。界面改了就更新这里再落盘。
     cfg: Settings,
     autostart: (crate::autostart::AutoStartState, crate::autostart::AutoStartPath),
@@ -795,6 +813,7 @@ impl Shared {
                         full_at: now,
                         basic: None,
                         basic_status: None,
+                        battery_at: Some(now),
                     },
                 )
             })
@@ -806,6 +825,34 @@ impl Shared {
     fn rebuild_readings(&mut self) {
         self.readings = self.devices.values().map(|device| device.reading.clone()).collect();
         self.sort_readings();
+        self.observe_history();
+    }
+
+    fn observe_history(&mut self) {
+        let now = std::time::Instant::now();
+        let unix = crate::snapshot::now_unix() as i64;
+        for (key, device) in &self.devices {
+            let mode = match device.link.as_ref().map(|link| link.mode.as_str()) {
+                Some("Wired") => 1, Some("Wireless24G") => 2, Some("Bluetooth") => 3, _ => 0,
+            };
+            let lifetime = device.basic.as_ref().map(|basic| basic.target.backend.sample_lifetime())
+                .unwrap_or_else(|| Duration::from_secs(self.cfg.refresh_interval_sec.saturating_mul(3).max(180)));
+            self.history_tracker.observe(&device.reading, device.battery_at, mode, now, unix, lifetime);
+            if !device.reading.connected || device.reading.display_percent().is_none() {
+                if let Some(view) = self.histories.get_mut(key) { view.estimate = Default::default(); }
+            }
+        }
+    }
+
+    fn reset_history(&mut self) {
+        self.history_epoch = self.history_epoch.wrapping_add(1);
+        self.histories.clear();
+        self.history_tracker.reset();
+    }
+
+    fn reload_history(&mut self) {
+        self.history_epoch = self.history_epoch.wrapping_add(1);
+        self.histories.clear();
     }
 
     fn complete_refresh(&mut self, backend: crate::backends::BackendId, request: u64) {
@@ -861,9 +908,10 @@ impl Shared {
             status: Status::Idle,
             frames: 0,
             elapsed_ms: 0,
-            rows: Vec::new(),
-            plot: None,
-            estimate: crate::history::Estimate::default(),
+            history_tracker: Default::default(),
+            histories: Default::default(),
+            history_gate: Arc::new(std::sync::Mutex::new(())),
+            history_epoch: 0,
             cfg,
             autostart: (crate::autostart::AutoStartState::Unknown, crate::autostart::AutoStartPath::Unknown),
             pending: VecDeque::new(),
@@ -874,6 +922,11 @@ impl Shared {
 
     // 完整身份晚于首次电量返回时，保留选择和托盘偏好。
     fn promote_device_key(&mut self, old: &str, new: &str) -> bool {
+        self.history_epoch = self.history_epoch.wrapping_add(1);
+        self.history_tracker.promote(old, new);
+        if let Some(view) = self.histories.remove(old) {
+            self.histories.entry(new.into()).or_insert(view);
+        }
         for key in self.key_aliases.values_mut() {
             if key == old {
                 *key = new.to_string();
@@ -1163,9 +1216,7 @@ fn lock_shared(s: &Arc<Mutex<Shared>>) -> std::sync::MutexGuard<'_, Shared> {
 
 /// 等一个后台线程收尾，最多 `budget`。
 ///
-/// 不用裸 `join()`：刷新线程可能正卡在 `record_sample` 的跨进程锁上
-/// （超时 3 秒），裸 join 会让「点退出」变成最长 3 秒毫无反应；也不能只
-/// `sleep(50ms)` 就走 —— 那会把最后一次采样丢在半路。
+/// 限制退出时等待HID查询和历史文件锁的时间；结束轮询后再保存待写采样。
 fn join_bounded(h: std::thread::JoinHandle<()>, budget: Duration) {
     let start = std::time::Instant::now();
     while !h.is_finished() && start.elapsed() < budget {
@@ -1849,18 +1900,13 @@ fn handle_act(a: Act, env: &UiEnv) {
             if !ask_confirm(crate::tr!("清空历史记录"), &q) {
                 return;
             }
-            if p.exists() {
-                if let Err(e) = std::fs::remove_file(&p) {
-                    env.say(crate::trf!("✘ 删除失败：{e}", e = e));
-                    return;
-                }
+            let gate = lock_shared(env.shared).history_gate.clone();
+            let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = crate::history::clear_device_history() {
+                env.say(crate::trf!("✘ 删除失败：{e}", e = e));
+                return;
             }
-            {
-                let mut s = lock_shared(env.shared);
-                s.rows.clear();
-                s.plot = None;
-                s.estimate = crate::history::Estimate::default();
-            }
+            lock_shared(env.shared).reset_history();
             env.say(crate::tr!("✔ 历史记录已清空"));
         }
 
@@ -2528,9 +2574,11 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
     if let Some(parent) = new_path.parent() {
         let _ = crate::paths::ensure_dir(parent);
     }
-    if old_has && new_empty {
+    if kind == SavePathKind::Settings && old_has && new_empty {
         let _ = std::fs::copy(&old, &new_path);
     }
+    let gate = lock_shared(env.shared).history_gate.clone();
+    let _guard = (kind == SavePathKind::History).then(|| gate.lock().unwrap_or_else(|e| e.into_inner()));
     let res = match kind {
         SavePathKind::History => crate::history::set_custom_history_path(Some(new_path.clone())),
         SavePathKind::Settings => {
@@ -2542,6 +2590,7 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
     };
     match res {
         Ok(()) => {
+            if kind == SavePathKind::History { lock_shared(env.shared).reload_history(); }
             env.say(crate::trf!(
                 "✔ {}已改到 {}",
                 kind.label(),
@@ -2556,12 +2605,15 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
 
 /// 恢复默认保存位置。
 fn reset_custom_path(env: &UiEnv, kind: SavePathKind) {
+    let gate = lock_shared(env.shared).history_gate.clone();
+    let _guard = (kind == SavePathKind::History).then(|| gate.lock().unwrap_or_else(|e| e.into_inner()));
     let res = match kind {
         SavePathKind::History => crate::history::set_custom_history_path(None),
         SavePathKind::Settings => crate::paths::set_custom_settings_file(None),
     };
     match res {
         Ok(()) => {
+            if kind == SavePathKind::History { lock_shared(env.shared).reload_history(); }
             env.say(crate::trf!("✔ {}已恢复默认位置", kind.label()));
             env.signal.request_refresh();
             env.canvas.repaint_now();
@@ -2853,21 +2905,6 @@ pub(crate) fn autostart_hint(
                 "已关闭开机自启（{}）。",
                 crate::i18n::translate(state.describe())
             ),
-        }
-    }
-}
-
-/// 历史文件第四列的链路编码：有线 = 1，2.4G = 2（C# 版就是这个编码）。
-fn link_code(s: &Shared) -> i32 {
-    match s.link_mode.as_str() {
-        "Wired" => 1,
-        "Wireless24G" => 2,
-        _ => {
-            if s.ident.as_ref().map(|i| i.dongle_sn.is_empty()).unwrap_or(true) {
-                1
-            } else {
-                2
-            }
         }
     }
 }
@@ -3164,12 +3201,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 mut state,
                 mut ident,
                 mut link_mode,
-                plot,
-                estimate,
                 cfg,
                 autostart_text,
                 autostart_on,
-                rows_n,
                 mut err_text,
             ) = {
                 let s = lock_shared(&shared_p);
@@ -3177,12 +3211,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     s.ui_state(),
                     s.ident.clone(),
                     s.link_mode.clone(),
-                    s.plot.clone(),
-                    s.estimate.clone(),
                     s.cfg.clone(),
                     s.autostart_text(),
                     s.autostart_on(),
-                    s.rows.len(),
                     s.error_text(),
                 )
             };
@@ -3201,7 +3232,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 .selected_device
                 .as_ref()
                 .and_then(|key| readings.iter().find(|r| &r.key == key));
-            let (record, is_primary) = {
+            let (record, history) = {
                 let mut s = lock_shared(&shared_p);
                 s.active_key = ui.selected_device.clone();
                 (
@@ -3209,7 +3240,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         .as_ref()
                         .and_then(|k| s.devices.get(k))
                         .cloned(),
-                    s.primary_key.as_ref() == ui.selected_device.as_ref(),
+                    ui.selected_device.as_ref().and_then(|key| s.histories.get(key)).cloned().unwrap_or_default(),
                 )
             };
             if let Some(record) = &record {
@@ -3226,7 +3257,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     .map(|l| l.mode.clone())
                     .unwrap_or_default();
             }
-            let empty_estimate = crate::history::Estimate::default();
             let audio = audio_p.snapshot();
             let data = crate::ui::viewdata::Data {
                 selected,
@@ -3236,13 +3266,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 // 常驻错误文字（读不到设备的原因 / 正在写设备）。
                 // 瞬时提示走 `ui.status`，由 `pages::draw_toast` 优先显示。
                 status: err_text,
-                plot: if is_primary { plot.as_deref() } else { None },
-                estimate: if is_primary {
-                    &estimate
-                } else {
-                    &empty_estimate
-                },
-                rows: if is_primary { rows_n } else { 0 },
+                plot: history.plot.as_deref(),
+                estimate: &history.estimate,
+                rows: history.rows,
                 cfg: &cfg,
                 autostart_text: &autostart_text,
                 autostart_on,
@@ -3260,21 +3286,76 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         let shared_c = Arc::clone(&shared);
         let signal_c = Arc::clone(&signal);
         let sender_c = sender;
-        std::thread::spawn(move || loop {
-            let rows = crate::history::read_rows();
-            let plot = crate::chart::build(&rows);
-            {
-                let mut s = lock_shared(&shared_c);
-                s.rows = rows;
-                s.plot = Some(Arc::new(plot));
-            }
-            sender_c.notice();
-
-            for _ in 0..30 {
-                if signal_c.shutdown.load(Ordering::Relaxed) {
-                    return;
+        std::thread::spawn(move || {
+            let gate = lock_shared(&shared_c).history_gate.clone();
+            let mut cached: crate::history::DeviceHistoryFile = Default::default();
+            let mut plotted: crate::history::DeviceRows = Default::default();
+            let mut plots: BTreeMap<String, Arc<crate::chart::Plot>> = Default::default();
+            let mut loaded_epoch = None;
+            let mut reload_at = std::time::Instant::now();
+            while !signal_c.shutdown.load(Ordering::Relaxed) {
+                {
+                    let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+                    let (samples, aliases, aliases_changed, owner, epoch, keys) = {
+                        let mut s = lock_shared(&shared_c);
+                        s.observe_history();
+                        let (samples, pending_aliases) = s.history_tracker.take_pending();
+                        let aliases_changed = !pending_aliases.is_empty();
+                        let mut aliases: Vec<_> = s.key_aliases.iter().map(|(old,new)| (old.clone(),new.clone())).collect();
+                        aliases.extend(pending_aliases);
+                        // Legacy files had no key and only sampled the primary
+                        // ROG mouse. Do not assign them when ownership is ambiguous.
+                        let rog: Vec<_> = s.devices.values().filter(|device| device.link.is_some()
+                            && device.reading.family == crate::device::DeviceFamily::Mouse).collect();
+                        let owner = (rog.len() == 1).then(|| rog[0].reading.key.clone());
+                        (samples, aliases, aliases_changed, owner, s.history_epoch,
+                            s.devices.keys().cloned().collect::<Vec<_>>())
+                    };
+                    let reloading = loaded_epoch != Some(epoch) || reload_at.elapsed() >= Duration::from_secs(30);
+                    let result = if !samples.is_empty() || aliases_changed
+                        || (reloading && !aliases.is_empty())
+                        || (owner.is_some() && !cached.legacy.is_empty()) {
+                        Some(crate::history::update_device_history(&samples, &aliases, owner.as_deref()))
+                    } else if reloading { Some(crate::history::load_device_history()) } else { None };
+                    if let Some(result) = result {
+                        match result {
+                            Ok(file) => {
+                                cached = file;
+                                loaded_epoch = Some(epoch);
+                                reload_at = std::time::Instant::now();
+                            }
+                            Err(error) => {
+                                crate::diagnostics::event_once("history_update_failed", &error);
+                                lock_shared(&shared_c).history_tracker.retry(samples, aliases);
+                            }
+                        }
+                    }
+                    if loaded_epoch == Some(epoch) {
+                        let mut views = BTreeMap::new();
+                        for key in keys {
+                            let rows = cached.devices.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+                            if plotted.get(&key).map(Vec::as_slice) != Some(rows) {
+                                plots.insert(key.clone(), Arc::new(crate::chart::build(rows)));
+                                plotted.insert(key.clone(), rows.to_vec());
+                            }
+                            views.insert(key.clone(), crate::history::HistoryView {
+                                plot: plots.get(&key).cloned(), rows: rows.len(),
+                                estimate: Default::default(),
+                            });
+                        }
+                        let mut s = lock_shared(&shared_c);
+                        if s.history_epoch == epoch {
+                            let now = snapshot::now_unix() as i64;
+                            for (key, view) in &mut views {
+                                let rows = cached.devices.get(key).map(Vec::as_slice).unwrap_or(&[]);
+                                view.estimate = s.history_tracker.estimate(key, rows, now);
+                            }
+                            s.histories = views;
+                        }
+                    }
                 }
-                std::thread::sleep(Duration::from_millis(1000));
+                sender_c.notice();
+                std::thread::sleep(Duration::from_secs(1));
             }
         })
     };
@@ -3401,30 +3482,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     s.want_full = false;
                     (full, s.write_gen)
                 };
-                let sample = refresh_devices(&shared_t, full, gen_at_read);
+                refresh_devices(&shared_t, full, gen_at_read);
                 lock_shared(&shared_t).complete_rog_refresh(gen_at_read, seen);
-
-                // ④ 记一条历史采样 + 重算续航估算。
-                //
-                // `record_sample` 会拿一个 3 秒超时的全局 mutex，**绝不能握着
-                // `Shared` 的锁去调** —— 另一个实例正在写的时候这里会白等 3 秒，
-                // 期间界面完全刷不出来。
-                if let Some(q) = sample {
-                    let mode_code = link_code(&lock_shared(&shared_t));
-                    let _ = crate::history::record_sample(q.level, q.charging, mode_code);
-
-                    let est = {
-                        let s = lock_shared(&shared_t);
-                        crate::history::predict_sticky(
-                            &s.rows,
-                            q.level,
-                            q.charging,
-                            mode_code,
-                            snapshot::now_unix() as i64,
-                        )
-                    };
-                    lock_shared(&shared_t).estimate = est;
-                }
 
                 let wake_probe = {
                     let s = lock_shared(&shared_t);
@@ -4000,11 +4059,32 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     nwg::dispatch_thread_events();
 
-    // 退出：通知两条后台线程，并等它们真的收尾（`record_sample` 可能在写盘）。
+    // Stop polling before the final history flush. A slow HID worker may outlive
+    // its bounded join, so reject publications after this final cutoff.
     signal.request_quit();
     join_bounded(history_thread, Duration::from_millis(4000));
     join_bounded(refresh_thread, Duration::from_millis(4000));
     for thread in additional_threads { join_bounded(thread, Duration::from_millis(500)); }
+    {
+        let gate = lock_shared(&shared).history_gate.clone();
+        let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+        let (samples, aliases) = {
+            let mut s = lock_shared(&shared);
+            s.write_gen = s.write_gen.wrapping_add(1);
+            for backend in crate::backends::ADDITIONAL_BACKENDS {
+                let generation = s.source_write_gen.entry(backend).or_default();
+                *generation = generation.wrapping_add(1);
+            }
+            let (samples, mut aliases) = s.history_tracker.take_pending();
+            aliases.extend(s.key_aliases.iter().map(|(old, new)| (old.clone(), new.clone())));
+            (samples, aliases)
+        };
+        if !samples.is_empty() || !aliases.is_empty() {
+            if let Err(error) = crate::history::update_device_history(&samples, &aliases, None) {
+                crate::diagnostics::event_once("history_shutdown_failed", &error);
+            }
+        }
+    }
 
     nwg::unbind_event_handler(&handler);
     nwg::unbind_event_handler(&msg_handler);
@@ -4058,6 +4138,56 @@ mod backend_tests {
                 input_len: 20, output_len: 20, feature_len: 0,
             }) }, connected: true, battery_unavailable: false, battery_at: Some(std::time::Instant::now()), polling_rate: Default::default(), dpi: Dpi::default(), battery: Some(Battery { estimated_percent: None, percent: Some(percent),
                 charging: Some(false), voltage_mv: None, approximate: false, level: None }) }
+    }
+
+    #[test]
+    fn history_collects_each_device_family_without_republishing_cached_samples() {
+        let mut shared = Shared::new(Settings::default());
+        let at = std::time::Instant::now();
+        for (backend, key, family) in [
+            (BackendId::Rapoo, "mouse", DeviceFamily::Mouse),
+            (BackendId::MchoseK87s, "keyboard", DeviceFamily::Keyboard),
+            (BackendId::Moondrop, "headset", DeviceFamily::Headset),
+            (BackendId::XInput, "gamepad", DeviceFamily::Gamepad),
+        ] {
+            let mut sample = snapshot(backend, key, 70);
+            sample.target.family = family; sample.battery_at = Some(at);
+            shared.publish_additional(backend, vec![sample.clone()], 0, 1);
+            let (rows, _) = shared.history_tracker.take_pending();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, key);
+            assert_eq!(rows[0].1.level, 70);
+            shared.publish_additional(backend, vec![sample], 0, 2);
+            assert!(shared.history_tracker.take_pending().0.is_empty());
+        }
+        assert_eq!(shared.devices.len(), 4);
+    }
+
+    #[test]
+    fn history_alias_on_first_verified_report_survives_a_path_reload() {
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(BackendId::Logitech, "channel", 70);
+        let old = sample.target.unverified_key();
+        sample.target.key = "verified-device".into(); sample.target.verified_identity = true;
+        shared.publish_additional(BackendId::Logitech, vec![sample.clone()], 0, 1);
+        shared.reload_history();
+        let (rows, aliases) = shared.history_tracker.take_pending();
+        assert_eq!(rows[0].0, "verified-device");
+        assert!(aliases.contains(&(old, "verified-device".into())));
+        sample.target.key = "replacement".into();
+        shared.publish_additional(BackendId::Logitech, vec![sample], 0, 2);
+        let (_, aliases) = shared.history_tracker.take_pending();
+        assert!(!aliases.iter().any(|(from, to)| from == "verified-device" && to == "replacement"));
+    }
+
+    #[test]
+    fn history_clear_drops_queued_samples_and_does_not_reuse_the_current_measurement() {
+        let mut shared = Shared::new(Settings::default());
+        let sample = snapshot(BackendId::Rapoo, "mouse", 70);
+        shared.publish_additional(BackendId::Rapoo, vec![sample.clone()], 0, 1);
+        shared.reset_history();
+        shared.publish_additional(BackendId::Rapoo, vec![sample], 0, 2);
+        assert!(shared.history_tracker.take_pending().0.is_empty());
     }
 
     #[test]

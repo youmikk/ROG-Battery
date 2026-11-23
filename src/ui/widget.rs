@@ -306,25 +306,28 @@ impl Drop {
     }
 }
 
-/// 一个可交互区域。
 /// 电量历史曲线的像素级几何（`draw_chart` 每帧都要用，但只在数据或
 /// 绘图区尺寸变化时才需要重算）。
 ///
-/// 充电动画期间整帧 60fps 重绘，而采样 30 秒才更新一次；把「归一化坐标 →
-/// 像素」这一步与三份 Vec（采样点 / 平滑曲线 / 面积多边形）连同充电底带
-/// 一起缓存，热路径就只剩三次 GDI+ 调用。
+/// 每段折线和填充独立缓存，断档不跨段连线；窗口重绘不重新分配点集。
 #[derive(Clone, Debug)]
 pub struct ChartGeom {
-    /// 缓存键：`Plot` 地址 + 绘图区四个边界 + 纵轴上下界。
-    pub key: (usize, u32, u32, u32, u32, u32, u32),
+    /// 缓存键：`Plot` 构建代号 + 绘图区四个边界 + 纵轴上下界。
+    pub key: (u64, u32, u32, u32, u32, u32, u32),
     /// 采样点（像素）。
     pub pts: Vec<(f32, f32)>,
-    /// 平滑曲线（像素）。
-    pub curve: Vec<(f32, f32)>,
-    /// 面积多边形（曲线 + 首尾拉到底边）。
-    pub area: Vec<(f32, f32)>,
+    /// 每段包含自己的路径、底部填充和真实样本范围。
+    pub segments: Vec<ChartSegmentGeom>,
     /// 充电时段底带。
     pub bands: Vec<R>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChartSegmentGeom {
+    pub samples: std::ops::Range<usize>,
+    pub curve: Vec<(f32, f32)>,
+    pub area: Vec<(f32, f32)>,
+    pub approximate: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

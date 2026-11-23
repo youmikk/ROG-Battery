@@ -22,11 +22,14 @@ Runs as a single executable without administrator rights or a separate backgroun
 | Mouse DPI | Numerical DPI, actual stage switching, X/Y stage editing or polling-rate settings where supported. Connections with numerical DPI writes can also save 1–4 software presets, sorted by value. |
 | Audio | Adjust speaker and headset volume or mute the microphone through Windows audio APIs. Changing the default output device opens Windows sound settings. |
 | Device preferences | Rename devices, override their type, drag to reorder, and choose the device for the standard tray icon. Preferences apply across the main window and taskbar. |
-| Detailed ROG settings | Supported mice retain DPI, polling rate, debounce, button mappings, sleep settings and configuration backups. The primary ROG mouse's battery page provides history and runtime estimates. |
+| Battery history and estimates | Supported devices from all brands keep separate 48-hour battery charts. Continuous valid samples provide remaining runtime or charging estimates; coarse readings retain the `≈` indicator. |
+| Detailed ROG settings | Supported mice retain DPI, polling rate, debounce, button mappings, sleep settings and configuration backups. |
 | Low-battery notifications | Windows notifications are available in the Store edition, not the portable build. They use valid, precise readings rather than estimates or expired cache entries. |
 | Appearance and language | Light and dark themes, system preferences, Simplified Chinese and English, plus startup, close behavior and refresh settings. |
 
 Mouse controls depend on the model, firmware and connection. Hardware DPI stages and software presets are presented separately; presets do not enable writes on read-only devices. Supported Logitech onboard profiles retain their actual stages, including a fifth stage. The 1–4 software preset limit does not change those hardware stages.
+
+Battery history and estimates apply to supported mice, keyboards, headsets and controllers that report battery levels. Cached or republished readings do not create new samples. Disconnections, long gaps and charging-state changes start a new interval. Estimates reflect recent consumption; insufficient evidence shows an explanation. Coarse levels require more observed transitions and produce rounded estimates in hours or days.
 
 ## Brands and device coverage
 
@@ -44,13 +47,13 @@ Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard gene
 
 Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
 
-## Latest release: 1.4.7
+## Latest release: 1.4.8
 
-- Expand battery queries for commonly used Chinese mouse, keyboard, headset and controller brands, and improve actual DPI stage reads and switching on selected mice.
-- Add a multi-device taskbar battery strip and improve sizing, icons, charging indicators, clicks, ordering and background operation.
-- Redesign About and Device feedback, fixing text clipping, alignment and corners, with optional diagnostic previews and screenshot selection. Check for updates is currently a placeholder.
+- Extend battery charts and runtime estimates to all supported brands, with separate 48-hour histories for each device.
+- Plot measured percentages as lines and coarse levels as steps marked `≈`; estimate remaining runtime or charging time from valid samples.
+- Fix duplicate cached samples, forecasts spanning disconnections, device identity migration and saving on exit, with improved Chinese and English battery pages.
 
-This release consolidates the former 1.4.7–1.4.12 updates under 1.4.7. Users of those portable versions can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store publishing is separate and may lag behind it. See the [full changelog](CHANGELOG.md).
+Portable users can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store updates become available after Store review. See the [full changelog](CHANGELOG.md).
 
 ## Getting started
 

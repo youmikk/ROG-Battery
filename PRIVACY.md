@@ -13,7 +13,7 @@ R Battery 是用于读取外设电量并调整支持的鼠标参数的 Windows �
 以下数据仅保存在您的电脑上：
 
 - 设置、语言、主题、托盘选择、设备名称和类型偏好。默认设置位于 `%APPDATA%\rog-mouse-ctl\settings.ini`。
-- 电量历史，用于绘制曲线和估算续航，默认位于 `%LOCALAPPDATA%\rog-battery\history.tsv`。
+- 电量历史，用于绘制曲线和估算续航，默认位于 `%LOCALAPPDATA%\rog-battery\history.tsv`。各设备按本地标识分别保存时间、电量、充电状态及精度，不在历史中保存用户自定义名称；每台设备保留最近 48 小时、最多 2000 条采样。
 - 设备状态缓存，默认位于 `%LOCALAPPDATA%\rog-mouse-ctl\snapshot.cache`。
 - 故障诊断与托盘日志，可能包含错误文本、设备状态或本地路径，不会自动上传。
 - 由您主动保存的设备配置备份，以及自定义存储位置的路径记录。
@@ -54,7 +54,7 @@ Through Windows HID and system interfaces, the app reads information such as mod
 The following data stays on your computer:
 
 - Settings, language, theme, tray selection, device names, and device type preferences. The default settings file is `%APPDATA%\rog-mouse-ctl\settings.ini`.
-- Battery history for charts and runtime estimates, at `%LOCALAPPDATA%\rog-battery\history.tsv` by default.
+- Battery history for charts and runtime estimates, at `%LOCALAPPDATA%\rog-battery\history.tsv` by default. Timestamps, levels, charging state and precision are stored separately by local device key, without custom device names. Each device retains up to 2,000 samples from the last 48 hours.
 - A device snapshot cache, at `%LOCALAPPDATA%\rog-mouse-ctl\snapshot.cache` by default.
 - Diagnostic and tray logs, which may contain error messages, device status, or local paths. They are not uploaded automatically.
 - Device configuration backups you explicitly save, and records of custom storage locations.

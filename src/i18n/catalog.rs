@@ -64,7 +64,7 @@ macro_rules! tr {
     ("名称最多 64 个字符，不能包含换行或控制字符") => { if $crate::i18n::english() { "Use up to 64 characters, without line breaks or control characters." } else { "名称最多 64 个字符，不能包含换行或控制字符" } };
     ("标准托盘图标设备") => { if $crate::i18n::english() { "Primary tray icon device" } else { "标准托盘图标设备" } };
     ("任务栏电量条会同时显示全部有电量设备") => { if $crate::i18n::english() { "The taskbar battery strip shows every device with battery data" } else { "任务栏电量条会同时显示全部有电量设备" } };
-    ("已在标准托盘显示") => { if $crate::i18n::english() { "Shown as primary tray icon" } else { "已在标准托盘显示" } };
+    ("已在标准托盘显示") => { if $crate::i18n::english() { "Shown in tray" } else { "已在标准托盘显示" } };
     ("设为标准托盘图标") => { if $crate::i18n::english() { "Use as primary tray icon" } else { "设为标准托盘图标" } };
     ("设备类型") => { if $crate::i18n::english() { "Device type" } else { "设备类型" } };
     ("单击数字查看全部设备") => { if $crate::i18n::english() { "Click the number to view all devices" } else { "单击数字查看全部设备" } };
@@ -359,6 +359,7 @@ macro_rules! trf {
     ("预计还能使用 {}", $($args:tt)*) => { if $crate::i18n::english() { format!("Estimated remaining: {}", $($args)*) } else { format!("预计还能使用 {}", $($args)*) } };
     ("沿用 {}前的估算 · 当前读数没更新，暂时没法重算", $($args:tt)*) => { if $crate::i18n::english() { format!("Estimate from {} ago · Waiting for a new reading", $($args)*) } else { format!("沿用 {}前的估算 · 当前读数没更新，暂时没法重算", $($args)*) } };
     ("按最近 {} 个采样估算 · 变化 {:+.2} %/h", $($args:tt)*) => { if $crate::i18n::english() { format!("Based on {} recent samples · Change {:+.2} %/h", $($args)*) } else { format!("按最近 {} 个采样估算 · 变化 {:+.2} %/h", $($args)*) } };
+    ("按最近 {} 个采样估算 · 变化 ≈{:+.1} %/h", $($args:tt)*) => { if $crate::i18n::english() { format!("Based on {} recent samples · Change ≈{:+.1} %/h", $($args)*) } else { format!("按最近 {} 个采样估算 · 变化 ≈{:+.1} %/h", $($args)*) } };
     ("{} 个采样点", $($args:tt)*) => { if $crate::i18n::english() { format!("{} samples", $($args)*) } else { format!("{} 个采样点", $($args)*) } };
     ("档位 {}", $($args:tt)*) => { if $crate::i18n::english() { format!("Stage {}", $($args)*) } else { format!("档位 {}", $($args)*) } };
     ("{} 个 · {}", $($args:tt)*) => { if $crate::i18n::english() { format!("{} LEDs · {}", $($args)*) } else { format!("{} 个 · {}", $($args)*) } };
@@ -545,6 +546,9 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "应用" => "Apply",
         "电量历史" => "Battery history",
         "近 48 小时" => "Last 48 hours",
+        "≈ 粗略电量" => "≈ Coarse level",
+        "历史样本不足（至少需要 2 个采样点）" => "More history is needed (at least 2 samples)",
+        "正在读取历史样本 ……" => "Loading battery history…",
         "充电" => "Charging",
         "当前" => "Active",
         "设备返回的回报率列表无效" => "Invalid polling rate list returned by the device",
@@ -750,6 +754,9 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "读不到设备状态，无法备份" => "Cannot back up: device status unavailable",
         "备份文件里没有任何已知键" => "The backup contains no recognized settings",
         "样本不足" => "Not enough samples",
+        "等待设备更新电量" => "Waiting for a fresh battery reading",
+        "充电状态未知，等待稳定放电趋势" => "Charging state unknown; waiting for a steady discharge trend",
+        "仅有粗略电量，等待更多档位变化" => "Coarse battery readings; waiting for more level changes",
         "刚切换，重新观察中" => "Power state changed; collecting new samples",
         "电量刚跳变，重新观察中" => "Battery level jumped; collecting new samples",
         "电量还没变化（需要再多观察一会儿）" => "Waiting for the battery level to change",

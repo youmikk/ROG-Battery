@@ -1,191 +1,268 @@
+use crate::history::{HistoryRow, HIST_GAP_BREAK_SEC};
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::history::HistoryRow;
-
-// ==================== 版面 ====================
-
-/// X 轴的坐标系基准：`build` 把时间线性映射到 `AREA_X .. AREA_X + AREA_W`。
-///
-/// 自绘界面按**逻辑像素**排版，这两个数没有物理意义，只作为比例基准 ——
-/// `pages.rs` 用 `(pt.x - AREA_X) / AREA_W` 把点搬进卡片的实际宽度。
-pub const AREA_X: i32 = 24;
-pub const AREA_W: i32 = 660;
-
-// ==================== 行数据 → 采样点 ====================
-
-/// 一个采样点。纵向位置由绘制方按自己的 Y 轴窗口算。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A measured point. Time stays normalized until the final pixel mapping so
+/// dense samples are not rounded onto a fixed-width intermediate canvas.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pt {
-    /// 已映射好的横向像素坐标（`AREA_X .. AREA_X + AREA_W`）。
-    pub x: i32,
-    /// 原始电量，绘制方据此算 Y。
+    pub fx: f32,
     pub level: u8,
-    /// 这个采样点当时是否在充电 —— 用于给折线段换颜色、画充电底带。
-    pub charging: bool,
+    pub approximate: bool,
 }
 
-/// 曲线上的一个点：横向是 0..=1 的比例，纵向是**平滑后**的电量。
-///
-/// 平滑（移动平均 + Catmull-Rom）本来在绘制方每帧现算，充电时 60fps 下
-/// 每秒要算 120 次、每次 2 万个点。数据 30 秒才更新一次，所以挪到这里
-/// 由 `build` 算一遍，绘制方只做像素映射。
+/// A point on a measured line or coarse battery step, without smoothing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurvePt {
-    /// 横向比例（0 = 区间左端，1 = 右端），按 `AREA_X / AREA_W` 归一。
     pub fx: f32,
-    /// 平滑后的电量（可能是小数，纵向映射仍由绘制方按自己的 Y 窗口算）。
     pub level: f32,
 }
 
-/// 一次完整的折线数据。
+/// One uninterrupted interval with a consistent precision and charging state.
+#[derive(Clone, Debug)]
+pub struct Segment {
+    /// Indices of the original samples in `Plot::points`.
+    pub samples: Range<usize>,
+    pub curve: Vec<CurvePt>,
+    /// True only when both the state and its charging flag are known.
+    pub charging: bool,
+    pub approximate: bool,
+}
+
+/// Geometry is rebuilt only when this snapshot changes or the viewport moves.
 #[derive(Clone, Debug, Default)]
 pub struct Plot {
     pub points: Vec<Pt>,
-    /// 已平滑、待映射的曲线点。`points.len() < 3` 时就是原始点的拷贝。
-    pub curve: Vec<CurvePt>,
+    pub segments: Vec<Segment>,
     pub first_ts: i64,
     pub last_ts: i64,
+    /// Allocators may reuse an old Plot's address after a background refresh.
+    /// A revision also invalidates cached geometry in that case.
+    pub revision: u64,
 }
 
 impl Plot {
-    /// 少于 2 个点画不出折线 —— 调用方要显示「历史样本不足」而不是留白。
     pub fn enough(&self) -> bool {
         self.points.len() >= 2
     }
+
+    pub fn has_approximate(&self) -> bool {
+        self.points.iter().any(|point| point.approximate)
+    }
+
+    pub fn has_charging_interval(&self) -> bool {
+        self.segments.iter().any(|segment| {
+            segment.charging && segment.samples.len() >= 2
+        })
+    }
 }
 
-/// 把历史行映射成采样点。
-///
-/// X 轴范围取**数据自己的时间跨度**，不是写死 48 小时：历史文件保留 48 小时，
-/// 但手上只有 8.75 小时数据时，按 48 小时铺满会让 7 个点全挤在左边五分之一里，
-/// 看起来像「点挤在一起」的 bug。跨度写在顶部说明行里，用户仍然知道这是多久的数据。
-///
-/// `first_ts` / `last_ts` 用 `min` / `max` 而不是首尾元素：`read_rows()` 虽然会排序，
-/// 但这个函数不该依赖调用方的排序 —— 用极值后即使输入乱序，X 也不会反向。
+static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+
+/// Keep measured values unchanged. Explicit history breaks, long absences,
+/// precision changes and power/connection transitions each start a new segment.
+/// An isolated sample remains visible as a dot; it cannot bridge an interval
+/// for which no continuous measurements exist.
 pub fn build(rows: &[HistoryRow]) -> Plot {
-    if rows.is_empty() {
+    let mut ordered = rows.to_vec();
+    ordered.sort_by_key(|row| row.ts);
+
+    let mut samples: Vec<HistoryRow> = Vec::with_capacity(ordered.len());
+    let mut invalid_gap = false;
+    for mut row in ordered {
+        if row.level > 100 {
+            invalid_gap = true;
+            continue;
+        }
+        row.break_before |= invalid_gap;
+        invalid_gap = false;
+        if let Some(previous) = samples.last_mut().filter(|previous| previous.ts == row.ts) {
+            // Same-second updates have no horizontal duration. Retain the last
+            // value and any explicit boundary recorded earlier in that second.
+            row.break_before |= previous.break_before;
+            *previous = row;
+        } else {
+            samples.push(row);
+        }
+    }
+    let Some(first) = samples.first() else {
         return Plot::default();
+    };
+    let first_ts = first.ts;
+    let last_ts = samples.last().map_or(first_ts, |row| row.ts);
+    let span = last_ts.saturating_sub(first_ts).max(1) as f64;
+    let points: Vec<Pt> = samples.iter().map(|row| Pt {
+        fx: (row.ts.saturating_sub(first_ts) as f64 / span) as f32,
+        level: row.level,
+        approximate: row.approximate,
+    }).collect();
+
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for index in 1..samples.len() {
+        if starts_segment(&samples[index - 1], &samples[index]) {
+            segments.push(build_segment(&points, start..index, &samples[start]));
+            start = index;
+        }
     }
-
-    let first_ts = rows.iter().map(|r| r.ts).min().unwrap_or(0);
-    let last_ts = rows.iter().map(|r| r.ts).max().unwrap_or(0);
-    // 所有采样点在同一秒时跨度为 0，除法会炸 —— 钳到 1 秒，
-    // 结果是所有点落在同一条竖线上（诚实反映「数据只覆盖一瞬」）。
-    let span = (last_ts - first_ts).max(1);
-
-    let mut points = Vec::with_capacity(rows.len());
-    for r in rows {
-        let fx = (r.ts - first_ts) as f64 / span as f64;
-        let x = AREA_X + (fx * (AREA_W - 1) as f64).round() as i32;
-        points.push(Pt {
-            x,
-            level: r.level,
-            charging: r.charging,
-        });
-    }
-
-    let curve = build_curve(&points);
+    segments.push(build_segment(&points, start..samples.len(), &samples[start]));
 
     Plot {
         points,
-        curve,
+        segments,
         first_ts,
         last_ts,
+        revision: NEXT_REVISION.fetch_add(1, Ordering::Relaxed),
     }
 }
 
-// ==================== 平滑 ====================
-
-/// 曲线上限：`AREA_W` 是 660 逻辑像素，两点/像素已经远超肉眼能分辨的密度。
-/// 2000 个采样 × 10 段插值 = 2 万点，是一条 660px 宽的线负担 30 倍冗余。
-const MAX_CURVE_PTS: usize = (AREA_W as usize) * 2;
-
-/// 尾部移动平均 + Catmull-Rom 插值，产出归一化曲线。
-fn build_curve(points: &[Pt]) -> Vec<CurvePt> {
-    let area_w = AREA_W as f32;
-    let raw: Vec<(f32, f32)> = points
-        .iter()
-        .map(|p| {
-            (
-                (p.x - AREA_X) as f32 / area_w,
-                p.level as f32,
-            )
-        })
-        .collect();
-    let soft = soften(&raw, 5);
-    // 段数自适应：点多时降到 1，避免总点数随采样数线性膨胀。
-    let seg = (MAX_CURVE_PTS / raw.len().max(1)).clamp(1, 10);
-    smooth_curve(&soft, seg)
-        .into_iter()
-        .map(|(fx, level)| CurvePt { fx, level })
-        .collect()
+fn starts_segment(previous: &HistoryRow, current: &HistoryRow) -> bool {
+    current.break_before
+        || current.ts.saturating_sub(previous.ts) > HIST_GAP_BREAK_SEC
+        || current.approximate != previous.approximate
+        || current.charging_known != previous.charging_known
+        || (current.charging_known && current.charging != previous.charging)
+        || current.mode != previous.mode
 }
 
-/// 窗口移动平均：把 1% 量化的台阶磨成缓坡。
-///
-/// 首尾各留一半窗口不参与（saturating 边界），末点强制保留原值 ——
-/// 它要跟「最新值」那个圆点标记重合，被平均掉就错位了。
-fn soften(pts: &[(f32, f32)], win: usize) -> Vec<(f32, f32)> {
-    if win < 3 || pts.len() < win {
-        return pts.to_vec();
-    }
-    let h = win / 2;
-    let n = pts.len();
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let lo = i.saturating_sub(h);
-        let hi = (i + h).min(n - 1);
-        let mut sum = 0.0f32;
-        let mut cnt = 0.0f32;
-        for j in lo..=hi {
-            sum += pts[j].1;
-            cnt += 1.0;
+fn build_segment(points: &[Pt], samples: Range<usize>, first: &HistoryRow) -> Segment {
+    let measured = &points[samples.clone()];
+    let mut curve: Vec<CurvePt> = Vec::with_capacity(measured.len() * 2);
+    for (index, point) in measured.iter().enumerate() {
+        if first.approximate && index > 0 {
+            let previous = &measured[index - 1];
+            if previous.level != point.level {
+                // A level report cannot establish a smooth decline between
+                // thresholds. Keep its previous plateau until the next report.
+                curve.push(CurvePt { fx: point.fx, level: previous.level as f32 });
+            }
         }
-        out.push((pts[i].0, sum / cnt));
+        curve.push(CurvePt { fx: point.fx, level: point.level as f32 });
     }
-    out[n - 1] = pts[n - 1];
-    out
-}
-
-/// Catmull-Rom：只对 y 插值，x 线性。
-///
-/// 采样间隔可能极不均匀（休眠两小时才一个点）。x 也插值会让曲线在密集处打结、
-/// 稀疏处回折，所以 x 一律线性；y 用样条并夹在数据自身极值内，避免过冲出界。
-fn smooth_curve(pts: &[(f32, f32)], seg: usize) -> Vec<(f32, f32)> {
-    if pts.len() < 3 || seg < 2 {
-        return pts.to_vec();
+    Segment {
+        samples,
+        curve,
+        charging: first.charging_known && first.charging,
+        approximate: first.approximate,
     }
-    let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
-    for (_, y) in pts {
-        min_y = min_y.min(*y);
-        max_y = max_y.max(*y);
-    }
-    let n = pts.len();
-    let mut out: Vec<(f32, f32)> = Vec::with_capacity(n * seg + 1);
-    for i in 0..n - 1 {
-        let p0 = pts[i.saturating_sub(1)];
-        let p1 = pts[i];
-        let p2 = pts[i + 1];
-        let p3 = pts[(i + 2).min(n - 1)];
-        for s in 0..seg {
-            let t = s as f32 / seg as f32;
-            let t2 = t * t;
-            let t3 = t2 * t;
-            let y = 0.5
-                * (2.0 * p1.1
-                    + (p2.1 - p0.1) * t
-                    + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
-                    + (3.0 * p1.1 - p0.1 - 3.0 * p2.1 + p3.1) * t3);
-            out.push((p1.0 + (p2.0 - p1.0) * t, y.clamp(min_y, max_y)));
-        }
-    }
-    out.push(*pts.last().unwrap());
-    out
 }
 
 pub const NOT_ENOUGH_TEXT: &str = "历史样本不足（至少需要 2 个采样点）";
-
-/// 后台线程还没读完第一遍时显示的文字。
-///
-/// 必须和 [`NOT_ENOUGH_TEXT`] 分开：读盘冷启动 712 ms，这段时间里说
-/// 「样本不足」是**假话**（文件里明明有 7 条），用户会以为功能坏了。
 pub const LOADING_TEXT: &str = "正在读取历史样本 ……";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(ts: i64, level: u8) -> HistoryRow {
+        HistoryRow::new(ts, level, false, 2)
+    }
+
+    #[test]
+    fn sorts_measured_values_without_rounding_or_smoothing_them() {
+        let plot = build(&[row(3600, 70), row(0, 90), row(120, 89), row(60, 89)]);
+        assert_eq!((plot.first_ts, plot.last_ts), (0, 3600));
+        assert_eq!(plot.points.iter().map(|point| point.level).collect::<Vec<_>>(),
+            vec![90, 89, 89, 70]);
+        assert_eq!(plot.segments.len(), 1);
+        let curve = &plot.segments[0].curve;
+        assert_eq!(curve.len(), 4);
+        assert_eq!(curve.first().unwrap().fx, 0.0);
+        assert_eq!(curve.last().unwrap().fx, 1.0);
+        assert!((curve[1].fx - 60.0 / 3600.0).abs() < f32::EPSILON);
+        assert!(curve.windows(2).all(|pair| pair[1].fx > pair[0].fx));
+        assert_eq!(curve.iter().map(|point| point.level).collect::<Vec<_>>(),
+            vec![90.0, 89.0, 89.0, 70.0]);
+    }
+
+    #[test]
+    fn gaps_and_explicit_breaks_leave_disconnected_intervals() {
+        let resumed_at = 60 + HIST_GAP_BREAK_SEC + 1;
+        let mut explicit = row(resumed_at + 60, 78);
+        explicit.break_before = true;
+        let plot = build(&[row(0, 90), row(60, 89), row(resumed_at, 80), explicit]);
+        assert_eq!(plot.segments.iter().map(|segment| segment.samples.clone())
+            .collect::<Vec<_>>(), vec![0..2, 2..3, 3..4]);
+        assert_eq!(plot.segments[1].curve.len(), 1);
+        assert_eq!(plot.segments[2].curve.len(), 1);
+    }
+
+    #[test]
+    fn coarse_samples_are_steps_and_never_blend_with_precise_samples() {
+        let mut coarse = [row(60, 80), row(120, 60), row(180, 60)];
+        for sample in &mut coarse { sample.approximate = true; }
+        let plot = build(&[row(0, 92), coarse[0], coarse[1], coarse[2], row(240, 57)]);
+        assert!(plot.has_approximate());
+        assert_eq!(plot.segments.iter().map(|segment| segment.samples.clone())
+            .collect::<Vec<_>>(), vec![0..1, 1..4, 4..5]);
+        let segment = &plot.segments[1];
+        assert!(segment.approximate);
+        assert_eq!(segment.curve.iter().map(|point| (point.fx, point.level))
+            .collect::<Vec<_>>(), vec![(0.25, 80.0), (0.5, 80.0), (0.5, 60.0), (0.75, 60.0)]);
+    }
+
+    #[test]
+    fn only_confirmed_continuous_charging_gets_a_charging_interval() {
+        let mut first_unknown = row(0, 50);
+        first_unknown.charging = true;
+        first_unknown.charging_known = false;
+        let mut second_unknown = first_unknown;
+        second_unknown.ts = 60;
+        let mut charging = row(120, 51);
+        charging.charging = true;
+        let mut later = charging;
+        later.ts = 180;
+        later.level = 52;
+        let unknown = build(&[first_unknown, second_unknown]);
+        assert!(!unknown.has_charging_interval());
+        let plot = build(&[first_unknown, second_unknown, charging, later, row(240, 52)]);
+        assert_eq!(plot.segments.iter().map(|segment| segment.samples.clone())
+            .collect::<Vec<_>>(), vec![0..2, 2..4, 4..5]);
+        assert!(plot.has_charging_interval());
+        assert!(!plot.segments[0].charging);
+        assert!(plot.segments[1].charging);
+        assert!(!plot.segments[2].charging);
+    }
+
+    #[test]
+    fn connection_changes_do_not_join_the_history() {
+        let mut wired = row(120, 80);
+        wired.mode = 1;
+        let plot = build(&[row(0, 80), row(60, 80), wired]);
+        assert_eq!(plot.segments.iter().map(|segment| segment.samples.clone())
+            .collect::<Vec<_>>(), vec![0..2, 2..3]);
+    }
+
+    #[test]
+    fn same_second_updates_keep_the_latest_value_and_boundary() {
+        let mut boundary = row(60, 80);
+        boundary.break_before = true;
+        let plot = build(&[row(0, 90), boundary, row(60, 79), row(120, 78)]);
+        assert_eq!(plot.points.iter().map(|point| point.level).collect::<Vec<_>>(),
+            vec![90, 79, 78]);
+        assert_eq!(plot.segments.iter().map(|segment| segment.samples.clone())
+            .collect::<Vec<_>>(), vec![0..1, 1..3]);
+    }
+
+    #[test]
+    fn invalid_samples_cannot_connect_valid_neighbors() {
+        let plot = build(&[row(0, 80), row(60, 255), row(120, 78), row(180, 77)]);
+        assert_eq!(plot.points.len(), 3);
+        assert_eq!(plot.segments.iter().map(|segment| segment.samples.clone())
+            .collect::<Vec<_>>(), vec![0..1, 1..3]);
+        assert!(build(&[]).points.is_empty());
+        assert!(build(&[row(0, 255)]).points.is_empty());
+        assert!(!build(&[row(0, 80)]).enough());
+    }
+
+    #[test]
+    fn rebuilds_invalidate_geometry_even_for_the_same_allocation() {
+        let mut plot = build(&[row(0, 80), row(60, 79)]);
+        let address = &plot as *const Plot;
+        let revision = plot.revision;
+        plot = build(&[row(0, 20), row(60, 19)]);
+        assert_eq!(&plot as *const Plot, address);
+        assert_ne!(plot.revision, revision);
+        assert_eq!(plot.clone().revision, plot.revision);
+    }
+}

@@ -1,17 +1,15 @@
-//! 历史采样的**存储层**：路径、解析、跨进程互斥、写入与裁剪。
-//!
-//! 逐条照搬 C# 版 `rog-battery.cs` 的 `RecordSampleLocked` / `PruneHistory`，
-//! 包括那些用真机数据试出来的阈值（60 秒去重 / 120 秒心跳 / 7200 秒断档 /
-//! 48 小时窗口 / 2000 行上限）。每一条都对应一次踩坑记录，换算法等于把那些坑
-//! 重新踩一遍。
+//! 历史采样的存储层：路径、跨进程互斥、原子写入与旧格式兼容。
+//! 多设备记录和旧四列记录共用history.tsv及既有命名互斥体。
 //!
 //! 路径故意叫 `rog-battery` 而不是 `rog-mouse-ctl`：要复用 C# 版攒下的历史数据。
 //!
 //! 上层：[`super::predict`]（纯计算）、[`super::format`]（纯文案）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::win32;
+use super::devices::{self, DeviceHistoryFile};
 
 // ==================== 常量（逐字照抄 C# 版） ====================
 
@@ -22,7 +20,7 @@ pub const HIST_KEEP_HOURS: i64 = 48;
 pub const TS_MIN_PLAUSIBLE: i64 = 1_577_836_800;
 /// 时间戳的合理上界（2100-01-01Z）。
 pub const TS_MAX_PLAUSIBLE: i64 = 4_102_444_800;
-/// 文件行数上限，防止无限增长。
+/// 每台设备的行数上限；未归属旧记录也独立使用这个上限。
 pub const HIST_MAX_LINES: usize = 2000;
 /// 电量变化时，两条采样至少隔 60 秒。
 pub const HIST_MIN_GAP_SEC: i64 = 60;
@@ -41,21 +39,22 @@ pub const MUTEX_NAME: &str = "Local\\RogBatteryHistory";
 /// 等锁上限。拿不到就放弃本次写入，不阻塞调用方。
 pub const MUTEX_TIMEOUT_MS: u32 = 3000;
 
-/// 单行历史记录的最大字节数（`ts\tlevel\tcharging\tmode`，留足余量）。
-///
-/// 只用来估算「文件体积是否接近行数上限」，不需要精确。
-const LINE_MAX_BYTES: usize = 24;
-/// 每写这么多条就做一次整份裁剪。
-///
-/// 48 小时窗口按行时间判断，必须全量；但写采样只需要最后一行。折中是攒够一批
-/// 再读全量，把「每条一次全量读」降成「每 40 条一次」。
-const PRUNE_EVERY_WRITES: u32 = 40;
-/// 距上次裁剪又写了几条。
-static WRITES_SINCE_PRUNE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CACHED_ROW_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// 最近一次成功读取或写入后的有效历史条数，包括未归属的旧记录。
+/// 诊断输出只取这个内存值，不在UI线程访问文件或等待历史互斥体。
+pub fn cached_row_count() -> usize {
+    CACHED_ROW_COUNT.load(Ordering::Relaxed)
+}
+
+fn remember_row_count(history: &DeviceHistoryFile) {
+    let count = history.devices.values().fold(history.legacy.len(), |total, rows| total.saturating_add(rows.len()));
+    CACHED_ROW_COUNT.store(count, Ordering::Relaxed);
+}
 
 // ==================== 数据行 ====================
 
-/// 一条历史采样：`<unix 秒>\t<电量 0-100>\t<charging 0|1>\t<mode>`。
+/// 一条历史采样。旧格式没有设备键和flags，新增采样由v2格式保存。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryRow {
     pub ts: i64,
@@ -64,6 +63,12 @@ pub struct HistoryRow {
     pub charging: bool,
     /// 连接方式（1=有线 2=2.4G 3=蓝牙），判定「已充满」要用它。
     pub mode: i32,
+    /// 该百分比由设备电量档位近似换算。
+    pub approximate: bool,
+    /// false表示设备没有提供可靠的充电状态。
+    pub charging_known: bool,
+    /// 当前采样之前存在断档，不应跨过此点连线或推算。
+    pub break_before: bool,
 }
 
 impl HistoryRow {
@@ -73,17 +78,10 @@ impl HistoryRow {
             level,
             charging,
             mode,
+            approximate: false,
+            charging_known: true,
+            break_before: false,
         }
-    }
-
-    fn to_line(&self) -> String {
-        format!(
-            "{}\t{}\t{}\t{}",
-            self.ts,
-            self.level,
-            if self.charging { 1 } else { 0 },
-            self.mode
-        )
     }
 }
 
@@ -104,7 +102,7 @@ pub fn primary_history_path() -> PathBuf {
     crate::paths::cache_dir().join("history.tsv")
 }
 
-/// 本次进程实际使用的历史文件路径（首次调用时定下来，之后不变）。
+/// 本次进程实际使用的历史文件路径；设置中更改位置后立即更新。
 ///
 /// 为什么要探测：`%LOCALAPPDATA%` 在某些受限环境里对普通进程只读
 /// （写入一律 `os error 5 拒绝访问`，连在同一目录新建文件都不行）。
@@ -114,21 +112,15 @@ pub fn primary_history_path() -> PathBuf {
 /// 顺序：`%LOCALAPPDATA%\rog-battery\` → 程序所在目录 → 缓存目录。
 /// 只有前一个**真的写不进去**才往后掉，正常机器上永远是第一个。
 pub fn history_path() -> PathBuf {
-    if let Ok(guard) = resolved_cell().lock() {
-        if let Some(r) = guard.as_ref() {
-            return r.path.clone();
-        }
+    let mut guard = resolved_cell().lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(r) = guard.as_ref() {
+        return r.path.clone();
     }
     let (path, custom) = match read_custom_history_path() {
         Some(custom) => (custom, true),
         None => (resolve_history_path_default(), false),
     };
-    if let Ok(mut guard) = resolved_cell().lock() {
-        *guard = Some(Resolved {
-            path: path.clone(),
-            custom,
-        });
-    }
+    *guard = Some(Resolved { path: path.clone(), custom });
     path
 }
 
@@ -138,20 +130,42 @@ fn custom_history_pointer() -> PathBuf {
 
 /// 用户在设置里点「更改」时随时改历史文件路径（进程内立即生效）。
 pub fn set_custom_history_path(new_path: Option<PathBuf>) -> Result<(), String> {
+    let _guard = lock_history().ok_or("历史文件正在使用，暂时无法更改保存位置")?;
+    let source = active_history_path_locked()?;
     let pointer = custom_history_pointer();
     let (resolved, custom) = match new_path {
         Some(p) => {
-            let _ = crate::paths::ensure_dir(&crate::paths::config_dir());
-            std::fs::write(&pointer, p.to_string_lossy().as_bytes())
-                .map_err(|e| format!("写入历史文件重定向记录失败：{e}"))?;
+            if p.as_os_str().is_empty() || p.to_str().is_none()
+                || p.to_string_lossy().trim() != p.to_string_lossy()
+                || p.to_string_lossy().contains(['\n', '\r', '\0']) {
+                return Err("历史文件保存路径无效".into());
+            }
             (p, true)
         }
-        None => {
-            let _ = std::fs::remove_file(&pointer);
-            (resolve_history_path_default(), false)
-        }
+        None => (resolve_history_path_default(), false),
     };
-    set_resolved_history_path(resolved, custom)
+    let now_sec = crate::snapshot::now_unix() as i64;
+    // 目标可能也有历史，必须按设备合并；先完成写盘再切换指针和进程缓存。
+    let migrated = migrate_history_at(&source, &resolved, now_sec)?;
+    let mut cache = resolved_cell().lock().map_err(|_| "历史路径锁中毒".to_string())?;
+    if custom {
+        let text = resolved.to_str().ok_or("历史文件保存路径无效")?.as_bytes();
+        match std::fs::read(&pointer) {
+            Ok(current) if current == text => {}
+            Ok(_) => atomic_write(&pointer, text)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => atomic_write(&pointer, text)?,
+            Err(error) => return Err(format!("读取历史文件重定向记录失败：{error}")),
+        }
+    } else {
+        match std::fs::remove_file(&pointer) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("清除历史文件重定向记录失败：{error}")),
+        }
+    }
+    *cache = Some(Resolved { path: resolved, custom });
+    remember_row_count(&migrated);
+    Ok(())
 }
 
 /// 当前实际生效的历史文件路径 + 它是不是用户自定义的。
@@ -171,12 +185,6 @@ fn resolved_cell() -> &'static std::sync::Mutex<Option<Resolved>> {
     CELL.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-fn set_resolved_history_path(p: PathBuf, custom: bool) -> Result<(), String> {
-    let mut guard = resolved_cell().lock().map_err(|_| "历史路径锁中毒".to_string())?;
-    *guard = Some(Resolved { path: p, custom });
-    Ok(())
-}
-
 fn read_custom_history_path() -> Option<PathBuf> {
     if let Ok(text) = std::fs::read_to_string(custom_history_pointer()) {
         let t = text.trim();
@@ -185,6 +193,34 @@ fn read_custom_history_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// 文件操作已持有历史互斥体。重新检查指针，使其它实例切换路径后，
+/// 当前实例的后续采样也会采用合并完成的新文件；UI查询仍使用内存缓存。
+fn active_history_path_locked() -> Result<PathBuf, String> {
+    let custom = match std::fs::read_to_string(custom_history_pointer()) {
+        Ok(text) => {
+            let value = text.trim();
+            if value.is_empty() { None } else { Some(PathBuf::from(value)) }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("读取历史文件重定向记录失败：{error}")),
+    };
+    let mut cache = resolved_cell().lock().map_err(|_| "历史路径锁中毒".to_string())?;
+    if let Some(current) = cache.as_ref() {
+        let unchanged = match &custom {
+            Some(path) => current.custom && current.path == *path,
+            None => !current.custom,
+        };
+        if unchanged { return Ok(current.path.clone()); }
+    }
+    let resolved = match custom {
+        Some(path) => Resolved { path, custom: true },
+        None => Resolved { path: resolve_history_path_default(), custom: false },
+    };
+    let path = resolved.path.clone();
+    *cache = Some(resolved);
+    Ok(path)
 }
 
 /// 当前用到的路径是不是降级路径（不是 `%LOCALAPPDATA%\rog-battery`）。
@@ -207,7 +243,7 @@ fn probe_writable(p: &std::path::Path) -> bool {
         let _ = crate::paths::ensure_dir(dir);
     }
     // create+append 能打开就认为可写。打不开会顺手留下一个空文件，
-    // 这是有意的：空的 history.tsv 和不存在等价，`read_rows` 读出来就是空表。
+    // 这是有意的：空的 history.tsv 和不存在等价，读取后都是空表。
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -295,26 +331,124 @@ pub fn parse_rows(text: &str) -> Vec<HistoryRow> {
     out
 }
 
-/// 读历史文件。文件不存在 / 读不了都返回空（这不是错误，第一次运行就是这样）。
-///
-/// **读完会按时间戳稳定排序**。文件是多个进程共写的：`record_sample_at` 有
-/// `Local\RogBatteryHistory` 互斥体保护，但任何外部工具、脚本、手工编辑都能
-/// 把顺序弄乱。下游的 [`predict_from_rows`] 有一堆「从最新往回取」的假设
-/// （`prev_t - r.ts > HIST_GAP_BREAK_SEC` 断档检测、`direction_start` 逐条回看），
-/// 一旦输入乱序，断档检测会因为差值是负数而永不触发，`span_minutes` 也会算小，
-/// 估算偏乐观。排序成本 2000 行的 O(n log n)，可以忽略。
-///
-/// 用 `sort_by_key` 而不是 `sort_unstable_by_key`：稳定排序能保住
-/// 「同一时刻的两条记录」的原始写入顺序，便于事后排查。
-pub fn read_rows() -> Vec<HistoryRow> {
-    match std::fs::read_to_string(history_path()) {
-        Ok(text) => {
-            let mut rows = parse_rows(&text);
-            rows.sort_by_key(|r| r.ts);
-            rows
-        }
-        Err(_) => Vec::new(),
+fn read_history_file(path: &Path) -> Result<DeviceHistoryFile, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(devices::parse_device_history(&text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(DeviceHistoryFile::default()),
+        Err(error) => Err(format!("读取历史文件 {} 失败：{error}", path.display())),
     }
+}
+
+/// 读取指定历史文件并裁剪内存副本，不修改磁盘。
+pub fn load_device_history_at(path: &Path, now_sec: i64) -> Result<DeviceHistoryFile, String> {
+    let mut history = read_history_file(path)?;
+    devices::normalize(&mut history, now_sec);
+    Ok(history)
+}
+
+pub fn load_device_history() -> Result<DeviceHistoryFile, String> {
+    let _guard = lock_history().ok_or("历史文件正在使用，暂时无法读取")?;
+    let history = load_device_history_at(&active_history_path_locked()?, crate::snapshot::now_unix() as i64)?;
+    remember_row_count(&history);
+    Ok(history)
+}
+
+fn write_history_file(path: &Path, history: &DeviceHistoryFile) -> Result<(), String> {
+    atomic_write(path, devices::render(history).as_bytes())
+}
+
+fn update_device_history_at(path: &Path, samples: &[(String, HistoryRow)],
+    aliases: &[(String, String)], legacy_owner: Option<&str>, now_sec: i64)
+    -> Result<DeviceHistoryFile, String> {
+    devices::validate_update(samples, aliases, legacy_owner)?;
+    let previous = read_history_file(path)?;
+    let mut updated = previous.clone();
+    devices::apply_update(&mut updated, samples, aliases, legacy_owner, now_sec);
+    if updated != previous { write_history_file(path, &updated)?; }
+    Ok(updated)
+}
+
+/// 当前路径与文件读改写都在既有跨进程互斥体内完成。
+pub fn update_device_history(samples: &[(String, HistoryRow)], aliases: &[(String, String)],
+    legacy_owner: Option<&str>) -> Result<DeviceHistoryFile, String> {
+    let _guard = lock_history().ok_or("历史文件正在使用，暂时无法写入")?;
+    let history = update_device_history_at(&active_history_path_locked()?, samples, aliases, legacy_owner,
+        crate::snapshot::now_unix() as i64)?;
+    remember_row_count(&history);
+    Ok(history)
+}
+
+fn clear_device_history_at(path: &Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() == 0 => Ok(()),
+        Ok(_) => atomic_write(path, &[]),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("读取历史文件 {} 失败：{error}", path.display())),
+    }
+}
+
+/// 清空所有设备和未归属旧记录，保留已选择的路径。
+pub fn clear_device_history() -> Result<(), String> {
+    let _guard = lock_history().ok_or("历史文件正在使用，暂时无法清空")?;
+    clear_device_history_at(&active_history_path_locked()?)?;
+    CACHED_ROW_COUNT.store(0, Ordering::Relaxed);
+    Ok(())
+}
+
+fn migrate_history_at(source: &Path, target: &Path, now_sec: i64) -> Result<DeviceHistoryFile, String> {
+    let source_history = read_history_file(source)?;
+    let mut merged = if source != target {
+        let target_history = read_history_file(target)?;
+        let mut merged = target_history.clone();
+        devices::merge_into(&mut merged, source_history, now_sec);
+        if merged != target_history { write_history_file(target, &merged)?; }
+        merged
+    } else { source_history };
+    devices::normalize(&mut merged, now_sec);
+    // 即使没有样本，也在切换前验证目标可作为文件写入。不会覆盖已有内容。
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        crate::paths::ensure_dir(parent)?;
+    }
+    std::fs::OpenOptions::new().append(true).create(true).open(target)
+        .map_err(|error| format!("无法使用历史文件 {}：{error}", target.display()))?;
+    Ok(merged)
+}
+
+/// 同目录临时文件写完并刷盘后替换目标，读者只会看到替换前或替换后的完整文件。
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        crate::paths::ensure_dir(parent)?;
+    }
+    let mut allocated = None;
+    for _ in 0..16 {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".tmp-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        let temp = PathBuf::from(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&temp) {
+            Ok(file) => { allocated = Some((temp, file)); break; }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("创建历史临时文件 {} 失败：{error}", temp.display())),
+        }
+    }
+    let (temp, mut file) = allocated.ok_or("无法创建历史临时文件")?;
+    let written = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let result = written.map_err(|error| format!("写入历史临时文件 {} 失败：{error}", temp.display()))
+        .and_then(|_| {
+            let source: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+            let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
+                Err(format!("替换历史文件 {} 失败：{}", path.display(), std::io::Error::last_os_error()))
+            } else { Ok(()) }
+        });
+    if result.is_err() { let _ = std::fs::remove_file(temp); }
+    result
 }
 
 // ==================== 跨进程互斥 ====================
@@ -363,212 +497,6 @@ fn lock_history() -> Option<MutexGuard> {
     }
 }
 
-// ==================== 写入 ====================
-
-/// 判断这条采样要不要写，以及为什么。
-///
-/// 规则（照抄 C# 版 `RecordSampleLocked`）：
-/// - 电量变了或相位变了：至少隔 [`HIST_MIN_GAP_SEC`] 秒
-/// - 都没变：每 [`HIST_SAME_GAP_SEC`] 秒记一条心跳
-///
-/// 为什么要心跳：鼠标在 100% 趴一夜，每分钟一条会把 2000 行全占满同一个值，
-/// 真正有用的变化点反而被挤出去；但完全不记又撑不住时间跨度。
-pub fn should_record(rows: &[HistoryRow], level: u8, charging: bool, now_sec: i64) -> bool {
-    let Some(last) = rows.last() else {
-        return true; // 空文件，第一条无条件写
-    };
-    let gap = now_sec - last.ts;
-    let level_changed = last.level != level;
-    let phase_changed = last.charging != charging;
-    let need = if level_changed || phase_changed {
-        HIST_MIN_GAP_SEC
-    } else {
-        HIST_SAME_GAP_SEC
-    };
-    gap >= need
-}
-
-/// 裁剪结果。
-pub struct PruneOutcome {
-    pub rows: Vec<HistoryRow>,
-    /// 是否真的需要重写文件。单纯追加时为 `false` —— 不要为了「顺便整理」去重写，
-    /// 那会在别人正在读的瞬间把文件截断。
-    pub rewrite: bool,
-    #[allow(dead_code)]
-    pub dropped: usize,
-}
-
-/// 按时间窗口和行数上限裁剪。
-pub fn prune_rows(rows: &[HistoryRow], now_sec: i64) -> PruneOutcome {
-    let cutoff = now_sec - HIST_KEEP_HOURS * 3600;
-    let mut kept: Vec<HistoryRow> = Vec::with_capacity(rows.len());
-    let mut dropped = 0usize;
-    for r in rows {
-        if r.ts < cutoff {
-            dropped += 1;
-            continue;
-        }
-        kept.push(*r);
-    }
-    // 没东西可删就别重写文件
-    let mut rewrite = dropped > 0;
-    if kept.len() > HIST_MAX_LINES {
-        let extra = kept.len() - HIST_MAX_LINES;
-        kept.drain(0..extra);
-        dropped += extra;
-        rewrite = true;
-    }
-    PruneOutcome {
-        rows: kept,
-        rewrite,
-        dropped,
-    }
-}
-
-pub fn record_sample_at(
-    level: u8,
-    charging: bool,
-    mode: i32,
-    now_sec: i64,
-) -> Result<bool, String> {
-    if level > 100 {
-        return Err(format!("电量 {level} 超出 0-100，拒绝写入历史"));
-    }
-
-    let _guard = match lock_history() {
-        Some(g) => g,
-        // 拿不到锁就放弃本次写入。宁可丢一条样本，也不要在托盘进程里卡 3 秒。
-        None => return Ok(false),
-    };
-
-    let path = history_path();
-    if let Some(dir) = path.parent() {
-        crate::paths::ensure_dir(dir)?;
-    }
-
-    // 只读最后一条：去重只看「上一条」，为了它整份读盘 + 解析 + 排序是每 60 秒一次的
-    // 固定浪费（2000 行 ≈ 2000 次 split + collect + O(n log n) 排序）。
-    let last = read_last_row();
-    let tail: &[HistoryRow] = match last.as_ref() {
-        Some(r) => std::slice::from_ref(r),
-        None => &[],
-    };
-    if !should_record(tail, level, charging, now_sec) {
-        return Ok(false);
-    }
-
-    let new_row = HistoryRow::new(now_sec, level, charging, mode);
-    let line = new_row.to_line();
-    append_line(&path, &line)?;
-
-    // 先追加再裁剪：万一裁剪失败，至少样本已经落盘了。
-    //
-    // 裁剪要拿**含刚追加那条**的列表去算。以前这里传的是 `&rows`（追加前的
-    // 快照），于是每次 rewrite 都会把刚写进去的那条覆盖掉；如果 `rows` 已经全部
-    // 超出 48 小时窗口，裁剪结果就是空表 —— 文件被改写成 0 字节，样本永远攒不起来，
-    // 界面上就永远显示「样本不足」。现在直接读追加后的文件，天然包含新样本。
-    if prune_due(&path) {
-        let all = read_rows();
-        let outcome = prune_rows(&all, now_sec);
-        if outcome.rewrite {
-            write_all(&path, &outcome.rows)?;
-        }
-    }
-    Ok(true)
-}
-
-/// 只读文件末尾，取最后一条样本。
-///
-/// 写采样时唯一需要的历史信息就是「上一条是什么」，为此把整份文件读盘 + 解析 +
-/// 排序（2000 行）是纯浪费。这里从文件尾往前找最后一行，最多回退 8KB。
-fn read_last_row() -> Option<HistoryRow> {
-    read_last_row_at(&history_path())
-}
-
-pub(super) fn read_last_row_at(path: &std::path::Path) -> Option<HistoryRow> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    if len == 0 {
-        return None;
-    }
-    let mut back = 256u64;
-    loop {
-        let start = len.saturating_sub(back);
-        f.seek(SeekFrom::Start(start)).ok()?;
-        let mut buf = Vec::with_capacity((len - start) as usize);
-        f.read_to_end(&mut buf).ok()?;
-        let text = String::from_utf8_lossy(&buf);
-        // 末尾若没有换行，说明是刚写完的残行，丢掉它再取上一行
-        let mut lines: Vec<&str> = text.split('\n').filter(|l| !l.trim().is_empty()).collect();
-        if !text.ends_with('\n') {
-            lines.pop();
-        }
-        if let Some(line) = lines.last() {
-            let mut rows = parse_rows(line);
-            if let Some(r) = rows.pop() {
-                return Some(r);
-            }
-        }
-        if start == 0 || back >= 8192 {
-            return None;
-        }
-        back *= 2;
-    }
-}
-
-/// 是否该做一次整份裁剪。
-///
-/// 裁剪需要全量行（48 小时窗口按行判断），而写采样只用到「最后一行」。
-/// 每写一条就读整份文件是纯浪费，所以按文件体积 + 写入计数节流：
-/// 体积接近行数上限，或累计写了 `PRUNE_EVERY_WRITES` 条，才真正读全量。
-fn prune_due(path: &std::path::Path) -> bool {
-    let writes = WRITES_SINCE_PRUNE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let too_big = std::fs::metadata(path)
-        .map(|m| m.len() as usize >= HIST_MAX_LINES * LINE_MAX_BYTES)
-        .unwrap_or(false);
-    if too_big || writes >= PRUNE_EVERY_WRITES {
-        WRITES_SINCE_PRUNE.store(0, std::sync::atomic::Ordering::Relaxed);
-        return true;
-    }
-    false
-}
-
-/// 追加一条之后的裁剪：把新样本并进列表再算，避免「刚写的被裁剪覆盖掉」。
-#[allow(dead_code)]
-pub(super) fn prune_after_append(rows: &[HistoryRow], new_row: HistoryRow, now_sec: i64) -> PruneOutcome {
-    let mut all = Vec::with_capacity(rows.len() + 1);
-    all.extend_from_slice(rows);
-    all.push(new_row);
-    prune_rows(&all, now_sec)
-}
-
-/// 写一条采样，用真实当前时间。
-pub fn record_sample(level: u8, charging: bool, mode: i32) -> Result<bool, String> {
-    record_sample_at(level, charging, mode, crate::snapshot::now_unix() as i64)
-}
-
-pub(super) fn append_line(path: &std::path::Path, line: &str) -> Result<(), String> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| format!("无法打开历史文件 {}：{e}", path.display()))?;
-    f.write_all(line.as_bytes())
-        .and_then(|_| f.write_all(b"\n"))
-        .map_err(|e| format!("写历史文件失败 {}：{e}", path.display()))
-}
-
-fn write_all(path: &std::path::Path, rows: &[HistoryRow]) -> Result<(), String> {
-    let mut text = String::with_capacity(rows.len() * 20);
-    for r in rows {
-        text.push_str(&r.to_line());
-        text.push('\n');
-    }
-    std::fs::write(path, text).map_err(|e| format!("重写历史文件失败 {}：{e}", path.display()))
-}
-
 // ==================== 三态 ====================
 
 /// 设备报告的 charging_status 与连接方式归并后的三态。
@@ -593,4 +521,148 @@ pub fn decide_charge(level: u8, charging: bool, mode: i32) -> ChargeState {
         return ChargeState::Full;
     }
     ChargeState::Discharging
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const NOW: i64 = 1_800_000_000;
+
+    struct TestFile(PathBuf);
+    impl TestFile {
+        fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            Self(std::env::temp_dir().join(format!("r-battery-history-{label}-{}-{nonce}-{}.tsv",
+                std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))))
+        }
+    }
+    impl Drop for TestFile {
+        fn drop(&mut self) {
+            if let Ok(metadata) = std::fs::metadata(&self.0) {
+                if metadata.is_dir() { let _ = std::fs::remove_dir(&self.0); }
+                else { let _ = std::fs::remove_file(&self.0); }
+            }
+        }
+    }
+
+    #[test]
+    fn load_missing_and_clear_preserve_file_location_and_remove_all_formats() {
+        let file = TestFile::new("clear");
+        assert_eq!(load_device_history_at(&file.0, NOW).unwrap(), DeviceHistoryFile::default());
+        let mut history = DeviceHistoryFile::default();
+        history.legacy.push(HistoryRow::new(NOW - 60, 70, false, 2));
+        history.devices.insert("one".into(), vec![HistoryRow::new(NOW, 40, false, 0)]);
+        history.devices.insert("two".into(), vec![HistoryRow::new(NOW, 90, true, 1)]);
+        write_history_file(&file.0, &history).unwrap();
+        assert_eq!(load_device_history_at(&file.0, NOW).unwrap(), history);
+        clear_device_history_at(&file.0).unwrap();
+        assert!(file.0.is_file());
+        assert_eq!(std::fs::metadata(&file.0).unwrap().len(), 0);
+        assert_eq!(load_device_history_at(&file.0, NOW).unwrap(), DeviceHistoryFile::default());
+        clear_device_history_at(&file.0).unwrap();
+    }
+
+    #[test]
+    fn unchanged_update_does_not_rewrite_and_mixed_formats_survive_device_updates() {
+        let file = TestFile::new("unchanged");
+        // 保留不影响样本的注释/空行：若无需修改，文件字节和修改时间都应不变。
+        let text = format!("# keep until actual change\n\n{}\t60\t0\t2\nv2\tdevice\t{}\t40\t0\t0\t7\n", NOW - 120, NOW - 120);
+        std::fs::write(&file.0, &text).unwrap();
+        let before = std::fs::metadata(&file.0).unwrap().modified().unwrap();
+        let original = load_device_history_at(&file.0, NOW).unwrap();
+        update_device_history_at(&file.0, &[], &[], None, NOW).unwrap();
+        assert_eq!(std::fs::read_to_string(&file.0).unwrap(), text);
+        assert_eq!(std::fs::metadata(&file.0).unwrap().modified().unwrap(), before);
+        let sample = [("another-device".into(), HistoryRow::new(NOW, 59, false, 2))];
+        let updated = update_device_history_at(&file.0, &sample, &[], None, NOW).unwrap();
+        assert_eq!(updated.devices["device"], original.devices["device"]);
+        assert_eq!(updated.legacy, original.legacy);
+        assert_eq!(updated.devices["another-device"], [sample[0].1]);
+        assert_eq!(load_device_history_at(&file.0, NOW).unwrap(), updated);
+        let saved = std::fs::read(&file.0).unwrap();
+        let throttled = [("another-device".into(), HistoryRow::new(NOW + 1, 59, false, 2))];
+        assert_eq!(update_device_history_at(&file.0, &throttled, &[], None, NOW + 1).unwrap(), updated);
+        assert_eq!(std::fs::read(&file.0).unwrap(), saved);
+    }
+
+    #[test]
+    fn cached_diagnostic_count_includes_all_devices_and_unclaimed_rows() {
+        let mut history = DeviceHistoryFile { legacy: vec![HistoryRow::new(NOW, 70, false, 2)], ..Default::default() };
+        history.devices.insert("one".into(), vec![HistoryRow::new(NOW, 40, false, 0)]);
+        history.devices.insert("two".into(), vec![HistoryRow::new(NOW - 120, 90, true, 1), HistoryRow::new(NOW, 91, true, 1)]);
+        remember_row_count(&history);
+        assert_eq!(cached_row_count(), 4);
+        remember_row_count(&DeviceHistoryFile::default());
+        assert_eq!(cached_row_count(), 0);
+    }
+
+    #[test]
+    fn disk_alias_and_legacy_migration_are_consumed_and_flags_survive_reload() {
+        let file = TestFile::new("migration");
+        let mut old = HistoryRow::new(NOW - 120, 90, false, 2);
+        old.approximate = true; old.charging_known = false; old.break_before = true;
+        let mut initial = DeviceHistoryFile { legacy: vec![HistoryRow::new(NOW - 60, 20, false, 2)], ..Default::default() };
+        initial.devices.insert("old-key".into(), vec![old]);
+        initial.devices.insert("current-key".into(), vec![old]);
+        write_history_file(&file.0, &initial).unwrap();
+        let aliases = [("old-key".into(), "current-key".into())];
+        let migrated = update_device_history_at(&file.0, &[], &aliases, Some("current-key"), NOW).unwrap();
+        assert!(migrated.legacy.is_empty());
+        assert_eq!(migrated.devices.len(), 1);
+        assert_eq!(migrated.devices["current-key"].len(), 2);
+        assert_eq!(migrated.devices["current-key"][0], old);
+        assert_eq!(load_device_history_at(&file.0, NOW).unwrap(), migrated);
+        let saved = std::fs::read(&file.0).unwrap();
+        update_device_history_at(&file.0, &[], &aliases, Some("another-rog"), NOW).unwrap();
+        assert_eq!(std::fs::read(&file.0).unwrap(), saved);
+    }
+
+    #[test]
+    fn changing_locations_merges_all_devices_and_retains_source_on_error() {
+        let source = TestFile::new("source");
+        let target = TestFile::new("target");
+        let bad_target = TestFile::new("bad-target");
+        let mut shared = HistoryRow::new(NOW - 120, 80, false, 2);
+        let mut from = DeviceHistoryFile { legacy: vec![HistoryRow::new(NOW - 60, 20, false, 2)], ..Default::default() };
+        from.devices.insert("shared".into(), vec![shared]);
+        from.devices.insert("source-only".into(), vec![HistoryRow::new(NOW, 60, false, 0)]);
+        let mut to = DeviceHistoryFile { legacy: from.legacy.clone(), ..Default::default() };
+        shared.break_before = true;
+        to.devices.insert("shared".into(), vec![shared]);
+        to.devices.insert("target-only".into(), vec![HistoryRow::new(NOW, 40, false, 0)]);
+        write_history_file(&source.0, &from).unwrap();
+        write_history_file(&target.0, &to).unwrap();
+        let original = std::fs::read(&source.0).unwrap();
+        migrate_history_at(&source.0, &target.0, NOW).unwrap();
+        let merged = load_device_history_at(&target.0, NOW).unwrap();
+        assert_eq!(merged.devices.len(), 3);
+        assert_eq!(merged.devices["shared"], [shared]);
+        assert_eq!(merged.legacy, from.legacy);
+        assert_eq!(std::fs::read(&source.0).unwrap(), original);
+        let once = std::fs::read(&target.0).unwrap();
+        migrate_history_at(&source.0, &target.0, NOW).unwrap();
+        assert_eq!(std::fs::read(&target.0).unwrap(), once);
+        std::fs::create_dir(&bad_target.0).unwrap();
+        assert!(migrate_history_at(&source.0, &bad_target.0, NOW).is_err());
+        assert_eq!(std::fs::read(&source.0).unwrap(), original);
+        assert!(bad_target.0.is_dir());
+    }
+
+    #[test]
+    fn invalid_updates_and_atomic_replacement_failure_preserve_previous_bytes() {
+        let file = TestFile::new("invalid");
+        let text = format!("v2\tdevice\t{NOW}\t75\t0\t2\t2\n");
+        std::fs::write(&file.0, &text).unwrap();
+        let bad = [("bad\nkey".into(), HistoryRow::new(NOW, 50, false, 2))];
+        assert!(update_device_history_at(&file.0, &bad, &[], None, NOW).is_err());
+        assert_eq!(std::fs::read_to_string(&file.0).unwrap(), text);
+        use std::os::windows::fs::OpenOptionsExt;
+        let handle = std::fs::OpenOptions::new().read(true).share_mode(1).open(&file.0).unwrap();
+        assert!(atomic_write(&file.0, b"replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&file.0).unwrap(), text);
+        drop(handle);
+        assert_eq!(load_device_history_at(&file.0, NOW).unwrap().devices["device"].len(), 1);
+    }
 }

@@ -766,13 +766,26 @@ pub fn cmd_save(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
 
 /// `estimate` —— 读当前电量 + 历史，打印续航/充满估算。
 ///
-/// 顺手按 C# 版的规则记一条采样（`record_sample` 内部会做去重和裁剪），
-/// 这样命令行跑几次就等于在攒数据，不用等 GUI。
+/// 读取一次新电量，写到与界面相同的设备历史。
 pub fn cmd_estimate(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
     println!("== estimate（电量历史与估算）==");
-    let st = ctx.state(dev)?;
+    let out = crate::snapshot::fetch(dev, &ctx.link.all_interfaces, ctx.link.report_id, &ctx.link.mode);
+    let battery = out.snapshot.battery().ok_or("未读取到新电量，请唤醒设备后重试")?;
+    let st = &out.snapshot.state;
+    let identity = &out.snapshot.identity;
+    let key = if !identity.mouse_sn.trim().is_empty() {
+        crate::device::stable_key(&format!("device:{}", identity.mouse_sn.trim()))
+    } else if !identity.mouse_mac.trim().is_empty() {
+        crate::device::stable_key(&format!("device:{}", identity.mouse_mac.trim()))
+    } else { ctx.link.device_key() };
     let mode = link_mode_code(ctx.link);
-    let rows = crate::history::read_rows();
+    let now_sec = out.snapshot.taken_unix as i64;
+    let sample = crate::history::HistoryRow::new(now_sec, battery.percent.unwrap(), battery.charging == Some(true), mode);
+    let aliases = [(ctx.link.device_key(), key.clone())];
+    // The CLI does not enumerate all peers here, so it cannot safely claim an
+    // unlabelled legacy file on behalf of the selected device.
+    let file = crate::history::update_device_history(&[(key.clone(), sample)], &aliases, None)?;
+    let rows = file.devices.get(&key).map(Vec::as_slice).unwrap_or(&[]);
 
     println!("历史文件    {}", crate::history::history_path_display());
     if crate::history::history_path_is_fallback() {
@@ -806,8 +819,7 @@ pub fn cmd_estimate(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
         }
     );
 
-    let now_sec = crate::snapshot::now_unix() as i64;
-    let est = crate::history::predict_from_rows(&rows, st.power, st.charging == 1, mode, now_sec);
+    let est = crate::history::predict_device(rows, sample);
     println!();
     println!("估算        {}", est.text);
     if est.known {
@@ -819,22 +831,13 @@ pub fn cmd_estimate(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
         println!("  参考       用了 {} 个样本", est.samples);
     }
 
-    // 记一条采样。失败只提示，不影响估算结果的输出。
-    match crate::history::record_sample(st.power, st.charging == 1, mode) {
-        Ok(true) => println!("  已追加     1 条采样到历史"),
-        Ok(false) => println!("  未追加     距上一条太近（去重规则：变化 60s / 心跳 600s）"),
-        Err(e) => println!("  写历史失败 {e}"),
-    }
+    println!("  历史       已更新此设备的采样（变化 60s / 心跳 120s）");
     Ok(())
 }
 
 /// 连接模式转成历史文件里的数字：1=有线 2=2.4G（与 C# 版 `LinkMode` 一致）。
 fn link_mode_code(link: &Link) -> i32 {
-    if link.mode.starts_with("Wired") {
-        1
-    } else {
-        2
-    }
+    match link.mode.as_str() { "Wired" => 1, "Wireless24G" => 2, "Bluetooth" => 3, _ => 0 }
 }
 
 /// 把 unix 秒格式化成 `MM-DD HH:MM`（本地时间，给历史记录列表看）。

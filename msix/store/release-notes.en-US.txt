@@ -1,20 +1,17 @@
+1.4.8
+
 New
-- The taskbar battery strip now shows multiple devices at once. A single device is number-only; multiple devices include a type glyph and percentage.
-- Added battery support for five VGN / VXE 2.4 GHz keyboard receivers.
-- Added battery support for EWEADN S9 PRO 8K / S9, MCHOSE G87 V2, Flydigi APEX5 and GameSir Nova / Cyclone 2.
-- Added ATK N9 V2 ULTRA headset support and separate charging, full, external-power and offline states for ATK / MCHOSE headsets.
-- Added MCHOSE V9 PRO headset support after receiver firmware validation; versions below 0008 do not receive battery queries.
-- Expanded support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, EWEADN, Flydigi, GameSir, Logitech, Razer, Sony, HyperX and CHERRY devices.
-- Added Chinese and English interfaces with a language selector. Follow system is the default.
-- Added low-battery Windows notifications, audio controls, device ordering and basic DPI stage switching.
+- Supported mice, keyboards, headsets and controllers from all brands now have separate 48-hour battery charts and runtime estimates. Confirmed charging readings also support time-to-full estimates.
+- Coarse battery levels retain the ≈ indicator and step charts, with rounded runtime estimates after enough changes have been observed.
+- The taskbar battery strip shows device types and percentages for multiple devices; click to open quick controls.
+- Added device feedback and optional diagnostic previews. Builds without a configured feedback service open GitHub in the browser.
+- Expanded battery support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, EWEADN, Edifier, MOONDROP, XIBERIA, FIFINE, Lofree and CHERRY models.
+- Mice supporting numerical DPI writes can save 1–4 software presets, sorted by value.
 
-Improvements
-- The taskbar battery strip now uses system-tray-sized content and keeps every visible device entry whole within the available taskbar space.
-- Improved recovery after sleep, cache expiry, wake-up and temporary query failures.
-- Brand backends read independently while existing ROG controls are retained.
+Improvements and fixes
+- Samples, storage and forecasts are isolated by device. Sleep, disconnection, charging changes and long gaps start separate intervals; cached readings do not create duplicate samples.
+- Improved legacy history migration, device identity continuity, storage-location changes, clearing history and saving on exit.
+- Improved taskbar icons, charging indicators, clicks and drag ordering; fixed alignment, corners and clipped text in About and feedback pages.
+- Retained detailed ROG settings, Windows audio controls, Chinese and English interfaces, and low-battery notifications in the Store edition.
 
-Fixes
-- Fixed intermittent unknown battery readings on selected receivers, stale identities after device replacement and duplicate cards.
-- Fixed crowded device glyphs and percentages in the taskbar strip.
-
-Support covers selected devices with implemented protocols and depends on model, firmware and connection type.
+Support covers selected models with implemented protocols. Runtime estimates require actual samples and depend on device reports and usage.
