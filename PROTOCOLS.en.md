@@ -73,6 +73,16 @@ Razer exposes battery, charging, current X/Y, complete stage records and separat
 
 Prioritize commonly used Chinese brands and basic DPI, retaining detailed ROG support. First improve Rapoo, VGN / VXE / ATK and MCHOSE model coverage, keyboards and sleep recovery, followed by AULA, AJAZZ, Dareu and Edifier with established protocol evidence. Pause new overseas-brand coverage while maintaining shipped support. Common-device battery coverage and stability take priority over advanced settings.
 
+From 2026-11-23, development proceeds in protocol-family batches. Transport and malformed-report checks are shared, while battery reads and DPI controls are validated independently. Implemented source, public hardware samples and this project's hardware tests are recorded separately. Regression tests, builds and commits cover a batch; individual models do not each trigger a release.
+
+| Batch | Scope | Current state |
+| --- | --- | --- |
+| Receiver battery | VGN YJX Pro, six ryMs receivers, MCHOSE 4D | Read-only battery implemented within the compatibility limits; hardware validation pending |
+| Domestic keyboards and headsets | MCHOSE K99 V3, MOONDROP GM01 Pro | Independent readers implemented; hardware validation pending |
+| Legacy Rapoo receivers | VT `1851`, then MT760 | `1851` battery implemented, hardware pending; MT760 not yet integrated |
+| Basic DPI | Other Rapoo generations, VGN YJX, MCHOSE 4D | Battery support grants no setting-write capability; actual stages and readback need further review |
+| Next battery batch | ATK Nano, newer AULA keyboards, MCHOSE headsets, system Bluetooth | Not yet integrated |
+
 - [x] Save 1–4 custom DPI presets per device, sorted by value after editing. A stage-count selector hides the highest values and retains them for restoration; the main window and tray share the enabled list.
 - [x] Distinguish actual device stages from software presets; require confirmed numerical write capability, validate supported values and verify readback.
 - [x] Explain writes that alter stored DPI. Presets cannot bypass missing write support, stale identity, changed configuration or disconnection.
@@ -197,7 +207,7 @@ All five new identities still require matching wireless hardware. The existing w
 
 Only the `089D:062F / FF01:0010` M156 query is independently implemented from packet facts published under MIT in HaloBattery PR #352 and MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc` files/tests `eweadn.py`. It accepts a 33-byte output and a 16–34 byte Windows input capacity and requires a descriptor proving one unnumbered Report 0 in each direction. Wired `088D:062E`, `FF00:0000`, M302 and other product names are excluded; passive `D1` notifications are not used.
 
-The output request is `00 30` plus 31 zeroes. The first byte is Windows' Report ID slot; payload byte 0 is `30` and the remaining payload bytes are zero, so the checksum over payload bytes 5–31 is zero. Input capacity comes from the actual descriptor, and every read uses capacity minus one rather than assuming a fixed 33 bytes.
+The output request is `00 30` plus 31 zeroes. The first byte is Windows' Report ID slot; payload byte 0 is `30` and the remaining payload bytes are zero, so the checksum over payload bytes 5–31 is zero. Input uses the actual descriptor's complete capacity before removing the zero Report ID, rather than assuming a fixed 33-byte buffer. The earlier reduction of the receive-buffer length was corrected on 2026-11-23.
 
 A reply must be 15–33 bytes, begin `30 00`, declare enough data for bytes 4–14 without exceeding the frame, contain ASCII `M156` at bytes 4–7, place a 0–100 percentage at byte 13 and the observed connected value `01` at byte 14. No charging field is established, so charging remains unknown. `30 02`, other states, wrong identity, truncation and request echoes never become 0%. One send may ignore unrelated input for up to one second and accept the first valid M156 frame; no extra online or configuration command is sent.
 
@@ -264,7 +274,7 @@ All 236 local regressions and a warning-free release build passed. Coverage incl
 
 This reader is independently implemented from pinned static M HUB/CZ SDK evidence and MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc` files `mchose_glw_keyboard.py` and `mchose_keyboard_hid.py`. `3837:3033` is shared by multiple keyboards, so entry requires the exact product `MCHOSE G87 V2 2.4G`, collection `0001:0000` and 65-byte input/output capacities. A descriptor must prove a sole input report ID, which may be zero, and a sole output Report 0. Multiple matching collections in one interface group are refused.
 
-Windows HidP capacities include the Report ID slot. For an unnumbered input, the actual ReadFile buffer is one byte shorter; the new transfer path uses the descriptor-proven ID to adjust the read length and is restricted to this collection. Only 64-byte payloads with a leading Report ID are allowed:
+Windows HidP capacities include the Report ID slot, and ReadFile must also use the complete capacity. For descriptor-proven unnumbered input, the leading zero is removed after reception before parsing the 64-byte payload. The earlier reduction of the receive-buffer length was corrected on 2026-11-23. Interrupt OUT remains restricted to this collection. Only 64-byte payloads with a leading Report ID are allowed:
 
 ```text
 55 04 00 SS 38 00 00 00 ...    // read 56 bytes of base information
@@ -386,7 +396,7 @@ On 2026-11-21, all 308 local regressions and the warning-free Windows x64 releas
 
 Cross-checked pinned VGN HUB resource `index-ZngoA_qG.js` (SHA256 `53adfab22f478249bdb9117bb26cedf8a7d3c6c561f2f2eb735e7d86e943be63`) at `Yd.GetBattery=48`, `oc.getBattery` and `sendHidBuffer`, against MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc` file `engine/providers/vgn_dragonfly3.py` (SHA256 `e91a2f755b2d6b84de3d088cfd7900d62300b3fb67a3762b88ccea9106c2e4bc`). Only protocol facts are independently implemented; vendor scripts and upstream implementation are not distributed.
 
-Only 2.4 GHz receiver `391D:1A01 / FF01:0010` is enabled. Its descriptor must prove unnumbered input and output Report 0 at 65-byte Windows capacity and one eligible collection per interface group. The diagnosed `FF05:0002` collection, wired `1001`, Pro `1A03` and all other PIDs are excluded. The request is `00 55 30` plus 62 zeroes. Unnumbered input omits that ID slot, so replies are read as 64 bytes rather than 65.
+The initial implementation enabled 2.4 GHz receiver `391D:1A01 / FF01:0010`. Its descriptor must prove unnumbered input and output Report 0 at 65-byte Windows capacity and one eligible collection per interface group. Pro `1A03` was added on 2026-11-23 as described below; the diagnosed `FF05:0002` collection, wired `1001` and other PIDs remain excluded. The request is `00 55 30` plus 62 zeroes. ReadFile uses the complete 65-byte capacity, then the zero ID is removed before parsing the 64-byte protocol payload.
 
 The reply is correlated only by byte 1 equal to `30`. Byte 9 of 1 identifies wired mode, publishes no battery and explicitly clears any previous wireless percentage. With byte 9 zero, byte 8 accepts 0–100. Exact request echoes, short frames, out-of-range levels and unknown connection enums create no fresh sample. The vendor path establishes no charging field, so charging remains unknown. Each query has a one-second, 32-report bound; background publication is capped at ten seconds and a silent device stops renewing the old sample.
 
@@ -399,3 +409,21 @@ Cross-checked MyFinder `73d99e2087dd70ae8eef4199854e0c495a66f0bc` file `engine/p
 Only `320F:706E / FF1C:0092` is enabled, with a descriptor proving that input and output each contain only a 64-byte Report `04` and one eligible collection per interface group. The request is `04 20 00 1A 06` plus 59 zeroes; byte 1 (`20`) equals the sum from request byte 3 onward. Replies require 64 bytes, Report `04`, command `1A`, byte 7 not equal to `FE/FF`, and a percentage byte 8 from 0–100. Exact request echoes, short frames, wrong report IDs or commands and error status are rejected.
 
 No response checksum algorithm or charging field is established, so neither is inferred. The adapter does not start a configuration session or read/write DPI, lighting, online handshakes or firmware. Queries are limited to one second, background publication to ten seconds, failed reads do not renew the old sample, and values expire after 120 seconds. On 2026-11-22, all 319 local regressions and the warning-free Windows x64 build passed. Fixtures are synthetic protocol constructions; no local G3M PRO was available, so actual caps, sleep/wake, 0%, physical battery accuracy and vendor-software coexistence remain unverified.
+
+## Unreleased: 2026-11-23 receiver, keyboard and headset batch
+
+Only reviewed protocol facts are independently implemented. External source code, test tools and vendor assets are not distributed. Exact model, connection and hardware-validation limits are recorded in the [compatibility notes](COMPATIBILITY.en.md).
+
+| Path | Evidence | Protocol facts and limits |
+| --- | --- | --- |
+| VGN YJX Pro / ryMs | Saved official VGN HUB `vgn-main.js`, SHA256 `2dc306331d30f874eec8a006f975ef5cac3ed2f18d3bef58e5dd089dc8d5cd5f`; FerrisPulse `a916c657c18034a30300dd08b33c6c192c86fb06`'s `VgnDeviceHelper.cs`; MyFinder `aa0228abbc850b693620d466147b35dfe50c8dca`'s `vgn_ry_ms.py` and PR #717 | `1A03` shares YJX command `30` with SE; the official parser identifies a cable flag rather than charging. Six ryMs receivers use F7, complemented-sum byte `08` and Feature 0/65; full-frame bytes 3/5 are percentage/sleep. No F6 initialization or FC configuration command is sent. |
+| MCHOSE 4D | Saved official M HUB `main.js`, SHA256 `cb10c9d3d29505bef2e2d3207dbe223601ff84c46d772b4a0f1e93ef02391c1b`; Voltide `c1872c4c93124d62c05bf5887fe89c32c6be8dd6` K7 provider; MyFinder `aa0228a` protocol notes and #535 Windows descriptor | Fixed `4D 01 01 00 00 09 00 00 08`, padded to 64. Version, command, business code, sequence, declared length, optional XOR, mouse VID, connection and level are checked. Public Ultra+ 85%-charging and 42%-discharging payloads are replayed with reconstructed transport padding; they are not local captures. Unknown charge flags remain unknown. |
+| MCHOSE K99 V3 | [mchose-hid-bridge `ad74f3e75fd5ae099b2ea4af039678c54dea73ac`](https://github.com/arutkowski00/mchose-hid-bridge/tree/ad74f3e75fd5ae099b2ea4af039678c54dea73ac), complete 40% reply, descriptor and 100% record; M HUB SDK SHA256 `d47d1d0e9e86efbbc1888d17f3bc5cd5caba73c06149a6f1fe26bb3d9386cbc3` | Report 0 with a 64-byte body; `55 03 00 38 38` query and percentage at byte 8 of the `AA 03` reply. G87 V2 configuration fields cannot establish K99 charging semantics. |
+| MOONDROP GM01 Pro | [MyFinder #127](https://github.com/wushuai0802/myfinder-device-battery/issues/127#issuecomment-6687188223), pinned `aa0228a` provider; saved BatteryHub `632f204c50c43355616bd32d17483c63b1bcac54`'s `moondrop.cpp`, SHA256 `c6b0bf3bb9496740487f65fa64f3d17d982d99381d8218f41f1195afe617753d` | Public prefix `4B 80 27 06 00 00 00 00 01 32` reports 50%. Firmware 1.5.3 records place all four collections on MI03, with volume and battery collections distinct. The original official HUB script was not independently obtained for this batch. |
+| Rapoo VT 1851 | [FerrisPulse #76](https://github.com/Ferris-echo/FerrisPulse/pull/76); pinned `a916c657` helper SHA256 `1916585f63a15e2e1108fd5b643d65ad8d9a02f353d470de3c010085302cdee0` | Output BA followed by GET_REPORT(Input), not the ReadFile stream. The reader handles 31/32-byte layouts with a retained or replaced report ID. Configuration marker 0 is rejected; 1/2 mean discharging/charging. No EEPROM writes; receiver caches need hardware validation. |
+
+Windows ReadFile requires the full HID capacity including the zero Report ID slot. A descriptor-proven unnumbered report loses that zero only after reception; subtracting one from the receive-buffer length is incorrect. This batch fixes the shared interrupt-input path used by VGN SE / Pro, K99 V3 and existing callers. GET_REPORT(Feature) has different returned-length semantics and retains its existing behavior.
+
+All new paths use background polling, sanitized diagnostics and the shared sample-expiry model. Protocol tests, public-reply replays and this project's hardware acceptance remain separate. No newly supported model has been validated on local hardware; sleep caches, charge transitions and vendor-software coexistence remain pending.
+
+All 397 local regressions, the warning-free Windows x64 release build and version/PE checks passed. A read-only probe confirmed that the existing ROG mouse and VGN V98 Pro V3 keyboard still returned valid battery data. No newly supported device was attached; their hardware acceptance remains pending.

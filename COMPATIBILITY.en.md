@@ -18,6 +18,31 @@ Version 1.4.12 portable validation: all 357 local regressions and the warning-fr
 
 Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed and the Windows x64 release build completed without warnings. Synthetic keyboard, headset and gamepad render checks covered Chinese/English, light/dark themes and 100% / 125% scaling; these were not hardware-connection evidence.
 
+## Unreleased: VGN and MCHOSE receivers
+
+On 2026-11-23, all 397 local regressions, the Windows x64 release build and version/PE checks passed. A read-only probe still obtained valid readings from the existing ROG mouse and VGN V98 Pro V3 keyboard. No newly supported device was attached, so this does not validate the new hardware paths.
+
+| Scope | Implemented capability | Limits |
+| --- | --- | --- |
+| VGN Dragonfly3 Pro `391D:1A03` | Fixed YJX battery query, alongside the existing SE transport; Pro additionally requires the `AA` response header | Only `FF01:0010`, unnumbered 65-byte Windows input/output capacities; cable state clears battery rather than claiming charging; no DPI |
+| VGN ryMs `391D:1A04/1A08/1A13/1A25/1A2B/1A41` | Receiver battery for Dragonfly3 Pro Max, Y2 V2 Pro Max, F1 V2 Pro Max, Dragonfly3 Ultra, F1 V5 Ultra and F2 V2 Ultra | Only `MI_01&Col01`, `FFFF:0002`, sole unnumbered 65-byte Feature; charging unknown; explicit sleep clears battery and later polls restore it |
+| MCHOSE 4D `3837:1014/1016/1018` | Battery and confirmed charge states for the shared receiver family used by K7 V2 / A7 V3 and related models | Only `FF01:0001` with independently proven `4D/64` reports in both directions; USB product name retained, otherwise MCHOSE Mouse; no model inferred from shared IDs; no DPI |
+
+The documented Windows array descriptor on `3837:1018`, exact A7 V3 Ultra+ / Pro name, `MI_02` and 64-byte capacities may also be accepted after `HidP_InitializeReportForID` confirms report `4D` in both local buffers. This sends no initialization command to hardware. MCHOSE 41-byte, `FF0B`, unproven descriptors and wired identities remain outside this batch. Failed reads do not renew samples. The lifetime is 120 seconds and background publication is capped at 10 seconds. No matching local hardware is available; cold start, sleep, charging, receiver cache behavior and vendor-software coexistence still need hardware validation.
+
+## Unreleased: MCHOSE K99 V3 and MOONDROP GM01 Pro
+
+- **MCHOSE K99 V3:** exact `3837:3033`, product `MCHOSE K99 V3 2.4G`, `MI_01`, `0001:0000`, unnumbered 65-byte Windows input/output capacities. The independent `55 03 00 38 38` query reads the percentage from an `AA 03` reply. Charging is unknown; G87 V2 shares a PID but uses a different protocol.
+- **MOONDROP GM01 Pro:** exact `35D8:0133`, `MI_03`. Report `4B` capacities are proved separately in both directions. A unique eligible `FF02:0002` takes precedence over a unique eligible `000C:0001`; volume-input collections are not queried. Only `4B 80 27 00` is sent. Charging remains unknown; invalid or silent replies produce no new measurement.
+
+K99 is limited to one second and GM01 to 800 ms, with at most 32 input frames per query. Public evidence includes K99 40% / 100% and GM01 50% replies. No matching local hardware has been tested; real zero, power-off caches, wake and vendor-software coexistence remain pending.
+
+## Unreleased: legacy Rapoo VT receiver
+
+Only `24AE:1851`, `FF00:000E`, `Col04`, 32-byte input/output capacities and no Feature reports are accepted, with sole Report `BA` proved by the descriptor. The reader sends `BA A5 AA 00`, waits 250 ms and uses bounded GET_REPORT(Input) for the 31/32-byte status response. It is separate from nRF54L and exposes no EEPROM, DPI or polling-rate writes.
+
+Only success, known discharge/charge markers and `0..100` percentages are accepted; configuration replies are rejected. The shared receiver is named Rapoo VT 2.4G without guessing its paired retail model. One query per poll, no retry; samples expire after 120 seconds, with a 10-second publication cap. There is no transaction or command echo, so receiver-held stale replies cannot be fully excluded. Local hardware, sleep and vendor-software coexistence remain unverified. MT760 is not included.
+
 ## Version 1.4.12
 
 This version adds firmware-gated MCHOSE V9 PRO battery support. Receiver version is read through `FF22:0001`; versions below `0008` block the FF90 battery query. Exact protocol and validation limits are in the ATK N9 V2 ULTRA / MCHOSE V9 headset section below. This is the acceptance baseline; no additional unverified protocol is included.
@@ -50,7 +75,7 @@ User issue #315 confirmed the S9 PRO 8K 16-byte format, 23%–98% readings and c
 
 ## In development: EWEADN S9 (M156)
 
-Limited to `089D:062F / FF01:0010`, a 33-byte output and a 16–34 byte Windows input capacity. A descriptor must prove one unnumbered Report 0 in each direction. Wired `088D:062E`, `FF00:0000`, M302 and other product names are excluded. The read length is the descriptor capacity minus one; the upstream fixed 33-byte buffer is not assumed for every firmware.
+Limited to `089D:062F / FF01:0010`, a 33-byte output and a 16–34 byte Windows input capacity. A descriptor must prove one unnumbered Report 0 in each direction. Wired `088D:062E`, `FF00:0000`, M302 and other product names are excluded. ReadFile receives the complete input capacity before removing the zero Report ID; the upstream fixed 33-byte buffer is not assumed for every firmware.
 
 The fixed request is `00 30` plus 31 zeroes; its checksum covers bytes 5–31 and is zero. A reply must be 15–33 bytes, begin `30 00`, declare enough data for bytes 4–14, contain ASCII `M156` at bytes 4–7, put a 0–100 percentage at byte 13 and the connected value `01` at byte 14. No charging field is established, so charging remains unknown. `30 02`, M302, passive `D1`, malformed lengths and other status values create no reading.
 
@@ -114,9 +139,9 @@ Developed after the 1.4.7 tag, with all 308 local regressions and the warning-fr
 
 ## In development: VGN Dragonfly3 SE
 
-Limited to receiver `391D:1A01 / FF01:0010`, with a descriptor proving unnumbered input and output Report 0 at 65-byte Windows capacity and one eligible collection per USB interface group. The other diagnosed `FF05:0002` collection, wired `1001`, other PIDs and other VGN protocols are excluded.
+The SE path matches receiver `391D:1A01 / FF01:0010`, with a descriptor proving unnumbered input and output Report 0 at 65-byte Windows capacity and one eligible collection per USB interface group. Unreleased source also adds Pro `1A03` as described above; the diagnosed `FF05:0002` collection, wired `1001` and other VGN protocols do not use this reader.
 
-The request is the fixed `00 55 30` plus 62 zeroes. A reply must be 64 bytes of unnumbered input with byte 1 equal to `30`. Byte 9 of 1 means wired; it publishes no battery and explicitly clears an old wireless percentage. When byte 9 is zero, byte 8 is an exact percentage from 0–100. Other values, request echoes, short frames and foreign commands create no fresh sample. No charging field is established. A query is limited to one second, background publication to ten seconds, and failures do not renew the old sample.
+The request is the fixed `00 55 30` plus 62 zeroes. A reply is received using the 65-byte Windows capacity, then the zero Report ID is removed to obtain a 64-byte protocol payload. Payload byte 1 must equal `30`. Byte 9 of 1 means wired; it publishes no battery and explicitly clears an old wireless percentage. When byte 9 is zero, byte 8 is an exact percentage from 0–100. Other values, request echoes, short frames and foreign commands create no fresh sample. No charging field is established. A query is limited to one second, background publication to ten seconds, and failures do not renew the old sample.
 
 Developed after the 1.4.7 tag, with all 313 local regressions and the warning-free release build passing. Evidence comes from pinned VGN HUB resources and the public MyFinder implementation; tests use synthetic field constructions. No local Dragonfly3 SE was available. Windows descriptors, receiver sleep caching, 0%, transport transitions, physical accuracy and vendor-software coexistence remain pending.
 
@@ -150,7 +175,7 @@ These adapters were developed after the 1.4.7 tag. Protocol regressions pass, bu
 | MCHOSE A7 V2 Pro / Pro+ / Ultra / Ultra+, L7 Pro / Pro+ | Restricted Feature endpoints read the mouse's own PID, percentage and charge; shared receiver IDs never select the name | Actual enabled-stage reads; Ultra+ and L7 Pro+ can switch existing stages, other models are read-only |
 | Older MCHOSE A7 Ultra | Restricted `5253:1020/1011` paths; some receivers are documented to return no 06 battery data | Reads require valid identity/config; no writes |
 
-Dareu requires `FF02:0002`, bidirectional Report 08, 17-byte reports. MCHOSE requires `FF01:0001`, Feature 11/12 and 65-byte capacity; exact host PIDs are listed in [protocol notes](PROTOCOLS.en.md). Bluetooth, MCHOSE A7 V3, old A5, firmware collections and unknown sensor layouts are excluded. Missing descriptor evidence never triggers an alternate write path.
+Dareu requires `FF02:0002`, bidirectional Report 08, 17-byte reports. MCHOSE requires `FF01:0001`, Feature 11/12 and 65-byte capacity; exact host PIDs are listed in [protocol notes](PROTOCOLS.en.md). Bluetooth, old A5, firmware collections and unknown sensor layouts are excluded. MCHOSE A7 V3 uses the separate 4D battery path described above and does not inherit Feature-mouse DPI write capabilities. Missing descriptor evidence never triggers an alternate write path.
 
 Both adapters preserve raw stage indexes and actual enabled counts; no default 400/800/1600 list is substituted. Identity and full configuration are checked before writes and results are read back. Dareu changes only the two-byte active-stage record. MCHOSE echoes the original full configuration, changing only the live connection's stage nibble and preserving rate, buttons, macro mappings and all other bytes. Arbitrary DPI/software-preset value writes are not offered for these adapters yet.
 

@@ -1,4 +1,4 @@
-//! VGN Dragonfly3 SE receiver battery only. No online/configuration probes.
+//! VGN Dragonfly3 SE / Pro receiver battery. No configuration probes.
 use super::*;
 use crate::hid::HidDevice;
 use std::time::Instant;
@@ -8,7 +8,8 @@ const LENGTH: u16 = 65;
 const UNAVAILABLE: &str = "设备无有效状态回报";
 
 fn management(i: &HidInterface) -> bool {
-    i.vendor_id == 0x391d && i.product_id == 0x1a01 && i.usage_page == 0xff01 && i.usage == 0x10
+    i.vendor_id == 0x391d && matches!(i.product_id, 0x1a01 | 0x1a03)
+        && i.usage_page == 0xff01 && i.usage == 0x10
 }
 
 fn control(i: &HidInterface) -> bool {
@@ -40,7 +41,7 @@ fn candidates(interfaces: &[HidInterface]) -> Vec<&HidInterface> {
 
 fn candidate(i: &HidInterface) -> Target {
     let mut target = Target::new(BackendId::VgnDragonfly3, i, 0);
-    target.name = "VGN Dragonfly3 SE".into();
+    target.name = if i.product_id == 0x1a03 { "VGN Dragonfly3 Pro" } else { "VGN Dragonfly3 SE" }.into();
     target.family = DeviceFamily::Mouse;
     target
 }
@@ -69,6 +70,11 @@ fn reply(frame: &[u8]) -> Option<Reply> {
     }
 }
 
+fn receiver_reply(frame: &[u8], pid: u16) -> Option<Reply> {
+    if pid == 0x1a03 && frame.first() != Some(&0xaa) { return None; }
+    reply(frame)
+}
+
 impl DeviceBackend for VgnDragonfly3 {
     fn discover(&self, api: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         Ok(candidates(interfaces)
@@ -87,9 +93,13 @@ impl DeviceBackend for VgnDragonfly3 {
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(interface)?;
         let started = Instant::now();
+        let mut remaining = 32;
         let response = device
-            .transact(&request(), 1000, |r| reply(r).is_some())
-            .and_then(|r| reply(&r));
+            .transact_with_input_report(&request(), 0, 1000, |r| {
+                remaining -= 1;
+                receiver_reply(r, interface.product_id).is_some() || remaining == 0
+            })
+            .and_then(|r| receiver_reply(&r, interface.product_id));
         trace::record(
             interface,
             BackendId::VgnDragonfly3,
@@ -167,7 +177,7 @@ mod tests {
         let i = interface("one");
         assert!(management(&i) && control(&i));
         for (vendor, product, page, usage, input, output) in [
-            (0x391d, 0x1a03, 0xff01, 0x10, 65, 65),
+            (0x391d, 0x1a04, 0xff01, 0x10, 65, 65),
             (0x391d, 0x1001, 0xff01, 0x10, 65, 65),
             (0x391d, 0x1a01, 0xff05, 0x02, 65, 65),
             (0x391d, 0x1a01, 0xff01, 0x10, 64, 65),
@@ -235,5 +245,28 @@ mod tests {
         let second = candidate(&interface("two"));
         assert_ne!(first.key, second.key);
         assert!(!first.same_channel(&second));
+        let old_identity = interface("one").path.to_ascii_lowercase();
+        assert_eq!(first.key, crate::device::stable_key(&format!("VGN Dragonfly3 SE:{old_identity}:0")));
+    }
+
+    #[test]
+    fn pro_receiver_uses_its_own_identity_and_reply_header_without_guessing_charging() {
+        let mut pro = interface("pro");
+        pro.product_id = 0x1a03;
+        assert!(control(&pro));
+        assert_eq!(candidate(&pro).name, "VGN Dragonfly3 Pro");
+        let mut packet = frame(73, 0);
+        assert!(receiver_reply(&packet, pro.product_id).is_none());
+        packet[0] = 0xaa;
+        for percent in 0..=100 {
+            packet[8] = percent;
+            assert_eq!(receiver_reply(&packet, pro.product_id), Some(Reply::Battery(percent)));
+        }
+        packet[9] = 1;
+        assert_eq!(receiver_reply(&packet, pro.product_id), Some(Reply::Wired));
+        packet.insert(0, 0);
+        assert!(receiver_reply(&packet, pro.product_id).is_none());
+        pro.product_id = 0x1003;
+        assert!(!control(&pro));
     }
 }

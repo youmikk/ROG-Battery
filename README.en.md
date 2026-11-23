@@ -10,7 +10,9 @@ Support covers selected devices with implemented protocols, not entire brands. N
 
 ## Unreleased improvements
 
-The taskbar battery strip uses native Windows fonts and device icons, with widths measured from the rendered glyphs. Both single and multiple devices show an icon and percentage. Device reordering, background operation with only the strip enabled, and malformed headset reports are also fixed. The usage notes below describe the current source; the published download remains 1.4.12.
+The taskbar battery strip uses native Windows fonts and device icons, with widths measured from the rendered glyphs. Both single and multiple devices show an icon and percentage, with bright green charging indicators throughout the app. Device reordering, background operation with only the strip enabled, and malformed headset reports are also fixed.
+
+Battery support adds VGN Dragonfly3 Pro and six ryMs receivers, selected MCHOSE 4D receivers used by K7 V2 / A7 V3 mice, the MCHOSE K99 V3 keyboard, the MOONDROP GM01 Pro headset and a legacy Rapoo VT receiver. Windows unnumbered HID input now uses the full receive capacity so valid replies are not lost to an incorrectly sized buffer. These new paths read battery only and do not expose DPI settings. Exact model, connection and hardware-validation limits are in the [compatibility notes](COMPATIBILITY.en.md). The usage notes below describe the current source; the published download remains 1.4.12.
 
 ## Version 1.4.12
 
@@ -32,7 +34,7 @@ This version is released as a portable build first. The taskbar battery strip no
 
 This version is released as a portable build first. It adds the taskbar battery strip and continues support for commonly used Chinese brands including Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo and HECATE. New protocols pass local simulated regressions but still require per-model hardware acceptance. Exact receiver and model limits are documented in the [compatibility notes](COMPATIBILITY.en.md).
 
-MCHOSE mouse work adds Feature-protocol battery, identity and actual-stage reads for A7 V2 and selected L7 models, with existing-stage switching on A7 V2 Ultra+ / L7 Pro+. Some older A7 Ultra receivers are documented not to return battery; a shared name does not guarantee compatibility. A7 V3 and old A5 protocols are not implemented yet.
+MCHOSE mouse work adds Feature-protocol battery, identity and actual-stage reads for A7 V2 and selected L7 models, with existing-stage switching on A7 V2 Ultra+ / L7 Pro+. Some older A7 Ultra receivers are documented not to return battery; a shared name does not guarantee compatibility. A7 V3 and old A5 use other protocols and are outside version 1.4.8's scope.
 
 AJAZZ AJ179 PRO adds 2.4 GHz battery and actual X/Y stage reading/switching over USB or its receiver. The mouse's own ID establishes its model; switching reads the current profile and preserves all stage values and colors. Charging and wired battery remain unknown, Bluetooth is not integrated, and hardware acceptance is pending.
 

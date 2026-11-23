@@ -102,6 +102,42 @@ impl Descriptor {
             .is_some_and(|sizes| sizes.get(&id) == Some(&length))
     }
 
+    /// Verify both directions of a vendor byte-array report. Other report IDs
+    /// may share the collection, but cannot supply the required report's size.
+    pub fn input_output_byte_reports(&self, interface: &HidInterface, id: u8,
+        input: u16, output: u16) -> bool {
+        if self.caps.usage_page != interface.usage_page || self.caps.usage != interface.usage
+            || self.caps.input_report_byte_length != input
+            || self.caps.output_report_byte_length != output { return false; }
+        [(0, input, self.caps.number_input_button_caps, self.caps.number_input_value_caps),
+         (1, output, self.caps.number_output_button_caps, self.caps.number_output_value_caps)]
+            .into_iter().all(|(kind, length, buttons, count)| {
+                if buttons != 0 || !(1..=32).contains(&count) { return false; }
+                let mut values: Vec<HIDP_VALUE_CAPS> = (0..count)
+                    .map(|_| unsafe { core::mem::zeroed() }).collect();
+                let mut returned = count;
+                if unsafe { (self.api.get_value_caps)(kind, values.as_mut_ptr(), &mut returned, self.preparsed) } < 0
+                    || returned != count { return false; }
+                feature_byte_report_lengths(&values, length)
+                    .is_some_and(|sizes| sizes.get(&id) == Some(&length))
+            })
+    }
+
+    /// For a caller's exact, independently documented Windows descriptor
+    /// variant. Initializing a report only touches local memory, not the device.
+    pub fn initialized_input_output_report(&self, interface: &HidInterface, id: u8, length: u16) -> bool {
+        if self.caps.usage_page != interface.usage_page || self.caps.usage != interface.usage
+            || !(2..=4096).contains(&length)
+            || self.caps.input_report_byte_length != length
+            || self.caps.output_report_byte_length != length
+            || !(0..=1).all(|kind| self.report_ids(kind).is_some_and(|ids| ids.contains(&id))) {
+            return false;
+        }
+        initialize_both_reports(id, length, |kind, buffer| unsafe {
+            (self.api.initialize_report_for_id)(kind, id, self.preparsed, buffer.as_mut_ptr(), buffer.len() as u32)
+        })
+    }
+
     /// Prove that every advertised input report ID is in a small protocol
     /// allow-list. The caller must separately validate the collection usage.
     pub fn input_report_ids(&self, interface: &HidInterface, length: u16, allowed: &[u8]) -> bool {
@@ -156,6 +192,13 @@ fn single_id(ids: Vec<u8>) -> Option<u8> {
     ids.iter().all(|id| *id == first).then_some(first)
 }
 
+fn initialize_both_reports(id: u8, length: u16, mut initialize: impl FnMut(u32, &mut [u8]) -> i32) -> bool {
+    (0..=1).all(|kind| {
+        let mut buffer = vec![0; usize::from(length)];
+        initialize(kind, &mut buffer) >= 0 && buffer.first() == Some(&id)
+    })
+}
+
 fn feature_byte_report_lengths(
     fields: &[HIDP_VALUE_CAPS],
     maximum: u16,
@@ -181,6 +224,22 @@ fn feature_byte_report_lengths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_report_initialization_must_confirm_both_directions_and_the_requested_id() {
+        let mut calls = Vec::new();
+        assert!(initialize_both_reports(0x4d, 64, |kind, r| {
+            calls.push(kind); assert_eq!(r.len(), 64); r[0] = 0x4d; 0x00110000
+        }));
+        assert_eq!(calls, vec![0, 1]);
+        for denied in [0, 1] {
+            assert!(!initialize_both_reports(0x4d, 64, |kind, r| {
+                r[0] = 0x4d;
+                if kind == denied { 0xc0110010u32 as i32 } else { 0x00110000 }
+            }));
+        }
+        assert!(!initialize_both_reports(0x4d, 64, |_, _| 0x00110000));
+    }
 
     #[test]
     fn button_fields_and_value_fields_are_both_required_and_zero_counts_are_not_queried() {

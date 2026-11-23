@@ -395,8 +395,8 @@ impl HidDevice {
     }
 
     /// Interrupt Output exchange for a collection with one descriptor-proven
-    /// input report ID. Windows omits the zero Report ID byte from unnumbered
-    /// input buffers even though the collection capacity includes its slot.
+    /// input report ID. ReadFile needs the full Windows capacity, including the
+    /// zero ID slot; unnumbered reports are normalized after receiving them.
     pub fn transact_with_input_report(
         &mut self,
         packet: &[u8],
@@ -446,10 +446,10 @@ impl HidDevice {
             return None;
         }
         while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
-            let read_len = self.in_len as usize
-                - usize::from(input_report_id == Some(0));
+            let read_len = self.in_len as usize;
             if read_len == 0 || !self.start_read(read_len) { return None; }
-            let frame = self.finish_read(left.as_millis().max(1) as u32)?;
+            let raw = self.finish_read(left.as_millis().max(1) as u32)?;
+            let Some(frame) = protocol_input(raw, input_report_id, read_len) else { continue; };
             if matches(&frame) { return Some(frame); }
         }
         None
@@ -965,4 +965,41 @@ pub fn open_link(hid: &HidApi) -> Result<Link, String> {
         .into_iter()
         .next()
         .ok_or_else(|| "没有可用的命令通道".to_string())
+}
+
+fn protocol_input(mut frame: Vec<u8>, report_id: Option<u8>, capacity: usize) -> Option<Vec<u8>> {
+    if report_id == Some(0) {
+        if frame.len() < 2 || frame.len() > capacity || frame[0] != 0 { return None; }
+        frame.remove(0);
+    }
+    Some(frame)
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::protocol_input;
+
+    #[test]
+    fn windows_unnumbered_input_removes_id_only_after_receiving_full_buffer() {
+        let mut windows = vec![0; 65];
+        windows[1] = 0xaa; windows[2] = 3; windows[9] = 40;
+        let payload = protocol_input(windows.clone(), Some(0), 65).unwrap();
+        assert_eq!(payload.len(), 64);
+        assert_eq!((&payload[..2], payload[8]), (&[0xaa, 3][..], 40));
+        // Short reads stay short so each protocol can reject them itself.
+        assert_eq!(protocol_input(windows[..12].to_vec(), Some(0), 65).unwrap().len(), 11);
+        assert!(protocol_input(vec![0], Some(0), 65).is_none());
+        assert!(protocol_input(vec![0xaa; 64], Some(0), 65).is_none());
+        assert!(protocol_input(vec![0; 66], Some(0), 65).is_none());
+    }
+
+    #[test]
+    fn numbered_and_unspecified_inputs_preserve_existing_byte_layout() {
+        for report_id in [None, Some(4), Some(0x4d)] {
+            let frame = vec![0x4d, 1, 1, 14, 0, 9];
+            assert_eq!(protocol_input(frame.clone(), report_id, 64), Some(frame));
+        }
+        let frame = vec![0, 0xb0, 0, 42, 1];
+        assert_eq!(protocol_input(frame.clone(), None, 65), Some(frame));
+    }
 }

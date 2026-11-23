@@ -4404,10 +4404,15 @@ mod backend_tests {
             (BackendId::VgnBeiying, DeviceFamily::Keyboard),
             (BackendId::MchoseQhw, DeviceFamily::Keyboard), (BackendId::Keyboard20, DeviceFamily::Keyboard),
             (BackendId::MchoseGlw, DeviceFamily::Keyboard),
+            (BackendId::MchoseK99, DeviceFamily::Keyboard),
+            (BackendId::Moondrop, DeviceFamily::Headset),
+            (BackendId::RapooLegacy, DeviceFamily::Mouse),
             (BackendId::Edifier, DeviceFamily::Headset), (BackendId::EweadnS9Pro, DeviceFamily::Mouse),
             (BackendId::EweadnS9, DeviceFamily::Mouse),
             (BackendId::Dareu, DeviceFamily::Mouse),
             (BackendId::VgnDragonfly3, DeviceFamily::Mouse),
+            (BackendId::VgnRy, DeviceFamily::Mouse),
+            (BackendId::MchoseModern, DeviceFamily::Mouse),
             (BackendId::MchoseMouse, DeviceFamily::Mouse), (BackendId::GearHub, DeviceFamily::Mouse), (BackendId::G3m, DeviceFamily::Mouse), (BackendId::Aula, DeviceFamily::Mouse),
             (BackendId::EightBitDo, DeviceFamily::Gamepad),
             (BackendId::Flydigi, DeviceFamily::Gamepad),
@@ -4437,6 +4442,33 @@ mod backend_tests {
         assert_eq!(shared.readings[0].battery_text(true), "92%");
         assert_eq!(shared.readings[0].quality, crate::device::ReadingQuality::Live);
         assert_eq!(shared.readings[0].family, family);
+        }
+    }
+
+    #[test]
+    fn new_receiver_explicit_sleep_clears_tray_level_and_wake_returns_it() {
+        for backend in [BackendId::VgnRy, BackendId::MchoseModern] {
+            let mut shared = Shared::new(Settings::default());
+            let now = std::time::Instant::now();
+            let mut sample = snapshot(backend, "mouse", 85);
+            sample.target.family = DeviceFamily::Mouse;
+            sample.battery_at = Some(now);
+            merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+            assert_eq!(shared.readings[0].battery_text(true), "85%");
+            let mut sleep = sample.clone();
+            sleep.connected = false;
+            sleep.battery = None;
+            sleep.battery_at = None;
+            sleep.battery_unavailable = true;
+            merge_additional_at(&mut shared, backend, vec![sleep].into(), now + Duration::from_secs(10));
+            assert!(!shared.devices["mouse"].reading.connected);
+            assert!(shared.devices["mouse"].reading.battery.is_none());
+            let woke = now + Duration::from_secs(20);
+            sample.battery_at = Some(woke);
+            sample.battery.as_mut().unwrap().percent = Some(84);
+            merge_additional_at(&mut shared, backend, vec![sample].into(), woke);
+            assert!(shared.readings[0].connected);
+            assert_eq!(shared.readings[0].battery_text(true), "84%");
         }
     }
 
