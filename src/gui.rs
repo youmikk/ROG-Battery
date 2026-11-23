@@ -4407,6 +4407,13 @@ mod backend_tests {
             (BackendId::MchoseK99, DeviceFamily::Keyboard),
             (BackendId::Moondrop, DeviceFamily::Headset),
             (BackendId::RapooLegacy, DeviceFamily::Mouse),
+            (BackendId::RapooOffice, DeviceFamily::Mouse),
+            (BackendId::AulaHfd, DeviceFamily::Keyboard),
+            (BackendId::MchoseMc, DeviceFamily::Headset),
+            (BackendId::AulaF99, DeviceFamily::Keyboard),
+            (BackendId::AtkNano, DeviceFamily::Mouse),
+            (BackendId::EweadnX87, DeviceFamily::Keyboard),
+            (BackendId::Xiberia, DeviceFamily::Headset),
             (BackendId::Edifier, DeviceFamily::Headset), (BackendId::EweadnS9Pro, DeviceFamily::Mouse),
             (BackendId::EweadnS9, DeviceFamily::Mouse),
             (BackendId::Dareu, DeviceFamily::Mouse),
@@ -4447,11 +4454,11 @@ mod backend_tests {
 
     #[test]
     fn new_receiver_explicit_sleep_clears_tray_level_and_wake_returns_it() {
-        for backend in [BackendId::VgnRy, BackendId::MchoseModern] {
+        for backend in [BackendId::VgnRy, BackendId::MchoseModern, BackendId::MchoseMc] {
             let mut shared = Shared::new(Settings::default());
             let now = std::time::Instant::now();
             let mut sample = snapshot(backend, "mouse", 85);
-            sample.target.family = DeviceFamily::Mouse;
+            sample.target.family = if backend == BackendId::MchoseMc { DeviceFamily::Headset } else { DeviceFamily::Mouse };
             sample.battery_at = Some(now);
             merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
             assert_eq!(shared.readings[0].battery_text(true), "85%");
@@ -4469,6 +4476,29 @@ mod backend_tests {
             merge_additional_at(&mut shared, backend, vec![sample].into(), woke);
             assert!(shared.readings[0].connected);
             assert_eq!(shared.readings[0].battery_text(true), "84%");
+        }
+    }
+
+    #[test]
+    fn fresh_charging_unknown_clears_percentage_and_shows_charge_in_main_and_tray() {
+        for backend in [BackendId::RapooOffice, BackendId::Headset, BackendId::GameSir] {
+            let mut shared = Shared::new(Settings::default());
+            let now = std::time::Instant::now();
+            let mut sample = snapshot(backend, "charging", 47);
+            sample.battery_at = Some(now);
+            merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+            assert_eq!(shared.readings[0].battery_text(true), "47%");
+            let measured = now + Duration::from_secs(10);
+            sample.battery.as_mut().unwrap().percent = None;
+            sample.battery.as_mut().unwrap().charging = Some(true);
+            sample.battery_at = Some(measured);
+            merge_additional_at(&mut shared, backend, vec![sample].into(), measured);
+            assert_eq!(shared.readings[0].battery_text(true), "—");
+            assert!(shared.readings[0].is_charging());
+            assert!(shared.devices["charging"].reading.is_charging());
+            merge_additional_at(&mut shared, backend, Vec::new().into(), measured + Duration::from_secs(120));
+            assert!(!shared.readings[0].is_charging());
+            assert_eq!(shared.readings[0].battery_text(true), "—");
         }
     }
 

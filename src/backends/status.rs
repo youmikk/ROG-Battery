@@ -48,8 +48,10 @@ impl Status {
         });
         if connected == Some(true) {
             if let Some(battery) = valid {
-                // 只有电量字段本身的有效回报才能延长电量采样寿命。
-                if battery.percent.is_some() || battery.level.is_some() || battery.estimated_percent.is_some() {
+                // A fresh charge-only report replaces the whole sample. Its
+                // missing percentage must clear the old number, not renew it.
+                if battery.percent.is_some() || battery.level.is_some()
+                    || battery.estimated_percent.is_some() || battery.charging.is_some() {
                     let measured = measured.unwrap_or(now).min(now);
                     if self.measured_at.is_none_or(|previous| measured > previous) {
                         self.measured_at = Some(measured);
@@ -142,5 +144,28 @@ mod tests {
         assert_eq!(state.quality, ReadingQuality::Stale);
         assert_eq!(state.queried_at, Some(now));
         assert!(state.connected);
+    }
+
+    #[test]
+    fn charging_without_percentage_replaces_the_old_number_and_expires_normally() {
+        let now = Instant::now();
+        let lifetime = Duration::from_secs(120);
+        let charge_only = Battery { percent: None, estimated_percent: None,
+            charging: Some(true), voltage_mv: None, approximate: false, level: None };
+        for prior in [false, true] {
+            let mut state = Status::default();
+            if prior { state.observe(Some(true), Some(&battery(47)), now, lifetime); }
+            let measured = now + Duration::from_secs(10);
+            state.observe_sample(Some(true), Some(&charge_only), Some(measured), measured, lifetime);
+            assert_eq!(state.quality, ReadingQuality::Live);
+            assert_eq!(state.battery.as_ref().unwrap().percent, None);
+            assert_eq!(state.battery.as_ref().unwrap().charging, Some(true));
+            state.observe_sample(None, None, None, measured + lifetime, lifetime);
+            assert_eq!(state.measured_at, Some(measured));
+            assert_eq!(state.quality, ReadingQuality::Stale);
+            state.observe_sample(Some(true), Some(&battery(48)), Some(measured + lifetime), measured + lifetime, lifetime);
+            assert_eq!(state.quality, ReadingQuality::Live);
+            assert_eq!(state.battery.as_ref().unwrap().percent, Some(48));
+        }
     }
 }

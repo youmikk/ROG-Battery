@@ -41,7 +41,26 @@ K99 is limited to one second and GM01 to 800 ms, with at most 32 input frames pe
 
 Only `24AE:1851`, `FF00:000E`, `Col04`, 32-byte input/output capacities and no Feature reports are accepted, with sole Report `BA` proved by the descriptor. The reader sends `BA A5 AA 00`, waits 250 ms and uses bounded GET_REPORT(Input) for the 31/32-byte status response. It is separate from nRF54L and exposes no EEPROM, DPI or polling-rate writes.
 
-Only success, known discharge/charge markers and `0..100` percentages are accepted; configuration replies are rejected. The shared receiver is named Rapoo VT 2.4G without guessing its paired retail model. One query per poll, no retry; samples expire after 120 seconds, with a 10-second publication cap. There is no transaction or command echo, so receiver-held stale replies cannot be fully excluded. Local hardware, sleep and vendor-software coexistence remain unverified. MT760 is not included.
+Only success, known discharge/charge markers and `0..100` percentages are accepted; configuration replies are rejected. The shared receiver is named Rapoo VT 2.4G without guessing its paired retail model. One query per poll, no retry; samples expire after 120 seconds, with a 10-second publication cap. There is no transaction or command echo, so receiver-held stale replies cannot be fully excluded. Local hardware, sleep and vendor-software coexistence remain unverified. MT760 uses the separate path below.
+
+## Unreleased: second domestic mouse, keyboard and headset batch
+
+| Scope | Implemented capability | Matching and limits |
+| --- | --- | --- |
+| Rapoo MT760 family `24AE:1870` | Percentage; charging `7F` retains charging only | `FF00:000E`, sole `BA/32` in both directions, no Feature; one SET_OUTPUT_REPORT followed by GET_INPUT_REPORT, busy states repeat reads only; receiver ID does not distinguish L / Mini; zero is not published |
+| ATK / VXE NANO `373B:1216` | GET07 percentage | `FF05:0001`, Output `08/64`; input byte-array ID and capacity proved separately; one management collection per actual USB parent; no charging, voltage or DPI |
+| AULA F87ProV2 `0C45:FEFE` | HFD page 0 percentage | Exact `AULA F87ProV2D Dongle`, `MI_03 / FF60:0061`, unnumbered 33/33; both page-address bytes must be zero; charging unknown |
+| AULA F99 MAX `05AC:024F` | Two-page HFD percentage | Exact `F99 MAX Dongle`, `MI_03 / FF60:0061`, unnumbered 33/33; firmware `0C45:800A`, wireless mode and valid percentage checked before page two; charging unknown, zero placeholder rejected |
+| Original EWEADN X87 `0C45:FEFE` | GET_INFO percentage | Exact `2.4G Dongle`, `MI_03 / FF60:0061`, unnumbered 33 or 65; named X87 only after firmware manufacturer=2, product=5, mode=2; excludes X87S / V2; charging unknown, zero rejected |
+| MCHOSE V9 PRO 2 `3837:6011` | MC percentage, charging and explicit sleep | Exact `MCHOSE V9 Pro 2`, `MI_03 / FF07:0222`, bidirectional `55/64`; query `0B` and notification `22` validated separately; sleep clears the old value; R9 excluded |
+| MCHOSE X9 `3837:6045` | BLK percentage, charging with unknown percentage and explicit offline | Exact `MCHOSE X9`, `MI_00 / FF90:0001`, sole `55/64` in both directions; `02` provides percentage, `03` charging only, `1A` clears the old value; `00/04` are not interpreted as full |
+| XIBERIA K06S `36F9:F002` | Exact percentage | Exact `XIBERIA K06S Wireless`, `FF90:0001 / Col03`, sole `55/64` in both directions; FF82 never queried; charging unknown, zero indistinguishable from an echo and rejected |
+
+These paths query status only, with no new DPI, audio, lighting, macro or firmware settings. Background publication is capped at ten seconds and samples expire after 120 seconds. A charging-only sample replaces the previous battery and clears its percentage; it never extends an old number's lifetime. Keyboard/headset reads have time and frame limits. MT760 repeats bounded reads only when busy, while NANO rechecks the physical receiver and report capabilities before querying.
+
+No device in this batch has been tested locally. Public evidence includes complete MT760 47%, F87ProV2 48% and F99 MAX 68% two-page replies, F99 MAX 71% after correcting the buffer, and NANO 90% / K06S 100% prefixes; some test padding is synthetic. X87's upstream battery reads also remain unverified. A public successful battery read does not establish this project's charging, sleep, hot-plug, receiver-cache or vendor-software acceptance.
+
+All 440 final local regressions, the warning-free Windows x64 release build and version/PE checks passed. A read-only probe returned valid battery and charging data from the existing VGN V98 Pro V3. The ROG interface supplied no valid reading in the second probe, which cannot establish its wake state or long-term stability. None of the newly supported devices was attached.
 
 ## Version 1.4.12
 

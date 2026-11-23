@@ -123,6 +123,29 @@ impl Descriptor {
             })
     }
 
+    /// Identify independently proven byte-array reports when the two directions
+    /// use different IDs. Neither direction may contain a second report.
+    pub fn single_input_output_byte_report_ids(&self, interface: &HidInterface,
+        input: u16, output: u16) -> Option<(u8, u8)> {
+        if self.caps.usage_page != interface.usage_page || self.caps.usage != interface.usage
+            || self.caps.input_report_byte_length != input
+            || self.caps.output_report_byte_length != output { return None; }
+        let mut ids = [0; 2];
+        for (kind, length, buttons, count) in [
+            (0, input, self.caps.number_input_button_caps, self.caps.number_input_value_caps),
+            (1, output, self.caps.number_output_button_caps, self.caps.number_output_value_caps),
+        ] {
+            if buttons != 0 || !(1..=32).contains(&count) { return None; }
+            let mut values: Vec<HIDP_VALUE_CAPS> = (0..count)
+                .map(|_| unsafe { core::mem::zeroed() }).collect();
+            let mut returned = count;
+            if unsafe { (self.api.get_value_caps)(kind, values.as_mut_ptr(), &mut returned, self.preparsed) } < 0
+                || returned != count { return None; }
+            ids[kind as usize] = single_byte_report_id(&values, length)?;
+        }
+        Some((ids[0], ids[1]))
+    }
+
     /// For a caller's exact, independently documented Windows descriptor
     /// variant. Initializing a report only touches local memory, not the device.
     pub fn initialized_input_output_report(&self, interface: &HidInterface, id: u8, length: u16) -> bool {
@@ -197,6 +220,11 @@ fn initialize_both_reports(id: u8, length: u16, mut initialize: impl FnMut(u32, 
         let mut buffer = vec![0; usize::from(length)];
         initialize(kind, &mut buffer) >= 0 && buffer.first() == Some(&id)
     })
+}
+
+fn single_byte_report_id(fields: &[HIDP_VALUE_CAPS], maximum: u16) -> Option<u8> {
+    let reports = feature_byte_report_lengths(fields, maximum)?;
+    (reports.len() == 1).then(|| *reports.keys().next().unwrap())
 }
 
 fn feature_byte_report_lengths(
@@ -297,5 +325,22 @@ mod tests {
         assert_eq!(single_id(vec![7, 7]), Some(7));
         assert_eq!(single_id(vec![]), None);
         assert_eq!(single_id(vec![0, 7]), None);
+    }
+
+    #[test]
+    fn byte_report_identity_requires_a_complete_array_and_rejects_other_ids() {
+        let mut input: HIDP_VALUE_CAPS = unsafe { core::mem::zeroed() };
+        input.ReportID = 0;
+        input.BitSize = 8;
+        input.ReportCount = 15;
+        let mut output = input;
+        output.ReportID = 8;
+        output.ReportCount = 63;
+        assert_eq!(single_byte_report_id(&[input], 16), Some(0));
+        assert_eq!(single_byte_report_id(&[output], 64), Some(8));
+        assert_eq!(single_byte_report_id(&[input, output], 64), None);
+        assert_eq!(single_byte_report_id(&[input], 64), None);
+        output.BitSize = 1;
+        assert_eq!(single_byte_report_id(&[output], 64), None);
     }
 }

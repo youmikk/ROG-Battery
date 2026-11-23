@@ -14,6 +14,8 @@ The taskbar battery strip uses native Windows fonts and device icons, with width
 
 Battery support adds VGN Dragonfly3 Pro and six ryMs receivers, selected MCHOSE 4D receivers used by K7 V2 / A7 V3 mice, the MCHOSE K99 V3 keyboard, the MOONDROP GM01 Pro headset and a legacy Rapoo VT receiver. Windows unnumbered HID input now uses the full receive capacity so valid replies are not lost to an incorrectly sized buffer. These new paths read battery only and do not expose DPI settings. Exact model, connection and hardware-validation limits are in the [compatibility notes](COMPATIBILITY.en.md). The usage notes below describe the current source; the published download remains 1.4.12.
 
+Further additions cover limited battery protocols for Rapoo MT760, ATK / VXE NANO, AULA F87ProV2 / F99 MAX, EWEADN X87, MCHOSE V9 PRO 2 / X9 and XIBERIA K06S. When a device reports charging without a percentage, the app shows charging and clears the old number; failed queries still expire according to the original sample time. Charging support varies by path, and these new models still require this project's hardware validation.
+
 ## Version 1.4.12
 
 This version is released as a portable build first. It adds MCHOSE V9 PRO headset support after reading receiver firmware through a descriptor-proven `FF22` Feature `AA/64`; versions below `0008` are blocked, while unknown versions retain the conservative fallback. Per-model hardware validation is still pending.

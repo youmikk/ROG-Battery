@@ -16,6 +16,7 @@ enum Model {
     AtkUltra,
     MchoseV9,
     MchoseV9Pro,
+    MchoseX9,
 }
 
 impl Model {
@@ -25,6 +26,7 @@ impl Model {
             Self::AtkUltra => "ATK N9 V2 ULTRA",
             Self::MchoseV9 => "MCHOSE V9 Turbo+",
             Self::MchoseV9Pro => "MCHOSE V9 PRO",
+            Self::MchoseX9 => "MCHOSE X9",
         }
     }
 }
@@ -42,8 +44,47 @@ fn model(i: &HidInterface) -> Option<Model> {
         }
         (0x3837, 0x600a) if i.input_len == 64 => Some(Model::MchoseV9),
         (0x291d, 0x385d) if i.input_len == 64 => Some(Model::MchoseV9Pro),
+        (0x3837, 0x6045) if i.input_len == 64
+            && i.product.trim().eq_ignore_ascii_case("MCHOSE X9")
+            && x9_group(i).is_some() => Some(Model::MchoseX9),
         _ => None,
     }
+}
+
+fn x9_group(i: &HidInterface) -> Option<String> {
+    if i.vendor_id != 0x3837 || i.product_id != 0x6045 { return None; }
+    // HeadsetControl's X9 capture identifies MI_00. Keep its Windows instance
+    // intact while joining sibling collections with either TLC index base.
+    let path = i.path.to_ascii_lowercase();
+    let parts: Vec<_> = path.split('#').collect();
+    if parts.len() != 4 || parts[0] != r"\\?\hid" || parts[2].is_empty()
+        || parts[3].is_empty() || path.contains('\0') { return None; }
+    let fields: Vec<_> = parts[1].split('&').collect();
+    for required in ["vid_3837", "pid_6045", "mi_00"] {
+        if fields.iter().filter(|field| **field == required).count() != 1 { return None; }
+    }
+    if fields.iter().filter(|field| field.starts_with("mi_")).count() != 1 { return None; }
+    let collections: Vec<_> = fields.iter().filter_map(|field| field.strip_prefix("col")).collect();
+    let instance = match collections.as_slice() {
+        [] => parts[2],
+        [collection] => {
+            if collection.len() != 2 || !collection.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+            let (instance, index) = parts[2].rsplit_once('&')?;
+            if instance.split('&').count() < 2 || index.len() != 4
+                || !index.starts_with("00") || !index.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+            instance
+        }
+        _ => return None,
+    };
+    let hardware = fields.into_iter().filter(|field| !field.starts_with("col"))
+        .collect::<Vec<_>>().join("&");
+    Some(format!("{}#{hardware}#{instance}#{}", parts[0], parts[3]))
+}
+
+fn x9_unique(i: &HidInterface, interfaces: &[HidInterface]) -> bool {
+    let Some(group) = x9_group(i) else { return false; };
+    interfaces.iter().filter(|other| other.usage_page == 0xff90 && other.usage == 1
+        && x9_group(other).as_ref() == Some(&group)).count() == 1
 }
 
 #[derive(Default)]
@@ -65,7 +106,8 @@ fn proven(api: &HidApi, i: &HidInterface) -> bool {
 
 fn candidates<'a>(api: &HidApi, interfaces: &'a [HidInterface]) -> Vec<&'a HidInterface> {
     // Descriptor checks open Windows handles. Prove each collection once per scan.
-    let proven: Vec<_> = interfaces.iter().filter(|i| proven(api, i)).collect();
+    let proven: Vec<_> = interfaces.iter().filter(|i|
+        (model(i) != Some(Model::MchoseX9) || x9_unique(i, interfaces)) && proven(api, i)).collect();
     let mut groups = BTreeMap::new();
     for interface in &proven {
         *groups.entry(channel::collection_group(interface)).or_insert(0usize) += 1;
@@ -119,6 +161,19 @@ fn reading(model: Model, r: &[u8]) -> Option<Reading> {
                 _ => None,
             }
         }
+        Model::MchoseX9 => {
+            if r.len() != 64 { return None; }
+            // X9's captured battery field is 02. The official BLK codec marks
+            // 03 as charging and 1A as asleep. A plugged-in percentage may be
+            // frozen, so 03 carries charging only. Full/unknown fields are not
+            // converted into 100% or borrowed from the older V9 variants.
+            match r[3] {
+                2 if r[2] <= 100 => Some(Reading::Level { percent: r[2], charging: false }),
+                3 => Some(Reading::ExternalPower),
+                0x1a => Some(Reading::Offline),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -147,6 +202,17 @@ fn battery(reading: Reading) -> (Option<Battery>, bool) {
             true,
         ),
         Reading::Offline => (None, false),
+    }
+}
+
+fn snapshot(target: &Target, selected: Model, parsed: Reading) -> Snapshot {
+    let (battery, connected) = battery(parsed);
+    Snapshot {
+        target: target.clone(), battery,
+        battery_unavailable: selected == Model::MchoseX9 && parsed == Reading::Offline,
+        // Charge-only samples carry their own time and no old percentage.
+        battery_at: connected.then(Instant::now),
+        dpi: Dpi::default(), polling_rate: Default::default(), connected,
     }
 }
 
@@ -313,16 +379,7 @@ impl DeviceBackend for Headset {
             .as_deref()
             .and_then(|r| reading(selected, r))
             .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
-        let (battery, connected) = battery(parsed);
-        Ok(Snapshot {
-            target: target.clone(),
-            battery,
-            battery_unavailable: false,
-            battery_at: connected.then(Instant::now),
-            dpi: Dpi::default(),
-            polling_rate: Default::default(),
-            connected,
-        })
+        Ok(snapshot(target, selected, parsed))
     }
 }
 #[cfg(test)]
@@ -467,7 +524,7 @@ mod tests {
 
     #[test]
     fn short_battery_reports_are_rejected_before_reading_fields() {
-        for model in [Model::AtkUltimate, Model::AtkUltra, Model::MchoseV9, Model::MchoseV9Pro] {
+        for model in [Model::AtkUltimate, Model::AtkUltra, Model::MchoseV9, Model::MchoseV9Pro, Model::MchoseX9] {
             let frame = reply(model, 45, 2);
             let minimum = if matches!(model, Model::AtkUltimate | Model::AtkUltra) { 22 } else { 64 };
             for length in 0..minimum {
@@ -477,6 +534,63 @@ mod tests {
             oversized.resize(65, 0);
             assert_eq!(reading(model, &oversized), None);
         }
+    }
+
+    fn x9_interface(instance: &str) -> HidInterface {
+        let mut i = interface(0x3837, 0x6045, 64);
+        i.path = format!(r"\\?\hid#vid_3837&pid_6045&mi_00&col06#8&{instance}&0&0005#{{hid}}");
+        i.product = "MCHOSE X9".into();
+        i.serial = "shared".into();
+        i
+    }
+
+    #[test]
+    fn x9_requires_exact_name_interface_and_one_management_collection() {
+        let one = x9_interface("one"); let two = x9_interface("two");
+        assert_eq!(model(&one), Some(Model::MchoseX9));
+        assert!(x9_unique(&one, &[one.clone(), two.clone()]));
+        assert_ne!(Target::new(BackendId::Headset, &one, 1).key,
+            Target::new(BackendId::Headset, &two, 1).key);
+        let mut variant = one.clone(); variant.product = "  mchose x9  ".into();
+        assert_eq!(model(&variant), Some(Model::MchoseX9));
+        for name in ["MCHOSE V9 PRO", "MCHOSE X9 Pro", "USB Receiver", ""] {
+            variant = one.clone(); variant.product = name.into(); assert!(model(&variant).is_none());
+        }
+        for (page, usage, input, output) in [(0xff22, 1, 64, 64), (0xff90, 2, 64, 64),
+            (0xff90, 1, 63, 64), (0xff90, 1, 64, 65)] {
+            variant = one.clone(); variant.usage_page = page; variant.usage = usage;
+            variant.input_len = input; variant.output_len = output; assert!(model(&variant).is_none());
+        }
+        variant = one.clone(); variant.path = variant.path.replace("mi_00", "mi_01");
+        assert!(model(&variant).is_none());
+        variant = one.clone(); variant.path = variant.path.replace("col06", "col07").replace("0005", "0006");
+        variant.input_len = 0; variant.product = "USB Receiver".into();
+        assert!(!x9_unique(&one, &[one.clone(), variant]));
+    }
+
+    #[test]
+    fn x9_battery_field_charging_only_and_sleep_have_separate_meanings() {
+        let t = Target::new(BackendId::Headset, &x9_interface("one"), 1);
+        for percent in 0..=100 {
+            let parsed = reading(Model::MchoseX9, &reply(Model::MchoseX9, percent, 2)).unwrap();
+            let sample = snapshot(&t, Model::MchoseX9, parsed);
+            assert_eq!(sample.battery.unwrap().percent, Some(percent));
+            assert!(sample.connected && sample.battery_at.is_some());
+        }
+        let parsed = reading(Model::MchoseX9, &reply(Model::MchoseX9, 50, 3)).unwrap();
+        let charging = snapshot(&t, Model::MchoseX9, parsed);
+        assert!(charging.connected && charging.battery_at.is_some());
+        let battery = charging.battery.unwrap();
+        assert_eq!((battery.percent, battery.charging), (None, Some(true)));
+        let sleeping = snapshot(&t, Model::MchoseX9, Reading::Offline);
+        assert!(!sleeping.connected && sleeping.battery_unavailable);
+        assert!(sleeping.battery.is_none() && sleeping.battery_at.is_none());
+        assert!(reading(Model::MchoseX9, &query()).is_none());
+        for state in [0, 1, 4, 5, 0xff] {
+            assert!(reading(Model::MchoseX9, &reply(Model::MchoseX9, 50, state)).is_none());
+        }
+        assert!(reading(Model::MchoseX9, &reply(Model::MchoseX9, 101, 2)).is_none());
+        assert_ne!(model(&x9_interface("one")), Some(Model::MchoseV9Pro));
     }
 
     #[test]
