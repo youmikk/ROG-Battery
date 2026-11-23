@@ -83,6 +83,16 @@ pub fn render() -> String {
     render_events(events.iter())
 }
 
+/// Keep the feedback preview scoped to the selected product and the last 24 queries.
+pub fn render_selected(backend: BackendId, vendor_id: u16, product_id: u16) -> String {
+    let events = EVENTS.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner());
+    let mut selected: Vec<_> = events.iter().rev().filter(|event|
+        event.backend == backend && event.vendor_id == vendor_id && event.product_id == product_id)
+        .take(24).collect();
+    selected.reverse();
+    render_events(selected)
+}
+
 fn render_events<'a>(events: impl IntoIterator<Item = &'a Event>) -> String {
     let mut output = String::from("Protocol query summary (no payloads or device identifiers)\n");
     for event in events {

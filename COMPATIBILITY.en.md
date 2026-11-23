@@ -4,21 +4,11 @@
 
 Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with simulated protocol coverage and Logitech hardware validation pending. Battery observations now distinguish live, cached and stale readings; failed queries alone do not establish disconnection. See [protocol research](PROTOCOLS.en.md) for upstream catalogs and capability boundaries.
 
-This document lists additions in 1.4.12, 1.4.11, 1.4.10, 1.4.9, 1.4.8, 1.4.7, 1.4.6 and 1.4.5 alongside existing 1.4.4 capabilities with their hardware validation status. Discovery, model recognition and parser tests do not verify hardware compatibility.
+This document records the consolidated 1.4.7 release scope and earlier capabilities with their hardware-validation limits. Work previously labeled 1.4.7–1.4.12 or unreleased is consolidated into 1.4.7. Intermediate validation records remain for traceability and do not identify separate release targets. Discovery, model recognition and parser tests do not verify hardware compatibility.
 
-Version 1.4.8 release validation (2026-11-22): all 319 local regressions passed; the Windows x64 release build completed without warnings, with source/runtime versions, PE type and SHA256 checked. The taskbar battery strip was verified to display, open the quick-view panel on click and close it on a second click. The existing VGN read-only probe returned valid data; new models still require hardware acceptance.
+Current combined validation: all 526 Rust tests passed. Per-model hardware acceptance remains documented separately below; protocol simulations, public contributor reports and this project's hardware tests are distinct evidence.
 
-Version 1.4.9 acceptance candidate: all 326 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and copied-executable SHA256. The new multi-device taskbar layout is covered by synthetic readings and width-boundary tests. Existing wired VGN V98 Pro V3 hardware still returned 100% and charging. None of the five new wireless VGN / VXE identities is attached locally, so matching hardware acceptance remains pending.
-
-Version 1.4.10 portable validation: all 354 local regressions and the warning-free Windows x64 release build passed, including source/runtime versions, PE type and SHA256. A live mock-device run displayed separate mouse, keyboard, headset and gamepad cards. The post-1.4.10 FF90 headset state expansion passes 356 local regressions. New EWEADN, MCHOSE G87 V2, Flydigi and GameSir protocols still need matching hardware acceptance; S9 PRO 8K already has user hardware readings.
-
-Version 1.4.11 portable validation: all 356 local regressions and the warning-free Windows x64 release build passed, including runtime version, PE type and SHA256. FF90 adds ATK N9 V2 ULTRA and corrects MCHOSE external-power/offline handling. Matching hardware acceptance remains pending.
-
-Version 1.4.12 portable validation: all 357 local regressions and the warning-free Windows x64 release build passed, including runtime version, PE type and SHA256. MCHOSE V9 PRO adds a `0008` firmware gate and descriptor-proven `FF22` Feature `AA/64`. Matching hardware acceptance remains pending.
-
-Version 1.4.7 release validation (2026-11-21): all 213 local regressions passed and the Windows x64 release build completed without warnings. Synthetic keyboard, headset and gamepad render checks covered Chinese/English, light/dark themes and 100% / 125% scaling; these were not hardware-connection evidence.
-
-## Unreleased: VGN and MCHOSE receivers
+## Version 1.4.7: VGN and MCHOSE receivers
 
 On 2026-11-23, all 397 local regressions, the Windows x64 release build and version/PE checks passed. A read-only probe still obtained valid readings from the existing ROG mouse and VGN V98 Pro V3 keyboard. No newly supported device was attached, so this does not validate the new hardware paths.
 
@@ -30,20 +20,20 @@ On 2026-11-23, all 397 local regressions, the Windows x64 release build and vers
 
 The documented Windows array descriptor on `3837:1018`, exact A7 V3 Ultra+ / Pro name, `MI_02` and 64-byte capacities may also be accepted after `HidP_InitializeReportForID` confirms report `4D` in both local buffers. This sends no initialization command to hardware. MCHOSE 41-byte, `FF0B`, unproven descriptors and wired identities remain outside this batch. Failed reads do not renew samples. The lifetime is 120 seconds and background publication is capped at 10 seconds. No matching local hardware is available; cold start, sleep, charging, receiver cache behavior and vendor-software coexistence still need hardware validation.
 
-## Unreleased: MCHOSE K99 V3 and MOONDROP GM01 Pro
+## Version 1.4.7: MCHOSE K99 V3 and MOONDROP GM01 Pro
 
 - **MCHOSE K99 V3:** exact `3837:3033`, product `MCHOSE K99 V3 2.4G`, `MI_01`, `0001:0000`, unnumbered 65-byte Windows input/output capacities. The independent `55 03 00 38 38` query reads the percentage from an `AA 03` reply. Charging is unknown; G87 V2 shares a PID but uses a different protocol.
 - **MOONDROP GM01 Pro:** exact `35D8:0133`, `MI_03`. Report `4B` capacities are proved separately in both directions. A unique eligible `FF02:0002` takes precedence over a unique eligible `000C:0001`; volume-input collections are not queried. Only `4B 80 27 00` is sent. Charging remains unknown; invalid or silent replies produce no new measurement.
 
 K99 is limited to one second and GM01 to 800 ms, with at most 32 input frames per query. Public evidence includes K99 40% / 100% and GM01 50% replies. No matching local hardware has been tested; real zero, power-off caches, wake and vendor-software coexistence remain pending.
 
-## Unreleased: legacy Rapoo VT receiver
+## Version 1.4.7: legacy Rapoo VT receiver
 
 Only `24AE:1851`, `FF00:000E`, `Col04`, 32-byte input/output capacities and no Feature reports are accepted, with sole Report `BA` proved by the descriptor. The reader sends `BA A5 AA 00`, waits 250 ms and uses bounded GET_REPORT(Input) for the 31/32-byte status response. It is separate from nRF54L and exposes no EEPROM, DPI or polling-rate writes.
 
 Only success, known discharge/charge markers and `0..100` percentages are accepted; configuration replies are rejected. The shared receiver is named Rapoo VT 2.4G without guessing its paired retail model. One query per poll, no retry; samples expire after 120 seconds, with a 10-second publication cap. There is no transaction or command echo, so receiver-held stale replies cannot be fully excluded. Local hardware, sleep and vendor-software coexistence remain unverified. MT760 uses the separate path below.
 
-## Unreleased: second domestic mouse, keyboard and headset batch
+## Version 1.4.7: domestic mouse, keyboard and headset protocols
 
 | Scope | Implemented capability | Matching and limits |
 | --- | --- | --- |
@@ -52,7 +42,7 @@ Only success, known discharge/charge markers and `0..100` percentages are accept
 | AULA F87ProV2 `0C45:FEFE` | HFD page 0 percentage | Exact `AULA F87ProV2D Dongle`, `MI_03 / FF60:0061`, unnumbered 33/33; both page-address bytes must be zero; charging unknown |
 | AULA F99 MAX `05AC:024F` | Two-page HFD percentage | Exact `F99 MAX Dongle`, `MI_03 / FF60:0061`, unnumbered 33/33; firmware `0C45:800A`, wireless mode and valid percentage checked before page two; charging unknown, zero placeholder rejected |
 | Original EWEADN X87 `0C45:FEFE` | GET_INFO percentage | Exact `2.4G Dongle`, `MI_03 / FF60:0061`, unnumbered 33 or 65; named X87 only after firmware manufacturer=2, product=5, mode=2; excludes X87S / V2; charging unknown, zero rejected |
-| MCHOSE V9 PRO 2 `3837:6011` | MC percentage, charging and explicit sleep | Exact `MCHOSE V9 Pro 2`, `MI_03 / FF07:0222`, bidirectional `55/64`; query `0B` and notification `22` validated separately; sleep clears the old value; R9 excluded |
+| MCHOSE V9 PRO 2 `3837:6011` | MC percentage, charging and explicit sleep | Exact `MCHOSE V9 Pro 2`, `MI_03 / FF07:0222`, bidirectional `55/64`; query `0B` and notification `22` validated separately; sleep clears the old value; R9 uses the separate path below |
 | MCHOSE X9 `3837:6045` | BLK percentage, charging with unknown percentage and explicit offline | Exact `MCHOSE X9`, `MI_00 / FF90:0001`, sole `55/64` in both directions; `02` provides percentage, `03` charging only, `1A` clears the old value; `00/04` are not interpreted as full |
 | XIBERIA K06S `36F9:F002` | Exact percentage | Exact `XIBERIA K06S Wireless`, `FF90:0001 / Col03`, sole `55/64` in both directions; FF82 never queried; charging unknown, zero indistinguishable from an echo and rejected |
 
@@ -62,29 +52,49 @@ No device in this batch has been tested locally. Public evidence includes comple
 
 All 440 final local regressions, the warning-free Windows x64 release build and version/PE checks passed. A read-only probe returned valid battery and charging data from the existing VGN V98 Pro V3. The ROG interface supplied no valid reading in the second probe, which cannot establish its wake state or long-term stability. None of the newly supported devices was attached.
 
-## Version 1.4.12
+## Version 1.4.7: ATK 8K Nano, Lingbao, keyboards and a headset
 
-This version adds firmware-gated MCHOSE V9 PRO battery support. Receiver version is read through `FF22:0001`; versions below `0008` block the FF90 battery query. Exact protocol and validation limits are in the ATK N9 V2 ULTRA / MCHOSE V9 headset section below. This is the acceptance baseline; no additional unverified protocol is included.
+| Scope | Implemented capability | Matching rules and limits |
+| --- | --- | --- |
+| ATK 8K Nano `373B:1178` | Holtek percentage, charging and explicit no-link state | `FF10:0001`; sole unnumbered 65-byte input/output and sole unnumbered 9-byte Feature report, with one collection under the real USB parent. Only GetConfigData `82` is sent. The ordinary NANO BITMOUSE command is not reused, and the shared receiver cannot identify the paired retail mouse model. |
+| Lingbao M1 Pro `088D:052F` | Valid wireless percentage | Exact product `Wireless-Receiver`, `MI_01 / FF00:0001`, one collection under the real USB parent, and only Feature `0F/33` with a proven per-report byte length. One GET_FEATURE per poll; no setting or Output request. |
+| MCHOSE K87S `3837:3033` | Coarse ten-point battery estimates displayed as `≈` numbers | Exact product `MCHOSE K87S 2.4G`, `0001:0000`, 65-byte input/output. The active profile index is checked before and after reading; a concurrent profile change rejects the result. Charging remains unknown. G87 V2 and K99 V3 are separate paths. |
+| Original AULA F108 Pro `05AC:024F` | Native-driver protocol percentage | Exact product `F108Pro Dongle`, `MI_03 / FF60:0061`, sole unnumbered 33-byte input/output. Fixed `20 01` query, charging unknown. This path excludes V2(C), F99 MAX and wired identities; V2C uses the separate implementation below. |
+| FIFINE HT6 `3142:00C3` | Percentage, charging, power-off and lost link | `MI_00 / FF90:0001`, sole `55/64` in each direction. Separate `55 65 01 00` query and state interpretation; MCHOSE's unknown-percentage charging handling is not reused. No RGB or other settings are exposed. |
 
-## Version 1.4.11
+Lingbao replies must contain both the `M536` and `LX` fingerprints, a 1–100 percentage and flag 0. Public charging observations report a fixed 100 with flag 1, so those replies create no new reading. An earlier number expires from its original timestamp; a first placeholder creates no valid battery sample. Charging stays unknown. Successfully reading a receiver does not independently establish mouse RF presence or a new physical measurement, and sleep caches remain unverified.
 
-This version adds ATK N9 V2 ULTRA through the FF90 battery query and corrects ATK/MCHOSE headset state semantics. Exact bytes, descriptors and validation limits remain in the ATK N9 V2 ULTRA / MCHOSE V9 section below.
+Background queries are capped at 15 seconds for F108 Pro and ten seconds for the other four paths. Valid samples expire after 120 seconds and failed reads never renew them. Explicit no-link replies from ATK and HT6 clear old battery data immediately. All five paths only read state; they expose no DPI, lighting, macros, pairing or firmware settings.
 
-## Version 1.4.10
+The modules add 29 regression cases: Lingbao uses two complete public 65% captures; HT6 uses a public 80% capture prefix with reconstructed padding; other frames are synthetic protocol constructions. The public K87S 64% user result contains no complete reply, and the F108 Pro command comes from static analysis of the official driver. Neither constitutes this project's hardware acceptance. No matching model was tested locally; actual descriptors, charging transitions, cold starts, sleep recovery, multiple receivers and vendor-software coexistence remain pending. The combined 526-test Rust suite passed; the hardware-validation limits above remain.
 
-This version reunifies the multi-brand backends on `main` and adds strict read-only battery paths for EWEADN S9 PRO 8K, EWEADN S9 M156, MCHOSE G87 V2, Flydigi APEX5 and GameSir Nova / Cyclone 2. Exact identities, report gates, decoded fields, error handling and validation limits remain documented in their sections below.
+## Version 1.4.7: MT560, R9 and additional AULA and Dareu devices
 
-None of the new paths exposes configuration or state writes. Apart from user hardware evidence for S9 PRO 8K, this project has no independent matching hardware. The Microsoft Store package version is synchronized but will not be submitted before stability acceptance.
+The following implementations are included in consolidated version 1.4.7 and passed the combined 526-test Rust suite. Matching hardware acceptance remains pending.
 
-## 1.4.9 acceptance candidate
+| Scope | Implemented capability | Matching and limits |
+| --- | --- | --- |
+| Rapoo MT560 `24AE:1872` | Continuous reception of percentages from `BB` status reports | Only `FF00:000E`, with one management collection under the actual USB parent. Runtime proof establishes BB's own length and the collection capacity, without assuming 64 bytes. Input only; no BA or other command. Charging, DPI and mouse RF presence are not inferred from other fields |
+| AULA V9Pro+ `320F:22BA` | Percentage and charging | Exact `AULA-V9Pro+`, `MI_01 / FF1C:0092`, sole bidirectional byte-array Report `04/64`; battery command `1A` only. Discharging 0% cannot be distinguished from an echo and is rejected; charging 0% is retained |
+| MCHOSE R9 `3837:6013` | MC percentage, charging and explicit sleep | Exact `MCHOSE R9`, `FF07:0222`, bidirectional `55/64` byte arrays. Uniqueness uses the actual USB parent without borrowing V9 PRO 2's fixed interface number. GET `0B` and notification `22` are validated; sleep clears old battery data |
+| Dareu EM901 / CM610 Pro `260D:1074` | Percentage and charging | Product `2.4G Wireless Receiver`; Feature `08/17` query and Input `09/17` reply. Same-collection `FF02:0002` takes priority. Split `FF01:0000` input must belong to the same USB parent, and both interfaces must report manufacturer `Compx`. The shared PID does not identify one retail model; `1090` is not enabled |
+| AULA F108 Pro V2C `0C45:FEFC` | Percentage from 56-byte HFD device information | Exact `AULA F108ProV2C Dongle`, `FF68:0061`; first-page firmware identity must be `38A6:273A/2749` |
+| AULA F87 Pro V2C `0C45:FEFC` | Same as above | Exact `AULA F87ProV2C Dongle`, `FF68:0061`; first-page firmware identity must be `38A6:2712/2738/2747`. Separate from the existing F87ProV2D path |
+| AULA NOVA98 `0C45:FEFC` | Same as above | Exact `AULA NOVA98 Dongle`, `FF80:0071`; first-page firmware identity must be `38A6:273B/275D`. The C-series FF68 and auxiliary collections are not used |
 
-The taskbar strip no longer packs a device glyph and number into one 32-pixel cell. A single device remains number-only. Multiple devices are shown in overview order with a 16-pixel type glyph, 13-pixel percentage and a 14-pixel gap between devices. Percentages include `%`, low readings use a warning color and charging devices show a small status dot. Only connected devices with current battery data are included. Entries are kept whole and laid out only within available taskbar space, so a half-device is never clipped into the notification area.
+All three HFD keyboards require one management collection under the actual USB parent and runtime proof of sole unnumbered 33- or 65-byte reports in both directions. The complete 56-byte information block is read according to that capacity; a mismatched first-page identity stops later pages. Firmware restrictions are a conservative consistency check between the official catalog and SDK fields, not a hardware-confirmed reply mapping. Only 1–100% is published; charging and work-mode semantics remain unknown. F108ProV2 without the C suffix, other shared-PID models and auxiliary collections are excluded from this path.
 
-Five exact VGN / VXE 2.4 GHz keyboard identities are added: `258A:024F/027F/027B` and `391D:2A01/2A02`. Each requires a unique `FF02:0002` management collection, 20-byte bidirectional Report `13` and a proven descriptor. The fixed request is `13 4A 01`, sixteen zero bytes and checksum `5E`; replies require the complete 20-byte frame, matching header and checksum, a percentage from 0–100, and rejection of request echoes. Only `258A:024F` has documented charging evidence at complete-frame byte 6 bit `0x10`; charging stays unknown on the other four. `3554:FA09` remains exclusively owned by the unified MCHOSE keyboard backend.
+This batch adds no DPI, button, audio, lighting, pairing or firmware settings. MT560 publishes at most two seconds apart while retaining each sample's original receipt time. The three HFD keyboards have a thirty-second publication cap; other paths use ten seconds. Samples expire after 120 seconds, and failed reads or reopened handles do not renew them. Actual report cadence, silence recovery and vendor-software coexistence still require hardware checks.
 
-Each query is limited to 2.5 seconds. Failure neither clears nor renews the old sample, which expires after 120 seconds without a new valid reply. The existing wired `258A:024E` VGN V98 Pro V3 path still reads through its original Feature protocol; this project has obtained a valid 100% and charging reading from that device. All five new wireless identities still require matching hardware acceptance. Synthetic tests do not validate descriptors, sleep, 0%, charging transitions or coexistence with VGN HUB.
+Public evidence includes V9Pro+ 80% / 82% unplugged–charging–unplugged captures and the CM610 Pro split-collection report. These are upstream contributor observations. MT560, R9 and the three HFD keyboards primarily use protocol-derived synthetic test data, not captures from local hardware. Original public sources, report formats and remaining limits are recorded in the [batch protocol notes](PROTOCOLS.en.md#domestic-147).
 
-## In development: EWEADN S9 PRO 8K
+## Version 1.4.7: VGN / VXE 20-byte keyboard receivers
+
+Five 2.4 GHz identities are included: `258A:024F/027F/027B` and `391D:2A01/2A02`. Each requires a unique `FF02:0002` management collection and descriptor-proven bidirectional Report `13/20`. The request is `13 4A 01`, sixteen zeroes and checksum `5E`; replies validate full length, header, additive checksum and 0–100%. Only `258A:024F` uses the confirmed full-frame byte6 `0x10` charging bit; the others keep charging unknown. Shared `3554:FA09` remains handled by the separate MCHOSE backend.
+
+Queries allow at most 2.5 seconds, background publication is capped at ten seconds, and samples expire after 120 seconds. Failed reads retain the old timestamp; later valid reports restore readings. Existing wired V98 Pro V3 `258A:024E` hardware results do not validate these five wireless identities. Actual descriptors, sleep, 0%, charging transitions and vendor-software coexistence remain pending.
+
+## Version 1.4.7: EWEADN S9 PRO 8K
 
 Limited to `372E:1026` on `FF00:0001` or `FF06:0001`. Within one USB interface group, exactly one collection must have a runtime descriptor proving Feature Report `03` is 64 bytes. A 64-byte collection maximum alone is not accepted, and other Feature IDs may own a larger report. Zero or multiple proven collections cause no device open and no request.
 
@@ -92,7 +102,7 @@ The reader sends one 64-byte Feature request `03 20 50 00 00 4F 81` plus 57 zero
 
 User issue #315 confirmed the S9 PRO 8K 16-byte format, 23%–98% readings and charging transitions on Windows x64. This project has no independent S9 PRO hardware. The same `372E:1026` is also used by other S7/S9 catalog entries, so the current name is not a runtime paired-model proof. Real descriptor shapes, 64-byte replies, sleep caching, wake-up and coexistence with EWEADN HUB remain pending.
 
-## In development: EWEADN S9 (M156)
+## Version 1.4.7: EWEADN S9 (M156)
 
 Limited to `089D:062F / FF01:0010`, a 33-byte output and a 16–34 byte Windows input capacity. A descriptor must prove one unnumbered Report 0 in each direction. Wired `088D:062E`, `FF00:0000`, M302 and other product names are excluded. ReadFile receives the complete input capacity before removing the zero Report ID; the upstream fixed 33-byte buffer is not assumed for every firmware.
 
@@ -100,7 +110,7 @@ The fixed request is `00 30` plus 31 zeroes; its checksum covers bytes 5–31 an
 
 All 356 local regressions and the warning-free Windows x64 release build pass, covering actual input capacities, every percentage, bad headers/lengths/identity/status and exact VID/PID/collection boundaries. Packet facts were independently implemented from HaloBattery PR #352 under MIT. No local S9 hardware was available; real caps, comparisons such as 70% / 69%, sleep, removal, cold start and vendor-driver coexistence remain pending.
 
-## In development: MCHOSE G87 V2
+## Version 1.4.7: MCHOSE G87 V2
 
 `3837:3033` is shared by multiple keyboards, so this path requires the exact product string `MCHOSE G87 V2 2.4G`, collection `0001:0000` and 65-byte input/output capacities. A descriptor must prove that input declares one report ID (which may be zero) and output declares only Report 0. Multiple matching collections in one interface group are refused. Other MCHOSE mice, QHW/BY keyboards, K99 V3 and ordinary keyboard/mouse collections do not enter this reader.
 
@@ -108,13 +118,13 @@ Only three read-only configuration requests are sent: command `04` reads base da
 
 All 356 local regressions and the warning-free Windows x64 release build pass, covering zero/nonzero input report IDs, all three requests, slot permutations, malformed headers/lengths/offsets/levels and exact identity boundaries. No local G87 V2 was available. Real descriptors, sleep caching, cold start, reads during profile changes and coexistence with MCHOSE software remain pending.
 
-## In development: Flydigi APEX5
+## Version 1.4.7: Flydigi APEX5
 
 Limited to `37D7:2501 / FFA0:0001`, 32-byte input/output and Reports `04` / `03`. The only request is the fixed GET_INFO frame `03 5A A5 01 02 03` plus 26 zeroes. IMU, rumble, trigger, lighting, mode and configuration commands are unreachable. A reply must match the `04 5A A5 01 01 00 80` header and mode `01/02`.
 
 Byte 12 bits 0–3 encode five battery tiers, displayed as `≈` estimates of `0/20/40/60/80/100%`. Bits 4–7 accept only 0 or 1. A high nibble of 1 is a charging sentinel; it produces neither a sixth tier nor a fabricated percentage and shows charging only. Other tiers or charge values are rejected. All 356 local regressions and the warning-free release build pass. No local APEX5 was available; real descriptors, sleep, charging transitions and desktop-software coexistence remain pending.
 
-## In development: GameSir Nova / Cyclone 2
+## Version 1.4.7: GameSir Nova / Cyclone 2
 
 The Nova family is limited to `3537:1098/100F/1040` and an unnumbered `FF7A` input/output collection. The app sends `00 01 01`, ignores `F4` state frames for up to 800 ms, and accepts only replies beginning with `01` whose byte 18 is 0–100 or charging sentinel `FF`; `FF` reports charging without inventing a percentage.
 
@@ -122,7 +132,7 @@ Cyclone 2 is limited to `3537:100B / FFF0:0040`, 64-byte input/output and Report
 
 All 356 local regressions and the warning-free Windows x64 release build pass, covering exact Nova/Cyclone VID/PID, collection, capacity, report IDs, requests, 0%/100%, the charging sentinel and malformed frames. No matching GameSir controller was available locally. Windows descriptors, sleep/wake, wired/2.4 GHz transitions, multiple identical units and GameSir Nexus coexistence remain pending.
 
-## In development: ATK N9 V2 ULTRA / MCHOSE V9 headsets
+## Version 1.4.7: ATK N9 V2 ULTRA / MCHOSE V9 headsets
 
 The FF90 `55:65` headset backend adds `373B:12D6` ATK N9 V2 ULTRA and limits ATK input capacity to the descriptor-proven 22–64 bytes. ATK states `02/03/04` mean discharging, charging and full. State `04` preserves the reported percentage instead of forcing 100%.
 
@@ -130,7 +140,7 @@ MCHOSE V9 Turbo+ remains limited to `3837:600A / FF90:0001` and 64-byte input/ou
 
 All 357 local regressions and the warning-free Windows x64 release build pass, covering ATK's dynamic input capacity and three states, MCHOSE external-power/offline handling and strict descriptors. `291D:385D` MCHOSE V9 PRO now requires the same physical receiver's `FF22:0001` descriptor to prove Feature `AA/64` before reading firmware; confirmed versions below `0008` block the battery query, while unknown versions retain the conservative battery fallback. All new headset paths still need matching hardware acceptance.
 
-## In development: AULA SC380 PRO
+## Version 1.4.7: AULA SC380 PRO
 
 Limited to `258A:0138` receivers, `FF02:0002`, Windows Feature capacity 520 and only report ID `09` in a unique management collection. Each poll checks the six-byte model signature `04 00 00 00 00 2E` and online response; the receiver ID alone cannot establish the mouse model. Wired `0136`, other AULA mice and keyboards are excluded.
 
@@ -138,9 +148,9 @@ Battery exposes exact percentages from 1–100; charging is unknown. A zero payl
 
 Actual 1–6 stages contain X/Y values from 100–12000 in steps of 100. Original order and duplicate values are retained without fabricated defaults. Switching is bound to the complete 400-byte configuration, rechecks identity and configuration before writing, changes only the active-stage nibble and preserves buttons, lighting, rate and all other bytes. Full readback confirms the result. Lost send completions are not retried or blindly rolled back. Numerical edits, software presets, stage-count and rate writes are not exposed.
 
-Developed after the 1.4.7 tag, with all 298 local regressions and a warning-free release build passing. Evidence comes from the official model configuration and upstream Windows hardware documentation; local tests use synthetic reports, with no matching hardware available. Descriptor behavior, real transport, sleep caching, physical switching, persistence and vendor-software coexistence remain unverified. Without transaction IDs, cross-process races and same-model replacement cannot be fully distinguished.
+Included in consolidated version 1.4.7, with all 298 local regressions and a warning-free release build passing. Evidence comes from the official model configuration and upstream Windows hardware documentation; local tests use synthetic reports, with no matching hardware available. Descriptor behavior, real transport, sleep caching, physical switching, persistence and vendor-software coexistence remain unverified. Without transaction IDs, cross-process races and same-model replacement cannot be fully distinguished.
 
-## In development: AULA F75 / F87 PRO keyboards
+## Version 1.4.7: AULA F75 / F87 PRO keyboards
 
 The existing `3554:FA09` shared-receiver backend recognizes F75 model code `03 00 00 00 00 CD` and F87 PRO code `03 00 00 00 03 E3`. The interface still requires `FF02:0002`, 20-byte bidirectional Report `13` and one management collection. F87 is excluded because its official wireless catalog entry uses `FF00:0001`, which conflicts with this receiver family. An unknown code is never named as AULA from the receiver ID alone.
 
@@ -148,29 +158,29 @@ AULA places its identity checksum at complete-frame byte 8 and sends no equivale
 
 This addition follows the 1.4.7 tag. All 303 local regressions and the warning-free release build pass. Official catalogs and static scripts provide the protocol evidence, while tests use synthetic frames; no local F75 / F87 PRO was available. Windows SET_REPORT transport, receiver caching, wake recovery, switching between AULA and MCHOSE devices on one receiver and vendor-software coexistence remain hardware checks.
 
-## In development: 8BitDo Pro 3 controller
+## Version 1.4.7: 8BitDo Pro 3 controller
 
 Limited to D-input mode `2DC8:6009`, standard Gamepad `0001:0005`, and a descriptor proving that every Input Report ID is `04` with a 15–64-byte input capacity. The adapter opens a read-only input handle and sends no Feature, Output, rumble, lighting, mode or initialization command. XInput mode uses a different PID and does not enter this private-report parser.
 
 Each read receives at most 64 reports within 400 ms and accepts only an Input Report `04` with the declared capacity. Byte 14 contains an exact percentage in bits 0–6 and a charging bit at bit 7. A 0% value is retained; values 101–127 are rejected. At 100%, the controller is treated as charged rather than actively charging. Background publication is capped at ten seconds, failed reads do not renew the sample time, numbers expire after 120 seconds and a new report restores them automatically.
 
-Developed after the 1.4.7 tag, with all 308 local regressions and the warning-free release build passing. Evidence comes from a pinned SDL driver and public MyFinder records; a reporter also confirmed Pro 3 sending this report over D-input Bluetooth without Steam. No matching local hardware was available. Windows descriptors, 0% / 100%, charging transitions, sleep recovery, multiple controller instances and coexistence with Steam or vendor software remain pending.
+Included in consolidated version 1.4.7, with all 308 local regressions and the warning-free release build passing. Evidence comes from a pinned SDL driver and public MyFinder records; a reporter also confirmed Pro 3 sending this report over D-input Bluetooth without Steam. No matching local hardware was available. Windows descriptors, 0% / 100%, charging transitions, sleep recovery, multiple controller instances and coexistence with Steam or vendor software remain pending.
 
-## In development: VGN Dragonfly3 SE
+## Version 1.4.7: VGN Dragonfly3 SE
 
-The SE path matches receiver `391D:1A01 / FF01:0010`, with a descriptor proving unnumbered input and output Report 0 at 65-byte Windows capacity and one eligible collection per USB interface group. Unreleased source also adds Pro `1A03` as described above; the diagnosed `FF05:0002` collection, wired `1001` and other VGN protocols do not use this reader.
+The SE path matches receiver `391D:1A01 / FF01:0010`, with a descriptor proving unnumbered input and output Report 0 at 65-byte Windows capacity and one eligible collection per USB interface group. Version 1.4.7 also includes Pro `1A03` as described above; the diagnosed `FF05:0002` collection, wired `1001` and other VGN protocols do not use this reader.
 
 The request is the fixed `00 55 30` plus 62 zeroes. A reply is received using the 65-byte Windows capacity, then the zero Report ID is removed to obtain a 64-byte protocol payload. Payload byte 1 must equal `30`. Byte 9 of 1 means wired; it publishes no battery and explicitly clears an old wireless percentage. When byte 9 is zero, byte 8 is an exact percentage from 0–100. Other values, request echoes, short frames and foreign commands create no fresh sample. No charging field is established. A query is limited to one second, background publication to ten seconds, and failures do not renew the old sample.
 
-Developed after the 1.4.7 tag, with all 313 local regressions and the warning-free release build passing. Evidence comes from pinned VGN HUB resources and the public MyFinder implementation; tests use synthetic field constructions. No local Dragonfly3 SE was available. Windows descriptors, receiver sleep caching, 0%, transport transitions, physical accuracy and vendor-software coexistence remain pending.
+Included in consolidated version 1.4.7, with all 313 local regressions and the warning-free release build passing. Evidence comes from pinned VGN HUB resources and the public MyFinder implementation; tests use synthetic field constructions. No local Dragonfly3 SE was available. Windows descriptors, receiver sleep caching, 0%, transport transitions, physical accuracy and vendor-software coexistence remain pending.
 
-## In development: HECATE G3M PRO
+## Version 1.4.7: HECATE G3M PRO
 
 Limited to `320F:706E / FF1C:0092`, with a descriptor proving that both directions contain only a 64-byte Report `04` and one eligible collection per interface group. The fixed request is `04 20 00 1A 06` plus 59 zeroes. Replies require 64 bytes, Report `04` and command `1A`; status bytes `FE/FF` are rejected and percentages from 0–100 are accepted. An exact request echo is not a reading.
 
 No charging field is established, so charging remains unknown. The adapter reads no DPI, lighting, online session or other configuration and never falls back to the VGN keyboard protocol sharing this vendor ID. Each query is limited to one second and failures do not renew the old sample. This feature follows the 1.4.7 tag; all 319 local regressions and the warning-free build pass. Tests use synthetic protocol fixtures and no local G3M PRO was available, so descriptors, sleep, 0%, charging and vendor-software coexistence remain pending.
 
-## In development: AJAZZ AJ179 PRO
+## Version 1.4.7: AJAZZ AJ179 PRO
 
 Restricted to `3151:402D` receivers and `3151:4026` USB, `FFFF:0002`, Windows Feature capacity 65 and only report ID 0 in a unique management collection. Several brands share these IDs; only mouse identity `1851` is named AJ179 PRO and receives configuration access. Other valid identities retain a neutral name and receiver battery only. Bluetooth `402C`, newer controllers and other AJAZZ protocols are excluded.
 
@@ -180,11 +190,11 @@ The current one-of-eight profile is queried before its complete X/Y table; profi
 
 Identity and complete configuration are rechecked before writes. A lost send completion is not retried or blindly rolled back; success requires matching readback. There is no transaction ID or system-wide exclusive lock. Vendor-software races, same-model replacement, USB/receiver deduplication and power-cycle persistence remain unresolved hardware checks.
 
-This is development work after the 1.4.7 tag; all 285 local regressions and a warning-free release build passed. Published original replies provide offline decoding evidence; other boundary and write cases use synthetic reports. No local AJ179 PRO was available to validate Windows Feature transport, wake or physical stage switching.
+This work is included in consolidated version 1.4.7; all 285 local regressions and a warning-free release build passed. Published original replies provide offline decoding evidence; other boundary and write cases use synthetic reports. No local AJ179 PRO was available to validate Windows Feature transport, wake or physical stage switching.
 
-## In development: Dareu and MCHOSE mice
+## Version 1.4.7: Dareu and MCHOSE mice
 
-These adapters were developed after the 1.4.7 tag. Protocol regressions pass, but no matching device was available for local hardware acceptance. Catalog entries and upstream hardware reports are not local compatibility certification.
+These adapters are included in consolidated version 1.4.7. Protocol regressions pass, but no matching device was available for local hardware acceptance. Catalog entries and upstream hardware reports are not local compatibility certification.
 
 | Scope | Battery / identity | DPI |
 | --- | --- | --- |
@@ -200,7 +210,7 @@ Both adapters preserve raw stage indexes and actual enabled counts; no default 4
 
 MCHOSE uses published L7 Pro+ raw battery/config frames, corrects the upstream connection-bit interpretation and requires two consecutive matching replies. A wireless-zero sleep placeholder cannot enable settings or renew battery age. Dareu charge enum 2 stays unknown due to conflicting evidence. Full sleep cycles, official-driver coexistence, Windows Feature/caps, physical stage effect and multiple receivers still need hardware validation; stale receiver caches and last-moment cross-process races are not claimed solved.
 
-## In development: Edifier Halo Space
+## Version 1.4.7: Edifier Halo Space
 
 Only `2D99:E049` wireless receiver, `FF14:0001`, with 64-byte input/output is eligible. Descriptors must establish input Report `2F` only and output Report `2E` only, with one management collection per Windows USB interface group. There is no fallback to `FF13`, multimedia collections, other Edifier models or Bluetooth.
 
@@ -210,7 +220,7 @@ Charging is unconfirmed and stays unknown. Queries allow 1.2 seconds, with a ten
 
 On 2026-11-21, all 241 local regressions and a warning-free Windows x64 build passed. The independent implementation uses FerrisPulse's published interface, 35% reply prefix and checksum evidence, with synthetic trailing test data. No matching headset was available locally. Descriptors, actual communication, charging-cable transitions, sleep recovery and official-software coexistence remain unverified. This work follows the 1.4.7 tag.
 
-## In development: MCHOSE keyboards
+## Version 1.4.7: MCHOSE keyboards
 
 M HUB and CZ SDK were inspected separately; their keyboard protocols are not interchangeable. Queries require the matching collection, input/output capacities and actual report IDs. Missing descriptor evidence or multiple eligible controls in one Windows USB interface group prevents I/O.
 
@@ -229,9 +239,9 @@ Shared BY replies follow M HUB's single-packet header. Byte 4 is not presumed to
 
 G98 V3 uses separately proven descriptor capacities for input/output and a 1.5-second query window. The response checkCode algorithm is unconfirmed; actual report ID, complete length, fixed header, sequence and field ranges are validated without inventing a checksum rule. No heartbeat, occupancy declaration, lighting or settings writes are sent. Receiver-cached sleep replies, independent cold-start reads, padding and full-charge transitions need hardware validation.
 
-All these paths use a ten-second maximum background wait and 120-second sample lifetime. Failure does not renew a sample; fresh background replies restore the display. On 2026-11-21, all 236 local regressions and a warning-free Windows x64 release build passed. Existing ROG and VGN read-only probes succeeded; no newly added keyboard was available. Published frames are offline regression evidence, with other vectors synthetic. This work follows the 1.4.7 tag and has not been submitted to the Microsoft Store.
+All these paths use a ten-second maximum background wait and 120-second sample lifetime. Failure does not renew a sample; fresh background replies restore the display. On 2026-11-21, all 236 local regressions and a warning-free Windows x64 release build passed. Existing ROG and VGN read-only probes succeeded; no newly added keyboard was available. Published frames are offline regression evidence, with other vectors synthetic. This work is consolidated into 1.4.7; Microsoft Store releases are handled separately.
 
-## In development: shared VGN / VXE keyboard receivers
+## Version 1.4.7: shared VGN / VXE keyboard receivers
 
 Adds `320F:5088`, `FF1C:0092`, 64-byte input/output receiver queries. VGN HUB lists S99, V98 Pro / V2, N75 Pro and VXE75 / V2 in this protocol family. Exactly one management collection per Windows USB interface group is required, and both input/output descriptors must contain only Report `04`. Wired `320F:5055` is excluded; the existing V98 Pro V3 backend is separate.
 
@@ -241,9 +251,9 @@ The sole request is `04 00 00 1A 06` with zero padding. Replies require exactly 
 
 The published receiver response took about 1.03 seconds, so each query allows 2.5 seconds with a ten-second maximum background wait. An independent backend worker avoids blocking V98 Pro V3 queries. The protocol has no transaction ID, so concurrent VGN HUB queries cannot be reliably attributed and need hardware testing.
 
-Local validation on 2026-11-21 passed 223 regressions and a warning-free Windows x64 build. No matching keyboard was available locally. The published 93% reply prefix and sleep observations inform protocol tests; their trailing test padding is synthetic. This does not validate every listed model. This feature was developed after the 1.4.7 tag.
+Local validation on 2026-11-21 passed 223 regressions and a warning-free Windows x64 build. No matching keyboard was available locally. The published 93% reply prefix and sleep observations inform protocol tests; their trailing test padding is synthetic. This does not validate every listed model. This feature is included in consolidated version 1.4.7.
 
-## In development: Lofree HYZEN
+## Version 1.4.7: Lofree HYZEN
 
 Only receiver `388D:0025`, collection `FF1C:0092`, with 32-byte input/output is matched. Wired `0024` and single-mode `0029` are not battery-query targets. A present `0024` suppresses receiver polling, following the official driver's wired exclusion. Without a proven cable/receiver pairing identity, this may also suppress a different HYZEN receiver when multiple keyboards are attached; hardware work remains.
 
@@ -447,7 +457,9 @@ Version 1.4.5 has verified wireless battery and current DPI reads on Rapoo VT1 `
 
 VGN currently matches V98 Pro V3 `258A:024E/024F/027E/027F` and queries only the confirmed vendor control interface. Wired battery reads use feature report `0x09`; receivers use command `0x4A` in report `0x13`, with length and checksum validation. Unknown IDs and unrelated vendor collections are not probed with this protocol. A USB device returned valid 100% battery and charging status; other battery levels, receivers and wake recovery still need testing.
 
-Settings → About → Device compatibility opens a GitHub form and exports factory model, VID/PID, usage, report lengths, and a summary of the last 128 protocol queries in the current session: feature identifiers, durations and results. The report excludes payloads, serial numbers, MAC addresses, interface paths, usernames, custom device names, DPI setting values and raw logs.
+Open **Settings → About → Device feedback**, choose a device and issue category, and describe the problem. You can preview or disable **Include diagnostics** and attach screenshots. The optional summary contains app and system versions, the original model, type, connection, battery, VID/PID, usage, report lengths, backend and the last 24 query summaries matching the backend and VID/PID. It excludes payloads, serial numbers, MAC addresses, interface paths, usernames, device aliases, DPI setting values and raw logs.
+
+Builds with a configured feedback service can submit in the app and use **My feedback** to read maintainer replies or add information. Otherwise, copy the content and open GitHub, adding screenshots manually; browser submissions do not create in-app history. Descriptions, selected diagnostics and screenshots are public. Network access occurs only when you submit, add information or check replies. The separate report window is removed; diagnostic logs and the command-line reports below remain available. See the [privacy policy](PRIVACY.md).
 
 For remote adaptation, run `rog-mouse-ctl device-report --probe` using version 1.4.4 or later. It performs read-only queries and then generates a sanitized report from the same process, including returned battery, charging status, current DPI, available onboard stages and the current stage. It changes no settings and uploads nothing. Profile names, button settings and raw memory contents are excluded. Users can compare readings with the official driver; DPI write tests are separate. Local hardware ownership is not required for user-assisted testing, although unknown private protocols may still need driver analysis or targeted communication captures.
 

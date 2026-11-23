@@ -2,85 +2,19 @@
 
 [简体中文](README.md) | **English**
 
-A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, Sony, HyperX, Cherry and Arctis Nova devices, plus XInput and standard HID battery queries. It communicates through Windows HID and system APIs, runs as a single executable, and uses no background service or network connection. ROG devices do not require Armoury Crate.
+A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, Sony, HyperX, Cherry and Arctis Nova devices, plus XInput and standard HID battery queries. It communicates through Windows HID and system APIs and runs as a single executable without a background service. Normal battery monitoring and device settings work offline. Network access occurs only when you submit feedback, add a reply, or check for replies; there is no background telemetry. ROG devices do not require Armoury Crate.
 
 [Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
 
-Support covers selected devices with implemented protocols, not entire brands. New adapters have simulated protocol coverage but still require per-model hardware validation. See [compatibility notes](COMPATIBILITY.en.md) for the exact scope.
+Support covers selected devices with implemented protocols, not entire brands. See [compatibility notes](COMPATIBILITY.en.md) for model coverage, capabilities, protocol testing, and hardware validation status.
 
-## Unreleased improvements
+## Latest release: 1.4.7
 
-The taskbar battery strip uses native Windows fonts and device icons, with widths measured from the rendered glyphs. Both single and multiple devices show an icon and percentage, with bright green charging indicators throughout the app. Device reordering, background operation with only the strip enabled, and malformed headset reports are also fixed.
+- Expand battery queries for common domestic mice, keyboards, headsets and controllers while preserving deep ROG support. Some other brands can read and switch actual DPI stages.
+- Display multiple devices in a compact taskbar battery widget with type icons and bright green charging indicators. Clicking opens the quick panel; interaction, ordering and background operation are improved.
+- Redesign About and Device feedback with optional diagnostic previews and screenshots. In-app submission and replies require a configured relay; the current release opens GitHub in the browser, where screenshots must be attached manually.
 
-Battery support adds VGN Dragonfly3 Pro and six ryMs receivers, selected MCHOSE 4D receivers used by K7 V2 / A7 V3 mice, the MCHOSE K99 V3 keyboard, the MOONDROP GM01 Pro headset and a legacy Rapoo VT receiver. Windows unnumbered HID input now uses the full receive capacity so valid replies are not lost to an incorrectly sized buffer. These new paths read battery only and do not expose DPI settings. Exact model, connection and hardware-validation limits are in the [compatibility notes](COMPATIBILITY.en.md). The usage notes below describe the current source; the published download remains 1.4.12.
-
-Further additions cover limited battery protocols for Rapoo MT760, ATK / VXE NANO, AULA F87ProV2 / F99 MAX, EWEADN X87, MCHOSE V9 PRO 2 / X9 and XIBERIA K06S. When a device reports charging without a percentage, the app shows charging and clears the old number; failed queries still expire according to the original sample time. Charging support varies by path, and these new models still require this project's hardware validation.
-
-## Version 1.4.12
-
-This version is released as a portable build first. It adds MCHOSE V9 PRO headset support after reading receiver firmware through a descriptor-proven `FF22` Feature `AA/64`; versions below `0008` are blocked, while unknown versions retain the conservative fallback. Per-model hardware validation is still pending.
-
-## Version 1.4.11
-
-This version is released as a portable build first. FF90 headset handling now adds ATK N9 V2 ULTRA and distinguishes ATK discharging, charging and full states. MCHOSE V9 Turbo+ now separates external power with unknown level from explicit offline, so silence or external power is never shown as 0% / 100%.
-
-## Version 1.4.10
-
-This version is released as a portable build first. It adds read-only battery support for EWEADN S9 PRO 8K, EWEADN S9 (M156), MCHOSE G87 V2, Flydigi APEX5 and GameSir Nova / Cyclone 2. The user-verified S9 PRO 8K path reported 23%–98% and charging data. Every path sends only reviewed queries; no configuration, rumble, lighting or mode writes are exposed.
-
-## Version 1.4.9
-
-This version is released as a portable build first. The taskbar battery strip now uses compact dimensions that match the system tray. A single device shows only its number; multiple devices are shown in order with a type glyph and percentage, using enough spacing and only whole entries that fit in the available taskbar space. VGN / VXE adds strict read-only battery support for five 2.4 GHz keyboard receivers; `258A:024F` uses the documented charging bit while charging remains unknown on the other IDs.
-
-## Version 1.4.8
-
-This version is released as a portable build first. It adds the taskbar battery strip and continues support for commonly used Chinese brands including Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo and HECATE. New protocols pass local simulated regressions but still require per-model hardware acceptance. Exact receiver and model limits are documented in the [compatibility notes](COMPATIBILITY.en.md).
-
-MCHOSE mouse work adds Feature-protocol battery, identity and actual-stage reads for A7 V2 and selected L7 models, with existing-stage switching on A7 V2 Ultra+ / L7 Pro+. Some older A7 Ultra receivers are documented not to return battery; a shared name does not guarantee compatibility. A7 V3 and old A5 use other protocols and are outside version 1.4.8's scope.
-
-AJAZZ AJ179 PRO adds 2.4 GHz battery and actual X/Y stage reading/switching over USB or its receiver. The mouse's own ID establishes its model; switching reads the current profile and preserves all stage values and colors. Charging and wired battery remain unknown, Bluetooth is not integrated, and hardware acceptance is pending.
-
-AULA SC380 PRO adds 2.4 GHz battery and actual X/Y DPI-stage reading/switching. The model signature is checked before reading configuration; switching preserves other settings and verifies the complete block afterward. Charging remains unknown. Wired mode and other AULA models are not integrated yet; hardware acceptance is pending.
-
-AULA F75 and F87 PRO now receive 2.4 GHz battery and charging reads. They share a `3554:FA09` receiver with some MCHOSE keyboards, so the app selects framing from the complete model code and verifies identity before and after the battery query. F87 remains disabled because its official wireless collection entry conflicts with this path.
-
-8BitDo Pro 3 adds read-only battery and charging display in D-input mode. The adapter requires the standard gamepad collection and only Input Report `04`, reads the existing state stream and sends no mode, rumble or lighting command. XInput mode continues to use the system battery API.
-
-VGN Dragonfly3 SE receivers add a battery query. The adapter requires `391D:1A01 / FF01:0010` with 65-byte unnumbered input/output reports and sends only the fixed `55 30` query. It reads no configuration and changes no DPI stage; a wired reply clears the old wireless percentage, while charging remains unknown.
-
-HECATE G3M PRO adds battery percentage reads through its 2.4 GHz receiver. The adapter requires `320F:706E / FF1C:0092` and 64-byte Report `04`, reads no DPI, lighting or other configuration, and keeps charging unknown.
-
-## Version 1.4.7
-
-USB and Bluetooth battery reads are added for Sony DualSense / DualSense Edge, displaying coarse values as numbers prefixed with ≈. Protocol regressions pass; hardware acceptance remains pending. See [compatibility notes](COMPATIBILITY.en.md).
-
-Windows XInput battery reads are also integrated when the current driver returns a valid battery grade. System slots are shown separately, four-level estimates carry ≈, and wired or unknown battery types do not produce invented charge or charging status. Hardware acceptance remains pending.
-
-Sony INZONE H5 and H9 II receiver battery queries use model-specific control interfaces and separate percentage and charging data. No headset settings are written; hardware acceptance remains pending.
-
-HyperX Cloud Alpha 2 Wireless base-station battery, charging and voltage queries are also integrated, checking headset connection before and after battery reads and filtering unrelated traffic. Hardware acceptance remains pending.
-
-Keyboard coverage adds CHERRY MX 2.0S WL Pro USB / 2.4 GHz battery and charging queries, limited to reviewed identities and management collections. Bluetooth and other Cherry models are outside this addition; hardware acceptance remains pending.
-
-Standard HID strengths scaled from descriptor ranges also carry ≈, while native percentages retain ordinary numbers. Version 1.4.7 is released as a portable build first; Microsoft Store submission follows stability acceptance separately.
-
-## Version 1.4.6
-
-Devices with supported numerical DPI writes can save 1–4 software presets on the Performance page, sorted by DPI, and switch from the main window or tray. Reducing the stage count hides the highest values and keeps them for restoration. Presets remain separate from actual device stages; connections that write stored DPI show a note. Local regressions and render checks passed; per-model hardware acceptance remains pending.
-
-This version also adds profile-scoped Rapoo stage reads and switching, selected MCHOSE keyboard battery queries, and Arctis Nova headset status. Level-only readings display estimated percentages prefixed with ≈; exact readings retain the existing numeric style. Hardware acceptance remains pending; see [compatibility notes](COMPATIBILITY.en.md).
-
-Version 1.4.6 is released as a portable build first. Microsoft Store submission is handled separately after stability acceptance.
-
-## Version 1.4.5
-
-- Adds battery, actual X/Y DPI stages and polling-rate capabilities for selected VGN / VXE / ATK mice.
-- Adds Razer battery and settings support, with stage switching, editing and rate controls on reviewed connections.
-- Adds read-only battery, stage and rate queries for selected Lamzu / WLMouse devices.
-- Adds ATK N9 V2 Ultimate and MCHOSE V9 Turbo+ headset battery queries.
-- Extends Logitech DPI and polling-rate controls with readback verification.
-- Fixes intermittently unknown Rapoo battery readings during continuous reports; Rapoo DPI remains read-only.
-- Improves temporary read failures, cache expiry and identity changes while retaining existing ROG controls.
+This release consolidates the former 1.4.7–1.4.12 updates under 1.4.7. Users of those portable versions can exit the app and replace the executable. Microsoft Store publishing is handled separately. See [Compatibility](COMPATIBILITY.en.md) for model coverage and hardware validation, [Changelog](CHANGELOG.md) for history and [Protocol research](PROTOCOLS.en.md) for evidence.
 
 ## Getting started
 
@@ -114,7 +48,7 @@ The default is **Follow system**, which uses the Windows **display language**. M
 | Mouse performance | Existing detailed ROG DPI, polling-rate, debounce and related settings; other mice expose numerical DPI, actual stage switching, X/Y stage editing and rates according to protocol capabilities. Rapoo can read and switch stages in the current profile; hardware acceptance is pending. |
 | Buttons | Button remapping, configuration export, and backup restoration on supported models. |
 | Lighting | Opens Windows Dynamic Lighting; Windows manages the effects. |
-| Settings | Theme, startup, close behavior, refresh interval, storage locations, and diagnostic logs. |
+| Settings | Theme, startup, close behavior, refresh interval, storage locations, diagnostic logs, and device feedback. |
 
 Capabilities depend on the model, firmware, and connection. Unsupported settings are identified in the interface. Changing lift-off distance resets surface calibration; review the prompt before applying it.
 
@@ -130,7 +64,11 @@ Other software such as Armoury Crate may keep the device busy. Close it if reads
 
 ## Local data and privacy
 
-The app makes no network connections and sends no telemetry. Settings, device aliases, battery history, caches, backups, and diagnostic logs stay on your computer.
+Normal battery monitoring and device settings work offline, with no background telemetry or automatic crash reports. The app connects to the feedback service only when you submit feedback, add a reply, or check for replies. Settings, device aliases, battery history, caches, backups, and diagnostic logs stay on your computer.
+
+The optional diagnostic summary contains only app and system versions, the original device model, VID/PID, type, connection, battery state, backend, and interface and query summaries. It does not copy serial numbers, paths, custom device aliases, personal settings, or raw logs. Submissions include the app version and basic details of the selected device. Your description, any included diagnostics, and screenshots appear in a public GitHub issue. The feedback service serves screenshots through public image links backed by a private R2 bucket. Images are not re-encoded; check the picture and its metadata for personal content before submitting.
+
+Local feedback history and reply keys are encrypted with Windows DPAPI in the settings directory. Reply keys are never included in public issues. Deleting local history does not remove public GitHub content and removes the credentials needed to reply through the app.
 
 | Data | Default location |
 | --- | --- |
@@ -190,6 +128,8 @@ Backends poll independently and existing ROG controls are retained. Mouse, keybo
 
 The `devices` command reads device status; `device-report` exports descriptors and the current process's query summary. `device-report --probe` runs read-only queries first and exports battery, charging status, current DPI, available onboard stages and communication results from the same process for user-assisted testing. Reports exclude payloads and unique device identifiers and are never uploaded automatically.
 
-Report problems or compatibility results in [GitHub issues](https://github.com/youmikk/ROG-Battery/issues). Remove serial numbers and personal file paths before sharing logs.
+Open Device feedback in Settings, select a device and issue category, and describe the problem. You can preview or disable Include diagnostics and attach up to three screenshots. Builds with a configured feedback service can submit directly; My feedback shows status, maintainer replies, and a field for additional information. Network requests occur only when you initiate these actions.
+
+If the feedback service is not configured, use Copy report & open GitHub, review the content, and submit a [GitHub issue](https://github.com/youmikk/ROG-Battery/issues) in your browser. Add screenshots manually. Browser submissions do not appear in My feedback. The diagnostic log entry remains available; the separate device report window is removed, while the command-line reports above remain supported. Remove serial numbers, personal file paths, and other private content before separately sharing logs or backups.
 
 This repository does not currently include a LICENSE file. Copyright remains with the author. Please open an issue before reusing the code in another project.

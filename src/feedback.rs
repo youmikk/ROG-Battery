@@ -1,5 +1,57 @@
 //! 适配报告使用白名单字段重新生成，不复制用户日志、路径或配置。
 use std::fmt::Write;
+pub mod client;
+
+#[derive(Clone)]
+pub struct Candidate {
+    /// Display-only name; the report uses the original device name below.
+    pub label: String,
+    pub device: client::Device,
+    pub battery: String,
+    pub diagnostics: String,
+}
+
+pub fn candidate(label: String, reading: &crate::device::DeviceReading,
+    interface: Option<&crate::hid::HidInterface>, backend: Option<crate::backends::BackendId>,
+    connection: &str, family: crate::device::DeviceFamily) -> Candidate {
+    let family = family_code(family);
+    let name = clean(&reading.name);
+    let mut diagnostics = format!("App: R Battery {}\nSystem: {}\nModel: {}\nType: {}\nConnection: {}\nBattery: {}\nReading: {:?}\nConnected: {}\n",
+        crate::gui::APP_VERSION, system_version(), name, family, clean(connection),
+        reading.battery_text(true), reading.quality, reading.connected);
+    if let Some(interface) = interface {
+        let _ = writeln!(diagnostics, "VID/PID: {:04X}:{:04X}\nUsage: {:04X}:{:04X}\nReport bytes (input/output/feature): {}/{}/{}",
+            interface.vendor_id, interface.product_id, interface.usage_page, interface.usage,
+            interface.input_len, interface.output_len, interface.feature_len);
+        if let Some(backend) = backend {
+            let _ = writeln!(diagnostics, "Provider: {}", backend.name());
+            diagnostics.push_str(&crate::backends::trace::render_selected(backend, interface.vendor_id, interface.product_id));
+        }
+    }
+    Candidate { label, battery: reading.battery_text(true), diagnostics,
+        device: client::Device { name, family: family.into(), connection: connection.into(), brand: None, model: None } }
+}
+
+fn family_code(family: crate::device::DeviceFamily) -> &'static str {
+    use crate::device::DeviceFamily::*;
+    match family { Mouse => "mouse", Keyboard => "keyboard", Headset => "headset", Gamepad => "gamepad", Unknown => "other" }
+}
+
+/// Only the OS version is read; no computer, account or installation identifier.
+pub fn system_version() -> String {
+    #[repr(C)]
+    struct Version { size: u32, major: u32, minor: u32, build: u32, platform: u32, service: [u16; 128] }
+    unsafe {
+        let module = crate::win32::GetModuleHandleW(crate::win32::to_wide("ntdll.dll").as_ptr());
+        let address = crate::win32::GetProcAddress(module, b"RtlGetVersion\0".as_ptr() as _);
+        if address.is_null() { return "Windows".into(); }
+        let get: unsafe extern "system" fn(*mut Version) -> i32 = std::mem::transmute(address);
+        let mut version: Version = std::mem::zeroed();
+        version.size = std::mem::size_of::<Version>() as u32;
+        if get(&mut version) != 0 { return "Windows".into(); }
+        format!("Windows {}.{} build {}", version.major, version.minor, version.build)
+    }
+}
 
 fn clean(value: &str) -> String {
     value
@@ -87,6 +139,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Rapoo => &super::backends::rapoo::Rapoo,
             super::backends::BackendId::RapooLegacy => &super::backends::rapoo_legacy::RapooLegacy,
             super::backends::BackendId::RapooOffice => &super::backends::rapoo_office::RapooOffice,
+            super::backends::BackendId::RapooMt560 => &super::backends::rapoo_mt560::RapooMt560,
             super::backends::BackendId::Vgn => &super::backends::vgn::Vgn,
             super::backends::BackendId::VgnBeiying => &super::backends::vgn_beiying::VgnBeiying,
             super::backends::BackendId::VgnDragonfly3 => &super::backends::vgn_dragonfly3::VgnDragonfly3,
@@ -102,13 +155,16 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::MchoseModern => &super::backends::mchose_modern::MchoseModern,
             super::backends::BackendId::MchoseGlw => &super::backends::mchose_glw::MchoseGlw,
             super::backends::BackendId::MchoseK99 => &super::backends::mchose_k99::MchoseK99,
+            super::backends::BackendId::MchoseK87s => &super::backends::mchose_k87s::MchoseK87s,
             super::backends::BackendId::MchoseMc => &super::backends::mchose_mc::MchoseMc,
+            super::backends::BackendId::MchoseR9 => &super::backends::mchose_r9::MchoseR9,
             super::backends::BackendId::Moondrop => &super::backends::moondrop::Moondrop,
             super::backends::BackendId::Edifier => &super::backends::edifier::Edifier,
             super::backends::BackendId::EweadnS9 => &super::backends::eweadn::EweadnS9,
             super::backends::BackendId::EweadnS9Pro => &super::backends::eweadn_s9pro::EweadnS9Pro,
             super::backends::BackendId::EweadnX87 => &super::backends::eweadn_x87::EweadnX87,
             super::backends::BackendId::Dareu => &super::backends::dareu::Dareu,
+            super::backends::BackendId::DareuEm901 => &super::backends::dareu_em901::DareuEm901,
             super::backends::BackendId::EightBitDo => &super::backends::eightbitdo::EightBitDo,
             super::backends::BackendId::Flydigi => &super::backends::flydigi::Flydigi,
             super::backends::BackendId::GameSir => &super::backends::gamesir::GameSir,
@@ -116,9 +172,15 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::G3m => &super::backends::g3m::G3m,
             super::backends::BackendId::Aula => &super::backends::aula::Aula,
             super::backends::BackendId::AulaHfd => &super::backends::aula_hfd::AulaHfd,
+            super::backends::BackendId::AulaHfdMechanical => &super::backends::aula_hfd_mechanical::AulaHfdMechanical,
+            super::backends::BackendId::AulaV9Pro => &super::backends::aula_v9pro::AulaV9Pro,
             super::backends::BackendId::AulaF99 => &super::backends::aula_f99::AulaF99,
+            super::backends::BackendId::AulaF108 => &super::backends::aula_f108::AulaF108,
             super::backends::BackendId::AtkNano => &super::backends::atk_nano::AtkNano,
+            super::backends::BackendId::AtkHoltek => &super::backends::atk_holtek::AtkHoltek,
+            super::backends::BackendId::Lingbao => &super::backends::lingbao::Lingbao,
             super::backends::BackendId::Xiberia => &super::backends::xiberia::Xiberia,
+            super::backends::BackendId::FifineHt6 => &super::backends::fifine_ht6::FifineHt6,
             super::backends::BackendId::Cherry => &super::backends::cherry::Cherry,
             super::backends::BackendId::Lofree => &super::backends::lofree::Lofree,
             super::backends::BackendId::Nova => &super::backends::steelseries::Nova,
@@ -188,11 +250,6 @@ fn append_probe_result(output: &mut String, target: &super::backends::Target,
                 reading.dpi.stage_writable);
         }
     }
-}
-
-pub fn issue_url() -> String {
-    // 开发分支的模板尚未合入默认分支，直接预填正文也能提交。
-    "https://github.com/youmikk/ROG-Battery/issues/new?title=%5BDevice%5D&body=Brand%20%2F%20Model%3A%0AConnection%20%28USB%2C%202.4GHz%2C%20Bluetooth%29%3A%0AApp%20version%3A%0ABattery%20%2F%20DPI%20behavior%3A%0A%0AAttach%20the%20device%20report%20exported%20from%20Settings%20%E2%86%92%20About.%0A%E8%AF%B7%E5%A1%AB%E5%86%99%E5%93%81%E7%89%8C%E3%80%81%E5%9E%8B%E5%8F%B7%E3%80%81%E8%BF%9E%E6%8E%A5%E6%96%B9%E5%BC%8F%E5%92%8C%E9%97%AE%E9%A2%98%E8%A1%A8%E7%8E%B0%E3%80%82".to_string()
 }
 
 #[cfg(test)]

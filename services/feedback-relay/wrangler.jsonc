@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "r-battery-feedback",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "vars": {
+    "PUBLIC_BASE_URL": "",
+    "GITHUB_AUTHOR_LOGIN": ""
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "FEEDBACK", "class_name": "FeedbackCoordinator" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["FeedbackCoordinator"] }
+  ],
+  "r2_buckets": [
+    { "binding": "ATTACHMENTS", "bucket_name": "r-battery-feedback-attachments" }
+  ]
+}

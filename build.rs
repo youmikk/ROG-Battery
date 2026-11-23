@@ -18,6 +18,7 @@ fn main() {
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
     println!("cargo:rustc-env=ROG_APP_VERSION={}", version.trim());
     println!("cargo:rerun-if-env-changed=ROG_BUILD_VERSION");
+    println!("cargo:rerun-if-env-changed=R_BATTERY_FEEDBACK_URL");
     for path in ["build.rs", "Cargo.toml", "vendor/mingw-import-libs", "assets/app.o", "assets/app.rc", "assets/tray.ico"] {
         println!("cargo:rerun-if-changed={path}");
     }

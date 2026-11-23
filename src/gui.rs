@@ -1441,6 +1441,7 @@ struct UiEnv<'a> {
     tray: &'a TrayCtl,
     taskbar: &'a crate::taskbar_widget::TaskbarWidget,
     name_dialog: &'a crate::ui::device_name::Dialog,
+    feedback_dialog: &'a crate::ui::feedback::Dialog,
 }
 
 impl<'a> UiEnv<'a> {
@@ -1864,24 +1865,30 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
 
         Act::OpenRepo => open_url(env, "https://github.com/youmikk/ROG-Battery"),
-        Act::DeviceFeedback => open_url(env, &crate::feedback::issue_url()),
-        Act::ExportDeviceReport => {
-            let mut dialog = nwg::FileDialog::default();
-            if nwg::FileDialog::builder().title(crate::tr!("导出设备适配报告"))
-                .action(nwg::FileDialogAction::Save).filters("Text(*.txt)").build(&mut dialog).is_err() {
-                env.say(crate::tr!("无法打开保存窗口"));
-                return;
-            }
-            if dialog.run(Some(env.window)) {
-                if let Ok(path) = dialog.get_selected_item() {
-                    let result = crate::feedback::collect().and_then(|report|
-                        std::fs::write(PathBuf::from(path), report).map_err(|_| crate::tr!("无法保存适配报告").to_string()));
-                    match result {
-                        Ok(()) => env.say(crate::tr!("适配报告已保存")),
-                        Err(error) => env.say(error),
-                    }
-                }
-            }
+        Act::CheckUpdate => env.say(crate::ui::feedback::text("检查更新功能即将提供", "Update checking is coming soon")),
+        Act::DeviceFeedback | Act::FeedbackHistory => {
+            let s = lock_shared(env.shared);
+            let devices = s.readings.iter().map(|reading| {
+                let record = s.devices.get(&reading.key);
+                let basic = record.and_then(|record| record.basic.as_ref());
+                let link = record.and_then(|record| record.link.as_ref());
+                let interface = basic.and_then(|basic| basic.target.hid().ok()).or_else(|| link.map(|link| &link.iface));
+                let backend = basic.map(|basic| basic.target.backend).or_else(|| link.map(|_| crate::backends::BackendId::Rog));
+                let family = match s.cfg.device_kind(reading) {
+                    crate::tray_prefs::TrayKind::Mouse => crate::device::DeviceFamily::Mouse,
+                    crate::tray_prefs::TrayKind::Keyboard => crate::device::DeviceFamily::Keyboard,
+                    crate::tray_prefs::TrayKind::Headset => crate::device::DeviceFamily::Headset,
+                    crate::tray_prefs::TrayKind::Gamepad => crate::device::DeviceFamily::Gamepad,
+                    _ => crate::device::DeviceFamily::Unknown,
+                };
+                let connection = link.map(|link| match link.mode.as_str() {
+                    "Wireless24G" => "2.4GHz", "Wired" => "USB", "Bluetooth" => "Bluetooth", _ => "unknown",
+                }).unwrap_or("unknown");
+                crate::feedback::candidate(s.cfg.device_name(reading).to_string(), reading, interface, backend, connection, family)
+            }).collect();
+            let dark = crate::ui::theme::resolve(&s.cfg.theme) == crate::ui::theme::Mode::Dark;
+            drop(s);
+            env.feedback_dialog.show(env.window, devices, dark, matches!(a, Act::FeedbackHistory));
         }
 
         Act::OpenStore => open_url(env, "https://apps.microsoft.com/detail/9NRC8HCD4BZ7"),
@@ -3113,6 +3120,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let audio = crate::audio::Controls::new(move || sender.notice());
     let popup = Rc::new(crate::ui::tray_popup::Popup::new(sender, audio.clone())?);
     let name_dialog = crate::ui::device_name::Dialog::new(&window, sender)?;
+    let feedback_dialog = crate::ui::feedback::Dialog::new(&window, sender)?;
 
     {
         let shared_a = Arc::clone(&shared);
@@ -3532,6 +3540,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             }
 
             E::OnNotice => {
+                feedback_dialog.poll();
                 lock_shared(&shared_e).expire_additional();
                 for request in name_dialog.take_requests() {
                     crate::diagnostics::event(
@@ -3671,6 +3680,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         tray: &tray,
                         taskbar: &taskbar_updates,
                         name_dialog: &name_dialog,
+                        feedback_dialog: &feedback_dialog,
                     };
                     for a in acts {
                         handle_act(a, &env);
@@ -4410,8 +4420,18 @@ mod backend_tests {
             (BackendId::RapooOffice, DeviceFamily::Mouse),
             (BackendId::AulaHfd, DeviceFamily::Keyboard),
             (BackendId::MchoseMc, DeviceFamily::Headset),
+            (BackendId::MchoseR9, DeviceFamily::Headset),
+            (BackendId::RapooMt560, DeviceFamily::Mouse),
+            (BackendId::AulaV9Pro, DeviceFamily::Mouse),
+            (BackendId::DareuEm901, DeviceFamily::Mouse),
+            (BackendId::AulaHfdMechanical, DeviceFamily::Keyboard),
             (BackendId::AulaF99, DeviceFamily::Keyboard),
+            (BackendId::AulaF108, DeviceFamily::Keyboard),
             (BackendId::AtkNano, DeviceFamily::Mouse),
+            (BackendId::AtkHoltek, DeviceFamily::Mouse),
+            (BackendId::Lingbao, DeviceFamily::Mouse),
+            (BackendId::MchoseK87s, DeviceFamily::Keyboard),
+            (BackendId::FifineHt6, DeviceFamily::Headset),
             (BackendId::EweadnX87, DeviceFamily::Keyboard),
             (BackendId::Xiberia, DeviceFamily::Headset),
             (BackendId::Edifier, DeviceFamily::Headset), (BackendId::EweadnS9Pro, DeviceFamily::Mouse),
@@ -4425,7 +4445,13 @@ mod backend_tests {
             (BackendId::Flydigi, DeviceFamily::Gamepad),
             (BackendId::GameSir, DeviceFamily::Gamepad)] {
         let now = std::time::Instant::now();
-        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10000);
+        let interval = match backend {
+            BackendId::AulaF108 => 15000,
+            BackendId::AulaHfdMechanical => 30000,
+            BackendId::RapooMt560 => 2000,
+            _ => 10000,
+        };
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), interval);
         let mut shared = Shared::new(Settings::default());
         let mut sample = snapshot(backend, "keyboard", 93);
         sample.target.family = family;
@@ -4454,11 +4480,14 @@ mod backend_tests {
 
     #[test]
     fn new_receiver_explicit_sleep_clears_tray_level_and_wake_returns_it() {
-        for backend in [BackendId::VgnRy, BackendId::MchoseModern, BackendId::MchoseMc] {
+        for backend in [BackendId::VgnRy, BackendId::MchoseModern, BackendId::MchoseMc,
+            BackendId::AtkHoltek, BackendId::FifineHt6, BackendId::MchoseR9] {
             let mut shared = Shared::new(Settings::default());
             let now = std::time::Instant::now();
             let mut sample = snapshot(backend, "mouse", 85);
-            sample.target.family = if backend == BackendId::MchoseMc { DeviceFamily::Headset } else { DeviceFamily::Mouse };
+            sample.target.family = if matches!(backend, BackendId::MchoseMc | BackendId::FifineHt6) {
+                DeviceFamily::Headset
+            } else { DeviceFamily::Mouse };
             sample.battery_at = Some(now);
             merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
             assert_eq!(shared.readings[0].battery_text(true), "85%");

@@ -507,3 +507,8 @@ pub fn set_round_corners(hwnd: Handle) -> bool {
     }
     dwm_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_ROUND)
 }
+
+/// Let DWM draw the popup outline and its corners as one surface.
+pub fn set_popup_frame(hwnd: Handle, border: u32) -> bool {
+    set_round_corners(hwnd) && dwm_attr(hwnd, DWMWA_BORDER_COLOR, &border)
+}

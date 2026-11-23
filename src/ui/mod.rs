@@ -2,6 +2,8 @@
 pub mod canvas;
 pub mod dropdown;
 pub mod device_name;
+pub mod feedback;
+pub mod feedback_icons;
 pub mod palette;
 pub mod frame;
 pub mod gfx;

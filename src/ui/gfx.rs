@@ -467,22 +467,26 @@ pub enum Align {
     Right,
 }
 
-/// 应用图标解码一次就缓存：exe 资源 1 号 ICON（`assets/app.rc` 里的
-/// `1 ICON "tray.ico"`，也就是用户给的那张原画生成的 ico）。
-///
-/// 不用 `include_bytes!` + 流解码：图标已经在资源里，`LoadImageW` 直接给
-/// HICON，`GdipCreateBitmapFromHICON` 再转成可绘制位图，省掉解码器。
+/// 标题栏裁切图标只解码一次。
 pub fn app_icon_bitmap() -> *mut c_void {
     static CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| unsafe {
+    *CACHE.get_or_init(|| load_icon_bitmap(2, 48)) as *mut c_void
+}
+
+/// 关于页使用应用原图，较大资源保持高 DPI 下清晰。
+pub fn about_icon_bitmap() -> *mut c_void {
+    static CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| load_icon_bitmap(1, 256)) as *mut c_void
+}
+
+fn load_icon_bitmap(resource: usize, size: i32) -> usize {
+    unsafe {
         let hicon = crate::win32::LoadImageW(
             crate::win32::GetModuleHandleW(std::ptr::null()),
-            // 资源 2 = 标题栏专用的小图标（从原画裁到角色占满画面），
-            // 资源 1 是应用/托盘图标，两者构图不同。
-            2 as *const u16,
+            resource as *const u16,
             crate::win32::IMAGE_ICON,
-            48,
-            48,
+            size,
+            size,
             0,
         );
         if hicon.is_null() {
@@ -494,7 +498,7 @@ pub fn app_icon_bitmap() -> *mut c_void {
         }
         // HICON 留着不销毁：位图可能仍引用它，进程退出时一并回收。
         bmp as usize
-    }) as *mut c_void
+    }
 }
 
 // ==================== 绘制上下文 ====================
@@ -527,8 +531,8 @@ struct ObjCache {
     brushes: Vec<(u32, *mut c_void)>,
     /// 键：`(argb, width 的位模式, 是否圆头圆角)`。
     pens: Vec<((u32, u32, bool), *mut c_void)>,
-    /// 键：`(水平对齐, 是否单行)`。
-    fmts: Vec<((i32, bool), *mut c_void)>,
+    /// 键：`(水平对齐, 是否单行, 是否垂直居中)`。
+    fmts: Vec<((i32, bool, bool), *mut c_void)>,
 }
 
 impl ObjCache {
@@ -583,16 +587,20 @@ impl ObjCache {
 
     /// 单行文字格式（超宽省略号 + 禁折行）。`align` 0=左 1=中 2=右。
     fn fmt_oneline(&mut self, align: i32) -> *mut c_void {
-        self.fmt_inner(align, true)
+        self.fmt_inner(align, true, true)
     }
 
     /// 多行文字格式（竖直靠上、允许折行）。
     fn fmt_wrap(&mut self) -> *mut c_void {
-        self.fmt_inner(0, false)
+        self.fmt_inner(0, false, false)
     }
 
-    fn fmt_inner(&mut self, align: i32, oneline: bool) -> *mut c_void {
-        let key = (align, oneline);
+    fn fmt_wrap_centered(&mut self) -> *mut c_void {
+        self.fmt_inner(0, false, true)
+    }
+
+    fn fmt_inner(&mut self, align: i32, oneline: bool, centered: bool) -> *mut c_void {
+        let key = (align, oneline, centered);
         for (k, h) in &self.fmts {
             if *k == key {
                 return *h;
@@ -604,18 +612,14 @@ impl ObjCache {
         }
         unsafe {
             GdipSetStringFormatAlign(fmt, align);
+            GdipSetStringFormatLineAlign(fmt, i32::from(centered));
             if oneline {
-                // 1 = Center（竖直居中）
-                GdipSetStringFormatLineAlign(fmt, 1);
                 // 3 = EllipsisCharacter：超宽截断加省略号
                 GdipSetStringFormatTrimming(fmt, 3);
                 // 0x0000_1000 = StringFormatFlagsNoWrap。光设 Trimming 不够：
                 // GDI+ 默认允许自动折行，一串没有空格的连续字符（输入框里的
                 // `400900`）会在框宽处硬断成两行并溢出框外。
                 GdipSetStringFormatFlags(fmt, 0x0000_1000);
-            } else {
-                // 0 = Near（竖直靠上）
-                GdipSetStringFormatLineAlign(fmt, 0);
             }
         }
         self.fmts.push((key, fmt));
@@ -1167,6 +1171,15 @@ impl<'a> Painter<'a> {
 
     /// 画多行文字，从矩形顶部开始排。
     pub fn text_wrap(&mut self, s: &str, r: R, size: f32, color: u32) {
+        self.text_block(s, r, size, color, false);
+    }
+
+    /// 允许折行，同时让整个文本块与同行控件垂直居中。
+    pub fn text_wrap_centered(&mut self, s: &str, r: R, size: f32, color: u32) {
+        self.text_block(s, r, size, color, true);
+    }
+
+    fn text_block(&mut self, s: &str, r: R, size: f32, color: u32, centered: bool) {
         let r = self.snapped_text_rect(r);
         let size = self.snapped_font_size(size);
         if !self.visible(r) || s.is_empty() {
@@ -1178,7 +1191,11 @@ impl<'a> Painter<'a> {
         }
         let u: Vec<u16> = s.encode_utf16().collect();
         let layout = RectF { x: r.x, y: r.y, w: r.w, h: r.h };
-        let fmt = self.obj.fmt_wrap();
+        let fmt = if centered {
+            self.obj.fmt_wrap_centered()
+        } else {
+            self.obj.fmt_wrap()
+        };
         let brush = self.obj.brush(color);
         if fmt.is_null() || brush.is_null() {
             return;

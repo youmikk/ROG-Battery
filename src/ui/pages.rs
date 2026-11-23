@@ -9,11 +9,6 @@ use crate::ui::palette::{
 use crate::ui::theme::Theme;
 use crate::ui::widget::{Act, Drop, Edit, Icon, Page, Pref, SettingsSection, Slide, Ui};
 
-/// 设置页「关于」里的开源仓库地址。
-const REPO_URL: &str = "https://github.com/youmikk/ROG-Battery";
-/// 设置页「关于」里的商店产品页地址。
-const STORE_URL: &str = "https://apps.microsoft.com/detail/9NRC8HCD4BZ7";
-
 /// 页面要显示的数据。由 `gui.rs` 从 `Shared` 里凑出来。
 pub use crate::ui::viewdata::Data;
 
@@ -3048,91 +3043,116 @@ fn settings_data(p: &mut Painter, ui: &mut Ui, _d: &Data, c: &mut Cursor) {
 }
 
 fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
+    use crate::ui::feedback_icons::{self, Icon as FeedbackIcon};
+
     let t = p.t;
-    // ---- 关于 ----
+    let tr = |zh: &'static str, en: &'static str| {
+        if crate::i18n::english() { en } else { zh }
+    };
+    let light = t.bg == crate::ui::theme::LIGHT.bg;
+    let sunken = if light { 0xFFF5F7F4 } else { t.bg_sunken };
+    let hover = if light { 0xFFF3F6F0 } else { t.card_hover };
+    let w = c.w.min(760.0);
+    let x = c.x + (c.w - w) / 2.0;
+    let y = c.y + if c.w < 730.0 { 25.0 } else { 34.0 };
 
-
-    let card = c.card(p, layout::ROW_H * 3.0);
-    {
-        // 版本：值右对齐，版本号来自 Cargo.toml（不再手写常量）
-        let area = row_area(card, card.y);
-        row_label(
-            p,
-            area,
-            crate::tr!("版本"),
-            Some(crate::tr!(
-                "R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具"
-            )),
-            96.0,
-        );
+    let draw_button = |p: &mut Painter, ui: &mut Ui, r: R, label: &str,
+                       act: Act, next: bool| {
+        let fill = if ui.hover == Some(act) { hover } else { t.card };
+        p.card(r, 8.0, fill, t.border_strong);
+        let suffix_w = if next { 23.0 } else { 0.0 };
+        let label_rect = R::new(r.x + 10.0, r.y, r.w - 20.0 - suffix_w, r.h);
         p.text(
-            &format!("v{}", d.version),
-            R::new(area.right() - 140.0, area.y, 140.0, area.h),
-            12.5,
-            true,
+            label,
+            label_rect,
+            12.0,
+            false,
             t.text,
-            Align::Right,
+            Align::Center,
         );
-        row_rule(p, card, area);
-    }
-    {
-        // 开源仓库
-        let area = R::new(
-            card.x + 18.0,
-            card.y + layout::ROW_H,
-            card.w - 36.0,
-            layout::ROW_H,
-        );
-        let ctl = row_label(p, area, crate::tr!("开源仓库"), Some(REPO_URL), 64.0);
-        button(
-            p,
-            ui,
-            R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
-            crate::tr!("打开"),
-            false,
-            Act::OpenRepo,
-        );
-        row_rule(p, card, area);
-    }
-    {
-        // 商店页
-        let area = R::new(
-            card.x + 18.0,
-            card.y + layout::ROW_H * 2.0,
-            card.w - 36.0,
-            layout::ROW_H,
-        );
-        let ctl = row_label(p, area, "Microsoft Store", Some(STORE_URL), 64.0);
-        button(
-            p,
-            ui,
-            R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
-            crate::tr!("打开"),
-            false,
-            Act::OpenStore,
-        );
-    }
-    c.y = card.bottom();
+        if next {
+            feedback_icons::draw(p, FeedbackIcon::Next,
+                R::new(r.right() - 24.0, r.cy() - 8.0, 16.0, 16.0), t.text);
+        }
+        ui.hot(r, act);
+    };
 
-    c.h2(p, crate::tr!("诊断"), false);
-    let card = c.card(p, layout::ROW_H);
-    let area = row_area(card, card.y);
-    let ctl = row_label(p, area, crate::tr!("诊断日志"), None, 64.0);
-    button(p, ui, R::new(ctl.x, ctl.cy() - 15.0, 64.0, 30.0),
-        crate::tr!("打开"), false, Act::OpenLogFolder);
-    c.y = card.bottom();
-    c.h2(p, crate::tr!("设备适配"), false);
-    let card = c.card(p, layout::ROW_H * 2.0);
-    let area = row_area(card, card.y);
-    let control = row_label(p, area, crate::tr!("反馈品牌与型号"), Some("GitHub"), 96.0);
-    button(p, ui, R::new(control.x, control.cy() - 15.0, 96.0, 30.0),
-        crate::tr!("打开"), false, Act::DeviceFeedback);
-    row_rule(p, card, area);
-    let area = row_area(card, card.y + layout::ROW_H);
-    let control = row_label(p, area, crate::tr!("设备适配报告"), None, 96.0);
-    button(p, ui, R::new(control.x, control.cy() - 15.0, 96.0, 30.0),
-        crate::tr!("导出"), false, Act::ExportDeviceReport);
-    c.y = card.bottom();
+    let logo = R::new(x, y, 58.0, 58.0);
+    p.image_rounded(crate::ui::gfx::about_icon_bitmap(), logo, 15.0);
+    let brand_x = logo.right() + 15.0;
+    let brand_w = p.measure("R Battery", 23.0, true).0.ceil() + 12.0;
+    p.text("R Battery", R::new(brand_x, y, brand_w, 36.0),
+        23.0, true, t.text, Align::Left);
+    let version = format!("v{}", d.version);
+    let version_w = p.measure(&version, 13.0, true).0 + 20.0;
+    let badge = R::new(brand_x + brand_w + 12.0, y + 4.0, version_w, 28.0);
+    p.round(badge, 7.0, t.accent_soft);
+    p.text(&version, badge, 13.0, true, t.accent, Align::Center);
+    let check_label = tr("检查更新", "Check for updates");
+    let check_w = (p.measure(check_label, 12.0, false).0 + 30.0).max(86.0);
+    draw_button(p, ui, R::new(badge.right() + 10.0, y, check_w, 36.0),
+        check_label, Act::CheckUpdate, false);
+    p.text(tr("设备电量，一眼就懂。", "Device battery at a glance."),
+        R::new(brand_x, y + 36.0, w - (brand_x - x), 19.0),
+        12.0, false, t.text2, Align::Left);
+
+    let row_h = 74.0;
+    let project = R::new(x, logo.bottom() + 28.0, w, row_h);
+    p.card(project, 10.0, t.card, t.border);
+    let repo_w = (p.measure("GitHub", 12.0, false).0 + 53.0).max(86.0);
+    let repo = R::new(project.right() - 18.0 - repo_w, project.cy() - 18.0, repo_w, 36.0);
+    let store_label = tr("微软商城", "Microsoft Store");
+    let store_w = (p.measure(store_label, 12.0, false).0 + 53.0).max(86.0);
+    let store = R::new(repo.x - 8.0 - store_w, repo.y, store_w, repo.h);
+    let project_text_w = store.x - (project.x + 18.0) - 16.0;
+    p.text(tr("项目主页", "Project homepage"),
+        R::new(project.x + 18.0, project.y + 14.0, project_text_w, 22.0),
+        14.0, false, t.text, Align::Left);
+    p.text(tr("查看源代码、支持设备与更新记录", "Source code, supported devices and updates"),
+        R::new(project.x + 18.0, project.y + 41.0, project_text_w, 19.0),
+        12.0, false, t.text2, Align::Left);
+    draw_button(p, ui, store, store_label, Act::OpenStore, true);
+    draw_button(p, ui, repo, "GitHub", Act::OpenRepo, true);
+
+    let heading_y = project.bottom() + 24.0;
+    p.text(tr("支持与反馈", "Support & feedback"),
+        R::new(x + 2.0, heading_y, w - 4.0, 19.0),
+        12.0, true, t.text2, Align::Left);
+    let support = R::new(x, heading_y + 29.0, w, row_h * 3.0);
+    p.card(support, 10.0, t.card, t.border);
+    let rows = [
+        (FeedbackIcon::Message, tr("反馈设备", "Device feedback"),
+            tr("设备未识别、电量异常或其他使用问题", "Unrecognized devices, battery issues or other problems"),
+            tr("反馈", "Feedback"), Act::DeviceFeedback),
+        (FeedbackIcon::History, tr("我的反馈", "My feedback"),
+            tr("查看处理进度和回复，补充设备信息", "Track progress, read replies and add device details"),
+            tr("查看", "View"), Act::FeedbackHistory),
+        (FeedbackIcon::File, tr("诊断日志", "Diagnostic logs"),
+            tr("查看本地运行记录", "View local activity records"),
+            tr("打开", "Open"), Act::OpenLogFolder),
+    ];
+    for (index, (icon, title, description, label, act)) in rows.into_iter().enumerate() {
+        let row = R::new(support.x, support.y + index as f32 * row_h, support.w, row_h);
+        if index != 0 {
+            p.hline(row.x + 1.0, row.right() - 1.0, row.y, t.border);
+        }
+        let icon_box = R::new(row.x + 18.0, row.cy() - 17.5, 35.0, 35.0);
+        p.round(icon_box, 8.0, sunken);
+        feedback_icons::draw(p, icon,
+            R::new(icon_box.cx() - 10.0, icon_box.cy() - 10.0, 20.0, 20.0), t.text2);
+        let text_x = icon_box.right() + 12.0;
+        let control = R::new(row.right() - 18.0 - 86.0, row.cy() - 18.0, 86.0, 36.0);
+        let text_w = control.x - text_x - 16.0;
+        p.text(title, R::new(text_x, row.y + 14.0, text_w, 22.0),
+            14.0, false, t.text, Align::Left);
+        p.text(description, R::new(text_x, row.y + 41.0, text_w, 19.0),
+            12.0, false, t.text2, Align::Left);
+        draw_button(p, ui, control, label, act, false);
+    }
+    let foot = R::new(x, support.bottom() + 25.0, w, 19.0);
+    p.text(tr("R Battery · Windows 外设电量与设置", "R Battery · Windows peripheral batteries and settings"),
+        foot, 12.0, false, t.text3, Align::Center);
+    c.y = foot.bottom();
 }
 
 /// 绘制「关闭窗口」确认模态对话框。
