@@ -241,7 +241,7 @@ const ERROR_SUCCESS: i32 = 0;
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-/// 值名。用 `RogMouseCtl` 而不是 `R Battery`：注册表值名允许空格但
+/// 值名。用 `RogMouseCtl` 而不是 `X-Battery`：注册表值名允许空格但
 /// 命令行工具/脚本处理时容易漏引号。
 const RUN_VALUE_NAME: &str = "RogMouseCtl";
 /// 启动时传给程序的参数。GUI 是默认形态（无参数），这个参数的作用是

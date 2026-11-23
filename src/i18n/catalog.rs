@@ -137,7 +137,7 @@ macro_rules! tr {
     ("控制方式") => { if $crate::i18n::english() { "Lighting control" } else { "控制方式" } };
     ("由 Windows 动态光效控制") => { if $crate::i18n::english() { "Controlled by Windows Dynamic Lighting" } else { "由 Windows 动态光效控制" } };
     ("打开动态光效设置") => { if $crate::i18n::english() { "Open lighting settings" } else { "打开动态光效设置" } };
-    ("灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。") => { if $crate::i18n::english() { "Choose effects in Settings → Personalization → Dynamic Lighting. Windows provides solid colors, breathing, gradients, waves and more. R Battery leaves lighting control to Windows to prevent conflicts." } else { "灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。" } };
+    ("灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。") => { if $crate::i18n::english() { "Choose effects in Settings → Personalization → Dynamic Lighting. Windows provides solid colors, breathing, gradients, waves and more. X-Battery leaves lighting control to Windows to prevent conflicts." } else { "灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。" } };
     ("灯效设备") => { if $crate::i18n::english() { "Lighting device" } else { "灯效设备" } };
     ("已检测到 HID LampArray 设备") => { if $crate::i18n::english() { "HID LampArray device detected" } else { "已检测到 HID LampArray 设备" } };
     ("未检测到 HID LampArray 设备") => { if $crate::i18n::english() { "No HID LampArray device detected" } else { "未检测到 HID LampArray 设备" } };
@@ -184,7 +184,7 @@ macro_rules! tr {
     ("深色") => { if $crate::i18n::english() { "Dark" } else { "深色" } };
     ("关于") => { if $crate::i18n::english() { "About" } else { "关于" } };
     ("版本") => { if $crate::i18n::english() { "Version" } else { "版本" } };
-    ("R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具") => { if $crate::i18n::english() { "R Battery · ROG device settings without ASUS drivers" } else { "R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具" } };
+    ("X-Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具") => { if $crate::i18n::english() { "X-Battery · ROG device settings without ASUS drivers" } else { "X-Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具" } };
     ("开源仓库") => { if $crate::i18n::english() { "Source code" } else { "开源仓库" } };
     ("打开") => { if $crate::i18n::english() { "Open" } else { "打开" } };
     ("诊断") => { if $crate::i18n::english() { "Diagnostics" } else { "诊断" } };
@@ -232,7 +232,7 @@ macro_rules! tr {
     ("接收器固件低于 0008") => { if $crate::i18n::english() { "Receiver firmware is below 0008" } else { "接收器固件低于 0008" } };
     ("（上次电量，未连接）") => { if $crate::i18n::english() { " (last reading, disconnected)" } else { "（上次电量，未连接）" } };
     ("（充电中）") => { if $crate::i18n::english() { " (charging)" } else { "（充电中）" } };
-    ("R Battery · 打开设备页面") => { if $crate::i18n::english() { "R Battery · Open devices" } else { "R Battery · 打开设备页面" } };
+    ("X-Battery · 打开设备页面") => { if $crate::i18n::english() { "X-Battery · Open devices" } else { "X-Battery · 打开设备页面" } };
     ("✘ 操作排不进去了（前面的还没写完），稍等一下再试") => { if $crate::i18n::english() { "✘ The command queue is full. Please try again shortly." } else { "✘ 操作排不进去了（前面的还没写完），稍等一下再试" } };
     ("✘ 读不到设备：插好接收器，或动一下设备再试") => { if $crate::i18n::english() { "✘ Device unavailable. Connect the receiver or move the device and try again." } else { "✘ 读不到设备：插好接收器，或动一下设备再试" } };
     ("✘ 未检测到 HID LampArray 灯效设备") => { if $crate::i18n::english() { "✘ No HID LampArray lighting device detected" } else { "✘ 未检测到 HID LampArray 灯效设备" } };
@@ -607,7 +607,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "控制方式" => "Lighting control",
         "由 Windows 动态光效控制" => "Controlled by Windows Dynamic Lighting",
         "打开动态光效设置" => "Open lighting settings",
-        "灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。" => "Choose effects in Settings → Personalization → Dynamic Lighting. Windows provides solid colors, breathing, gradients, waves and more. R Battery leaves lighting control to Windows to prevent conflicts.",
+        "灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。" => "Choose effects in Settings → Personalization → Dynamic Lighting. Windows provides solid colors, breathing, gradients, waves and more. X-Battery leaves lighting control to Windows to prevent conflicts.",
         "灯效设备" => "Lighting device",
         "已检测到 HID LampArray 设备" => "HID LampArray device detected",
         "未检测到 HID LampArray 设备" => "No HID LampArray device detected",
@@ -654,7 +654,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "深色" => "Dark",
         "关于" => "About",
         "版本" => "Version",
-        "R Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具" => "R Battery · ROG device settings without ASUS drivers",
+        "X-Battery · 不依赖 ASUS 驱动的 ROG 设备参数工具" => "X-Battery · ROG device settings without ASUS drivers",
         "开源仓库" => "Source code",
         "打开" => "Open",
         "诊断" => "Diagnostics",
@@ -701,7 +701,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "正在写设备 ……" => "Writing to device…",
         "（上次电量，未连接）" => " (last reading, disconnected)",
         "（充电中）" => " (charging)",
-        "R Battery · 打开设备页面" => "R Battery · Open devices",
+        "X-Battery · 打开设备页面" => "X-Battery · Open devices",
         "✘ 操作排不进去了（前面的还没写完），稍等一下再试" => "✘ The command queue is full. Please try again shortly.",
         "✘ 读不到设备：插好接收器，或动一下设备再试" => "✘ Device unavailable. Connect the receiver or move the device and try again.",
         "✘ 未检测到 HID LampArray 灯效设备" => "✘ No HID LampArray lighting device detected",

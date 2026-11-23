@@ -1,6 +1,6 @@
-# R Battery feedback relay
+# X-Battery feedback relay
 
-R Battery 的自有反馈中继：桌面客户端通过 HTTPS 提交设备反馈，服务端在固定仓库 [`youmikk/ROG-Battery`](https://github.com/youmikk/ROG-Battery) 创建议题，用户可用本机保存的回复密钥查看维护者回复和补充信息。客户端不需要 GitHub 登录，也不会持有 GitHub Token。
+X-Battery 的自有反馈中继：桌面客户端通过 HTTPS 提交设备反馈，服务端在固定仓库 [`youmikk/X-Battery`](https://github.com/youmikk/X-Battery) 创建议题，用户可用本机保存的回复密钥查看维护者回复和补充信息。客户端不需要 GitHub 登录，也不会持有 GitHub Token。
 
 服务独立实现，运行时无 npm 依赖。使用 Cloudflare Worker、一个 SQLite Durable Object 和一个私有 R2 桶。无需 GitHub 附件上传 API，不调用 MyFinder 或其他项目的反馈服务器。
 
@@ -39,7 +39,7 @@ node --test test/relay.test.mjs
    | `r2_buckets[0].bucket_name` | 第 2 步创建的桶名。绑定名必须为 `ATTACHMENTS`。 |
    | `durable_objects.bindings` / `migrations` | 保持所附 `FeedbackCoordinator`、SQLite 迁移和 `FEEDBACK` 绑定。首次部署由 Wrangler 建立持久化对象。 |
 
-4. 为 `youmikk/ROG-Battery` 创建 GitHub fine-grained Token，只授权这个仓库的 **Issues: Read and write** 和必要的 Metadata 读取。组织仓库如有审批要求，先完成审批。建议用专用服务账号便于区分用户转发与维护者直接回复。不要把 Token 放进 Rust、HTML、JSON 配置或 Git 仓库。
+4. 为 `youmikk/X-Battery` 创建 GitHub fine-grained Token，只授权这个仓库的 **Issues: Read and write** 和必要的 Metadata 读取。组织仓库如有审批要求，先完成审批。建议用专用服务账号便于区分用户转发与维护者直接回复。不要把 Token 放进 Rust、HTML、JSON 配置或 Git 仓库。
 5. 使用交互式 secret 输入配置凭据：
 
    ```powershell
@@ -118,7 +118,7 @@ GitHub Token 可更换，但保持发帖账号与 `GITHUB_AUTHOR_LOGIN` 一致�
 成功创建返回 `201`；相同请求编号、内容和密钥再次提交返回 `200`，响应相同：
 
 ```json
-{"number":123,"url":"https://github.com/youmikk/ROG-Battery/issues/123","replyAccess":true}
+{"number":123,"url":"https://github.com/youmikk/X-Battery/issues/123","replyAccess":true}
 ```
 
 ### 查看反馈：`GET /feedback/123`
@@ -129,7 +129,7 @@ GitHub Token 可更换，但保持发帖账号与 `GITHUB_AUTHOR_LOGIN` 一致�
 {
   "issue": {
     "number": 123,
-    "url": "https://github.com/youmikk/ROG-Battery/issues/123",
+    "url": "https://github.com/youmikk/X-Battery/issues/123",
     "title": "[电量显示] 我的无线鼠标",
     "state": "open",
     "body": "议题正文",
@@ -139,7 +139,7 @@ GitHub Token 可更换，但保持发帖账号与 `GITHUB_AUTHOR_LOGIN` 一致�
   "comments": [
     {
       "id": 123456,
-      "url": "https://github.com/youmikk/ROG-Battery/issues/123#issuecomment-123456",
+      "url": "https://github.com/youmikk/X-Battery/issues/123#issuecomment-123456",
       "body": "已加入测试版，请更新后确认。",
       "author": "youmikk",
       "createdAt": "2026-11-23T01:00:00Z",
@@ -163,7 +163,7 @@ GitHub Token 可更换，但保持发帖账号与 `GITHUB_AUTHOR_LOGIN` 一致�
 `body` 为 1–2000 字符。每条新回复有独立 UUID，重试复用原 UUID 和正文。成功 `201`、幂等重放 `200`：
 
 ```json
-{"id":123457,"url":"https://github.com/youmikk/ROG-Battery/issues/123#issuecomment-123457","createdAt":"2026-11-23T02:00:00Z"}
+{"id":123457,"url":"https://github.com/youmikk/X-Battery/issues/123#issuecomment-123457","createdAt":"2026-11-23T02:00:00Z"}
 ```
 
 凭证只出现在客户端请求体或 Authorization 头，不出现在公开议题/评论、图片 URL或服务日志。正文中若误带当前凭证也会被替换为 `[redacted]`；这不是通用隐私清洗器，客户端仍需控制诊断内容。截图里的像素和图片元数据不会自动去除隐私。
@@ -239,4 +239,4 @@ R2 保存原始图片，Worker 在 `/attachments/<48位随机hex>` 提供公开�
 
 小规模使用采用单 Durable Object 排队，便于跨重启保持一致性；慢上传或 GitHub 超时会暂时阻塞后续请求。它不是高吞吐服务。部署后应根据实际请求量观察配额和延迟，再决定是否拆分协调器，不能直接更改对象名而丢失去重记录。
 
-未配置服务地址时，客户端应明确显示“应用内反馈服务尚未启用”，保留表单，并提供 [`GitHub 手动提交`](https://github.com/youmikk/ROG-Battery/issues/new/choose)。浏览器方式由用户自己的 GitHub 登录完成；不能将本服务不可用时的请求转发到 MyFinder 或其他无关服务。
+未配置服务地址时，客户端应明确显示“应用内反馈服务尚未启用”，保留表单，并提供 [`GitHub 手动提交`](https://github.com/youmikk/X-Battery/issues/new/choose)。浏览器方式由用户自己的 GitHub 登录完成；不能将本服务不可用时的请求转发到 MyFinder 或其他无关服务。

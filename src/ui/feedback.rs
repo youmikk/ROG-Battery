@@ -347,7 +347,7 @@ impl Controls {
             .and_then(|i| s.devices.get(i).map(|d| d.diagnostics.clone()))
             .unwrap_or_else(|| {
                 format!(
-                    "App: R Battery {}\nSystem: {}\nNo detected interface selected.\n",
+                    "App: X-Battery {}\nSystem: {}\nNo detected interface selected.\n",
                     crate::gui::APP_VERSION,
                     crate::feedback::system_version()
                 )
@@ -401,7 +401,7 @@ impl Controls {
         }
         let s = self.state.borrow();
         self.window
-            .set_text(text("反馈设备 · R Battery", "Device feedback · R Battery"));
+            .set_text(text("反馈设备 · X-Battery", "Device feedback · X-Battery"));
         self.button(
             Action::Close,
             text("关闭反馈", "Close feedback"),
@@ -1386,7 +1386,7 @@ impl Controls {
                 self.set_view(View::Diagnostics);
             }
             Action::Example => {
-                self.description.set_text(text("接收器已经连接，官方驱动能看到电量，但这里一直显示未知。唤醒设备后仍然如此。","The receiver is connected and the official driver shows the battery, but R Battery keeps showing unknown, even after waking the device."));
+                self.description.set_text(text("接收器已经连接，官方驱动能看到电量，但这里一直显示未知。唤醒设备后仍然如此。","The receiver is connected and the official driver shows the battery, but X-Battery keeps showing unknown, even after waking the device."));
                 self.state.borrow_mut().error.clear();
                 self.rebuild();
             }
@@ -2416,7 +2416,7 @@ impl Dialog {
         }
         let mut window = nwg::Window::default();
         nwg::Window::builder()
-            .title("R Battery")
+            .title(crate::gui::WINDOW_TITLE)
             .flags(nwg::WindowFlags::POPUP)
             .ex_flags(0x80)
             .parent(Some(&overlay))

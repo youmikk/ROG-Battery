@@ -16,7 +16,7 @@ pub fn candidate(label: String, reading: &crate::device::DeviceReading,
     connection: &str, family: crate::device::DeviceFamily) -> Candidate {
     let family = family_code(family);
     let name = clean(&reading.name);
-    let mut diagnostics = format!("App: R Battery {}\nSystem: {}\nModel: {}\nType: {}\nConnection: {}\nBattery: {}\nReading: {:?}\nConnected: {}\n",
+    let mut diagnostics = format!("App: X-Battery {}\nSystem: {}\nModel: {}\nType: {}\nConnection: {}\nBattery: {}\nReading: {:?}\nConnected: {}\n",
         crate::gui::APP_VERSION, system_version(), name, family, clean(connection),
         reading.battery_text(true), reading.quality, reading.connected);
     if let Some(interface) = interface {
@@ -63,7 +63,7 @@ fn clean(value: &str) -> String {
 
 pub fn report(interfaces: &[crate::hid::HidInterface]) -> String {
     let mut report = format!(
-        "R Battery device compatibility report\nApp version: {}\n\n",
+        "X-Battery device compatibility report\nApp version: {}\n\n",
         crate::gui::APP_VERSION
     );
     let mut seen = std::collections::BTreeSet::new();

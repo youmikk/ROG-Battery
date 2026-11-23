@@ -1,16 +1,18 @@
-# R Battery
+# X-Battery
 
 [简体中文](README.md) | **English**
+
+X-Battery was previously named R Battery. The source uses the new name; released builds may still display the former name.
 
 **A Windows battery monitor and quick mouse settings tool for peripherals from multiple brands.** Check mice, keyboards, headsets and controllers in one place, with a taskbar battery strip and tray panel for quick access. DPI controls follow each device's capabilities, headset pages provide Windows volume and microphone controls, and supported ROG mice retain detailed settings.
 
 Runs as a single executable without administrator rights or a separate background service. Routine battery monitoring and device settings work offline, with no background telemetry. ROG devices do not require Armoury Crate.
 
-[![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
+[![Release](https://img.shields.io/github/v/release/youmikk/X-Battery)](https://github.com/youmikk/X-Battery/releases)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#requirements)
-[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-R%20Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-X--Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
 
-[Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Device compatibility](COMPATIBILITY.en.md) · [Changelog (Chinese)](CHANGELOG.md)
+[Download portable build](https://github.com/youmikk/X-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Device compatibility](COMPATIBILITY.en.md) · [Changelog (Chinese)](CHANGELOG.md)
 
 ## Features
 
@@ -57,7 +59,7 @@ Portable users can exit the app and replace the executable. This README describe
 
 ## Getting started
 
-1. Download and run `rog-mouse-ctl.exe` from [GitHub Releases](https://github.com/youmikk/ROG-Battery/releases/latest), or install from [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US).
+1. Download and run `rog-mouse-ctl.exe` from [GitHub Releases](https://github.com/youmikk/X-Battery/releases/latest), or install from [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US).
 2. Connect the device using a mode listed in the compatibility notes. Readings update automatically. A single device opens its details; multiple devices open the device list.
 3. Click the numeric tray icon or taskbar strip to open quick view. Click a supported mouse or headset to expand its controls, and click again to collapse them.
 4. Open **Settings → Battery & tray** for display options. Device details let you change names, types and the standard tray selection.
@@ -155,4 +157,4 @@ MSIX packaging and Microsoft Store submission use a separate manual workflow, wi
 
 ## License
 
-This repository does not currently include a LICENSE file. Copyright remains with the author. Please open an [issue](https://github.com/youmikk/ROG-Battery/issues) before reusing the code in another project.
+This repository does not currently include a LICENSE file. Copyright remains with the author. Please open an [issue](https://github.com/youmikk/X-Battery/issues) before reusing the code in another project.

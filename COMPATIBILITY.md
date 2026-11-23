@@ -463,6 +463,6 @@ VGN 目前匹配 V98 Pro V3 的 `258A:024E/024F/027E/027F`，只查询已确认�
 
 远程适配时，可使用 1.4.4 或后续版本执行 `rog-mouse-ctl device-report --probe`。此命令先进行只读查询，再生成同一次运行的脱敏报告，另外包含设备实际返回的电量、充电状态、当前 DPI、已读取的板载档位与当前档位。探测不修改设置，不上传报告，也不导出板载配置名称、按键设置或原始存储内容。用户可对照官方驱动读数反馈结果；DPI 写入测试另行进行。没有本地设备也能通过用户测试推进适配，但完全未知的私有协议仍可能需要驱动分析或针对性的通信采集。
 
-FerrisPulse 等项目列出的其他品牌与型号尚未全部接入 R Battery。其通用型号目录、共享接收器标识和已验证协议需分别核对，不作为本软件已经兼容的声明。
+FerrisPulse 等项目列出的其他品牌与型号尚未全部接入 X-Battery。其通用型号目录、共享接收器标识和已验证协议需分别核对，不作为本软件已经兼容的声明。
 
 协议资料：[Solaar](https://github.com/pwr-Solaar/Solaar)、[libratbag](https://github.com/libratbag/libratbag)、[USB HID Usage Tables](https://usb.org/document-library/hid-usage-tables-15)、[雷柏 A HUB](https://hub.rapoo.cn/)、[VGN 网页驱动](https://drive.vgnlab.com.cn/)、[FerrisPulse 协议资料](https://github.com/Ferris-echo/FerrisPulse)。协议逻辑独立实现，未复制驱动或开源项目代码。

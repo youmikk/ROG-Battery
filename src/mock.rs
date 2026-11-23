@@ -12,7 +12,7 @@ pub fn enabled() -> bool {
 }
 
 pub fn window_title() -> &'static str {
-    if enabled() { "R Battery · 模拟设备" } else { crate::gui::WINDOW_TITLE }
+    if enabled() { "X-Battery · 模拟设备" } else { crate::gui::WINDOW_TITLE }
 }
 
 /// 解析夹具文本。坏行跳过 —— 模拟工具不该因为一行写错就整体失效。

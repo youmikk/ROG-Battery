@@ -235,16 +235,24 @@ enum Instance {
     Unavailable,
 }
 
-/// 把已经开着的那个窗口叫到前台。
+/// 查找已经开着的主窗口，兼容升级前的应用名称。
 ///
 /// 用户双击图标通常是想看面板；直接静默退出会像「程序打不开」。窗口标题是
 /// [`crate::gui::WINDOW_TITLE`]，用标题找而不靠类名 —— 类名由 nwg 生成，换库
 /// 版本就会变。
+fn existing_window() -> win32::Handle {
+    // Keep the mutex and recognize the old title during upgrades.
+    let legacy = if crate::mock::enabled() { "R Battery · 模拟设备" } else { "R Battery" };
+    for title in [crate::mock::window_title(), legacy] {
+        let title = win32::to_wide(title);
+        let hwnd = unsafe { win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
+        if !hwnd.is_null() { return hwnd; }
+    }
+    std::ptr::null_mut()
+}
+
 fn wake_existing() -> bool {
-    let title: Vec<u16> = format!("{}\0", crate::mock::window_title())
-        .encode_utf16()
-        .collect();
-    let hwnd = unsafe { crate::win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
+    let hwnd = existing_window();
     if hwnd.is_null() {
         return false;
     }
@@ -273,8 +281,7 @@ fn check_instance_named(mutex_name: &str) -> Instance {
     }
     let err = unsafe { win32::GetLastError() };
     if err == ERROR_ALREADY_EXISTS {
-        let title = win32::to_wide(crate::mock::window_title());
-        let hwnd = unsafe { win32::FindWindowW(std::ptr::null(), title.as_ptr()) };
+        let hwnd = existing_window();
         if !hwnd.is_null() {
             unsafe {
                 win32::ShowWindow(hwnd, SW_RESTORE);

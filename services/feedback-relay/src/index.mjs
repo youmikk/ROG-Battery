@@ -148,7 +148,7 @@ export class FeedbackCoordinator {
       const safe = value => publicText(value, data.replyKey);
       const title = `[${PREFIX[data.category]}] ${publicTitle(data.device.name, data.replyKey)}`;
       const sections = [
-        "通过 R Battery 提交的用户反馈。",
+        "通过 X-Battery 提交的用户反馈。",
         `应用版本：${safe(data.appVersion ?? "未提供")}`,
         `设备：${safe(data.device.name)}\n类型：${data.device.family}\n连接方式：${safe(data.device.connection)}`,
       ];

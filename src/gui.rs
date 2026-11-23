@@ -31,7 +31,7 @@ static TRAY_ICON: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/a
 
 /// 窗口标题。用产品名，不写具体型号 —— 这是个通用 ROG 鼠标工具。
 /// `main.rs` 的单实例检查靠这个标题找已有窗口，两处必须一致。
-pub const WINDOW_TITLE: &str = "R Battery";
+pub const WINDOW_TITLE: &str = "X-Battery";
 
 /// 应用版本号。
 ///
@@ -1380,7 +1380,7 @@ impl TrayCtl {
                     if cfg.tray_device.is_some() && !readings.is_empty() {
                         format!("{} · {}", cfg.tray_name(), crate::tr!("未连接"))
                     } else {
-                        crate::tr!("R Battery · 打开设备页面").to_string()
+                        crate::tr!("X-Battery · 打开设备页面").to_string()
                     }
                 });
             let signature = format!(
@@ -1910,7 +1910,7 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.say(crate::tr!("✔ 历史记录已清空"));
         }
 
-        Act::OpenRepo => open_url(env, "https://github.com/youmikk/ROG-Battery"),
+        Act::OpenRepo => open_url(env, "https://github.com/youmikk/X-Battery"),
         Act::CheckUpdate => env.say(crate::ui::feedback::text("检查更新功能即将提供", "Update checking is coming soon")),
         Act::DeviceFeedback | Act::FeedbackHistory => {
             let s = lock_shared(env.shared);

@@ -22,7 +22,9 @@ use winapi::{
     },
 };
 
-const REPOSITORY: &str = "https://github.com/youmikk/ROG-Battery";
+const REPOSITORY: &str = "https://github.com/youmikk/X-Battery";
+// Existing encrypted history and cached relay receipts use the former URL.
+const LEGACY_REPOSITORY: &str = "https://github.com/youmikk/ROG-Battery";
 const MAX_IMAGE: usize = 5 * 1024 * 1024;
 const MAX_RESPONSE: usize = 512 * 1024;
 const MAX_REQUEST: usize = 21 * 1024 * 1024;
@@ -196,7 +198,8 @@ impl StoredEntry {
             request_id: self.request_id.clone(), created_at: self.created_at,
             updated_at: self.updated_at, category: self.draft.category.clone(),
             device: self.draft.device.clone(), description: self.draft.description.clone(),
-            status: self.status, number: self.number, url: self.url.clone(),
+            status: self.status, number: self.number,
+            url: self.number.map(|number| format!("{REPOSITORY}/issues/{number}")),
         }
     }
 }
@@ -441,7 +444,7 @@ fn http(endpoint: &Endpoint, method: &str, route: &str, bearer: Option<&str>, bo
     if !matches!(method, "GET" | "POST") || !route.starts_with("/feedback")
         || !route.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/')
         || body.len() > MAX_REQUEST || bearer.is_some_and(|key| !reply_key(key)) { return Err(invalid()); }
-    let agent = wide("R Battery feedback/1");
+    let agent = wide("X-Battery feedback/1");
     let session = internet(unsafe { WinHttpOpen(agent.as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         null(), null(), 0) })?;
     if unsafe { WinHttpSetTimeouts(session.0, 5000, 5000, 15000, 15000) } == 0 { return Err(network_error()); }
@@ -651,10 +654,12 @@ fn with_history<T>(write: bool, action: impl FnOnce(&mut History) -> Result<T, S
 
 fn valid_number(number: u64) -> bool { number > 0 && number <= MAX_NUMBER }
 fn issue_url(number: u64, url: &str) -> bool {
-    valid_number(number) && url == format!("{REPOSITORY}/issues/{number}")
+    valid_number(number) && [REPOSITORY, LEGACY_REPOSITORY].iter()
+        .any(|repository| url == format!("{repository}/issues/{number}"))
 }
 fn comment_url(number: u64, id: u64, url: &str) -> bool {
-    valid_number(number) && valid_number(id) && url == format!("{REPOSITORY}/issues/{number}#issuecomment-{id}")
+    valid_number(number) && valid_number(id) && [REPOSITORY, LEGACY_REPOSITORY].iter()
+        .any(|repository| url == format!("{repository}/issues/{number}#issuecomment-{id}"))
 }
 
 fn timestamp(value: &str) -> bool {
@@ -799,10 +804,11 @@ fn complete_entry(history: &mut History, stored: &StoredEntry, receipt: CreateRe
     if !receipt.reply_access || !issue_url(receipt.number, &receipt.url) { return Err(service_error()); }
     let item = history.entries.iter_mut().find(|e| e.request_id == stored.request_id).ok_or_else(damaged)?;
     if item.reply_key != stored.reply_key || (item.status == Status::Completed
-        && (item.number != Some(receipt.number) || item.url.as_ref() != Some(&receipt.url))) { return Err(service_error()); }
+        && (item.number != Some(receipt.number)
+            || !item.url.as_deref().is_some_and(|url| issue_url(receipt.number, url)))) { return Err(service_error()); }
     item.status = Status::Completed;
     item.number = Some(receipt.number);
-    item.url = Some(receipt.url);
+    item.url = Some(format!("{REPOSITORY}/issues/{}", receipt.number));
     item.updated_at = now().max(item.updated_at);
     // Images remain available for pending retries; completed receipts no
     // longer need large local attachment copies.
@@ -905,11 +911,14 @@ fn complete_reply(entry: &mut StoredEntry, stored: &StoredEntry, pending: &Store
     -> Result<(), String> {
     if entry.reply_key != stored.reply_key || !valid_receipt(entry.number.unwrap_or_default(), receipt) { return Err(damaged()); }
     if entry.pending_reply.as_ref().is_some_and(|r| r.request_id == pending.request_id && r.body == pending.body) {
-        entry.last_reply = Some(FinishedReply { request: pending.clone(), receipt: receipt.clone() });
+        let mut receipt = receipt.clone();
+        receipt.url = format!("{REPOSITORY}/issues/{}#issuecomment-{}", entry.number.unwrap(), receipt.id);
+        entry.last_reply = Some(FinishedReply { request: pending.clone(), receipt });
         entry.pending_reply = None;
         entry.updated_at = now().max(entry.updated_at);
     } else if !entry.last_reply.as_ref().is_some_and(|r| r.request.request_id == pending.request_id
-        && r.receipt.id == receipt.id && r.receipt.url == receipt.url) { return Err(service_error()); }
+        && r.receipt.id == receipt.id
+        && comment_url(entry.number.unwrap_or_default(), r.receipt.id, &r.receipt.url)) { return Err(service_error()); }
     Ok(())
 }
 
@@ -945,7 +954,7 @@ pub fn fallback(draft: &Draft) -> Result<Fallback, String> {
         "device" => message("设备适配", "Device support"), "battery" => message("电量", "Battery"),
         "dpi" => "DPI".into(), _ => message("反馈", "Feedback"),
     }, draft.device.name);
-    let header = format!("R Battery {}\n\n- Device: {}\n- Type: {}\n- Connection: {}\n", crate::gui::APP_VERSION,
+    let header = format!("X-Battery {}\n\n- Device: {}\n- Type: {}\n- Connection: {}\n", crate::gui::APP_VERSION,
         markdown_label(&draft.device.name), draft.device.family, markdown_label(&draft.device.connection));
     let mut markdown = header.clone();
     if let Some(brand) = &draft.device.brand { markdown.push_str(&format!("- Brand: {}\n", markdown_label(brand))); }
@@ -1088,9 +1097,14 @@ mod tests {
     #[test]
     fn github_links_timestamps_and_receipts_are_bound_to_the_exact_issue() {
         let good = format!("{REPOSITORY}/issues/42");
-        assert!(issue_url(42, &good));
-        for url in [format!("{good}/"), format!("{good}?x=1"), format!("{good}#x"), good.replace("github.com", "github.com.evil.test"),
-            good.replace("/42", "/042"), good.replace("youmikk", "other")] { assert!(!issue_url(42, &url)); }
+        for repository in [REPOSITORY, LEGACY_REPOSITORY] {
+            let url = format!("{repository}/issues/42");
+            assert!(issue_url(42, &url));
+            assert!(comment_url(42, 7, &format!("{url}#issuecomment-7")));
+            assert!(!comment_url(42, 8, &format!("{url}#issuecomment-7")));
+            for bad in [format!("{url}/"), format!("{url}?x=1"), format!("{url}#x"), url.replace("github.com", "github.com.evil.test"),
+                url.replace("/42", "/042"), url.replace("youmikk", "other")] { assert!(!issue_url(42, &bad)); }
+        }
         assert!(timestamp("2026-11-23T01:02:03Z")); assert!(timestamp("2024-02-29T00:00:00.123Z"));
         for date in ["2026-02-29T00:00:00Z", "2026-11-23T25:00:00Z", "2026-11-23", "2026-11-23T00:00:00Z<script>"] { assert!(!timestamp(date)); }
         assert!(valid_receipt(42, &ReplyReceipt { id: 7, url: format!("{good}#issuecomment-7"), created_at: "2026-11-23T01:02:03Z".into() }));
@@ -1099,6 +1113,40 @@ mod tests {
         assert!(valid_version("1.4.12-beta.2+win")); assert!(!valid_version("1.4.12\r\nInjected:1"));
         assert!(pending(br#"{"status":"pending","retryAfter":5}"#));
         assert!(!pending(br#"{"status":"success","retryAfter":5}"#));
+    }
+
+    #[test]
+    fn repository_rename_preserves_encrypted_history_and_receipt_replays() {
+        let scratch = Scratch::new();
+        let mut old = stored();
+        old.status = Status::Completed;
+        old.number = Some(42);
+        old.url = Some(format!("{LEGACY_REPOSITORY}/issues/42"));
+        let request = StoredReply { request_id: REQUEST.into(), body: "Additional device information".into() };
+        old.last_reply = Some(FinishedReply {
+            request: request.clone(),
+            receipt: ReplyReceipt { id: 7, url: format!("{LEGACY_REPOSITORY}/issues/42#issuecomment-7"),
+                created_at: "2026-11-23T01:02:03Z".into() },
+        });
+        save_history(&scratch.history(), &History { schema: 1, entries: vec![old.clone()] }).unwrap();
+        let mut restored = read_history(&scratch.history()).unwrap();
+        assert_eq!(restored.entries[0].reply_key, old.reply_key);
+        assert_eq!(restored.entries[0].request_id, old.request_id);
+        assert_eq!(restored.entries[0].public().url, Some(format!("{REPOSITORY}/issues/42")));
+        for repository in [REPOSITORY, LEGACY_REPOSITORY] {
+            let outcome = complete_entry(&mut restored, &old, CreateReceipt {
+                number: 42, url: format!("{repository}/issues/42"), reply_access: true,
+            }).unwrap();
+            assert_eq!(outcome.url, Some(format!("{REPOSITORY}/issues/42")));
+            let receipt = ReplyReceipt { id: 7, url: format!("{repository}/issues/42#issuecomment-7"),
+                created_at: "2026-11-23T01:02:03Z".into() };
+            complete_reply(&mut restored.entries[0], &old, &request, &receipt).unwrap();
+        }
+        save_history(&scratch.history(), &restored).unwrap();
+        assert_eq!(read_history(&scratch.history()).unwrap().entries[0].reply_key, old.reply_key);
+        assert!(complete_entry(&mut restored, &old, CreateReceipt {
+            number: 43, url: format!("{REPOSITORY}/issues/43"), reply_access: true,
+        }).is_err());
     }
 
     #[test]

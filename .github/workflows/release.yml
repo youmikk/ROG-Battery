@@ -112,7 +112,7 @@ jobs:
           } else {
             "Release $tag 不存在，新建"
             gh release create $tag dist\rog-mouse-ctl.exe dist\rog-mouse-ctl.exe.sha256 `
-              --verify-tag --title "R Battery $ver" --notes-file $notes
+              --verify-tag --title "X-Battery $ver" --notes-file $notes
           }
           if ($LASTEXITCODE -ne 0) { throw "Release publishing failed" }
           gh release view $tag --json tagName,assets | Out-File -FilePath release-info.json -Encoding utf8

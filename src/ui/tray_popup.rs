@@ -239,7 +239,7 @@ impl Popup {
     pub fn new(notice: nwg::NoticeSender, audio_controls: crate::audio::Controls) -> Result<Self, String> {
         let mut window = nwg::Window::default();
         nwg::Window::builder()
-            .title("R Battery · Devices")
+            .title("X-Battery · Devices")
             .flags(nwg::WindowFlags::POPUP)
             .ex_flags(0x80)
             .size((410, 367))
@@ -1892,7 +1892,7 @@ fn draw(
     p.round_stroke(R::new(0.5, 0.5, w - 1.0, h - 1.0), 11.0, t.border, 1.0);
     p.image_rounded(gfx::app_icon_bitmap(), R::new(17.0, 16.0, 25.0, 25.0), 5.0);
     p.text(
-        "R Battery",
+        crate::gui::WINDOW_TITLE,
         R::new(51.0, 13.0, 200.0, 32.0),
         14.0,
         true,

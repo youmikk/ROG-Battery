@@ -352,7 +352,7 @@ impl TaskbarWidget {
             }
         }
         let class_name = crate::win32::to_wide(CLASS_NAME);
-        let window_name = crate::win32::to_wide("R Battery Taskbar Strip");
+        let window_name = crate::win32::to_wide("X-Battery Taskbar Strip");
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,

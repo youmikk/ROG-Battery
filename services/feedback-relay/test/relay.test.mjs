@@ -48,7 +48,7 @@ class FakeGithub {
   fetch = async (input, init) => {
     const url = new URL(input);
     assert.equal(url.origin, "https://api.github.com");
-    assert.ok(url.pathname.startsWith("/repos/youmikk/ROG-Battery/"));
+    assert.ok(url.pathname.startsWith("/repos/youmikk/X-Battery/"));
     assert.equal(init.redirect, "error");
     assert.equal(init.headers.Authorization, "Bearer fake-test-token");
     this.calls.push({ url: input, method: init.method, body: init.body });
@@ -57,7 +57,7 @@ class FakeGithub {
       if (this.noIssueCreated) throw new Error("Network failed before server response");
       const body = JSON.parse(init.body);
       const number = this.nextIssue++;
-      const result = { number, html_url: `https://github.com/youmikk/ROG-Battery/issues/${number}`,
+      const result = { number, html_url: `https://github.com/youmikk/X-Battery/issues/${number}`,
         title: body.title, body: body.body, state: "open", user: { login: "relay-bot" },
         created_at: "2026-11-23T00:00:00Z", updated_at: "2026-11-23T00:00:00Z", comments: 0 };
       this.issues.push(result);
@@ -68,7 +68,7 @@ class FakeGithub {
     if (commentMatch && init.method === "POST") {
       const number = Number(commentMatch[1]);
       const result = { id: 1000 + this.comments.length, issue: number, body: JSON.parse(init.body).body,
-        html_url: `https://github.com/youmikk/ROG-Battery/issues/${number}#issuecomment-${1000 + this.comments.length}`,
+        html_url: `https://github.com/youmikk/X-Battery/issues/${number}#issuecomment-${1000 + this.comments.length}`,
         user: { login: "relay-bot" }, author_association: "COLLABORATOR", created_at: "2026-11-23T01:00:00Z" };
       this.comments.push(result);
       if (this.loseCommentResponse) { this.loseCommentResponse = false; throw new Error("Comment response lost"); }
@@ -121,7 +121,7 @@ test("creates one fixed-repository issue; replay survives coordinator restart wi
   const result = await s.coordinator.fetch(request("/feedback", value));
   assert.equal(result.status, 201);
   const receipt = await result.json();
-  assert.deepEqual(receipt, { number: 123, url: "https://github.com/youmikk/ROG-Battery/issues/123", replyAccess: true });
+  assert.deepEqual(receipt, { number: 123, url: "https://github.com/youmikk/X-Battery/issues/123", replyAccess: true });
   const restarted = new FeedbackCoordinator({ storage: s.storage }, s.env, { fetch: s.github.fetch, now: () => BASE_TIME });
   const replay = await restarted.fetch(request("/feedback", value));
   assert.equal(replay.status, 200);
@@ -184,7 +184,7 @@ test("replies need the matching key and are idempotent including interrupted suc
   s.advance(6000);
   const recovered = await s.coordinator.fetch(request("/feedback/123/replies", message, { key: KEY }));
   assert.equal(recovered.status, 200);
-  assert.deepEqual(await recovered.json(), { id: 1000, url: "https://github.com/youmikk/ROG-Battery/issues/123#issuecomment-1000", createdAt: "2026-11-23T01:00:00Z" });
+  assert.deepEqual(await recovered.json(), { id: 1000, url: "https://github.com/youmikk/X-Battery/issues/123#issuecomment-1000", createdAt: "2026-11-23T01:00:00Z" });
   assert.equal(s.github.comments.length, 1);
   assert.equal((await s.coordinator.fetch(request("/feedback/123/replies", { ...message, body: "changed" }, { key: KEY }))).status, 409);
 });
@@ -197,7 +197,7 @@ test("thread is authenticated, returns only maintainer comments and hides relay 
     ["COLLABORATOR", "relay-bot", `转发回复 <!-- r-battery-reply:${"a".repeat(64)} -->`]]) {
     const id = 2000 + s.github.comments.length;
     s.github.comments.push({ id, issue: 123, author_association: association, user: { login: author }, body: text,
-      html_url: `https://github.com/youmikk/ROG-Battery/issues/123#issuecomment-${id}`, created_at: "2026-11-23T02:00:00Z" });
+      html_url: `https://github.com/youmikk/X-Battery/issues/123#issuecomment-${id}`, created_at: "2026-11-23T02:00:00Z" });
   }
   const response = await s.coordinator.fetch(request("/feedback/123", undefined, { key: KEY }));
   assert.equal(response.status, 200);
@@ -285,18 +285,18 @@ test("public boundary overwrites forged rate identity and disabled config return
 });
 
 test("GitHub issue and comment URLs cannot escape the fixed repository", () => {
-  assert.equal(checkGithubUrl("https://github.com/youmikk/ROG-Battery/issues/123", 123), "https://github.com/youmikk/ROG-Battery/issues/123");
-  for (const url of ["https://github.com/evil/repo/issues/123", "https://github.com.evil.org/youmikk/ROG-Battery/issues/123",
-    "https://user@github.com/youmikk/ROG-Battery/issues/123", "https://github.com/youmikk/ROG-Battery/issues/123?x=y",
-    "https://github.com/youmikk/ROG-Battery/issues/123#issuecomment-9"]) assert.throws(() => checkGithubUrl(url, 123));
-  assert.throws(() => checkGithubUrl("https://github.com/youmikk/ROG-Battery/issues/123#issuecomment-9", 123, 8));
+  assert.equal(checkGithubUrl("https://github.com/youmikk/X-Battery/issues/123", 123), "https://github.com/youmikk/X-Battery/issues/123");
+  for (const url of ["https://github.com/evil/repo/issues/123", "https://github.com.evil.org/youmikk/X-Battery/issues/123",
+    "https://user@github.com/youmikk/X-Battery/issues/123", "https://github.com/youmikk/X-Battery/issues/123?x=y",
+    "https://github.com/youmikk/X-Battery/issues/123#issuecomment-9"]) assert.throws(() => checkGithubUrl(url, 123));
+  assert.throws(() => checkGithubUrl("https://github.com/youmikk/X-Battery/issues/123#issuecomment-9", 123, 8));
 });
 
 test("public recovery marker copied by a different account cannot claim a feedback record", async () => {
   const s = setup(); s.github.noIssueCreated = true;
   await s.coordinator.fetch(request("/feedback", body()));
   const pending = await s.storage.get(`request:${UUID}`);
-  s.github.issues.push({ number: 999, html_url: "https://github.com/youmikk/ROG-Battery/issues/999",
+  s.github.issues.push({ number: 999, html_url: "https://github.com/youmikk/X-Battery/issues/999",
     body: pending.marker, user: { login: "attacker" }, created_at: "2026-11-23T00:00:00Z" });
   s.advance(6000);
   assert.equal((await s.coordinator.fetch(request("/feedback", body()))).status, 202);
@@ -356,7 +356,7 @@ test("large maintainer history is bounded below client response limit", async ()
     const id = index + 100;
     s.github.comments.push({ id, issue: 123, body: "维".repeat(30000), user: { login: "youmikk" },
       author_association: "OWNER", created_at: "2026-11-23T02:00:00Z",
-      html_url: `https://github.com/youmikk/ROG-Battery/issues/123#issuecomment-${id}` });
+      html_url: `https://github.com/youmikk/X-Battery/issues/123#issuecomment-${id}` });
   }
   const response = await s.coordinator.fetch(request("/feedback/123", undefined, { key: KEY }));
   assert.equal(response.status, 200);

@@ -3122,8 +3122,8 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let logo = R::new(x, y, 58.0, 58.0);
     p.image_rounded(crate::ui::gfx::about_icon_bitmap(), logo, 15.0);
     let brand_x = logo.right() + 15.0;
-    let brand_w = p.measure("R Battery", 23.0, true).0.ceil() + 12.0;
-    p.text("R Battery", R::new(brand_x, y, brand_w, 36.0),
+    let brand_w = p.measure(crate::gui::WINDOW_TITLE, 23.0, true).0.ceil() + 12.0;
+    p.text(crate::gui::WINDOW_TITLE, R::new(brand_x, y, brand_w, 36.0),
         23.0, true, t.text, Align::Left);
     let version = format!("v{}", d.version);
     let version_w = p.measure(&version, 13.0, true).0 + 20.0;
@@ -3192,7 +3192,7 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         draw_button(p, ui, control, label, act, false);
     }
     let foot = R::new(x, support.bottom() + 25.0, w, 19.0);
-    p.text(tr("R Battery · Windows 外设电量与设置", "R Battery · Windows peripheral batteries and settings"),
+    p.text(tr("X-Battery · Windows 外设电量与设置", "X-Battery · Windows peripheral batteries and settings"),
         foot, 12.0, false, t.text3, Align::Center);
     c.y = foot.bottom();
 }

@@ -1,16 +1,18 @@
-# R Battery
+# X-Battery
 
 **简体中文** | [English](README.en.md)
+
+X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能显示旧名称。
 
 **Windows 多品牌外设电量监控与鼠标快捷设置工具。** 在一个窗口中查看鼠标、键盘、耳机和手柄的电量，通过任务栏电量条与托盘面板快速访问设备。按设备能力提供 DPI 切换，耳机页面集成 Windows 音量和麦克风控制，ROG 鼠标保留深度设置。
 
 单文件运行，无需管理员权限，无独立后台服务。日常电量读取与设备设置离线完成，无后台遥测；ROG 设备无需安装 Armoury Crate。
 
-[![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
+[![Release](https://img.shields.io/github/v/release/youmikk/X-Battery)](https://github.com/youmikk/X-Battery/releases)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#系统要求)
-[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-R%20Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-X--Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
 
-[下载绿色版](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [设备兼容性](COMPATIBILITY.md) · [更新日志](CHANGELOG.md)
+[下载绿色版](https://github.com/youmikk/X-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [设备兼容性](COMPATIBILITY.md) · [更新日志](CHANGELOG.md)
 
 ## 主要功能
 
@@ -59,7 +61,7 @@
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/youmikk/ROG-Battery/releases/latest) 下载 `rog-mouse-ctl.exe` 并运行，或通过 [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) 安装。
+1. 从 [GitHub Releases](https://github.com/youmikk/X-Battery/releases/latest) 下载 `rog-mouse-ctl.exe` 并运行，或通过 [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) 安装。
 2. 按兼容性说明中的连接方式接入设备。程序自动读取状态；单设备直接打开详情，多设备显示设备列表。
 3. 单击数字托盘或任务栏电量条打开快速查看面板。点击支持的鼠标或耳机可展开快捷控制，再次点击收起。
 4. 进入 **设置 → 电量与托盘** 调整显示选项；在设备详情中修改名称、类型与标准托盘选择。
@@ -157,4 +159,4 @@ MSIX 打包与 Microsoft Store 提交由独立手动工作流处理，默认不�
 
 ## 许可
 
-仓库暂未附 LICENSE 文件；补充之前版权归作者所有。如需用于其他项目，请先开 [issue](https://github.com/youmikk/ROG-Battery/issues) 说明。
+仓库暂未附 LICENSE 文件；补充之前版权归作者所有。如需用于其他项目，请先开 [issue](https://github.com/youmikk/X-Battery/issues) 说明。

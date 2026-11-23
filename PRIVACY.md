@@ -1,10 +1,10 @@
-# R Battery 隐私政策 / Privacy Policy
+# X-Battery 隐私政策 / Privacy Policy
 
-最后更新 / Last updated: 2026-11-23
+最后更新 / Last updated: 2026-11-24
 
 ## 中文
 
-R Battery 是用于读取外设电量并调整支持的鼠标参数的 Windows 本地应用。日常电量读取和设备设置离线完成。仅在您主动提交反馈、补充说明或查看维护者回复时，应用才连接反馈服务。应用不包含后台遥测、广告或自动崩溃上报服务。
+X-Battery 是用于读取外设电量并调整支持的鼠标参数的 Windows 本地应用。日常电量读取和设备设置离线完成。仅在您主动提交反馈、补充说明或查看维护者回复时，应用才连接反馈服务。应用不包含后台遥测、广告或自动崩溃上报服务。
 
 应用通过 Windows HID 和系统接口读取型号、连接状态、电量、固件及设备提供的序列号等信息，并在您操作时修改支持的设备设置。序列号等唯一标识用于本地识别设备和保存偏好，不会加入自动生成的反馈诊断。
 
@@ -25,7 +25,7 @@ R Battery 是用于读取外设电量并调整支持的鼠标参数的 Windows �
 
 您可以选择问题类型、设备、说明和最多三张截图，并决定是否附带诊断摘要。自动生成的诊断仅包含应用及系统版本、设备原始型号、VID/PID、类型、连接、电量、适配后端及接口与查询摘要，不复制序列号、设备路径、个人路径、用户别名、个人配置或日志原文。即使关闭诊断，提交仍包含应用版本、所选设备基本信息和您填写的内容。
 
-配置了反馈服务的版本通过 HTTPS 将所选内容发送到 R Battery 自有反馈中继，由中继在 `youmikk/ROG-Battery` 仓库创建公开 GitHub 议题。问题描述、附带的诊断、截图和后续补充回复会公开展示。请勿在描述中填写您不希望公开的信息。
+配置了反馈服务的版本通过 HTTPS 将所选内容发送到 X-Battery 自有反馈中继，由中继在 `youmikk/X-Battery` 仓库创建公开 GitHub 议题。问题描述、附带的诊断、截图和后续补充回复会公开展示。请勿在描述中填写您不希望公开的信息。
 
 截图保存在反馈服务的私有 Cloudflare R2 存储桶，通过服务提供的公开图片链接显示在 GitHub 议题中。任何获得议题或图片链接的人都可以查看截图。图片不会重新编码，也不会自动清除画面中的个人内容或图片元数据，请在提交前自行检查。GitHub 和浏览器可能缓存公开内容。
 
@@ -41,11 +41,11 @@ R Battery 是用于读取外设电量并调整支持的鼠标参数的 Windows �
 
 已提交及结果待确认的截图保留，以便查看议题；失败上传或明确被拒的提交，其已存截图在 24 小时后清理。需要删除公开反馈或截图时，请联系项目维护者；GitHub、浏览器和其他外部缓存不保证即时删除。若另外主动分享本地日志或备份，请先检查并移除序列号、个人路径等内容。
 
-本政策更新时会修改上方日期。有关隐私的问题可通过 [GitHub issues](https://github.com/youmikk/ROG-Battery/issues) 联系。
+本政策更新时会修改上方日期。有关隐私的问题可通过 [GitHub issues](https://github.com/youmikk/X-Battery/issues) 联系。
 
 ## English
 
-R Battery is a local Windows application for monitoring peripheral batteries and changing supported mouse settings. Normal battery monitoring and device settings work offline. The app connects to the feedback service only when you submit feedback, add information, or check maintainer replies. It includes no background telemetry, advertising, or automatic crash-reporting service.
+X-Battery is a local Windows application for monitoring peripheral batteries and changing supported mouse settings. Normal battery monitoring and device settings work offline. The app connects to the feedback service only when you submit feedback, add information, or check maintainer replies. It includes no background telemetry, advertising, or automatic crash-reporting service.
 
 Through Windows HID and system interfaces, the app reads information such as model, connection status, battery level, firmware, and device-provided serial numbers. It changes supported settings when you request an operation. Unique identifiers such as serial numbers are used locally to distinguish devices and store preferences; they are not included in automatically generated feedback diagnostics.
 
@@ -66,7 +66,7 @@ The diagnostic log entry remains available. The separate device report window is
 
 You can select an issue category and device, write a description, attach up to three screenshots, and choose whether to include a diagnostic summary. Automatically generated diagnostics contain only app and system versions, the original device model, VID/PID, type, connection, battery state, backend, and interface and query summaries. They do not copy serial numbers, device or personal paths, custom device aliases, personal settings, or raw logs. Even with diagnostics disabled, a submission includes the app version, basic details of the selected device, and the content you provide.
 
-Builds with a configured feedback service send the selected content over HTTPS to R Battery's own relay, which creates a public GitHub issue in `youmikk/ROG-Battery`. Descriptions, included diagnostics, screenshots, and subsequent replies are public. Do not include information you do not wish to disclose.
+Builds with a configured feedback service send the selected content over HTTPS to X-Battery's own relay, which creates a public GitHub issue in `youmikk/X-Battery`. Descriptions, included diagnostics, screenshots, and subsequent replies are public. Do not include information you do not wish to disclose.
 
 Screenshots are stored in the feedback service's private Cloudflare R2 bucket and displayed in GitHub issues through public image links served by the relay. Anyone with an issue or image link can view the screenshot. Images are not re-encoded, and personal content in the picture or its metadata is not removed automatically. Review both before submitting. GitHub and browsers may cache public content.
 
@@ -82,4 +82,4 @@ You can delete local data at any time. Windows manages Store app data. Portable 
 
 Screenshots for completed submissions and submissions awaiting confirmation are retained so issue links continue to work. Stored screenshots from failed uploads or explicitly rejected submissions are cleaned up after 24 hours. Contact the project maintainer to request removal of public feedback or screenshots; immediate deletion from GitHub, browsers, or other external caches cannot be guaranteed. Before separately sharing local logs or backups, remove serial numbers, personal paths, and other information you do not wish to disclose.
 
-The date above changes when this policy is updated. For privacy questions, use [GitHub issues](https://github.com/youmikk/ROG-Battery/issues).
+The date above changes when this policy is updated. For privacy questions, use [GitHub issues](https://github.com/youmikk/X-Battery/issues).

@@ -1,4 +1,4 @@
-export const REPOSITORY = "youmikk/ROG-Battery";
+export const REPOSITORY = "youmikk/X-Battery";
 export const API_ORIGIN = "https://api.github.com";
 export const MAX_REQUEST_BYTES = 22 * 1024 * 1024;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;

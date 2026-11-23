@@ -63,7 +63,7 @@ fn hex_pid(pid: u16) -> String {
 /// 渲染成纯文本。字段顺序固定，方便比对两次导出的差异。
 pub fn render(f: &Facts<'_>) -> String {
     let mut out = String::with_capacity(768);
-    let _ = writeln!(out, "R Battery 诊断信息");
+    let _ = writeln!(out, "X-Battery 诊断信息");
     let _ = writeln!(out, "版本: {}", f.version);
     let _ = writeln!(out, "操作: {}", f.operation);
     let _ = writeln!(out, "状态: {}", f.status);
@@ -141,7 +141,7 @@ pub fn event(operation: &str, message: &str) {
     let _ = append_text(
         &log_path(),
         &format!(
-            "R Battery 诊断信息\n版本: {}\n操作: {operation}\n消息: {message}",
+            "X-Battery 诊断信息\n版本: {}\n操作: {operation}\n消息: {message}",
             crate::gui::APP_VERSION
         ),
     );
@@ -199,7 +199,7 @@ pub fn install_panic_hook(version: &'static str) {
             .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
             .unwrap_or("未知 panic");
         let text = format!(
-            "R Battery 崩溃信息\n版本: {version}\n位置: {location}\n消息: {payload}\n线程: {}\n回溯:\n{}",
+            "X-Battery 崩溃信息\n版本: {version}\n位置: {location}\n消息: {payload}\n线程: {}\n回溯:\n{}",
             std::thread::current().name().unwrap_or("未命名"),
             std::backtrace::Backtrace::force_capture()
         );
