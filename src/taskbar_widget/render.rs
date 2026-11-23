@@ -56,11 +56,11 @@ impl Drop for Dib {
 
 fn px(value: f32, scale: f32) -> i32 { (value * scale).round().max(1.0) as i32 }
 
-fn native_font(candidates: &[(&str, f32)], scale: f32) -> Option<Font> {
+fn native_font(candidates: &[(&str, f32)], scale: f32, weight: i32) -> Option<Font> {
     let dc = Dc::new()?;
     for (face, size) in candidates {
         let name = crate::win32::to_wide(face);
-        let font = unsafe { CreateFontW(-px(*size, scale), 0, 0, 0, FW_NORMAL,
+        let font = unsafe { CreateFontW(-px(*size, scale), 0, 0, 0, weight,
             0, 0, 0, DEFAULT_CHARSET as _, OUT_DEFAULT_PRECIS as _, CLIP_DEFAULT_PRECIS as _,
             ANTIALIASED_QUALITY as _, DEFAULT_PITCH as _, name.as_ptr()) };
         if font.is_null() { continue; }
@@ -79,6 +79,33 @@ fn native_font(candidates: &[(&str, f32)], scale: f32) -> Option<Font> {
 
 struct Mask { width: i32, height: i32, alpha: Vec<u8> }
 impl Mask {
+    fn charging_bolt(scale: f32) -> Self {
+        let (width, height) = (px(8.0, scale), px(12.0, scale));
+        let outline = [(0.5, 0.0), (1.0, 0.0), (0.6, 0.4), (1.0, 0.4),
+            (0.15, 1.0), (0.35, 0.6), (0.0, 0.6)];
+        let mut alpha = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let mut covered = 0;
+                for sy in 0..4 { for sx in 0..4 {
+                    let qx = (x as f32 + (sx as f32 + 0.5) / 4.0) / width as f32;
+                    let qy = (y as f32 + (sy as f32 + 0.5) / 4.0) / height as f32;
+                    let mut inside = false;
+                    for index in 0..outline.len() {
+                        let (ax, ay) = outline[index];
+                        let (bx, by) = outline[(index + 1) % outline.len()];
+                        if (ay > qy) != (by > qy) && qx < (bx - ax) * (qy - ay) / (by - ay) + ax {
+                            inside = !inside;
+                        }
+                    }
+                    covered += u32::from(inside);
+                }}
+                alpha.push((covered * 255 / 16) as u8);
+            }
+        }
+        Self { width, height, alpha }
+    }
+
     fn text(text: &str, font: &Font, light: bool) -> Option<Self> {
         let dc = Dc::new()?;
         let _font = Selection::new(dc.0, font.0)?;
@@ -145,21 +172,20 @@ pub(super) struct Layout {
 impl Layout {
     pub fn new(items: &[StripItem], light: bool, scale: f32) -> Option<Self> {
         if items.is_empty() || !scale.is_finite() || scale <= 0.0 { return None; }
-        let text = native_font(&[("Segoe UI Variable Text", 13.0), ("Segoe UI", 12.0)], scale)?;
-        let icons = native_font(&[("Segoe Fluent Icons", 16.0), ("Segoe MDL2 Assets", 16.0)], scale)?;
-        let marks = native_font(&[("Segoe Fluent Icons", 11.0), ("Segoe MDL2 Assets", 11.0)], scale)?;
-        let foreground = if light { 0xff25_302b } else { 0xffe1_e8df };
+        let text = native_font(&[("Segoe UI Variable Text", 13.0), ("Segoe UI", 12.0)], scale, FW_SEMIBOLD)?;
+        let icons = native_font(&[("Segoe Fluent Icons", 16.0), ("Segoe MDL2 Assets", 16.0)], scale, FW_SEMIBOLD)?;
+        let foreground = if light { 0xff16_1917 } else { 0xfff2_f5f1 };
         let red = if light { 0xffc4_2b1c } else { 0xffff_6b6b };
         let items = items.iter().map(|item| Some(Item {
             icon: Mask::text(glyph(item.kind), &icons, light)?,
             label: Mask::text(&item.level.map(|v| v.label(true)).unwrap_or_else(|| "—".into()), &text, light)?,
             charge: if item.charging && item.level.is_some() {
-                Some(Mask::text("\u{e945}", &marks, light)?)
+                Some(Mask::charging_bolt(scale))
             } else { None },
             color: if item.level.is_some_and(|v| v.value <= 20) { red } else { foreground },
         })).collect::<Option<Vec<_>>>()?;
         Some(Self { items, foreground,
-            charge_color: if light { 0xff50_7b3b } else { 0xffa1_c486 },
+            charge_color: if light { 0xff16_8a43 } else { 0xff4a_de80 },
             padding: px(6.0, scale), icon_gap: px(4.0, scale),
             device_gap: px(10.0, scale), charge_gap: px(2.0, scale),
         })
@@ -250,6 +276,25 @@ mod tests {
                 assert_eq!(layout.visible_count(layout.width(count) - 1), count - 1);
             }
             assert_eq!(layout.visible_count(0), 0);
+        }
+    }
+
+    #[test]
+    fn charging_mark_has_a_solid_green_core_at_every_scale() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for light in [true, false] {
+                let mut data = item(100, TrayKind::Keyboard);
+                data.charging = true;
+                let layout = Layout::new(&[data], light, scale).unwrap();
+                let mark = layout.items[0].charge.as_ref().unwrap();
+                assert_eq!((mark.width, mark.height), (px(8.0, scale), px(12.0, scale)));
+                assert!(mark.alpha.iter().filter(|&&a| a == 255).count() >= (12.0 * scale * scale) as usize);
+                let raster = layout.raster(1, px(40.0, scale)).unwrap();
+                assert!(raster.pixels.contains(&layout.charge_color));
+                let color = layout.charge_color;
+                assert!((color >> 8) & 255 > (color >> 16) & 255);
+                assert!((color >> 8) & 255 > color & 255);
+            }
         }
     }
 

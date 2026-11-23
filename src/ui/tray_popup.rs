@@ -768,13 +768,16 @@ impl Popup {
     pub fn hide(&self) {
         hide(self.hwnd(), &self.state, false)
     }
+    pub fn is_visible(&self) -> bool {
+        self.state.borrow().visible && unsafe { win32::IsWindowVisible(self.hwnd()) } != 0
+    }
     pub fn was_open(&self) -> bool {
         let s = self.state.borrow();
         s.visible || s.dismissed.is_some_and(|t| t.elapsed().as_millis() < 250)
     }
     pub fn show(&self, anchor: Rect) {
         let mut state = self.state.borrow_mut();
-        state.visible = true;
+        state.visible = false;
         state.dismissed = None;
         state.hover = None;
         state.focus = None;
@@ -783,20 +786,31 @@ impl Popup {
         state.drag = None;
         state.anchor = anchor;
         state.last_window_rect = None;
-        position_window(self.hwnd(), &mut state, true);
+        if !position_window(self.hwnd(), &mut state, true) { return; }
+        state.visible = true;
+        let refreshing = state.refreshing.is_some();
+        drop(state);
+        // Activation can synchronously re-enter the popup handler. Never hold
+        // the state borrow across ShowWindow, SetForegroundWindow or SetFocus.
+        unsafe {
+            win32::ShowWindow(self.hwnd(), 4); // SW_SHOWNOACTIVATE
+            win32::SetForegroundWindow(self.hwnd());
+            SetFocus(self.hwnd());
+            if refreshing { win32::SetTimer(self.hwnd(), SPIN_TIMER, 80, 0); }
+        }
     }
 }
 
-fn position_window(hwnd: Handle, state: &mut State, reveal: bool) {
+fn position_window(hwnd: Handle, state: &mut State, reveal: bool) -> bool {
     if reveal || state.work_area.right <= state.work_area.left {
         let monitor = unsafe { MonitorFromRect(&state.anchor, 2) };
         if monitor.is_null() {
-            return;
+            return false;
         }
         let mut info: win32::MonitorInfo = unsafe { std::mem::zeroed() };
         info.cb_size = std::mem::size_of::<win32::MonitorInfo>() as u32;
         if unsafe { win32::GetMonitorInfoW(monitor, &mut info) } == 0 {
-            return;
+            return false;
         }
         state.scale = monitor_scale(monitor);
         state.work_area = info.rc_work;
@@ -825,7 +839,7 @@ fn position_window(hwnd: Handle, state: &mut State, reveal: bool) {
     let window_rect = (x, y, width, height);
     unsafe {
         if reveal || state.last_window_rect != Some(window_rect) {
-            super::canvas::SetWindowPos(
+            let positioned = super::canvas::SetWindowPos(
                 hwnd,
                 if reveal {
                     -1isize as Handle
@@ -838,18 +852,12 @@ fn position_window(hwnd: Handle, state: &mut State, reveal: bool) {
                 height,
                 if reveal { 0x10 } else { 0x114 },
             );
+            if positioned == 0 { return false; }
             state.last_window_rect = Some(window_rect);
         }
         InvalidateRect(hwnd, std::ptr::null(), 0);
-        if reveal {
-            win32::ShowWindow(hwnd, 5);
-            win32::SetForegroundWindow(hwnd);
-            SetFocus(hwnd);
-            if state.refreshing.is_some() {
-                win32::SetTimer(hwnd, SPIN_TIMER, 80, 0);
-            }
-        }
     }
+    true
 }
 
 fn ensure_expanded_visible(state: &mut State, key: &str) {
@@ -1228,6 +1236,7 @@ fn hide(hwnd: Handle, state: &Rc<RefCell<State>>, deactivated: bool) {
         win32::KillTimer(hwnd, ACCORDION_TIMER);
         win32::KillTimer(hwnd, DRAG_ANIM_TIMER);
         win32::KillTimer(hwnd, AUDIO_TIMER);
+        if GetCapture() == hwnd { ReleaseCapture(); }
         win32::ShowWindow(hwnd, 0);
     }
 }

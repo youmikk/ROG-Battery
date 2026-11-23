@@ -29,8 +29,41 @@ const ULW_ALPHA: u32 = 0x0000_0002;
 const WM_DESTROY: u32 = 0x0002;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_MOUSEACTIVATE: u32 = 0x0021;
+const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
+const WM_CANCELMODE: u32 = 0x001f;
+const WM_CAPTURECHANGED: u32 = 0x0215;
 const MA_NOACTIVATE: isize = 3;
+
+pub const CLICK_QUERY_OPEN: usize = 1;
+pub const CLICK_OPEN: usize = 2;
+pub const CLICK_CLOSE: usize = 3;
+
+#[derive(Clone, Copy, Default)]
+struct ClickGesture {
+    pressed: Option<(usize, bool)>,
+}
+
+impl ClickGesture {
+    fn press(&mut self, window: usize, popup_visible: bool) {
+        self.pressed = Some((window, popup_visible));
+    }
+
+    fn release(&mut self, window: usize, inside: bool) -> Option<usize> {
+        let (pressed_window, was_visible) = self.pressed.take()?;
+        (inside && pressed_window == window).then_some(if was_visible { CLICK_CLOSE } else { CLICK_OPEN })
+    }
+
+    fn cancel(&mut self, window: usize) {
+        if self.pressed.is_some_and(|(pressed_window, _)| pressed_window == window) {
+            self.pressed = None;
+        }
+    }
+}
+
+thread_local! {
+    static CLICK_GESTURE: Cell<ClickGesture> = Cell::new(ClickGesture::default());
+}
 
 static NOTIFY_WINDOW: AtomicUsize = AtomicUsize::new(0);
 static CLICK_MESSAGE: AtomicU32 = AtomicU32::new(0);
@@ -99,6 +132,10 @@ extern "system" {
         title: *const u16,
     ) -> Handle;
     fn GetWindowRect(hwnd: Handle, out: *mut Rect) -> i32;
+    fn GetClientRect(hwnd: Handle, out: *mut Rect) -> i32;
+    fn SetCapture(hwnd: Handle) -> Handle;
+    fn GetCapture() -> Handle;
+    fn ReleaseCapture() -> i32;
     fn SetWindowPos(
         hwnd: Handle,
         after: Handle,
@@ -157,17 +194,52 @@ pub struct TaskbarWidget {
 
 unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize {
     match msg {
-        WM_LBUTTONUP => {
+        WM_LBUTTONDOWN => {
             let notify = NOTIFY_WINDOW.load(Ordering::Relaxed) as Handle;
             let message = CLICK_MESSAGE.load(Ordering::Relaxed);
             if !notify.is_null() && message != 0 {
-                unsafe { PostMessageW(notify, message, 0, 0) };
+                // Capture actual visibility at mouse-down, before focus changes.
+                let visible = unsafe { crate::win32::SendMessageW(notify, message, CLICK_QUERY_OPEN, 0) } != 0;
+                CLICK_GESTURE.with(|cell| {
+                    let mut gesture = cell.get();
+                    gesture.press(hwnd as usize, visible);
+                    cell.set(gesture);
+                });
+                unsafe { SetCapture(hwnd); }
             }
+            0
+        }
+        WM_LBUTTONUP => {
+            let mut rect = Rect::default();
+            let x = (lp as u16) as i16 as i32;
+            let y = ((lp >> 16) as u16) as i16 as i32;
+            let inside = unsafe { GetClientRect(hwnd, &mut rect) } != 0
+                && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+            let action = CLICK_GESTURE.with(|cell| {
+                let mut gesture = cell.get();
+                let action = gesture.release(hwnd as usize, inside);
+                cell.set(gesture);
+                action
+            });
+            if unsafe { GetCapture() } == hwnd { unsafe { ReleaseCapture(); } }
+            let notify = NOTIFY_WINDOW.load(Ordering::Relaxed) as Handle;
+            let message = CLICK_MESSAGE.load(Ordering::Relaxed);
+            if let Some(action) = action.filter(|_| !notify.is_null() && message != 0) {
+                unsafe { PostMessageW(notify, message, action, 0) };
+            }
+            0
+        }
+        WM_CANCELMODE | WM_CAPTURECHANGED | WM_DESTROY => {
+            CLICK_GESTURE.with(|cell| {
+                let mut gesture = cell.get();
+                gesture.cancel(hwnd as usize);
+                cell.set(gesture);
+            });
+            if msg == WM_CANCELMODE && unsafe { GetCapture() } == hwnd { unsafe { ReleaseCapture(); } }
             0
         }
         WM_MOUSEACTIVATE => MA_NOACTIVATE,
         WM_ERASEBKGND => 1,
-        WM_DESTROY => 0,
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
 }
@@ -458,9 +530,13 @@ impl TaskbarWidget {
                 height,
                 flags,
             ); }
-        } else if unsafe { GetWindow(hwnd, 3) } == taskbar { // GW_HWNDPREV
-            // Explorer raised the taskbar above the strip. Other windows retain their order.
-            unsafe { SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE); }
+        }
+        if taskbar_above_strip(hwnd, taskbar) {
+            // Explorer may raise several windows together. Restore the strip just
+            // above the taskbar while keeping our popup and other windows above it.
+            let previous = unsafe { GetWindow(taskbar, 3) }; // GW_HWNDPREV
+            unsafe { SetWindowPos(hwnd, if previous.is_null() { HWND_TOPMOST } else { previous },
+                0, 0, 0, 0, SWP_NOACTIVATE | 0x0003); }
         }
     }
 
@@ -474,6 +550,16 @@ impl TaskbarWidget {
         self.rendered.set(None);
         self.rendered_size.set((0, 0));
     }
+}
+
+fn taskbar_above_strip(hwnd: Handle, taskbar: Handle) -> bool {
+    let mut previous = unsafe { GetWindow(hwnd, 3) };
+    for _ in 0..256 {
+        if previous.is_null() { break; }
+        if previous == taskbar { return true; }
+        previous = unsafe { GetWindow(previous, 3) };
+    }
+    false
 }
 
 fn covers_monitor(window: Rect, monitor: Rect) -> bool {
@@ -500,6 +586,29 @@ impl Drop for TaskbarWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_click_uses_visibility_at_press_and_allows_immediate_reopen() {
+        let mut gesture = ClickGesture::default();
+        gesture.press(10, true);
+        assert_eq!(gesture.release(10, true), Some(CLICK_CLOSE));
+        // No time-based suppression after an outside click, Escape or another entry.
+        gesture.press(10, false);
+        assert_eq!(gesture.release(10, true), Some(CLICK_OPEN));
+        assert_eq!(gesture.release(10, true), None);
+    }
+
+    #[test]
+    fn strip_click_cancels_when_capture_is_lost_or_released_outside() {
+        let mut gesture = ClickGesture::default();
+        gesture.press(10, false);
+        gesture.cancel(10);
+        assert_eq!(gesture.release(10, true), None);
+        gesture.press(10, true);
+        assert_eq!(gesture.release(10, false), None);
+        gesture.press(10, false);
+        assert_eq!(gesture.release(20, true), None);
+    }
 
     #[test]
     fn only_fullscreen_on_the_taskbar_monitor_hides_the_strip() {

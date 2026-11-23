@@ -3793,9 +3793,16 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 return Some(0);
             }
             if msg == TASKBAR_CALLBACK_MSG {
-                if popup_tray.was_open() {
+                // A previous standard-tray click must not later toggle this popup.
+                clicks.set(TrayClicks::default());
+                win32::KillTimer(message_hwnd, CLICK_TIMER);
+                if wp == crate::taskbar_widget::CLICK_QUERY_OPEN {
+                    return Some(isize::from(popup_tray.is_visible()));
+                }
+                if wp == crate::taskbar_widget::CLICK_CLOSE {
                     popup_tray.hide();
-                } else if let Some(rect) = taskbar_strip.screen_rect() {
+                } else if wp == crate::taskbar_widget::CLICK_OPEN {
+                    let Some(rect) = taskbar_strip.screen_rect() else { return Some(0); };
                     let (readings, cfg, dpi, generation) = {
                         let s = lock_shared(&shared_tray);
                         (
