@@ -1,17 +1,15 @@
 1.4.8
 
 New
-- Supported mice, keyboards, headsets and controllers from all brands now have separate 48-hour battery charts and runtime estimates. Confirmed charging readings also support time-to-full estimates.
-- Coarse battery levels retain the ≈ indicator and step charts, with rounded runtime estimates after enough changes have been observed.
-- The taskbar battery strip shows device types and percentages for multiple devices; click to open quick controls.
-- Added device feedback and optional diagnostic previews. Builds without a configured feedback service open GitHub in the browser.
-- Expanded battery support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, EWEADN, Edifier, MOONDROP, XIBERIA, FIFINE, Lofree and CHERRY models.
-- Mice supporting numerical DPI writes can save 1–4 software presets, sorted by value.
+- Separate 48-hour battery charts and runtime estimates for supported mice, keyboards, headsets and controllers from all brands. Confirmed charging reports also support time-to-full estimates.
+- Coarse levels retain the ≈ indicator and step charts; rounded estimates appear after enough changes are observed.
+- A multi-device taskbar battery strip with quick controls, device feedback with optional diagnostics, and 1–4 sorted DPI presets on supported mice.
+- Expanded support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, EWEADN, Edifier, MOONDROP, XIBERIA, FIFINE, Lofree and CHERRY models.
 
 Improvements and fixes
-- Samples, storage and forecasts are isolated by device. Sleep, disconnection, charging changes and long gaps start separate intervals; cached readings do not create duplicate samples.
-- Improved legacy history migration, device identity continuity, storage-location changes, clearing history and saving on exit.
-- Improved taskbar icons, charging indicators, clicks and drag ordering; fixed alignment, corners and clipped text in About and feedback pages.
-- Retained detailed ROG settings, Windows audio controls, Chinese and English interfaces, and low-battery notifications in the Store edition.
+- Histories and forecasts are isolated by device. Sleep, disconnection, charging changes and long gaps start separate intervals; cached readings are not counted twice.
+- Improved history migration, device identity continuity, storage changes, clearing history and saving on exit.
+- Improved taskbar icons, charging indicators, clicks, ordering and text layout.
+- Retained ROG settings, Windows audio controls, Chinese and English, and Store low-battery notifications.
 
-Support covers selected models with implemented protocols. Runtime estimates require actual samples and depend on device reports and usage.
+Support depends on model, firmware and connection. Estimates need actual samples and vary with use. Feedback opens GitHub in the browser when no feedback service is configured.

@@ -5,6 +5,8 @@ param(
     [string] $TenantId,
     [string] $ClientId,
     [string] $ClientSecret,
+    [ValidatePattern('^\d+$')][string] $SubmissionId,
+    [switch] $ValidateOnly,
     [switch] $DryRun
 )
 
@@ -18,14 +20,37 @@ function Get-EnvOrParam($value, $name) {
     return $v
 }
 
-$TenantId     = Get-EnvOrParam $TenantId     'AZURE_AD_TENANT_ID'
-$ClientId     = Get-EnvOrParam $ClientId     'AZURE_AD_APPLICATION_CLIENT_ID'
-$ClientSecret = Get-EnvOrParam $ClientSecret 'AZURE_AD_APPLICATION_SECRET'
-
 if (-not (Test-Path $PackagePath)) { throw "找不到包：$PackagePath" }
 $pkg = (Resolve-Path $PackagePath).Path
 $pkgName = Split-Path -Leaf $pkg
 Write-Host "包：$pkgName  ($((Get-Item $pkg).Length) B)" -ForegroundColor Cyan
+
+$notesRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'msix/store'
+$releaseNotes = @{}
+foreach ($language in 'zh-CN', 'en-US') {
+    $notes = (Get-Content -LiteralPath (Join-Path $notesRoot "release-notes.$language.txt") -Raw -Encoding utf8).Trim()
+    if ([string]::IsNullOrWhiteSpace($notes) -or $notes.Length -gt 1500) {
+        throw "Store release notes for $language must contain 1–1500 characters; found $($notes.Length). No draft was created or changed."
+    }
+    $releaseNotes[$language] = $notes
+    Write-Host "  $language release notes: $($notes.Length)/1500 characters"
+}
+$verFromName = if ($pkgName -match '_(\d+\.\d+\.\d+\.0)_x64\.msixupload$') { $matches[1] } else { throw 'Expected a versioned x64 .msixupload archive.' }
+$innerName = ([System.IO.Path]::GetFileNameWithoutExtension($pkgName)) + '.msix'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [IO.Compression.ZipFile]::OpenRead($pkg)
+try {
+    if (@($archive.Entries | Where-Object { $_.FullName -eq $innerName }).Count -ne 1) {
+        throw "Upload archive must contain exactly one $innerName."
+    }
+} finally { $archive.Dispose() }
+if ($ValidateOnly) {
+    return [pscustomobject]@{ Package = $pkgName; Version = $verFromName; NotesValidated = $true }
+}
+
+$TenantId     = Get-EnvOrParam $TenantId     'AZURE_AD_TENANT_ID'
+$ClientId     = Get-EnvOrParam $ClientId     'AZURE_AD_APPLICATION_CLIENT_ID'
+$ClientSecret = Get-EnvOrParam $ClientSecret 'AZURE_AD_APPLICATION_SECRET'
 
 Write-Host '获取访问令牌…' -ForegroundColor DarkGray
 $tokenBody = @{
@@ -70,11 +95,22 @@ Write-Host '  OK' -ForegroundColor DarkGray
 $subsUri = "$api/applications/$ProductId/submissions"
 
 $app = Invoke-RestMethod -Method Get -Uri "$api/applications/$ProductId" -Headers $headers
-if ($app.pendingApplicationSubmission -and $app.pendingApplicationSubmission.id) {
-    throw "An existing Store submission needs attention: $($app.pendingApplicationSubmission.id). It has been left unchanged."
+if ($SubmissionId) {
+    if ($app.pendingApplicationSubmission.id -ne $SubmissionId) {
+        throw 'The requested submission is not the current pending draft. No submission was changed.'
+    }
+    $sub = Invoke-RestMethod -Method Get -Uri "$subsUri/$SubmissionId" -Headers $headers
+    if ($sub.status -ne 'PendingCommit') {
+        throw "Submission $SubmissionId is $($sub.status), not an editable PendingCommit draft. It has been left unchanged."
+    }
+    Write-Host "继续草稿 $SubmissionId…"
+} else {
+    if ($app.pendingApplicationSubmission -and $app.pendingApplicationSubmission.id) {
+        throw "An existing Store submission needs attention: $($app.pendingApplicationSubmission.id). It has been left unchanged."
+    }
+    Write-Host '创建草稿…'
+    $sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
 }
-Write-Host '创建草稿…'
-$sub = Invoke-RestMethod -Method Post -Uri $subsUri -Headers $headers -ContentType 'application/json'
 if (-not $sub) { throw '创建草稿失败（没有返回提交对象）' }
 Write-Host "  id=$($sub.id)  status=$($sub.status)" -ForegroundColor DarkGray
 
@@ -83,8 +119,6 @@ if ($pkgs.Count -eq 0) { throw '草稿里没有 applicationPackages 槽位，无
 Write-Host "  现有包槽：$($pkgs.Count) 个，第一个 $($pkgs[0].fileName)  fileStatus=$($pkgs[0].fileStatus)" -ForegroundColor DarkGray
 Write-Host "  槽字段：$(($pkgs[0].PSObject.Properties | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor DarkGray
 
-$verFromName = if ($pkgName -match '_(\d+\.\d+\.\d+\.\d+)_') { $matches[1] } else { $null }
-$innerName = ([System.IO.Path]::GetFileNameWithoutExtension($pkgName)) + '.msix'
 Write-Host "  目标包：$innerName  version=$verFromName（上传档案：$pkgName）" -ForegroundColor DarkGray
 
 $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
@@ -136,12 +170,10 @@ foreach ($s in $shapes) {
     $cur = Invoke-RestMethod -Method Get -Uri "$subsUri/$($sub.id)" -Headers $headers
     $baseSlot = @($cur.applicationPackages)[0]
     $cur.applicationPackages = @((& $s.pkg $baseSlot $innerName $verFromName))
-    $notesRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'msix/store'
     foreach ($listing in $cur.listings.PSObject.Properties) {
         $language = if ($listing.Name -like 'zh-*') { 'zh-CN' } elseif ($listing.Name -like 'en-*') { 'en-US' } else { $null }
         if ($language -and $listing.Value.baseListing) {
-            $notes = Get-Content (Join-Path $notesRoot "release-notes.$language.txt") -Raw -Encoding utf8
-            $listing.Value.baseListing | Add-Member -NotePropertyName releaseNotes -NotePropertyValue $notes.Trim() -Force
+            $listing.Value.baseListing | Add-Member -NotePropertyName releaseNotes -NotePropertyValue $releaseNotes[$language] -Force
         }
     }
 

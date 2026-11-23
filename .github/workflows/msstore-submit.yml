@@ -1,0 +1,110 @@
+name: 提交已有 MSIX
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: '已生成安装包的 MSIX 工作流运行 ID'
+        required: true
+      version:
+        description: '发布版本，如 1.4.8'
+        required: true
+      package_sha256:
+        description: '已核对的 msixupload SHA-256'
+        required: true
+      submission_id:
+        description: '要继续的 PendingCommit 草稿 ID；留空则新建'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: msstore-submission
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 核对安装包来源
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.run_id }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:SOURCE_RUN -notmatch '^\d+$') { throw 'Invalid run ID.' }
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version.' }
+          if ($env:PACKAGE_SHA256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid SHA-256.' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to read source run.' }
+          $tag = "v$env:RELEASE_VERSION"
+          $commit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq '.sha'
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve release tag.' }
+          if ($run.path -ne '.github/workflows/msstore.yml' -or $run.head_branch -ne $tag -or $run.head_sha -ne $commit) {
+            throw 'Source must be the MSIX build of the requested release tag.'
+          }
+          Write-Host "Verified $tag at $commit from run $env:SOURCE_RUN"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: msix-${{ inputs.version }}.0
+          path: dist
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: 核对包内容、哈希和更新说明
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packages = @(Get-ChildItem -LiteralPath dist -Filter '*.msixupload')
+          if ($packages.Count -ne 1) { throw 'Expected one upload package.' }
+          $package = $packages[0]
+          $hash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
+          if ($hash -ne $env:PACKAGE_SHA256) { throw 'Upload archive SHA-256 mismatch.' }
+          $props = Import-PowerShellDataFile -LiteralPath msix/package.props.psd1
+          $version = "$env:RELEASE_VERSION.0"
+          $name = "$($props.IdentityName)_${version}_x64.msix"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($package.FullName)
+          try {
+            $entry = $archive.GetEntry($name)
+            if (-not $entry) { throw 'Expected MSIX is missing.' }
+            $memory = [IO.MemoryStream]::new()
+            $source = $entry.Open()
+            try { $source.CopyTo($memory) } finally { $source.Dispose() }
+            $memory.Position = 0
+            $inner = [IO.Compression.ZipArchive]::new($memory, [IO.Compression.ZipArchiveMode]::Read)
+            try {
+              $reader = [IO.StreamReader]::new($inner.GetEntry('AppxManifest.xml').Open())
+              try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+              $identity = $manifest.Package.Identity
+              if ($identity.Version -ne $version -or $identity.Name -ne $props.IdentityName -or $identity.Publisher -ne $props.Publisher -or $identity.ProcessorArchitecture -ne 'x64') {
+                throw 'Store package identity, version or architecture mismatch.'
+              }
+            } finally { $inner.Dispose(); $memory.Dispose() }
+          } finally { $archive.Dispose() }
+          ./tools/msstore-publish.ps1 -ProductId '${{ vars.MSSTORE_PRODUCT_ID }}' -PackagePath $package.FullName -ValidateOnly
+
+      - name: 上传并提交到商店
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SUBMISSION_ID: ${{ inputs.submission_id }}
+        run: |
+          $package = Get-ChildItem -LiteralPath dist -Filter '*.msixupload' | Select-Object -First 1
+          $submissionArguments = @{ ProductId = '${{ vars.MSSTORE_PRODUCT_ID }}'; PackagePath = $package.FullName }
+          if ($env:SUBMISSION_ID) { $submissionArguments.SubmissionId = $env:SUBMISSION_ID }
+          ./tools/msstore-publish.ps1 @submissionArguments
