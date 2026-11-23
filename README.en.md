@@ -2,84 +2,122 @@
 
 [简体中文](README.md) | **English**
 
-A lightweight peripheral battery monitor and mouse settings utility for Windows, retaining detailed ROG support while adding selected Logitech, Rapoo, VGN, VXE, ATK, Razer, Lamzu, WLMouse, MCHOSE, AULA, AJAZZ, Dareu, Edifier, 8BitDo, HECATE, Sony, HyperX, Cherry and Arctis Nova devices, plus XInput and standard HID battery queries. It communicates through Windows HID and system APIs and runs as a single executable without a background service. Normal battery monitoring and device settings work offline. Network access occurs only when you submit feedback, add a reply, or check for replies; there is no background telemetry. ROG devices do not require Armoury Crate.
+**A Windows battery monitor and quick mouse settings tool for peripherals from multiple brands.** Check mice, keyboards, headsets and controllers in one place, with a taskbar battery strip and tray panel for quick access. DPI controls follow each device's capabilities, headset pages provide Windows volume and microphone controls, and supported ROG mice retain detailed settings.
 
-[Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Changelog (Chinese)](CHANGELOG.md)
+Runs as a single executable without administrator rights or a separate background service. Routine battery monitoring and device settings work offline, with no background telemetry. ROG devices do not require Armoury Crate.
 
-Support covers selected devices with implemented protocols, not entire brands. See [compatibility notes](COMPATIBILITY.en.md) for model coverage, capabilities, protocol testing, and hardware validation status.
+[![Release](https://img.shields.io/github/v/release/youmikk/ROG-Battery)](https://github.com/youmikk/ROG-Battery/releases)
+[![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#requirements)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-R%20Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
 
-## Latest release: 1.4.7
+[Download portable build](https://github.com/youmikk/ROG-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Device compatibility](COMPATIBILITY.en.md) · [Changelog (Chinese)](CHANGELOG.md)
 
-- Expand battery queries for common domestic mice, keyboards, headsets and controllers while preserving deep ROG support. Some other brands can read and switch actual DPI stages.
-- Display multiple devices in a compact taskbar battery widget with type icons and bright green charging indicators. Clicking opens the quick panel; interaction, ordering and background operation are improved.
-- Redesign About and Device feedback with optional diagnostic previews and screenshots. In-app submission and replies require a configured relay; the current release opens GitHub in the browser, where screenshots must be attached manually.
-
-This release consolidates the former 1.4.7–1.4.12 updates under 1.4.7. Users of those portable versions can exit the app and replace the executable. Microsoft Store publishing is handled separately. See [Compatibility](COMPATIBILITY.en.md) for model coverage and hardware validation, [Changelog](CHANGELOG.md) for history and [Protocol research](PROTOCOLS.en.md) for evidence.
-
-## Getting started
-
-Install from Microsoft Store, or download and run `rog-mouse-ctl.exe`. No administrator rights are required. Connect a supported device and the app will read its status automatically.
-
-### Devices and tray
-
-Click a device card to open its details. With multiple devices, return to the overview to switch devices. A single device opens directly.
-
-One numeric tray icon shows the selected device's battery level. Click it once to open a panel centered on the tray icon, with device battery levels, refresh, and settings. Double-click to open the main window, or right-click for the menu.
-
-A compact battery strip appears immediately left of the notification area. Both single and multiple devices show their type icon and percentage in the current device order, using native fonts at the taskbar's scale. Click the strip to open quick view and click it again to close. It can be disabled independently in Settings and hides when the taskbar is automatically hidden or a full-screen application covers its monitor.
-
-Choosing Minimize when closing the window keeps the app running while either the tray icon or battery strip is available. If neither entry is available, the app retains an ordinary minimized window so it can still be reopened.
-
-Device preferences provide a primary tray icon, device name, and device type, in that order. The primary selection controls the standard Windows tray icon, while the taskbar strip shows every device with battery data. Names can be edited or restored. Types default to automatic detection and can be set to Mouse, Keyboard, Headset, Gamepad, or Other. Your choice applies throughout the main window and both battery displays. Changing the type does not add hardware capabilities.
-
-In the tray device list, a mouse opens its known DPI stages, while a headset opens audio controls for speaker or headset volume, microphone mute, and Windows sound settings. Windows remains responsible for changing the default playback device; the app does not call undocumented interfaces.
-
-### Switching to English
-
-Click the gear in the upper-right corner, then choose **Settings (设置) → General (常规) → Language (语言) → English**. The change takes effect immediately.
-
-The default is **Follow system**, which uses the Windows **display language**. Moving English to the top of the Windows Preferred languages list alone may not change the display language. You can always select English directly in the app.
-
-### Features
+## Features
 
 | Feature | Details |
 | --- | --- |
-| Battery | Battery level, charging state, device information, 48-hour history, and runtime estimates. |
-| Mouse performance | Existing detailed ROG DPI, polling-rate, debounce and related settings; other mice expose numerical DPI, actual stage switching, X/Y stage editing and rates according to protocol capabilities. Rapoo can read and switch stages in the current profile; hardware acceptance is pending. |
-| Buttons | Button remapping, configuration export, and backup restoration on supported models. |
-| Lighting | Opens Windows Dynamic Lighting; Windows manages the effects. |
-| Settings | Theme, startup, close behavior, refresh interval, storage locations, diagnostic logs, and device feedback. |
+| Multiple device batteries | View battery levels and confirmed charging states across brands. Values estimated from coarse levels display `≈`; unavailable readings remain unknown. |
+| Taskbar battery strip | Compact device icons and percentages next to the notification area, with multiple devices, Windows scaling and bright green charging indicators. Click to open quick view. |
+| Tray controls | Single-click the numeric tray icon for quick view; double-click to open the main window. Supported mice expose DPI shortcuts, and headsets expand to audio controls. |
+| Mouse DPI | Numerical DPI, actual stage switching, X/Y stage editing or polling-rate settings where supported. Connections with numerical DPI writes can also save 1–4 software presets, sorted by value. |
+| Audio | Adjust speaker and headset volume or mute the microphone through Windows audio APIs. Changing the default output device opens Windows sound settings. |
+| Device preferences | Rename devices, override their type, drag to reorder, and choose the device for the standard tray icon. Preferences apply across the main window and taskbar. |
+| Detailed ROG settings | Supported mice retain DPI, polling rate, debounce, button mappings, sleep settings and configuration backups. The primary ROG mouse's battery page provides history and runtime estimates. |
+| Low-battery notifications | Windows notifications are available in the Store edition, not the portable build. They use valid, precise readings rather than estimates or expired cache entries. |
+| Appearance and language | Light and dark themes, system preferences, Simplified Chinese and English, plus startup, close behavior and refresh settings. |
 
-Capabilities depend on the model, firmware, and connection. Unsupported settings are identified in the interface. Changing lift-off distance resets surface calibration; review the prompt before applying it.
+Mouse controls depend on the model, firmware and connection. Hardware DPI stages and software presets are presented separately; presets do not enable writes on read-only devices. Supported Logitech onboard profiles retain their actual stages, including a fifth stage. The 1–4 software preset limit does not change those hardware stages.
 
-## Requirements and compatibility
+## Brands and device coverage
+
+The table groups implemented integrations by device type. **Coverage is limited to selected models and connections; it does not mean every device from a brand is supported or hardware-verified.** See [device compatibility](COMPATIBILITY.en.md) for exact models, charging behavior, DPI capabilities and validation status.
+
+| Device type | Brands and protocols with implemented integrations |
+| --- | --- |
+| Mice | ASUS / ROG, Logitech, Rapoo, VGN, VXE, ATK, Razer, MCHOSE, AULA, AJAZZ, Dareu, EWEADN, Lingbao, HECATE, Lamzu and WLMouse |
+| Keyboards | ASUS / ROG, Logitech HID++, VGN / VXE, MCHOSE, AULA, EWEADN, CHERRY and Lofree |
+| Headsets | ATK, MCHOSE, EDIFIER, MOONDROP, XIBERIA, FIFINE, Sony INZONE, HyperX and SteelSeries Arctis Nova |
+| Controllers | ASUS / ROG, Sony DualSense / DualSense Edge, 8BitDo, Flydigi, GameSir, and controllers whose current mode and driver expose battery information through Windows XInput |
+| Standard HID | Devices whose descriptors expose standard Battery Strength capabilities. This battery protocol does not provide universal DPI settings. |
+
+Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard generations can use different protocols. A similar name or shared receiver ID does not establish compatibility. Many new integrations have passed protocol tests but still need validation on the corresponding hardware.
+
+Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
+
+## Latest release: 1.4.7
+
+- Expand battery queries for commonly used Chinese mouse, keyboard, headset and controller brands, and improve actual DPI stage reads and switching on selected mice.
+- Add a multi-device taskbar battery strip and improve sizing, icons, charging indicators, clicks, ordering and background operation.
+- Redesign About and Device feedback, fixing text clipping, alignment and corners, with optional diagnostic previews and screenshot selection. Check for updates is currently a placeholder.
+
+This release consolidates the former 1.4.7–1.4.12 updates under 1.4.7. Users of those portable versions can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store publishing is separate and may lag behind it. See the [full changelog](CHANGELOG.md).
+
+## Getting started
+
+1. Download and run `rog-mouse-ctl.exe` from [GitHub Releases](https://github.com/youmikk/ROG-Battery/releases/latest), or install from [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US).
+2. Connect the device using a mode listed in the compatibility notes. Readings update automatically. A single device opens its details; multiple devices open the device list.
+3. Click the numeric tray icon or taskbar strip to open quick view. Click a supported mouse or headset to expand its controls, and click again to collapse them.
+4. Open **Settings → Battery & tray** for display options. Device details let you change names, types and the standard tray selection.
+
+### Taskbar and device preferences
+
+The standard Windows tray icon displays one selected device. The taskbar strip shows devices with valid battery readings in the saved order. When space is limited, it displays only complete device items; other devices remain accessible in quick view.
+
+The strip hides with an automatically hidden taskbar or a full-screen app on the same monitor. Choosing Minimize when closing keeps the app running while either the tray icon or strip is available. If neither is available, an ordinary minimized window remains accessible.
+
+Device type defaults to automatic detection, with manual Mouse, Keyboard, Headset, Gamepad or Other overrides. Your choice takes precedence and applies throughout the interface; changing the type does not add hardware capabilities.
+
+### Language
+
+Click the upper-right gear and choose **Settings (设置) → General (常规) → Language (语言)**, then **English**, **简体中文** or **Follow system**. Changes take effect immediately.
+
+The default, Follow system, uses the Windows **display language**, which can differ from the order of Preferred languages. Select English directly if needed.
+
+### Missing battery readings
+
+Check the exact model and connection in the [compatibility notes](COMPATIBILITY.en.md), wake the device, then wait for the next background query or click Refresh. Vendor software may occupy the control interface; close it and retry if necessary. A connected receiver does not always mean the paired device is reporting valid battery data.
+
+If readings remain unavailable, use **Settings → About → Device feedback** to share the model, connection, symptoms and an optional diagnostic summary.
+
+## Requirements
 
 - Windows 10 version 1809 (build 17763) or later, x64.
-- Dynamic Lighting requires a supported Windows 11 version and compatible hardware.
-- A supported USB HID device or wireless receiver. Bluetooth support depends on the protocol exposed by the device.
+- A supported USB, wired or 2.4 GHz receiver connection for that model. Bluetooth support is verified separately per protocol.
+- The Windows Dynamic Lighting entry requires a supported Windows 11 version and compatible hardware.
 
-ROG HARPE ACE MINI has been verified over USB and through the ROG OMNI receiver. See the [model catalogue](README.md#支持的型号) for recognized mice, keyboards, controllers, and receivers. Inclusion in the catalogue does not mean every feature has been verified on that hardware. Headset battery support depends on its HID protocol; a device type label alone does not establish compatibility.
+## Feedback and privacy
 
-Other software such as Armoury Crate may keep the device busy. Close it if reads or writes fail. Wake a sleeping device before refreshing.
+Open **Settings → About → Device feedback**, choose a device and category, and describe the issue. You can preview or disable Include device diagnostics and select up to three screenshots.
 
-## Local data and privacy
+**The current release submits through GitHub in your browser.** Use Copy report & open GitHub, review the report and submit it. Add screenshots manually; browser submissions do not appear in My feedback. Builds with a configured feedback service can submit in the app, display maintainer replies and send additional information. See the [feedback service guide](services/feedback-relay/README.md) for deployment.
 
-Normal battery monitoring and device settings work offline, with no background telemetry or automatic crash reports. The app connects to the feedback service only when you submit feedback, add a reply, or check for replies. Settings, device aliases, battery history, caches, backups, and diagnostic logs stay on your computer.
+Routine battery monitoring and device settings work offline, without background telemetry or automatic crash reports. Settings, aliases, history, caches, backups and diagnostic logs stay locally. Network features run only when you submit feedback, add information or check replies.
 
-The optional diagnostic summary contains only app and system versions, the original device model, VID/PID, type, connection, battery state, backend, and interface and query summaries. It does not copy serial numbers, paths, custom device aliases, personal settings, or raw logs. Submissions include the app version and basic details of the selected device. Your description, any included diagnostics, and screenshots appear in a public GitHub issue. The feedback service serves screenshots through public image links backed by a private R2 bucket. Images are not re-encoded; check the picture and its metadata for personal content before submitting.
+Optional diagnostics contain app and system versions, original device model, VID/PID, type, connection, battery and query results. They exclude serial numbers, file paths, custom aliases, personal settings and raw logs. Descriptions, included diagnostics and screenshots are public, so review them before submitting. In-app feedback history and reply credentials use Windows DPAPI encryption; deleting local history does not remove public GitHub content. See the [privacy policy](PRIVACY.md) for details.
 
-Local feedback history and reply keys are encrypted with Windows DPAPI in the settings directory. Reply keys are never included in public issues. Deleting local history does not remove public GitHub content and removes the credentials needed to reply through the app.
-
-| Data | Default location |
+| Local data | Default location |
 | --- | --- |
 | Settings | `%APPDATA%/rog-mouse-ctl/settings.ini` |
 | Battery history | `%LOCALAPPDATA%/rog-battery/history.tsv` |
 | Snapshot cache | `%LOCALAPPDATA%/rog-mouse-ctl/snapshot.cache` |
-| Backup directory | `%USERPROFILE%/Documents/rog-mouse-ctl/backups/` |
+| Configuration backups | `%USERPROFILE%/Documents/rog-mouse-ctl/backups/` |
 
-Settings and history locations can be changed in the app. Windows manages Store app data. Portable data and files saved to custom locations may require manual removal. See the [privacy policy](PRIVACY.md).
+Settings and history locations can be changed in the app. The executable and data directories retain the `rog-mouse-ctl` name for compatibility with existing installations and settings. Windows manages Store app data; portable data and files saved to custom locations may require manual removal.
 
 ## Command line
+
+Read-only multi-brand queries and diagnostics:
+
+```powershell
+rog-mouse-ctl.exe devices
+rog-mouse-ctl.exe device-report
+rog-mouse-ctl.exe device-report --probe
+rog-mouse-ctl.exe --help
+```
+
+`devices` lists devices and readings. `device-report` generates a device and query summary; `--probe` performs read-only queries first and reports results from the same process. Reports are not uploaded automatically and exclude raw communication payloads and unique device identifiers.
+
+ROG-specific query and settings examples:
 
 ```powershell
 rog-mouse-ctl.exe info
@@ -87,10 +125,9 @@ rog-mouse-ctl.exe quick
 rog-mouse-ctl.exe setdpi 2 1600
 rog-mouse-ctl.exe backup
 rog-mouse-ctl.exe estimate
-rog-mouse-ctl.exe --help
 ```
 
-Commands such as `setdpi` change device settings. See the command help for arguments.
+These commands use the ROG protocol rather than universal multi-brand settings. Operations such as `setdpi` change device configuration; see `--help` for keep and save options. Use the device's in-app controls for supported DPI shortcuts on other brands.
 
 ## Building
 
@@ -101,35 +138,18 @@ rustup toolchain install stable-x86_64-pc-windows-gnu
 cargo +stable-x86_64-pc-windows-gnu build --release --locked
 ```
 
-The executable is `target/release/rog-mouse-ctl.exe`. Required Windows import libraries and the icon resource are included. To rebuild the icon resource, run `windres -O coff -I assets -i assets/app.rc -o assets/app.o`.
+The output is `target/release/rog-mouse-ctl.exe`. Required Windows import libraries and icon resources are included; no additional runtime installation is needed. After changing icons, regenerate resources with `windres -O coff -I assets -i assets/app.rc -o assets/app.o`.
 
-Local release validation runs regression tests, builds the portable executable, checks versions and the PE subsystem, and generates SHA256 checksums:
+Run local tests, build and version checks before publishing:
 
 ```powershell
 powershell -File tools/build-release.ps1
 ```
 
-Portable outputs are collected in `dist/version/`. Pushing the source and matching release tag lets GitHub Actions build and publish the portable version. MSIX packaging and Microsoft Store submission use a separate manual workflow.
+Outputs are collected in `dist/version/`. Development uses `main`; pushing source and a matching version tag triggers the GitHub Actions portable release. For a build-only check, run the portable workflow manually with an empty tag.
 
-Development branches can use manual GitHub Actions runs to create test packages: leave the portable workflow's tag empty; "submit to Microsoft Store" is off by default in the MSIX workflow. Download build outputs from the run's Artifacts. After stability acceptance, select the source revision to release and enable the Store submission option.
+MSIX packaging and Microsoft Store submission use a separate manual workflow, with Store submission disabled by default. `Cargo.toml`, `msix/package.props.psd1`, the tag and executable version must agree. After stability acceptance, enable Store submission as needed and configure the required credentials and product ID.
 
-For manual MSIX packaging, install the Windows SDK and run:
+## License
 
-```powershell
-powershell -File msix/build-msix.ps1 -Verify
-powershell -File msix/make-upload.ps1
-```
-
-Keep the version in `Cargo.toml` aligned with the four-part Store version in `msix/package.props.psd1`. Publish from a clean working tree: push the source commit, then create the matching `vX.Y.Z` tag. The tag, source version, executable version, and package version must agree. Tags trigger only the portable release. Manual Store submission also requires the configured credentials and product ID.
-
-## Feedback and license
-
-Backends poll independently and existing ROG controls are retained. Mouse, keyboard and headset support is assessed separately; a brand name alone does not establish compatibility. Supported Logitech onboard modes retain actual stages, including the fifth stage; common-value buttons are not G HUB's configured stages. Rapoo nRF54L stage switching requires matching configuration and fresh telemetry. See [device compatibility](COMPATIBILITY.en.md) for capabilities and hardware validation status.
-
-The `devices` command reads device status; `device-report` exports descriptors and the current process's query summary. `device-report --probe` runs read-only queries first and exports battery, charging status, current DPI, available onboard stages and communication results from the same process for user-assisted testing. Reports exclude payloads and unique device identifiers and are never uploaded automatically.
-
-Open Device feedback in Settings, select a device and issue category, and describe the problem. You can preview or disable Include diagnostics and attach up to three screenshots. Builds with a configured feedback service can submit directly; My feedback shows status, maintainer replies, and a field for additional information. Network requests occur only when you initiate these actions.
-
-If the feedback service is not configured, use Copy report & open GitHub, review the content, and submit a [GitHub issue](https://github.com/youmikk/ROG-Battery/issues) in your browser. Add screenshots manually. Browser submissions do not appear in My feedback. The diagnostic log entry remains available; the separate device report window is removed, while the command-line reports above remain supported. Remove serial numbers, personal file paths, and other private content before separately sharing logs or backups.
-
-This repository does not currently include a LICENSE file. Copyright remains with the author. Please open an issue before reusing the code in another project.
+This repository does not currently include a LICENSE file. Copyright remains with the author. Please open an [issue](https://github.com/youmikk/ROG-Battery/issues) before reusing the code in another project.
