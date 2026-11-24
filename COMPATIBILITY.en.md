@@ -14,7 +14,20 @@ When Windows already exposes a battery level for a connected classic or dual-mod
 
 Only currently connected, remembered Bluetooth devices are enumerated, with the Bluetooth address providing a stable identity. Battery data comes from a Windows PnP cached property and is accepted only for complete `BYTE` or `UINT32` values in the `0–100` range. Missing cache data, invalid values and disconnected devices do not create a new reading. Charging remains unknown. A Bluetooth device and a standard HID Battery Strength interface are merged only when their names and Bluetooth address match.
 
-The background query interval is 30 seconds, and valid samples expire after 120 seconds. This implementation covers classic Bluetooth and dual-mode devices with a classic Bluetooth node. Headsets or other devices that appear only through BLE / GATT may still require a separate WinRT implementation and must not be presented as universal brand support. All 570 Rust regressions pass. No local Bluetooth hardware was available for acceptance testing, so sleep caching, wake recovery and multiple simultaneous devices still require hardware verification.
+The background query interval is 30 seconds, and valid samples expire after 120 seconds. This implementation covers classic Bluetooth and dual-mode devices with a classic Bluetooth node. Headsets or other devices that appear only through BLE / GATT may still require a separate WinRT implementation and must not be presented as universal brand support. All 571 Rust regressions pass. No local Bluetooth hardware was available for acceptance testing, so sleep caching, wake recovery and multiple simultaneous devices still require hardware verification.
+
+## Unreleased: CompX power-only receivers
+
+These receivers use the verified `FF02:0002`, Report `08`, 17-byte input/output and `08 04` battery request. The new paths send that request only: they do not perform an identity, configuration or DPI read first, and charging remains unknown.
+
+| Scope | Capability | Evidence and limits |
+| --- | --- | --- |
+| VGN F1 Moba `3554:F503` | 2.4 GHz receiver percentage and voltage | A complete user reply `08 04 … 5F 00 10 05 …` reports 95% at byte 6; deep sleep was observed as an `08 03` event and readings returned after wake |
+| VGN F1 Moba `3554:F506` | Wired percentage | The official VGN HUB statically maps Report `08` and command `04`; no complete replayable reply is available yet |
+| DELUX M900 Ultra / GH8K `3554:FB26` | 2.4 GHz receiver percentage | A contributor measured 90% and a user retest reported 85%; only the verified receiver and `FF02:0002` are matched |
+| VGN shared `3554:FB3E` | 2.4 GHz receiver percentage | User replies report 40%, 90% and 85%; the shared ID is not used to infer a specific retail model |
+
+Windows descriptors must prove exactly one Report `08` in both directions with 17 bytes. Invalid status, command, declared length, percentage or checksum produces no new reading. Other lengths and sibling collections on the same ID do not enter this power-only path. No matching hardware was available for project acceptance testing, so cold start, charging, deep-sleep wake and coexistence with VGN HUB still require hardware verification.
 
 ## Version 1.4.7: VGN and MCHOSE receivers
 

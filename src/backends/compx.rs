@@ -15,11 +15,35 @@ fn control(i: &HidInterface) -> bool {
         && i.input_len == 17 && i.output_len == 17
 }
 
+fn power_only(i: &HidInterface) -> bool {
+    i.vendor_id == 0x3554 && matches!(i.product_id, 0xf503 | 0xf506 | 0xfb26 | 0xfb3e)
+}
+
+fn known_name(i: &HidInterface) -> Option<&'static str> {
+    match (i.vendor_id, i.product_id) {
+        (0x3554, 0xf503) => Some("VGN F1 MOBA 2.4G Receiver"),
+        (0x3554, 0xf506) => Some("VGN F1 MOBA"),
+        (0x3554, 0xfb26) => Some("DELUX M900 Ultra / GH8K Receiver"),
+        (0x3554, 0xfb3e) => Some("VGN 2.4G Receiver"),
+        (0x3554, 0xfb56 | 0xfb57) => Some("VGN Dragonfly F2 Master+"),
+        _ => None,
+    }
+}
+
+fn power_only_proven(api: &HidApi, i: &HidInterface) -> bool {
+    descriptor::Descriptor::open(api, i)
+        .is_some_and(|descriptor| descriptor.only_input_output_report(i, REPORT, 17))
+}
+
 fn candidate(i: &HidInterface) -> Target {
     let mut target = Target::new(BackendId::CompX,i,0);
     // Shared receiver serial strings are not evidence that two interfaces are one mouse.
     target.family = DeviceFamily::Mouse;
-    if target.name.is_empty() { target.name = "CompX Mouse".into(); }
+    if let Some(name) = known_name(i) {
+        target.name = name.into();
+    } else if target.name.is_empty() {
+        target.name = "CompX Mouse".into();
+    }
     target
 }
 
@@ -232,9 +256,7 @@ impl<C: Channel> Session<C> {
             };
             if let Some(name) = name { target.name = name.into(); }
         }
-        if self.interface.vendor_id == 0x3554 && matches!(self.interface.product_id, 0xfb56 | 0xfb57) {
-            target.name = "VGN Dragonfly F2 Master+".into();
-        }
+        if let Some(name) = known_name(&self.interface) { target.name = name.into(); }
         target
     }
     fn profile(&mut self) -> Option<u16> {
@@ -249,7 +271,8 @@ impl<C: Channel> Session<C> {
         self.interface.vendor_id == 0x3554 && self.interface.product_id == 0xf58a && self.id == Some([2,27])
     }
     fn write_supported(&self) -> bool {
-        !control_output(&self.interface) && self.id.is_some() && self.layout.is_some_and(|l| !l.r1 || self.group_write() ||
+        !power_only(&self.interface) && !control_output(&self.interface)
+            && self.id.is_some() && self.layout.is_some_and(|l| !l.r1 || self.group_write() ||
             self.interface.vendor_id == 0x3554 && matches!((self.interface.product_id,self.id),
                 (0xf58c,Some([2,27])) | (0xf58f,Some([2,32]))))
     }
@@ -303,8 +326,9 @@ impl<C: Channel> Session<C> {
         let r = self.query(4,0,&[],0).ok()?;
         if !(1..=10).contains(&r[5]) || r[6] > 100 { return None; }
         let mv = (r[5] >= 4).then(|| u16::from_be_bytes([r[8],r[9]])).filter(|v| *v > 0);
-        Some(Battery { estimated_percent: None, percent: Some(r[6]), charging: (r[5] >= 2).then(|| match r[7] {
-            0 => Some(false), 1 => Some(true), _ => None }).flatten(), voltage_mv: mv,
+        let charging = (!power_only(&self.interface) && r[5] >= 2).then(|| match r[7] {
+            0 => Some(false), 1 => Some(true), _ => None }).flatten();
+        Some(Battery { estimated_percent: None, percent: Some(r[6]), charging, voltage_mv: mv,
             approximate: false, level: None })
     }
     fn check(&mut self, target: &Target) -> Result<(), String> {
@@ -410,17 +434,21 @@ impl<C: Channel> Session<C> {
 }
 
 impl DeviceBackend for CompX {
-    fn discover(&self, _: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>,String> {
-        Ok(interfaces.iter().filter(|i| control(i)).map(candidate).collect())
+    fn discover(&self, api: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>,String> {
+        Ok(interfaces.iter().filter(|i|
+            control(i) && (!power_only(i) || power_only_proven(api, i))).map(candidate).collect())
     }
-    fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot,String> {
+    fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot,String> {
         if !control(target.hid()?) { return Err("CompX 控制接口无效".into()); }
+        if power_only(target.hid()?) && !power_only_proven(api, target.hid()?) {
+            return Err("CompX 电量报告描述符未确认".into());
+        }
         let lock = channel_lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut s = Session::open(DeviceChannel::open(target.hid()?)?, target.hid()?);
-        s.identify();
+        if !power_only(target.hid()?) { s.identify(); }
         let battery = s.battery(); let battery_at = battery.as_ref().map(|_| Instant::now());
-        let config = s.config().ok();
+        let config = (!power_only(target.hid()?)).then(|| s.config().ok()).flatten();
         if battery.is_none() && config.is_none() { return Err("CompX 设备无有效应答".into()); }
         let target = s.target(target);
         let (dpi,polling_rate) = config.map(|c| (c.dpi,c.rate)).unwrap_or_default();
@@ -568,6 +596,39 @@ mod tests {
             assert!(s.layout.is_some()); assert!(!s.write_supported());
         }
         assert!(!control_output(&receiver()));
+    }
+    #[test]
+    fn newly_verified_comp_x_receivers_use_power_only_names_and_unknown_charging() {
+        for (pid, name) in [
+            (0xf503, "VGN F1 MOBA 2.4G Receiver"),
+            (0xf506, "VGN F1 MOBA"),
+            (0xfb26, "DELUX M900 Ultra / GH8K Receiver"),
+            (0xfb3e, "VGN 2.4G Receiver"),
+        ] {
+            let mut i = receiver();
+            i.product_id = pid;
+            assert!(power_only(&i));
+            assert_eq!(known_name(&i), Some(name));
+            assert_eq!(candidate(&i).name, name);
+        }
+        let mut i = receiver();
+        i.product_id = 0xf503;
+        struct Reply(Vec<u8>);
+        impl Channel for Reply {
+            fn exchange(&mut self, p: &[u8], matcher: &mut dyn FnMut(&[u8])->bool) -> Option<Vec<u8>> {
+                assert_eq!(p, &packet(4,0,&[],0));
+                matcher(&self.0).then(|| self.0.clone())
+            }
+        }
+        let reply = vec![8,4,0,0,0,4,95,0,0x10,5,0,0,0,0,0,0,0xd1];
+        let mut s = Session::open(Reply(reply), &i);
+        s.id = Some([1,8]);
+        s.layout = Layout::for_identity(&i, s.id);
+        let battery = s.battery().unwrap();
+        assert_eq!(battery.percent, Some(95));
+        assert_eq!(battery.charging, None);
+        assert_eq!(battery.voltage_mv, Some(4101));
+        assert!(!s.write_supported());
     }
     #[test]
     fn battery_echo_corruption_and_truncation_do_not_hide_valid_zero_or_live_reply() {
