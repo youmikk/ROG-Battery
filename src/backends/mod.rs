@@ -440,18 +440,18 @@ fn merge_additional_results(
             }
         };
         for snapshot in devices {
-            if backend == BackendId::StandardHid
+            if backend == BackendId::Bluetooth
                 && snapshots.iter().any(|other| {
-                    other.target.backend == BackendId::Bluetooth
+                    other.target.backend != BackendId::Bluetooth
                         && bluetooth::same_physical_device(&other.target, &snapshot.target)
                 })
             {
                 continue;
             }
-            if backend == BackendId::Bluetooth {
+            if backend != BackendId::Bluetooth {
                 snapshots.retain(|other| {
-                    other.target.backend != BackendId::StandardHid
-                        || !bluetooth::same_physical_device(&snapshot.target, &other.target)
+                    other.target.backend != BackendId::Bluetooth
+                        || !bluetooth::same_physical_device(&other.target, &snapshot.target)
                 });
             }
             if backend == BackendId::StandardHid
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn bluetooth_reading_replaces_only_address_verified_standard_hid_duplicate() {
+    fn richer_reading_replaces_only_identity_verified_bluetooth_duplicate() {
         let address = ["AA", "BB", "01", "02", "03", "04"].concat();
         let bluetooth_interface = HidInterface {
             path: format!("bluetooth:{address}"),
@@ -728,7 +728,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].target.backend, BackendId::Bluetooth);
+        assert_eq!(result[0].target.backend, BackendId::StandardHid);
 
         standard.target.name = "Other Headphones".into();
         let result = merge_additional_results([

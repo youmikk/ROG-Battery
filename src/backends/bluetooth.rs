@@ -4,7 +4,7 @@ use crate::win32::{FreeLibrary, GetProcAddress, Handle};
 use std::{
     collections::{BTreeSet, HashMap},
     ffi::c_void,
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
     time::Instant,
 };
 use winapi::shared::guiddef::GUID;
@@ -13,8 +13,10 @@ const ERROR_NO_MORE_ITEMS: u32 = 259;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const DIGCF_PRESENT: u32 = 0x0000_0002;
 const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
+const DIGCF_DEVICEINTERFACE: u32 = 0x0000_0010;
 const DEVPROP_TYPE_BYTE: u32 = 3;
 const DEVPROP_TYPE_UINT32: u32 = 7;
+const DEVPROP_TYPE_GUID: u32 = 13;
 const DEVPROP_TYPE_STRING: u32 = 18;
 const BLUETOOTH_MAX_NAME_SIZE: usize = 248;
 const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
@@ -45,6 +47,23 @@ const ADDRESS: DevPropKey = DevPropKey {
         Data4: [0x87, 0xe0, 0x6c, 0xda, 0x34, 0x28, 0x04, 0x0a],
     },
     pid: 1,
+};
+
+const CONTAINER: DevPropKey = DevPropKey {
+    fmtid: GUID {
+        Data1: 0x8c7e_d206,
+        Data2: 0x3f8a,
+        Data3: 0x4827,
+        Data4: [0xb3, 0xab, 0xae, 0x9e, 0x1f, 0xae, 0xfc, 0x6c],
+    },
+    pid: 2,
+};
+
+const HID_DEVICE_INTERFACE: crate::win32::Guid = crate::win32::Guid {
+    data1: 0x4d1e_55b2,
+    data2: 0xf16f,
+    data3: 0x11cf,
+    data4: [0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30],
 };
 
 #[repr(C)]
@@ -145,12 +164,6 @@ extern "system" {
 
 #[link(name = "setupapi")]
 extern "system" {
-    fn SetupDiGetClassDevsW(
-        class_guid: *const GUID,
-        enumerator: *const u16,
-        parent: Handle,
-        flags: u32,
-    ) -> Handle;
     fn SetupDiEnumDeviceInfo(device_set: Handle, index: u32, device: *mut SpDevInfoData) -> i32;
     fn SetupDiGetDeviceInstanceIdW(
         device_set: Handle,
@@ -169,7 +182,6 @@ extern "system" {
         required: *mut u32,
         flags: u32,
     ) -> i32;
-    fn SetupDiDestroyDeviceInfoList(device_set: Handle) -> i32;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,6 +243,7 @@ fn connected_devices() -> Result<Vec<Candidate>, String> {
         return Err(format!("BluetoothFindFirstDevice failed: {error}"));
     }
     let mut out = Vec::new();
+    let mut enumeration_error = None;
     loop {
         if info.connected != 0 {
             let address = format!("{:012X}", info.address & 0x0000_ffff_ffff_ffff);
@@ -257,11 +270,18 @@ fn connected_devices() -> Result<Vec<Candidate>, String> {
         info = unsafe { core::mem::zeroed() };
         info.dw_size = core::mem::size_of::<BluetoothDeviceInfo>() as u32;
         if unsafe { (api.next)(find, &mut info) } == 0 {
+            let error = crate::win32::last_error();
+            if error != ERROR_NO_MORE_ITEMS {
+                enumeration_error = Some(format!("BluetoothFindNextDevice failed: {error}"));
+            }
             break;
         }
     }
     unsafe {
         let _ = (api.close)(find);
+    }
+    if let Some(error) = enumeration_error {
+        return Err(error);
     }
     out.sort_by(|a, b| a.address.cmp(&b.address));
     Ok(out)
@@ -272,7 +292,7 @@ struct DeviceSet(Handle);
 impl Drop for DeviceSet {
     fn drop(&mut self) {
         unsafe {
-            let _ = SetupDiDestroyDeviceInfoList(self.0);
+            let _ = crate::win32::SetupDiDestroyDeviceInfoList(self.0);
         }
     }
 }
@@ -315,6 +335,30 @@ fn property(set: Handle, device: &SpDevInfoData, key: &DevPropKey) -> Option<(u3
     Some((kind, bytes))
 }
 
+fn guid_text(bytes: &[u8]) -> Option<String> {
+    let bytes: [u8; 16] = bytes.try_into().ok()?;
+    Some(format!(
+        "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        u32::from_ne_bytes(bytes[0..4].try_into().ok()?),
+        u16::from_ne_bytes(bytes[4..6].try_into().ok()?),
+        u16::from_ne_bytes(bytes[6..8].try_into().ok()?),
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    ))
+}
+
+fn container_property(set: Handle, device: &SpDevInfoData) -> Option<String> {
+    let (kind, bytes) = property(set, device, &CONTAINER)?;
+    (kind == DEVPROP_TYPE_GUID).then_some(())?;
+    guid_text(&bytes)
+}
+
 fn instance_id(set: Handle, device: &SpDevInfoData) -> Option<String> {
     let mut required = 0u32;
     unsafe {
@@ -334,6 +378,123 @@ fn instance_id(set: Handle, device: &SpDevInfoData) -> Option<String> {
         value.pop();
     }
     Some(String::from_utf16_lossy(&value))
+}
+
+fn bluetooth_container(address: &str) -> Option<String> {
+    let set = unsafe {
+        crate::win32::SetupDiGetClassDevsW(
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_ALLCLASSES,
+        )
+    };
+    if set.is_null() || set == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let set = DeviceSet(set);
+    let mut containers = BTreeSet::new();
+    for index in 0..u32::MAX {
+        let mut device: SpDevInfoData = unsafe { core::mem::zeroed() };
+        device.cb_size = core::mem::size_of::<SpDevInfoData>() as u32;
+        if unsafe { SetupDiEnumDeviceInfo(set.0, index, &mut device) } == 0 {
+            break;
+        }
+        let Some(id) = instance_id(set.0, &device) else {
+            continue;
+        };
+        let id = id.to_ascii_uppercase();
+        if !id.starts_with("BTHENUM\\") && !id.starts_with("BTHLE\\") {
+            continue;
+        }
+        let Some(candidate) =
+            property_address(set.0, &device).or_else(|| address_from_id(&id))
+        else {
+            continue;
+        };
+        if candidate != address {
+            continue;
+        }
+        if let Some(container) = container_property(set.0, &device) {
+            containers.insert(container);
+        }
+    }
+    (containers.len() == 1).then(|| containers.into_iter().next().unwrap())
+}
+
+fn hid_interface_container(path: &str) -> Option<String> {
+    let set = unsafe {
+        crate::win32::SetupDiGetClassDevsW(
+            &HID_DEVICE_INTERFACE,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    if set.is_null() || set == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let set = DeviceSet(set);
+    for index in 0..u32::MAX {
+        let mut interface = crate::win32::SpDeviceInterfaceData::default();
+        interface.cb_size = core::mem::size_of::<crate::win32::SpDeviceInterfaceData>() as u32;
+        if unsafe {
+            crate::win32::SetupDiEnumDeviceInterfaces(
+                set.0,
+                core::ptr::null_mut(),
+                &HID_DEVICE_INTERFACE,
+                index,
+                &mut interface,
+            )
+        } == 0
+        {
+            break;
+        }
+        let mut required = 0u32;
+        unsafe {
+            let _ = crate::win32::SetupDiGetDeviceInterfaceDetailW(
+                set.0,
+                &mut interface,
+                core::ptr::null_mut(),
+                0,
+                &mut required,
+                core::ptr::null_mut(),
+            );
+        }
+        if crate::win32::last_error() != ERROR_INSUFFICIENT_BUFFER || required == 0 {
+            continue;
+        }
+        let cb_size = if core::mem::size_of::<usize>() == 8 { 8 } else { 6 };
+        let mut buffer = vec![0u8; required as usize];
+        unsafe {
+            core::ptr::write_unaligned(buffer.as_mut_ptr() as *mut u32, cb_size);
+        }
+        let mut info: SpDevInfoData = unsafe { core::mem::zeroed() };
+        info.cb_size = core::mem::size_of::<SpDevInfoData>() as u32;
+        if unsafe {
+            crate::win32::SetupDiGetDeviceInterfaceDetailW(
+                set.0,
+                &mut interface,
+                buffer.as_mut_ptr() as *mut c_void,
+                required,
+                core::ptr::null_mut(),
+                &mut info as *mut SpDevInfoData as *mut c_void,
+            )
+        } == 0
+        {
+            continue;
+        }
+        let wide: Vec<u16> = buffer[4..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+            .collect();
+        let end = wide.iter().position(|value| *value == 0).unwrap_or(wide.len());
+        let candidate = String::from_utf16_lossy(&wide[..end]);
+        if candidate.eq_ignore_ascii_case(path) {
+            return container_property(set.0, &info);
+        }
+    }
+    None
 }
 
 fn property_address(set: Handle, device: &SpDevInfoData) -> Option<String> {
@@ -368,6 +529,58 @@ fn decode_battery(kind: u32, bytes: &[u8]) -> Option<u8> {
     (level <= 100).then_some(level)
 }
 
+#[derive(Clone, Copy)]
+struct TrackedBattery {
+    level: u8,
+    measured_at: Instant,
+}
+
+fn update_battery_times(
+    tracked: &mut HashMap<String, TrackedBattery>,
+    connected: &BTreeSet<String>,
+    batteries: &HashMap<String, u8>,
+    now: Instant,
+) -> HashMap<String, Instant> {
+    tracked.retain(|address, _| connected.contains(address));
+    let mut times = HashMap::new();
+    for (address, level) in batteries {
+        let entry = tracked.entry(address.clone()).or_insert(TrackedBattery {
+            level: *level,
+            measured_at: now,
+        });
+        if entry.level != *level {
+            entry.level = *level;
+            entry.measured_at = now;
+        }
+        times.insert(address.clone(), entry.measured_at);
+    }
+    times
+}
+
+fn cached_battery_times(
+    connected: &BTreeSet<String>,
+    batteries: &HashMap<String, u8>,
+    now: Instant,
+) -> HashMap<String, Instant> {
+    static TRACKED: OnceLock<Mutex<HashMap<String, TrackedBattery>>> = OnceLock::new();
+    let mut tracked = TRACKED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    update_battery_times(&mut tracked, connected, batteries, now)
+}
+
+fn unambiguous_batteries(
+    levels: HashMap<String, BTreeSet<u8>>,
+) -> HashMap<String, u8> {
+    levels
+        .into_iter()
+        .filter_map(|(address, levels)| {
+            (levels.len() == 1).then(|| (address, *levels.first().unwrap()))
+        })
+        .collect()
+}
+
 fn bluetooth_address(target: &Target) -> Option<String> {
     if target.backend != BackendId::Bluetooth {
         return None;
@@ -394,26 +607,34 @@ fn standard_hid_matches_address(interface: &HidInterface, address: &str) -> bool
         || compact_hex(&interface.path).contains(address)
 }
 
-/// Windows can expose the same Bluetooth peripheral through both its cached
-/// Bluetooth battery property and a standard HID Battery Strength report.
-/// Merge them only when the standard HID path or serial independently contains
-/// the Bluetooth address and the user-visible product strings agree.
+/// Windows can expose one Bluetooth peripheral through several HID and system
+/// battery routes. Prefer the PnP container ID; retain the address/name check
+/// as a conservative fallback for older drivers that do not expose it.
 pub(crate) fn same_physical_device(first: &Target, second: &Target) -> bool {
     let (bluetooth, standard) = match (first.backend, second.backend) {
         (BackendId::Bluetooth, BackendId::StandardHid) => (first, second),
         (BackendId::StandardHid, BackendId::Bluetooth) => (second, first),
         _ => return false,
     };
-    if !bluetooth
+    let same_name = bluetooth
         .name
         .trim()
-        .eq_ignore_ascii_case(standard.name.trim())
-    {
-        return false;
-    }
+        .eq_ignore_ascii_case(standard.name.trim());
     let Some(address) = bluetooth_address(bluetooth) else {
         return false;
     };
+    if let (Some(bluetooth_container), Ok(interface)) =
+        (bluetooth_container(&address), standard.hid())
+    {
+        if hid_interface_container(&interface.path)
+            .is_some_and(|container| container == bluetooth_container)
+        {
+            return true;
+        }
+    }
+    if !same_name || standard.backend != BackendId::StandardHid {
+        return false;
+    }
     standard
         .hid()
         .is_ok_and(|interface| standard_hid_matches_address(interface, &address))
@@ -421,7 +642,7 @@ pub(crate) fn same_physical_device(first: &Target, second: &Target) -> bool {
 
 fn cached_batteries() -> Result<HashMap<String, u8>, String> {
     let set = unsafe {
-        SetupDiGetClassDevsW(
+        crate::win32::SetupDiGetClassDevsW(
             core::ptr::null(),
             core::ptr::null(),
             core::ptr::null_mut(),
@@ -435,11 +656,15 @@ fn cached_batteries() -> Result<HashMap<String, u8>, String> {
         ));
     }
     let set = DeviceSet(set);
-    let mut batteries = HashMap::new();
+    let mut batteries: HashMap<String, BTreeSet<u8>> = HashMap::new();
     for index in 0..u32::MAX {
         let mut device: SpDevInfoData = unsafe { core::mem::zeroed() };
         device.cb_size = core::mem::size_of::<SpDevInfoData>() as u32;
         if unsafe { SetupDiEnumDeviceInfo(set.0, index, &mut device) } == 0 {
+            let error = crate::win32::last_error();
+            if error != ERROR_NO_MORE_ITEMS {
+                return Err(format!("SetupDiEnumDeviceInfo failed: {error}"));
+            }
             break;
         }
         let Some(id) = instance_id(set.0, &device) else {
@@ -454,10 +679,10 @@ fn cached_batteries() -> Result<HashMap<String, u8>, String> {
             continue;
         };
         if let Some(level) = property_battery(set.0, &device) {
-            batteries.insert(address, level);
+            batteries.entry(address).or_default().insert(level);
         }
     }
-    Ok(batteries)
+    Ok(unambiguous_batteries(batteries))
 }
 
 fn family_of(name: &str, class_of_device: u32) -> crate::device::DeviceFamily {
@@ -496,6 +721,9 @@ pub fn poll() -> Result<Poll, String> {
     let connected = connected_devices()?;
     let batteries = cached_batteries()?;
     let now = Instant::now();
+    let connected_addresses: BTreeSet<String> =
+        connected.iter().map(|device| device.address.clone()).collect();
+    let battery_times = cached_battery_times(&connected_addresses, &batteries, now);
     let mut present = BTreeSet::new();
     let mut snapshots = Vec::new();
     for device in connected {
@@ -517,7 +745,7 @@ pub fn poll() -> Result<Poll, String> {
             dpi: Dpi::default(),
             polling_rate: Default::default(),
             connected: true,
-            battery_at: Some(now),
+            battery_at: battery_times.get(&device.address).copied(),
             battery_unavailable: false,
         });
     }
@@ -584,6 +812,66 @@ mod tests {
         );
         assert_eq!(decode_battery(DEVPROP_TYPE_UINT32, &[50, 0]), None);
         assert_eq!(decode_battery(DEVPROP_TYPE_STRING, &[50]), None);
+    }
+
+    #[test]
+    fn unchanged_cached_reading_keeps_its_original_measurement_time() {
+        let address = ["AA", "BB", "01", "02", "03", "04"].concat();
+        let connected = BTreeSet::from([address.clone()]);
+        let mut batteries = HashMap::from([(address.clone(), 50)]);
+        let mut tracked = HashMap::new();
+        let start = Instant::now();
+        assert_eq!(
+            update_battery_times(&mut tracked, &connected, &batteries, start).get(&address),
+            Some(&start)
+        );
+        let later = start + std::time::Duration::from_secs(30);
+        assert_eq!(
+            update_battery_times(&mut tracked, &connected, &batteries, later).get(&address),
+            Some(&start)
+        );
+
+        batteries.insert(address.clone(), 49);
+        let changed = later + std::time::Duration::from_secs(30);
+        assert_eq!(
+            update_battery_times(&mut tracked, &connected, &batteries, changed).get(&address),
+            Some(&changed)
+        );
+
+        batteries.clear();
+        assert!(update_battery_times(&mut tracked, &connected, &batteries, changed).is_empty());
+        assert!(tracked.contains_key(&address));
+        update_battery_times(&mut tracked, &BTreeSet::new(), &batteries, changed);
+        assert!(!tracked.contains_key(&address));
+    }
+
+    #[test]
+    fn conflicting_cached_levels_for_one_address_remain_unknown() {
+        let address = ["AA", "BB", "01", "02", "03", "04"].concat();
+        let consistent = unambiguous_batteries(HashMap::from([(
+            address.clone(),
+            BTreeSet::from([40]),
+        )]));
+        assert_eq!(consistent.get(&address), Some(&40));
+
+        let conflicting = unambiguous_batteries(HashMap::from([(
+            address.clone(),
+            BTreeSet::from([40, 41]),
+        )]));
+        assert!(!conflicting.contains_key(&address));
+    }
+
+    #[test]
+    fn windows_container_guid_uses_native_field_endianness() {
+        let bytes = [
+            0x06, 0xd2, 0x7e, 0x8c, 0x8a, 0x3f, 0x27, 0x48, 0xb3, 0xab, 0xae,
+            0x9e, 0x1f, 0xae, 0xfc, 0x6c,
+        ];
+        assert_eq!(
+            guid_text(&bytes).as_deref(),
+            Some("8C7ED206-3F8A-4827-B3AB-AE9E1FAEFC6C")
+        );
+        assert_eq!(guid_text(&bytes[..15]), None);
     }
 
     #[test]

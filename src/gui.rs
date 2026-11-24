@@ -582,6 +582,20 @@ fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, po
     merge_additional_at(shared, backend, poll, std::time::Instant::now());
 }
 
+fn legacy_rog_history_owner(
+    devices: &std::collections::BTreeMap<String, DeviceSnapshot>,
+) -> Option<String> {
+    let owners: Vec<_> = devices
+        .values()
+        .filter(|device| {
+            device.basic.is_none()
+                && device.link.is_some()
+                && device.reading.family == crate::device::DeviceFamily::Mouse
+        })
+        .collect();
+    (owners.len() == 1).then(|| owners[0].reading.key.clone())
+}
+
 fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll,
     now: std::time::Instant) {
     if backend==crate::backends::BackendId::Rapoo {
@@ -625,29 +639,30 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
         }
     }
     for mut snapshot in poll.snapshots {
-        if backend == crate::backends::BackendId::StandardHid
+        if backend == crate::backends::BackendId::Bluetooth
             && shared.devices.values().any(|device| {
                 device.basic.as_ref().is_some_and(|other| {
-                    other.target.backend == crate::backends::BackendId::Bluetooth
+                    other.connected
+                        && other.target.backend != crate::backends::BackendId::Bluetooth
                         && crate::backends::bluetooth::same_physical_device(
-                            &other.target,
                             &snapshot.target,
+                            &other.target,
                         )
                 })
             })
         {
             continue;
         }
-        if backend == crate::backends::BackendId::Bluetooth {
+        if backend != crate::backends::BackendId::Bluetooth {
             let duplicates: Vec<String> = shared
                 .devices
                 .iter()
                 .filter_map(|(key, device)| {
                     device.basic.as_ref().and_then(|other| {
-                        (other.target.backend == crate::backends::BackendId::StandardHid
+                        (other.target.backend == crate::backends::BackendId::Bluetooth
                             && crate::backends::bluetooth::same_physical_device(
-                                &snapshot.target,
                                 &other.target,
+                                &snapshot.target,
                             ))
                         .then(|| key.clone())
                     })
@@ -3349,9 +3364,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         aliases.extend(pending_aliases);
                         // Legacy files had no key and only sampled the primary
                         // ROG mouse. Do not assign them when ownership is ambiguous.
-                        let rog: Vec<_> = s.devices.values().filter(|device| device.link.is_some()
-                            && device.reading.family == crate::device::DeviceFamily::Mouse).collect();
-                        let owner = (rog.len() == 1).then(|| rog[0].reading.key.clone());
+                        let owner = legacy_rog_history_owner(&s.devices);
                         (samples, aliases, aliases_changed, owner, s.history_epoch,
                             s.devices.keys().cloned().collect::<Vec<_>>())
                     };
@@ -4184,6 +4197,59 @@ mod backend_tests {
                 charging: Some(false), voltage_mv: None, approximate: false, level: None }) }
     }
 
+    fn history_owner_device(
+        key: &str,
+        family: DeviceFamily,
+        linked: bool,
+        basic: Option<Snapshot>,
+    ) -> DeviceSnapshot {
+        let iface = hid::HidInterface {
+            path: key.into(), serial: String::new(), product: "Test mouse".into(),
+            vendor_id: 0, product_id: 0, usage_page: 1, usage: 2,
+            input_len: 20, output_len: 20, feature_len: 0,
+        };
+        DeviceSnapshot {
+            reading: DeviceReading {
+                key: key.into(), name: "Test mouse".into(), family, battery: None,
+                connected: true, quality: crate::device::ReadingQuality::Live,
+            },
+            ident: Default::default(),
+            state: None,
+            link: linked.then(|| hid::Link {
+                mode: "Wireless24G".into(), report_id: 0, iface,
+                all_interfaces: Vec::new(),
+            }),
+            battery_at: None,
+            full_at: std::time::Instant::now(),
+            basic,
+            basic_status: None,
+        }
+    }
+
+    #[test]
+    fn legacy_rog_history_ignores_bluetooth_mice_with_link_metadata() {
+        let bluetooth = history_owner_device(
+            "bluetooth",
+            DeviceFamily::Mouse,
+            true,
+            Some(snapshot(BackendId::Bluetooth, "bluetooth", 80)),
+        );
+        let mut devices = std::collections::BTreeMap::from([("bluetooth".into(), bluetooth)]);
+        assert_eq!(legacy_rog_history_owner(&devices), None);
+
+        devices.insert(
+            "rog".into(),
+            history_owner_device("rog", DeviceFamily::Mouse, true, None),
+        );
+        assert_eq!(legacy_rog_history_owner(&devices).as_deref(), Some("rog"));
+
+        devices.insert(
+            "rog-two".into(),
+            history_owner_device("rog-two", DeviceFamily::Mouse, true, None),
+        );
+        assert_eq!(legacy_rog_history_owner(&devices), None);
+    }
+
     #[test]
     fn history_collects_each_device_family_without_republishing_cached_samples() {
         let mut shared = Shared::new(Settings::default());
@@ -4379,7 +4445,7 @@ mod backend_tests {
         assert_eq!(shared.cfg.device_names.get("confirmed-unit").map(String::as_str),Some("My mouse"));
     }
     #[test]
-    fn address_verified_bluetooth_replaces_standard_hid_and_preserves_preferences() {
+    fn richer_hid_reading_replaces_identity_verified_bluetooth_and_preserves_preferences() {
         let address = ["AA", "BB", "01", "02", "03", "04"].concat();
         let bluetooth_interface = hid::HidInterface {
             path: format!("bluetooth:{address}"),
@@ -4418,17 +4484,37 @@ mod backend_tests {
         shared.cfg.tray_device = Some(standard_key.clone());
         let now = std::time::Instant::now();
         merge_additional_at(&mut shared, BackendId::StandardHid, vec![standard.clone()].into(), now);
-        merge_additional_at(&mut shared, BackendId::Bluetooth, vec![bluetooth].into(), now + Duration::from_secs(1));
+        merge_additional_at(&mut shared, BackendId::Bluetooth, vec![bluetooth.clone()].into(), now + Duration::from_secs(1));
 
         assert_eq!(shared.devices.len(), 1);
+        assert!(shared.devices.contains_key(&standard_key));
+        shared
+            .devices
+            .get_mut(&standard_key)
+            .unwrap()
+            .basic
+            .as_mut()
+            .unwrap()
+            .connected = false;
+        merge_additional_at(
+            &mut shared,
+            BackendId::Bluetooth,
+            vec![bluetooth.clone()].into(),
+            now + Duration::from_secs(2),
+        );
         assert!(shared.devices.contains_key(&bluetooth_key));
-        assert_eq!(shared.cfg.device_names.get(&bluetooth_key).map(String::as_str), Some("My headphones"));
-        assert_eq!(shared.cfg.device_order, vec![bluetooth_key.clone()]);
-        assert_eq!(shared.cfg.tray_device.as_deref(), Some(bluetooth_key.as_str()));
 
-        merge_additional_at(&mut shared, BackendId::StandardHid, vec![standard].into(), now + Duration::from_secs(2));
+        let mut shared = Shared::new(Settings::default());
+        shared.cfg.device_names.insert(bluetooth_key.clone(), "My headphones".into());
+        shared.cfg.device_order = vec![bluetooth_key.clone()];
+        shared.cfg.tray_device = Some(bluetooth_key.clone());
+        merge_additional_at(&mut shared, BackendId::Bluetooth, vec![bluetooth].into(), now);
+        merge_additional_at(&mut shared, BackendId::StandardHid, vec![standard].into(), now + Duration::from_secs(1));
         assert_eq!(shared.devices.len(), 1);
-        assert!(shared.devices.contains_key(&bluetooth_key));
+        assert!(shared.devices.contains_key(&standard_key));
+        assert_eq!(shared.cfg.device_names.get(&standard_key).map(String::as_str), Some("My headphones"));
+        assert_eq!(shared.cfg.device_order, vec![standard_key.clone()]);
+        assert_eq!(shared.cfg.tray_device.as_deref(), Some(standard_key.as_str()));
     }
     #[test]
     fn razer_sibling_fallback_preserves_preferences_and_latest_receiver_identity() {
