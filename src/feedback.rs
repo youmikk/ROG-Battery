@@ -151,6 +151,9 @@ pub fn collect_probe() -> Result<String, String> {
         }
         let provider: &dyn super::backends::DeviceBackend = match backend {
             super::backends::BackendId::Logitech => &super::backends::logitech::Logitech,
+            super::backends::BackendId::LogitechHeadset => {
+                &super::backends::logitech_headset::LogitechHeadset
+            }
             super::backends::BackendId::Rapoo => &super::backends::rapoo::Rapoo,
             super::backends::BackendId::RapooLegacy => &super::backends::rapoo_legacy::RapooLegacy,
             super::backends::BackendId::RapooOffice => &super::backends::rapoo_office::RapooOffice,

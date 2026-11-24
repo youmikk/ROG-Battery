@@ -1,5 +1,6 @@
 //! 品牌适配层。未知能力保留为空，不能从设备类型推断写入协议。
 pub mod logitech;
+pub mod logitech_headset;
 pub mod lofree;
 pub mod mchose_qhw;
 pub mod mchose_mouse;
@@ -74,6 +75,7 @@ use crate::{device::DeviceFamily, hid::HidInterface, win32::HidApi};
 pub enum BackendId {
     Rog,
     Logitech,
+    LogitechHeadset,
     Rapoo,
     RapooLegacy,
     RapooOffice,
@@ -133,8 +135,8 @@ pub enum BackendId {
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 58] = [
-    BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
+pub const ADDITIONAL_BACKENDS: [BackendId; 59] = [
+    BackendId::Logitech, BackendId::LogitechHeadset, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
     BackendId::VgnRy, BackendId::MchoseModern, BackendId::MchoseK99, BackendId::Moondrop, BackendId::RapooLegacy,
@@ -151,6 +153,7 @@ impl BackendId {
         match self {
             Self::Rog => "ROG",
             Self::Logitech => "Logitech HID++",
+            Self::LogitechHeadset => "Logitech G PRO X 2",
             Self::Rapoo => "Rapoo nRF54L",
             Self::RapooLegacy => "Rapoo VT legacy",
             Self::RapooOffice => "Rapoo office mouse",
@@ -220,7 +223,7 @@ impl BackendId {
             | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901 | Self::AjazzAk980
             | Self::VeekosShine60
             | Self::AulaHfdMechanical) { return true; }
-        matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnKeyboard | Self::CompX | Self::Razer
+        matches!(self, Self::Logitech | Self::LogitechHeadset | Self::Rapoo | Self::Vgn | Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnKeyboard | Self::CompX | Self::Razer
             | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseModern | Self::VgnRy | Self::MchoseGlw | Self::Edifier | Self::EweadnS9 | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::Flydigi | Self::GameSir | Self::GearHub | Self::G3m | Self::AjazzAk980 | Self::Aula | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
     }
 
@@ -236,7 +239,7 @@ impl BackendId {
                 | Self::AulaHfdMechanical => 120,
             Self::Rapoo | Self::DualSense | Self::XInput => 8,
             Self::Bluetooth => 120,
-            Self::Logitech => 180,
+            Self::Logitech | Self::LogitechHeadset => 180,
             Self::CompX => 45,
             Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => 120,
             Self::Vgn | Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnRy | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseModern | Self::MchoseGlw | Self::Edifier | Self::EweadnS9 | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::Flydigi | Self::GameSir | Self::GearHub | Self::G3m | Self::Aula | Self::StandardHid => 120,
@@ -259,6 +262,7 @@ impl BackendId {
             Self::AulaHfdMechanical => Some(30_000),
             Self::Rapoo | Self::RapooMt560 | Self::DualSense | Self::XInput => Some(2_000),
             Self::Bluetooth => Some(30_000),
+            Self::LogitechHeadset => Some(120_000),
             Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnRy | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseModern | Self::MchoseGlw | Self::Edifier | Self::EweadnS9 | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::Flydigi | Self::GameSir | Self::GearHub | Self::G3m | Self::Aula | Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
             _ => None,
         }
@@ -340,7 +344,7 @@ impl Target {
             | BackendId::MchoseR9 | BackendId::AulaV9Pro | BackendId::DareuEm901
             | BackendId::AulaHfdMechanical
             | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Cherry | BackendId::Lofree | BackendId::Nova | BackendId::Inzone | BackendId::HyperX
-            | BackendId::DualSense | BackendId::VgnBeiying | BackendId::VgnDragonfly3 | BackendId::VgnRy | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::MchoseModern | BackendId::MchoseGlw | BackendId::Edifier | BackendId::EweadnS9 | BackendId::EweadnS9Pro | BackendId::Dareu | BackendId::EightBitDo | BackendId::Flydigi | BackendId::GameSir | BackendId::GearHub | BackendId::G3m | BackendId::AjazzAk980 | BackendId::VeekosShine60 | BackendId::Aula) {
+            | BackendId::DualSense | BackendId::VgnBeiying | BackendId::VgnDragonfly3 | BackendId::VgnRy | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::MchoseModern | BackendId::MchoseGlw | BackendId::Edifier | BackendId::EweadnS9 | BackendId::EweadnS9Pro | BackendId::Dareu | BackendId::EightBitDo | BackendId::Flydigi | BackendId::GameSir | BackendId::GearHub | BackendId::G3m | BackendId::AjazzAk980 | BackendId::VeekosShine60 | BackendId::LogitechHeadset | BackendId::Aula) {
             interface.path.to_ascii_lowercase()
         } else {
             format!(
@@ -499,6 +503,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
     let provider: &dyn DeviceBackend = match backend {
         BackendId::Rog => &rog::Rog,
         BackendId::Logitech => &logitech::Logitech,
+        BackendId::LogitechHeadset => &logitech_headset::LogitechHeadset,
         BackendId::Rapoo => &rapoo::Rapoo,
         BackendId::RapooLegacy => &rapoo_legacy::RapooLegacy,
         BackendId::RapooOffice => &rapoo_office::RapooOffice,
