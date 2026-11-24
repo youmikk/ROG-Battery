@@ -14,7 +14,7 @@ When Windows already exposes a battery level for a connected classic or dual-mod
 
 Only currently connected, remembered Bluetooth devices are enumerated, with the Bluetooth address providing a stable identity. Battery data comes from a Windows PnP cached property and is accepted only for complete `BYTE` or `UINT32` values in the `0–100` range. Conflicting values from several nodes for one address, missing cache data, invalid values and disconnected devices do not create a new reading. Re-reading an unchanged cached value does not renew its measurement time, and charging remains unknown. The system Bluetooth card is merged with vendor and standard HID routes for the same physical device through the PnP Container ID; older drivers without container information use a conservative address-and-name fallback.
 
-The background query interval is 30 seconds, and valid samples expire after 120 seconds. This implementation covers classic Bluetooth and dual-mode devices with a classic Bluetooth node. Headsets or other devices that appear only through BLE / GATT may still require a separate WinRT implementation and must not be presented as universal brand support. All 581 Rust regressions pass. No local Bluetooth hardware was available for acceptance testing, so sleep caching, wake recovery and multiple simultaneous devices still require hardware verification.
+The background query interval is 30 seconds, and valid samples expire after 120 seconds. This implementation covers classic Bluetooth and dual-mode devices with a classic Bluetooth node. Headsets or other devices that appear only through BLE / GATT may still require a separate WinRT implementation and must not be presented as universal brand support. All 584 Rust regressions pass. No local Bluetooth hardware was available for acceptance testing, so sleep caching, wake recovery and multiple simultaneous devices still require hardware verification.
 
 ## Unreleased: CompX power-only receivers
 
@@ -42,6 +42,12 @@ The wired link accepts only `0C45:8039`, product `AK980 PRO`, and `MI_02 / FF68:
 Each poll sends one `GET_DEVICE_INFO`: `AA 10 30`, address, last-packet flag and zero data. A reply must start `55 10`, declare 19–48 bytes, echo the keyboard VID/PID `0C45:8039`, use the known work mode and carry `0–100%`. Work mode is `0` on wired USB and `2` on 2.4 GHz. The `FF67` bulk channel, 2.4 GHz `MI_04` node and mismatched echoes are excluded. Two charge samples are insufficient to classify charging or full state.
 
 The public contributor tested both links at 100%; a normal read took about 14–17 ms. No matching keyboard was available for project acceptance testing, so discharge behavior, sleep/wake, Bluetooth mode, multiple keyboards and web-driver exclusivity remain pending.
+
+## Unreleased: Veekos Shine 60
+
+Only `3151:5026`, the exact product name `Veekos 2.4G Wireless Keyboard`, and `MI_02 / FFFF:0002` are accepted, with zero input/output lengths and a 65-byte Feature length. The descriptor must prove one Feature report: ID `0x83` when present, or unnumbered ID `0x00` for the variant. Multiple or additional reports are rejected.
+
+One GetFeature is sent, with no Output or SetFeature. The reply must be 65 bytes and echo the report ID, with byte 1 equal to zero, byte 2 containing `0–100%`, and byte 3 equal to 100. Mismatched echoes or scale, short replies and silence create no sample, and charging remains unknown. A public user measured 61% and 48% on one receiver while coexisting with the vendor driver. No matching hardware was available for project acceptance testing, so cold start, sleep/wake, 0% and multiple receivers remain pending.
 
 ## Version 1.4.7: VGN and MCHOSE receivers
 
