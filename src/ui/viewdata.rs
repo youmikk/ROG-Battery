@@ -34,4 +34,5 @@ pub struct Data<'a> {
     pub readings: &'a [crate::device::DeviceReading],
     pub audio: &'a crate::audio::Snapshot,
     pub basic: Option<&'a crate::backends::Snapshot>,
+    pub store: crate::store::View,
 }

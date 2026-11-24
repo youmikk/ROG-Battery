@@ -228,6 +228,12 @@ pub enum Act {
     OpenRepo,
     /// 设置页「关于」：检查更新入口。
     CheckUpdate,
+    DownloadUpdate,
+    InstallUpdate,
+    DismissUpdate,
+    CancelUpdate,
+    ExitToStoreUpdate,
+    ReviewStore,
     DeviceFeedback,
     FeedbackHistory,
     /// 设置页「关于」：打开 Microsoft Store 产品页。
@@ -550,6 +556,10 @@ impl Default for Ui {
 }
 
 impl Ui {
+    pub fn show_home_update(&self, view: &crate::store::View) -> bool {
+        self.page == Page::Home && view.home_visible
+    }
+
     pub fn sync_devices(&mut self, devices: &[crate::device::DeviceReading]) {
         let keys: Vec<_> = devices.iter().map(|d| d.key.clone()).collect();
         if keys != self.device_keys {
@@ -1105,6 +1115,43 @@ impl Ui {
 #[cfg(test)]
 mod drag_tests {
     use super::*;
+
+    #[test]
+    fn automatic_update_reminders_are_limited_to_home() {
+        let view = crate::store::View {
+            phase: crate::store::Phase::Available, available: true, home_visible: true,
+            failure: None, last_checked_day: None,
+        };
+        let mut ui = Ui::default();
+        assert!(ui.show_home_update(&view));
+        for page in [Page::Battery, Page::Perf, Page::Light, Page::Keys, Page::Settings] {
+            ui.page = page;
+            assert!(!ui.show_home_update(&view));
+        }
+        ui.page = Page::Home;
+        assert!(!ui.show_home_update(&crate::store::View { home_visible: false, ..view }));
+    }
+
+    #[test]
+    fn update_and_review_actions_work_without_a_device() {
+        for action in [Act::CheckUpdate, Act::DownloadUpdate, Act::InstallUpdate,
+            Act::CancelUpdate, Act::DismissUpdate, Act::ExitToStoreUpdate, Act::ReviewStore] {
+            assert!(!action.needs_device());
+        }
+    }
+
+    #[test]
+    fn about_section_keeps_its_own_scroll_position() {
+        let mut ui = Ui::default();
+        *ui.scroll_mut(Page::Settings) = 40.0;
+        ui.select_settings_section(SettingsSection::About);
+        assert_eq!(ui.scroll_y(Page::Settings), 0.0);
+        *ui.scroll_mut(Page::Settings) = 80.0;
+        ui.select_settings_section(SettingsSection::General);
+        assert_eq!(ui.scroll_y(Page::Settings), 40.0);
+        ui.select_settings_section(SettingsSection::About);
+        assert_eq!(ui.scroll_y(Page::Settings), 80.0);
+    }
 
     fn readings(keys: &[&str]) -> Vec<crate::device::DeviceReading> {
         keys.iter().map(|key| crate::device::DeviceReading {

@@ -11,6 +11,7 @@ pub mod layout;
 pub mod pages;
 pub mod theme;
 pub mod viewdata;
+pub mod store_updates;
 pub mod titlebar;
 pub mod tray_popup;
 pub mod panel_icons;

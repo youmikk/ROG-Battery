@@ -202,7 +202,7 @@ fn select_box(p: &mut Painter, r: R, text: &str, open: bool) {
 }
 
 /// 主按钮 / 次按钮（`.btn`）。
-fn button(p: &mut Painter, ui: &mut Ui, r: R, label: &str, primary: bool, act: Act) {
+pub(super) fn button(p: &mut Painter, ui: &mut Ui, r: R, label: &str, primary: bool, act: Act) {
     let hovered = ui.hover == Some(act);
     let rad = 8.0;
     if primary {
@@ -1389,6 +1389,9 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         Align::Left,
     );
     c.y += 25.0;
+    if ui.show_home_update(&d.store) {
+        c.y += super::store_updates::card(p, ui, &d.store, R::new(c.x, c.y, c.w, 0.0), true) + 18.0;
+    }
     if d.readings.is_empty() {
         p.text(
             crate::tr!("连接设备后会自动显示。"),
@@ -3009,13 +3012,14 @@ pub fn settings_header(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     let container = R::new(c.x, c.y, tabs_w, 36.0);
     p.round(container, 9.0, p.t.bg_sunken);
     p.round_stroke(container, 9.0, p.t.border, 1.0);
-    let tab_width = (container.w - 6.0) / 4.0;
-    for (index, (section, label)) in [
+    let tabs = [
         (SettingsSection::General, crate::tr!("常规")),
         (SettingsSection::Battery, crate::tr!("电量与托盘")),
         (SettingsSection::Data, crate::tr!("数据与存储")),
         (SettingsSection::About, crate::tr!("关于")),
-    ].into_iter().enumerate() {
+    ];
+    let tab_width = (container.w - 6.0) / tabs.len() as f32;
+    for (index, (section, label)) in tabs.into_iter().enumerate() {
         let r = R::new(container.x + 3.0 + index as f32 * tab_width, container.y + 3.0, tab_width, 30.0);
         let on = section == ui.settings_section;
         let act = Act::SettingsSection(section);
@@ -3431,14 +3435,23 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     p.text(&version, badge, 13.0, true, t.accent, Align::Center);
     let check_label = tr("检查更新", "Check for updates");
     let check_w = (p.measure(check_label, 12.0, false).0 + 30.0).max(86.0);
-    draw_button(p, ui, R::new(badge.right() + 10.0, y, check_w, 36.0),
-        check_label, Act::CheckUpdate, false);
+    let check = R::new(badge.right() + 10.0, y, check_w, 36.0);
+    if d.store.phase != crate::store::Phase::Unsupported {
+        if d.store.phase.busy() {
+            p.text(check_label, check, 12.0, false, t.text3, Align::Center);
+        } else {
+            draw_button(p, ui, check, check_label, Act::CheckUpdate, false);
+        }
+    }
     p.text(tr("设备电量，一眼就懂。", "Device battery at a glance."),
         R::new(brand_x, y + 36.0, w - (brand_x - x), 19.0),
         12.0, false, t.text2, Align::Left);
 
     let row_h = 74.0;
-    let project = R::new(x, logo.bottom() + 28.0, w, row_h);
+    let update = R::new(x, logo.bottom() + 24.0, w, 0.0);
+    let update_h = super::store_updates::card(p, ui, &d.store, update, false);
+    let project_y = if update_h > 0.0 { update.y + update_h + 18.0 } else { update.y };
+    let project = R::new(x, project_y, w, row_h);
     p.card(project, 10.0, t.card, t.border);
     let repo_w = (p.measure("GitHub", 12.0, false).0 + 53.0).max(86.0);
     let repo = R::new(project.right() - 18.0 - repo_w, project.cy() - 18.0, repo_w, 36.0);
@@ -3459,7 +3472,7 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     p.text(tr("支持与反馈", "Support & feedback"),
         R::new(x + 2.0, heading_y, w - 4.0, 19.0),
         12.0, true, t.text2, Align::Left);
-    let support = R::new(x, heading_y + 29.0, w, row_h * 3.0);
+    let support = R::new(x, heading_y + 29.0, w, row_h * 4.0);
     p.card(support, 10.0, t.card, t.border);
     let rows = [
         (FeedbackIcon::Message, tr("反馈设备", "Device feedback"),
@@ -3471,6 +3484,9 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         (FeedbackIcon::File, tr("诊断日志", "Diagnostic logs"),
             tr("查看本地运行记录", "View local activity records"),
             tr("打开", "Open"), Act::OpenLogFolder),
+        (FeedbackIcon::Message, tr("评价 X-Battery", "Review X-Battery"),
+            tr("你的好评，是开发者持续更新的最大动力", "Your positive review is the developer's greatest motivation to keep improving"),
+            tr("前往", "View"), Act::ReviewStore),
     ];
     for (index, (icon, title, description, label, act)) in rows.into_iter().enumerate() {
         let row = R::new(support.x, support.y + index as f32 * row_h, support.w, row_h);

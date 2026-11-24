@@ -35,6 +35,7 @@ mod proto;
 mod report;
 mod settings;
 mod snapshot;
+mod store;
 mod taskbar_widget;
 mod tray_icon;
 mod tray_prefs;

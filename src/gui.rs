@@ -1,5 +1,5 @@
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -755,6 +755,8 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
 }
 
 struct Shared {
+    store_update_pending: bool,
+    rog_write_active: bool,
     device_keys_dirty: bool,
     refresh_generation: u64,
     completed_requests: BTreeMap<crate::backends::BackendId, u64>,
@@ -909,6 +911,9 @@ impl Shared {
     }
 
     fn observe_history(&mut self) {
+        if self.store_update_pending {
+            return;
+        }
         let now = std::time::Instant::now();
         let unix = crate::snapshot::now_unix() as i64;
         for (key, device) in &self.devices {
@@ -965,6 +970,8 @@ impl Shared {
 
     fn new(cfg: Settings) -> Shared {
         Shared {
+            store_update_pending: false,
+            rog_write_active: false,
             device_keys_dirty: false,
             refresh_generation: 0,
             completed_requests: std::iter::once(crate::backends::BackendId::Rog).chain(crate::backends::ADDITIONAL_BACKENDS)
@@ -998,6 +1005,11 @@ impl Shared {
             results: VecDeque::new(),
             want_full: false,
         }
+    }
+
+    fn writes_pending(&self) -> bool {
+        self.rog_write_active || !self.pending.is_empty() || !self.source_busy.is_empty()
+            || self.source_pending.values().any(|queue| !queue.is_empty())
     }
 
     // 完整身份晚于首次电量返回时，保留选择和托盘偏好。
@@ -1793,6 +1805,190 @@ impl std::ops::Drop for TrayCtl {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StorePreparationAction {
+    Install,
+    ExitToStore,
+}
+
+struct StorePreparation {
+    action: StorePreparationAction,
+    started: std::time::Instant,
+    worker: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    result: Option<Result<(), String>>,
+    canceled: bool,
+}
+
+impl StorePreparation {
+    fn can_finish(&self, main_active: bool) -> bool {
+        let complete = self.canceled || self.result.as_ref().is_some_and(Result::is_err)
+            || self.result.is_some() && (main_active || self.action == StorePreparationAction::ExitToStore);
+        complete && (self.worker.is_none() || self.result.is_some())
+    }
+}
+
+struct StoreUpdates {
+    controller: crate::store::Controller,
+    preparation: RefCell<Option<StorePreparation>>,
+    writes_blocked: Cell<bool>,
+    ticking: Cell<bool>,
+}
+
+fn save_store_checkpoint(shared: &Arc<Mutex<Shared>>) -> Result<(), String> {
+    let gate = lock_shared(shared).history_gate.clone();
+    let _guard = gate.lock().unwrap_or_else(|error| error.into_inner());
+    let (samples, aliases) = {
+        let mut state = lock_shared(shared);
+        settings::save(&state.cfg)?;
+        let (samples, mut aliases) = state.history_tracker.take_pending();
+        aliases.extend(state.key_aliases.iter().map(|(old, new)| (old.clone(), new.clone())));
+        (samples, aliases)
+    };
+    if !samples.is_empty() || !aliases.is_empty() {
+        if let Err(error) = crate::history::update_device_history(&samples, &aliases, None) {
+            lock_shared(shared).history_tracker.retry(samples, aliases);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+impl StoreUpdates {
+    fn new(hwnd: win32::Handle) -> Self {
+        Self {
+            controller: crate::store::Controller::new(hwnd),
+            preparation: RefCell::new(None),
+            writes_blocked: Cell::new(false),
+            ticking: Cell::new(false),
+        }
+    }
+
+    fn view(&self) -> crate::store::View {
+        let mut view = self.controller.view();
+        if self.preparation.borrow().is_some() {
+            view.phase = crate::store::Phase::Preparing;
+            view.failure = None;
+        }
+        view
+    }
+
+    fn busy(&self) -> bool {
+        self.controller.installing() || self.preparation.borrow().is_some()
+    }
+
+    fn close_action(&self, mode: &str, tray_enabled: bool, taskbar_available: bool) -> WindowCloseAction {
+        if self.busy() { WindowCloseAction::Quit }
+        else { window_close_action(mode, tray_enabled, taskbar_available) }
+    }
+
+    fn begin(&self, action: StorePreparationAction, shared: &Arc<Mutex<Shared>>) -> bool {
+        if self.busy() {
+            return false;
+        }
+        if action == StorePreparationAction::Install {
+            if !self.controller.begin_install() {
+                return false;
+            }
+        } else {
+            self.controller.cancel();
+        }
+        let mut state = lock_shared(shared);
+        state.observe_history();
+        state.store_update_pending = true;
+        drop(state);
+        self.writes_blocked.set(true);
+        self.preparation.replace(Some(StorePreparation {
+            action,
+            started: std::time::Instant::now(),
+            worker: None,
+            result: None,
+            canceled: false,
+        }));
+        true
+    }
+
+    fn cancel(&self) {
+        let mut preparation = self.preparation.borrow_mut();
+        if let Some(job) = preparation.as_mut() {
+            job.canceled = true;
+            return;
+        }
+        drop(preparation);
+        self.controller.cancel();
+    }
+
+    fn tick(&self, main_active: bool, shared: &Arc<Mutex<Shared>>, signal: &Signal) -> (bool, Option<String>) {
+        if self.ticking.replace(true) {
+            return (false, None);
+        }
+        let before = self.view();
+        self.controller.tick(main_active);
+        let mut error = None;
+        let preparation = self.preparation.borrow_mut().take();
+        if let Some(mut job) = preparation {
+            if job.worker.is_none() && job.result.is_none() {
+                if job.canceled {
+                    job.result = Some(Ok(()));
+                } else if lock_shared(shared).writes_pending() {
+                    if job.started.elapsed() >= Duration::from_secs(30) {
+                        job.result = Some(Err(crate::ui::feedback::text(
+                            "设备操作仍未完成，请稍后再安装。", "Device operations have not finished. Try installing later.",
+                        ).into()));
+                    }
+                } else {
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    let shared_save = Arc::clone(shared);
+                    std::thread::spawn(move || {
+                        let _ = sender.send(save_store_checkpoint(&shared_save));
+                    });
+                    job.worker = Some(receiver);
+                }
+            }
+            if job.result.is_none() {
+                if let Some(worker) = &job.worker {
+                    match worker.try_recv() {
+                        Ok(result) => job.result = Some(result),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => job.result = Some(Err(
+                            crate::ui::feedback::text("保存任务未完成，请重试。", "The save task did not finish. Please retry.").into(),
+                        )),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+            }
+            if job.can_finish(main_active) {
+                let result = job.result.take().unwrap_or(Ok(()));
+                if job.canceled || result.is_err() {
+                    if job.action == StorePreparationAction::Install {
+                        self.controller.preparation_failed();
+                    }
+                    error = result.err();
+                } else if job.action == StorePreparationAction::Install {
+                    self.controller.install();
+                } else if let Err(open_error) = crate::dynlight::shell_open(crate::store::UPDATES_URL) {
+                    error = Some(open_error);
+                } else {
+                    signal.request_quit();
+                    nwg::stop_thread_dispatch();
+                }
+            } else {
+                self.preparation.replace(Some(job));
+            }
+        }
+        if self.view().phase == crate::store::Phase::Installed {
+            signal.request_quit();
+            nwg::stop_thread_dispatch();
+        }
+        if !self.busy() && self.view().phase != crate::store::Phase::Installed && self.writes_blocked.replace(false) {
+            let mut state = lock_shared(shared);
+            state.store_update_pending = false;
+            state.observe_history();
+        }
+        let changed = before != self.view();
+        self.ticking.set(false);
+        (changed, error)
+    }
+}
+
 /// 处理一个 `Act` 时要用到的一堆句柄。
 ///
 /// 打成一个结构而不是给 `handle_act` 传七个参数：这条链上每加一个能力
@@ -1807,6 +2003,7 @@ struct UiEnv<'a> {
     taskbar: &'a crate::taskbar_widget::TaskbarWidget,
     name_dialog: &'a crate::ui::device_name::Dialog,
     feedback_dialog: &'a crate::ui::feedback::Dialog,
+    store: &'a StoreUpdates,
 }
 
 impl<'a> UiEnv<'a> {
@@ -1839,6 +2036,11 @@ impl<'a> UiEnv<'a> {
     /// 改一项本地设置并立刻落盘，同时让界面用上新值。
     fn set_cfg(&self, f: impl FnOnce(&mut Settings)) {
         let mut shared = lock_shared(self.shared);
+        if shared.store_update_pending {
+            drop(shared);
+            self.say(crate::ui::feedback::text("更新准备期间暂时不能修改设置。", "Settings cannot be changed while preparing an update."));
+            return;
+        }
         let mut snapshot = shared.cfg.clone();
         f(&mut snapshot);
         if let Err(e) = settings::save(&snapshot) {
@@ -1874,6 +2076,12 @@ fn handle_act(a: Act, env: &UiEnv) {
     // 用户接着点别的东西时还以为是这次的结果。
     if !matches!(a, Act::None) {
         env.canvas.with_ui_mut(|u| u.clear_status());
+    }
+
+    if env.store.busy() && !matches!(a, Act::None | Act::Nav(_) | Act::SettingsSection(_)
+        | Act::OpenStore | Act::CancelUpdate | Act::DismissUpdate) {
+        env.say(crate::ui::feedback::text("正在准备或安装更新，请稍候。", "An update is being prepared or installed. Please wait."));
+        return;
     }
 
     // 读不到设备时，凡是要读写设备的动作都只回一句话：
@@ -2229,7 +2437,48 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
 
         Act::OpenRepo => open_url(env, "https://github.com/youmikk/X-Battery"),
-        Act::CheckUpdate => env.say(crate::ui::feedback::text("检查更新功能即将提供", "Update checking is coming soon")),
+        Act::CheckUpdate => {
+            env.store.controller.check();
+            env.canvas.repaint_now();
+        }
+        Act::DownloadUpdate => {
+            if !env.store.view().available || env.store.view().phase.busy() {
+                return;
+            }
+            if ask_confirm_owned(env.window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as _, crate::ui::feedback::text("下载微软商店更新", "Download Microsoft Store update"),
+                crate::ui::feedback::text("是否通过微软商店下载更新？\n\n下载期间电量监测继续运行，下载完成后不会自动安装。", "Download the update through Microsoft Store?\n\nBattery monitoring continues during the download. Installation will not start automatically.")) {
+                env.store.controller.download();
+                env.canvas.repaint_now();
+            }
+        }
+        Act::InstallUpdate | Act::ExitToStoreUpdate => {
+            let install = a == Act::InstallUpdate;
+            if install && env.store.view().phase != crate::store::Phase::ReadyToInstall {
+                return;
+            }
+            let title = if install { crate::ui::feedback::text("安装更新", "Install update") }
+                else { crate::ui::feedback::text("退出并在微软商店更新", "Exit and update in Microsoft Store") };
+            let message = if install {
+                crate::ui::feedback::text("开始安装更新？\n\n会先等待设备操作完成，保存设置和电量历史，再调用微软商店。安装可能关闭并重启软件，开机自启设置保持不变。", "Start installing the update?\n\nThe app waits for device operations and saves settings and battery history before calling Microsoft Store. Installation may close and restart the app. Your startup preference stays unchanged.")
+            } else {
+                crate::ui::feedback::text("保存数据并退出 X-Battery，然后打开微软商店更新页面？\n\n退出后电量监测会暂停，请在商店更新完成后重新打开软件。开机自启设置不会被关闭。", "Save data and exit X-Battery, then open Microsoft Store updates?\n\nBattery monitoring pauses after exit. Reopen the app when the Store update finishes. Your startup preference will not be disabled.")
+            };
+            if ask_confirm_owned(env.window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as _, title, message) {
+                let action = if install { StorePreparationAction::Install } else { StorePreparationAction::ExitToStore };
+                if env.store.begin(action, env.shared) {
+                    env.canvas.repaint_now();
+                }
+            }
+        }
+        Act::DismissUpdate => {
+            env.store.controller.dismiss();
+            env.canvas.repaint_now();
+        }
+        Act::CancelUpdate => {
+            env.store.cancel();
+            env.canvas.repaint_now();
+        }
+        Act::ReviewStore => open_url(env, crate::store::REVIEW_URL),
         Act::DeviceFeedback | Act::FeedbackHistory => {
             let s = lock_shared(env.shared);
             let devices = s.readings.iter().map(|reading| {
@@ -2255,7 +2504,7 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.feedback_dialog.show(env.window, devices, dark, matches!(a, Act::FeedbackHistory));
         }
 
-        Act::OpenStore => open_url(env, "https://apps.microsoft.com/detail/9NRC8HCD4BZ7"),
+        Act::OpenStore => open_url(env, crate::store::PRODUCT_URL),
     }
 }
 
@@ -3120,6 +3369,7 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
         let backend = target.backend;
         if backend != crate::backends::BackendId::Rog {
             let mut state = lock_shared(shared);
+            if state.store_update_pending { return false; }
             let queue = state.source_pending.entry(backend).or_default();
             if queue.len() >= MAX_PENDING { return false; }
             queue.push_back(cmd);
@@ -3133,6 +3383,7 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
     }
     {
         let mut s = lock_shared(shared);
+        if s.store_update_pending { return false; }
         if s.pending.len() >= MAX_PENDING {
             return false;
         }
@@ -3263,6 +3514,10 @@ fn parse_color(s: &str) -> Result<Option<[u8; 3]>, String> {
 /// 按钮组合 `MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2`：
 /// 默认按钮放在**第二个**（否）—— 用户手快按回车时不会误把按键绑成「无功能」。
 fn ask_confirm(title: &str, text: &str) -> bool {
+    ask_confirm_owned(std::ptr::null_mut(), title, text)
+}
+
+fn ask_confirm_owned(hwnd: win32::Handle, title: &str, text: &str) -> bool {
     const MB_YESNO: u32 = 0x0000_0004;
     const MB_ICONWARNING: u32 = 0x0000_0030;
     const MB_DEFBUTTON2: u32 = 0x0000_0100;
@@ -3272,7 +3527,7 @@ fn ask_confirm(title: &str, text: &str) -> bool {
     let c = crate::win32::to_wide(title);
     let r = unsafe {
         crate::win32::MessageBoxW(
-            std::ptr::null_mut(),
+            hwnd,
             t.as_ptr(),
             c.as_ptr(),
             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
@@ -3471,6 +3726,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         lock_shared(&shared).replace_mock_readings(readings);
     }
     let signal = Arc::new(Signal::new(cfg.refresh_interval_sec));
+    let store_updates = Rc::new(StoreUpdates::new(hwnd));
     let sender = notice.sender();
     let audio = crate::audio::Controls::new(move || sender.notice());
     let popup = Rc::new(crate::ui::tray_popup::Popup::new(sender, audio.clone())?);
@@ -3512,6 +3768,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     {
         let shared_p = Arc::clone(&shared);
         let audio_p = audio.clone();
+        let store_p = Rc::clone(&store_updates);
         canvas.set_painter(Box::new(move |inner, fonts, ui, args| {
             // 只在锁里拷一份数据，**不在锁里画** —— 画一帧要几毫秒，
             // 握着锁会让后台线程写结果时多等这段。
@@ -3595,6 +3852,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 readings: &readings,
                 audio: &audio,
                 basic: record.as_ref().and_then(|record| record.basic.as_ref()),
+                store: store_p.view(),
             };
             canvas::draw_frame(inner, fonts, ui, args, &theme, &data)
         }));
@@ -3756,13 +4014,19 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 // 但不能让这个 loop 无限跑下去、把读取饿死。
                 let mut ran = 0usize;
                 loop {
-                    let cmd = { lock_shared(&shared_t).pending.pop_front() };
+                    let cmd = {
+                        let mut state = lock_shared(&shared_t);
+                        let command = state.pending.pop_front();
+                        state.rog_write_active = command.is_some();
+                        command
+                    };
                     let Some((cmd, target)) = cmd else { break };
                     let res = match &cmd {
                         Cmd::Backup(_) | Cmd::Restore(_) => run_file_cmd(&cmd, target.as_ref()),
                         _ => run_cmd(&cmd, target.as_ref()),
                     };
                     let mut s = lock_shared(&shared_t);
+                    s.rog_write_active = false;
                     if let Some(target) = &target {
                         for device in s.devices.values_mut() {
                             if device
@@ -3844,9 +4108,47 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let audio_min = audio.clone();
     let tray_broadcast = Arc::clone(&tray_tb);
     let taskbar_broadcast = Rc::clone(&taskbar_widget);
+    let store_min = Rc::clone(&store_updates);
+    let signal_min = Arc::clone(&signal);
+    let store_e = Rc::clone(&store_updates);
+    let session_ending = Cell::new(false);
+    const STORE_TIMER: usize = 90;
     // 第二个参数是**处理器 id**（nwg 要求 > 0xFFFF），要过滤的消息在回调里判。
     let min_handler =
         nwg::bind_raw_event_handler(&window.handle, 0x10006, move |_h, msg, wp, _lp| {
+            if msg == 0x0011 {
+                session_ending.set(true);
+                lock_shared(&shared_language).store_update_pending = true;
+                return Some(1);
+            }
+            if msg == 0x0016 {
+                if wp != 0 {
+                    signal_min.request_quit();
+                    nwg::stop_thread_dispatch();
+                } else {
+                    session_ending.set(false);
+                    if !store_min.busy() {
+                        lock_shared(&shared_language).store_update_pending = false;
+                    }
+                }
+                return Some(0);
+            }
+            if msg == 0x0113 && wp == STORE_TIMER {
+                if !session_ending.get() {
+                    store_min.controller.startup();
+                    let main_active = unsafe {
+                        win32::IsWindowVisible(hwnd) != 0 && win32::IsIconic(hwnd) == 0
+                            && win32::GetForegroundWindow() == hwnd
+                    };
+                    let (changed, error) = store_min.tick(main_active, &shared_language, &signal_min);
+                    if let Some(error) = error {
+                        canvas_min.with_ui_mut(|ui| ui.set_status(format!("{} {error}", crate::ui::feedback::text("✘ 更新准备失败：", "✘ Update preparation failed:"))));
+                        canvas_min.set_animating(true);
+                    }
+                    if changed { canvas_min.invalidate(); }
+                }
+                return Some(0);
+            }
             if taskbar_created != 0 && msg == taskbar_created {
                 tray_broadcast.re_add();
                 taskbar_broadcast.recreate();
@@ -3882,7 +4184,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         match evt {
             E::OnWindowClose => {
                 let s = lock_shared(&shared_e);
-                let action = window_close_action(&s.cfg.close_mode, s.cfg.tray_enabled,
+                let action = store_e.close_action(&s.cfg.close_mode, s.cfg.tray_enabled,
                     s.cfg.taskbar_widget_enabled && taskbar_updates.host_available());
                 drop(s);
 
@@ -4067,6 +4369,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         taskbar: &taskbar_updates,
                         name_dialog: &name_dialog,
                         feedback_dialog: &feedback_dialog,
+                        store: &store_e,
                     };
                     for a in acts {
                         handle_act(a, &env);
@@ -4344,6 +4647,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     .map_err(|e| crate::trf!("绑托盘回调失败：{e}", e = e))?;
     unsafe {
         win32::SetTimer(message_hwnd, TASKBAR_TIMER, 1000, 0);
+        win32::SetTimer(hwnd, STORE_TIMER, 1000, 0);
     }
 
     // ── 菜单事件处理器 ──────────────────────────────────────
@@ -4386,6 +4690,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
     nwg::dispatch_thread_events();
 
+    unsafe { win32::KillTimer(hwnd, STORE_TIMER); }
+    store_updates.controller.shutdown();
+
     // Stop polling before the final history flush. A slow HID worker may outlive
     // its bounded join, so reject publications after this final cutoff.
     signal.request_quit();
@@ -4397,6 +4704,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
         let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
         let (samples, aliases) = {
             let mut s = lock_shared(&shared);
+            if let Err(error) = settings::save(&s.cfg) {
+                crate::diagnostics::event_once("settings_shutdown_failed", &error);
+            }
             s.write_gen = s.write_gen.wrapping_add(1);
             for backend in crate::backends::ADDITIONAL_BACKENDS {
                 let generation = s.source_write_gen.entry(backend).or_default();
@@ -4429,6 +4739,136 @@ mod backend_tests {
     use super::*;
     use crate::backends::{BackendId, Snapshot, Target};
     use crate::device::{Battery, BatteryLevel, DeviceFamily, DeviceReading, Dpi};
+
+    fn dormant_store_updates() -> StoreUpdates {
+        StoreUpdates {
+            controller: crate::store::Controller::for_test(),
+            preparation: RefCell::new(None),
+            writes_blocked: Cell::new(false),
+            ticking: Cell::new(false),
+        }
+    }
+
+    fn preparation(action: StorePreparationAction) -> StorePreparation {
+        StorePreparation {
+            action, started: std::time::Instant::now(), worker: None, result: None, canceled: false,
+        }
+    }
+
+    #[test]
+    fn store_preparation_does_not_stop_monitoring_workers() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        lock_shared(&shared).store_update_pending = true;
+        assert!(!submit(&shared, &signal, Cmd::Stage(0)));
+        assert!(!signal.shutdown.load(Ordering::Relaxed));
+        assert!(lock_shared(&shared).pending.is_empty());
+    }
+
+    #[test]
+    fn store_preparation_waits_for_queued_and_in_flight_device_writes() {
+        let mut state = Shared::new(Settings::default());
+        assert!(!state.writes_pending());
+        state.rog_write_active = true;
+        assert!(state.writes_pending());
+        state.rog_write_active = false;
+        state.pending.push_back((Cmd::Stage(0), None));
+        assert!(state.writes_pending());
+        state.pending.clear();
+        state.source_busy.insert(BackendId::CompX);
+        assert!(state.writes_pending());
+        state.source_busy.clear();
+        state.source_pending.insert(BackendId::CompX, VecDeque::from([Cmd::Stage(0)]));
+        assert!(state.writes_pending());
+        state.source_pending.clear();
+        assert!(!state.writes_pending());
+    }
+
+    #[test]
+    fn canceling_store_preparation_restores_commands_without_setting_shutdown() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let updates = dormant_store_updates();
+        lock_shared(&shared).store_update_pending = true;
+        updates.writes_blocked.set(true);
+        updates.preparation.replace(Some(preparation(StorePreparationAction::ExitToStore)));
+        updates.cancel();
+        assert!(updates.tick(false, &shared, &signal).1.is_none());
+        assert!(!updates.busy());
+        assert!(!lock_shared(&shared).store_update_pending);
+        assert!(!signal.shutdown.load(Ordering::Relaxed));
+        assert!(submit(&shared, &signal, Cmd::Stage(0)));
+    }
+
+    #[test]
+    fn failed_checkpoint_keeps_the_app_running_and_restores_writes() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let updates = dormant_store_updates();
+        let mut job = preparation(StorePreparationAction::Install);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(Err("save failed".into())).unwrap();
+        job.worker = Some(receiver);
+        updates.preparation.replace(Some(job));
+        updates.writes_blocked.set(true);
+        lock_shared(&shared).store_update_pending = true;
+        assert_eq!(updates.tick(false, &shared, &signal).1.as_deref(), Some("save failed"));
+        assert!(!updates.busy());
+        assert!(!lock_shared(&shared).store_update_pending);
+        assert!(!signal.shutdown.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn installation_waits_for_main_window_activation_after_a_successful_checkpoint() {
+        let mut job = preparation(StorePreparationAction::Install);
+        job.result = Some(Ok(()));
+        assert!(!job.can_finish(false));
+        assert!(job.can_finish(true));
+        job.canceled = true;
+        assert!(job.can_finish(false));
+    }
+
+    #[test]
+    fn canceled_checkpoint_worker_finishes_before_writes_resume() {
+        let mut job = preparation(StorePreparationAction::Install);
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        job.worker = Some(receiver);
+        job.canceled = true;
+        assert!(!job.can_finish(false));
+        job.result = Some(Ok(()));
+        assert!(job.can_finish(false));
+    }
+
+    #[test]
+    fn store_write_wait_timeout_does_not_discard_commands_or_stop_workers() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let updates = dormant_store_updates();
+        let mut job = preparation(StorePreparationAction::Install);
+        job.started -= Duration::from_secs(31);
+        updates.preparation.replace(Some(job));
+        updates.writes_blocked.set(true);
+        let mut state = lock_shared(&shared);
+        state.store_update_pending = true;
+        state.pending.push_back((Cmd::Stage(0), None));
+        drop(state);
+        assert!(updates.tick(false, &shared, &signal).1.is_some());
+        assert_eq!(lock_shared(&shared).pending.len(), 1);
+        assert!(!lock_shared(&shared).store_update_pending);
+        assert!(!signal.shutdown.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn store_installation_overrides_close_to_tray_and_close_confirmation() {
+        let updates = dormant_store_updates();
+        updates.preparation.replace(Some(preparation(StorePreparationAction::Install)));
+        for mode in ["ask", "minimize", "quit"] {
+            assert_eq!(updates.close_action(mode, true, true), WindowCloseAction::Quit);
+        }
+        updates.preparation.replace(None);
+        assert_eq!(updates.close_action("minimize", true, true), WindowCloseAction::Hide);
+        assert_eq!(updates.close_action("ask", true, true), WindowCloseAction::Ask);
+    }
 
     #[test]
     fn close_to_background_keeps_the_window_reachable_with_either_indicator() {

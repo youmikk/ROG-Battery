@@ -6,8 +6,8 @@
   "workers_dev": true,
   "observability": { "enabled": false },
   "vars": {
-    "PUBLIC_BASE_URL": "",
-    "GITHUB_AUTHOR_LOGIN": ""
+    "PUBLIC_BASE_URL": "https://r-battery-feedback.a2424729779.workers.dev",
+    "GITHUB_AUTHOR_LOGIN": "youmikk"
   },
   "durable_objects": {
     "bindings": [
@@ -18,6 +18,6 @@
     { "tag": "v1", "new_sqlite_classes": ["FeedbackCoordinator"] }
   ],
   "r2_buckets": [
-    { "binding": "ATTACHMENTS", "bucket_name": "r-battery-feedback-attachments" }
+    { "binding": "ATTACHMENTS", "bucket_name": "x-battery" }
   ]
 }

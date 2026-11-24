@@ -8,7 +8,7 @@ export class Github {
   constructor(token, author, fetchImpl = fetch) {
     this.token = token;
     this.author = author.toLowerCase();
-    this.fetch = fetchImpl;
+    this.fetch = fetchImpl.bind(globalThis);
   }
 
   authored(value) { return value?.user?.login?.toLowerCase() === this.author; }
@@ -17,7 +17,7 @@ export class Github {
     // path is built exclusively by this class; credentials never follow redirects.
     const response = await this.fetch(`${API_ORIGIN}/repos/${REPOSITORY}${path}`, {
       method: body === undefined ? "GET" : "POST",
-      redirect: "error",
+      redirect: "manual",
       headers: {
         "Authorization": `Bearer ${this.token}`,
         "Accept": "application/vnd.github+json",

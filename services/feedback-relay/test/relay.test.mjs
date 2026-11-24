@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker, { FeedbackCoordinator } from "../src/index.mjs";
+import { Github } from "../src/github.mjs";
 import { feedback, reply } from "../src/validation.mjs";
 import { readJson, MAX_REQUEST_BYTES, MAX_IMAGE_BYTES, checkGithubUrl } from "../src/security.mjs";
 
@@ -49,7 +50,7 @@ class FakeGithub {
     const url = new URL(input);
     assert.equal(url.origin, "https://api.github.com");
     assert.ok(url.pathname.startsWith("/repos/youmikk/X-Battery/"));
-    assert.equal(init.redirect, "error");
+    assert.equal(init.redirect, "manual");
     assert.equal(init.headers.Authorization, "Bearer fake-test-token");
     this.calls.push({ url: input, method: init.method, body: init.body });
     if (init.method === "POST" && this.reject) return new Response("{}", { status: this.reject });
@@ -114,6 +115,33 @@ function request(path, data, { key, ip = IP, method = data === undefined ? "GET"
       ...(key ? { Authorization: `Bearer ${key}` } : {}), ...headers },
     body: data === undefined ? undefined : JSON.stringify(data) });
 }
+
+test("binds platform fetch to the global receiver for submissions and replies", async () => {
+  const state = setup();
+  const platformFetch = async function (input, init) {
+    assert.equal(this, globalThis);
+    return state.github.fetch(input, init);
+  };
+  const coordinator = new FeedbackCoordinator({ storage: state.storage }, state.env,
+    { fetch: platformFetch, now: () => BASE_TIME });
+  const submitted = await coordinator.fetch(request("/feedback", body()));
+  assert.equal(submitted.status, 201);
+  assert.equal(state.github.issues.length, 1);
+  const updates = await coordinator.fetch(request("/feedback/123", undefined, { key: KEY }));
+  assert.equal(updates.status, 200);
+});
+
+test("does not follow GitHub redirects with service credentials", async () => {
+  const requests = [];
+  const github = new Github("unused-test-token", "youmikk", async function (input, init) {
+    assert.equal(this, globalThis);
+    assert.equal(init.redirect, "manual");
+    requests.push(input);
+    return new Response(null, { status: 307, headers: { Location: "https://redirect.invalid/" } });
+  });
+  await assert.rejects(github.request("/issues"), { code: "github_unavailable" });
+  assert.deepEqual(requests, ["https://api.github.com/repos/youmikk/X-Battery/issues"]);
+});
 
 test("creates one fixed-repository issue; replay survives coordinator restart without leaking reply key", async () => {
   const s = setup();

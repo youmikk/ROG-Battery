@@ -27,6 +27,7 @@ Runs as a single executable without administrator rights or a separate backgroun
 | Battery history and estimates | Supported devices from all brands keep separate 48-hour battery charts. Continuous valid samples provide remaining runtime or charging estimates; coarse readings retain the `≈` indicator. |
 | Detailed ROG settings | Supported mice retain DPI, polling rate, debounce, button mappings, sleep settings and configuration backups. |
 | Low-battery notifications | Windows notifications are available in the Store edition, not the portable build. They use valid, precise readings rather than estimates or expired cache entries. |
+| Store updates and reviews | Store installations check silently on the first launch each day and remind only on Home. Downloads and installation require separate confirmation; About includes the official Store review link. |
 | Appearance and language | Light and dark themes, system preferences, Simplified Chinese and English, plus startup, close behavior and refresh settings. |
 
 Mouse controls depend on the model, firmware and connection. Hardware DPI stages and software presets are presented separately; presets do not enable writes on read-only devices. Supported Logitech onboard profiles retain their actual stages, including a fifth stage. The 1–4 software preset limit does not change those hardware stages.
@@ -50,11 +51,13 @@ Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard gene
 
 Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
 
-## Latest release: 1.4.8
+## Latest release: 1.4.9
 
-- Extend battery charts and runtime estimates to all supported brands, with separate 48-hour histories for each device.
-- Plot measured percentages as lines and coarse levels as steps marked `≈`; estimate remaining runtime or charging time from valid samples.
-- Fix duplicate cached samples, forecasts spanning disconnections, device identity migration and saving on exit, with improved Chinese and English battery pages.
+- Rename the app to X-Battery and the executable to `x-battery.exe`, retaining existing settings, battery histories and startup preferences.
+- Fix taskbar battery strip flicker and improve multi-device cards, drag ordering, DPI controls and settings.
+- Add generic Bluetooth battery-cache readings and support for selected VGN, DELUX, EWEADN, AJAZZ, Veekos and Logitech devices.
+- Add daily silent update checks, separate download and installation confirmations, and an optional About review link for Store installations.
+- Enable in-app feedback without a GitHub account, including screenshots, maintainer replies and follow-ups, and fix relay submission failures.
 
 Portable users can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store updates become available after Store review. See the [full changelog](CHANGELOG.md).
 
@@ -79,6 +82,16 @@ Click the upper-right gear and choose **Settings (设置) → General (常规) �
 
 The default, Follow system, uses the Windows **display language**, which can differ from the order of Preferred languages. Select English directly if needed.
 
+### Store updates and reviews
+
+Microsoft Store installations silently query the official Store on the first launch of each local calendar day, retaining the daily attempt across restarts. Temporary startup, network or Store failures receive a limited number of delayed retries. Portable and simulated-device modes do not check automatically.
+
+Available-update reminders appear only within the **Home device list**, never as popups over hidden windows, tray quick view or device detail pages. Later today hides the Home card for the rest of the day. **Settings → About → Check for updates** bypasses the daily limit. Failures show an error rather than incorrectly reporting that the app is up to date.
+
+Downloading and installing require separate user confirmation. A completed download never installs automatically. Before installation, the app waits for existing device writes, temporarily blocks new writes, and saves settings and battery history before calling the official Microsoft installation API. Failed or canceled preparation restores normal operation without changing the startup preference. Windows may close and restart the app; reopen it after updating if it does not restart. Exit and update in Store remains available as a fallback.
+
+Release information opens the Microsoft Store product page. The app does not scrape undocumented release-note fields or use GitHub or a third-party automatic updater. **Settings → About → Review X-Battery** opens the official Store review entry when clicked. Honest reviews are welcome, entirely optional, and never affect any feature.
+
 ### Missing battery readings
 
 Check the exact model and connection in the [compatibility notes](COMPATIBILITY.en.md), wake the device, then wait for the next background query or click Refresh. Vendor software may occupy the control interface; close it and retry if necessary. A connected receiver does not always mean the paired device is reporting valid battery data.
@@ -95,9 +108,9 @@ If readings remain unavailable, use **Settings → About → Device feedback** t
 
 Open **Settings → About → Device feedback**, choose a device and category, and describe the issue. You can preview or disable Include device diagnostics and select up to three screenshots.
 
-**The current release submits through GitHub in your browser.** Use Copy report & open GitHub, review the report and submit it. Add screenshots manually; browser submissions do not appear in My feedback. Builds with a configured feedback service can submit in the app, display maintainer replies and send additional information. See the [feedback service guide](services/feedback-relay/README.md) for deployment.
+**Official releases use the feedback service and can submit in the app without a GitHub account.** Screenshots, maintainer replies and follow-ups are supported; feedback and selected attachments are public. Self-built versions without a configured service provide Copy report & open GitHub instead. Add screenshots manually; browser submissions do not appear in My feedback. See the [feedback service guide](services/feedback-relay/README.md) for deployment.
 
-Routine battery monitoring and device settings work offline, without background telemetry or automatic crash reports. Settings, aliases, history, caches, backups and diagnostic logs stay locally. Network features run only when you submit feedback, add information or check replies.
+Routine battery monitoring and device settings work offline, without background telemetry or automatic crash reports. Settings, aliases, history, caches, backups and diagnostic logs stay locally. Store installations query Microsoft's official update service on the first launch each day. Downloading, installing, reviewing and feedback network features require user action. The app does not attach device diagnostics, settings or battery history to update requests.
 
 Optional diagnostics contain app and system versions, original device model, VID/PID, type, connection, battery and query results. They exclude serial numbers, file paths, custom aliases, personal settings and raw logs. Descriptions, included diagnostics and screenshots are public, so review them before submitting. In-app feedback history and reply credentials use Windows DPAPI encryption; deleting local history does not remove public GitHub content. See the [privacy policy](PRIVACY.md) for details.
 
@@ -106,6 +119,7 @@ Optional diagnostics contain app and system versions, original device model, VID
 | Settings | `%APPDATA%/rog-mouse-ctl/settings.ini` |
 | Battery history | `%LOCALAPPDATA%/rog-battery/history.tsv` |
 | Snapshot cache | `%LOCALAPPDATA%/rog-mouse-ctl/snapshot.cache` |
+| Store update check record | `%LOCALAPPDATA%/rog-mouse-ctl/store-updates.json` |
 | Configuration backups | `%USERPROFILE%/Documents/rog-mouse-ctl/backups/` |
 
 Settings and history locations can be changed in the app. The executable is now `x-battery.exe`, while data directories retain the `rog-mouse-ctl` name for compatibility with existing installations and settings. Windows manages Store app data; portable data and files saved to custom locations may require manual removal.

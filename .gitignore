@@ -28,6 +28,7 @@ hwnd.txt
 *.pvk
 .env
 .env.*
+/.wrangler/
 store-credentials.psd1
 msix/store-credentials.psd1
 

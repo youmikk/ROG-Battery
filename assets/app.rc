@@ -5,8 +5,8 @@
 1 24 "app.manifest"
 
 1 VERSIONINFO
-FILEVERSION 1,4,8,0
-PRODUCTVERSION 1,4,8,0
+FILEVERSION 1,4,9,0
+PRODUCTVERSION 1,4,9,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS VOS_NT_WINDOWS32
@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Sonder\0"
             VALUE "FileDescription", "X-Battery\0"
-            VALUE "FileVersion", "1.4.8\0"
+            VALUE "FileVersion", "1.4.9\0"
             VALUE "InternalName", "x-battery\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Sonder\0"
             VALUE "OriginalFilename", "x-battery.exe\0"
             VALUE "ProductName", "X-Battery\0"
-            VALUE "ProductVersion", "1.4.8\0"
+            VALUE "ProductVersion", "1.4.9\0"
         END
     END
     BLOCK "VarFileInfo"

@@ -1,15 +1,16 @@
-1.4.8
+1.4.9
 
 New
-- Separate 48-hour battery charts and runtime estimates for supported mice, keyboards, headsets and controllers from all brands. Confirmed charging reports also support time-to-full estimates.
-- Coarse levels retain the ≈ indicator and step charts; rounded estimates appear after enough changes are observed.
-- A multi-device taskbar battery strip with quick controls, device feedback with optional diagnostics, and 1–4 sorted DPI presets on supported mice.
-- Expanded support for selected Rapoo, VGN / VXE / ATK, MCHOSE, AULA, AJAZZ, Dareu, EWEADN, Edifier, MOONDROP, XIBERIA, FIFINE, Lofree and CHERRY models.
+- Store installations check for official updates silently on the first launch each day, with Home-only reminders, manual checks and a Later today option.
+- Downloads and installation require separate confirmation. Settings and battery histories are saved before installation, retaining startup preferences.
+- About includes an official Microsoft Store review link. Reviews are optional and never affect features.
+- Submit in-app device feedback and screenshots without a GitHub account, read maintainer replies and send follow-ups. Submitted content is public.
+- Add generic Bluetooth battery-cache readings and support for selected VGN, DELUX, EWEADN, AJAZZ, Veekos and Logitech devices.
 
 Improvements and fixes
-- Histories and forecasts are isolated by device. Sleep, disconnection, charging changes and long gaps start separate intervals; cached readings are not counted twice.
-- Improved history migration, device identity continuity, storage changes, clearing history and saving on exit.
-- Improved taskbar icons, charging indicators, clicks, ordering and text layout.
-- Retained ROG settings, Windows audio controls, Chinese and English, and Store low-battery notifications.
+- Rename the app and executable to X-Battery while retaining the Store identity, settings, battery histories and startup preferences.
+- Fix taskbar battery strip flicker when opening quick view, switching windows and entering or leaving full screen.
+- Improve compact device cards, DPI controls, settings groups, paths and drawing-cache memory use; fix stale drag-ordering indicators.
+- Fix duplicate Bluetooth samples and devices, and feedback relay submission failures.
 
-Support depends on model, firmware and connection. Estimates need actual samples and vary with use. Feedback opens GitHub in the browser when no feedback service is configured.
+Support depends on model, firmware and connection. Bluetooth battery readings require data already provided by Windows; unknown charging states remain unknown. Update availability is determined by Microsoft Store.

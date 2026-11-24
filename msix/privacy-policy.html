@@ -8,10 +8,10 @@
 </head>
 <body>
 <h1>X-Battery 隐私政策 / Privacy Policy</h1>
-<p>最后更新 / Last updated: 2026-11-24</p>
+<p>最后更新 / Last updated: 2026-11-25</p>
 <section lang="zh-CN">
 <h2>中文</h2>
-<p>X-Battery 是用于读取外设电量并调整支持的鼠标参数的 Windows 本地应用。日常电量读取和设备设置离线完成。仅在您主动提交反馈、补充说明或查看维护者回复时，应用才连接反馈服务。应用不包含后台遥测、广告或自动崩溃上报服务。</p>
+<p>X-Battery 是用于读取外设电量并调整支持的鼠标参数的 Windows 本地应用。日常电量读取和设备设置离线完成。商店安装版会在每日第一次启动时通过微软官方服务静默检查更新。仅在您主动提交反馈、补充说明或查看维护者回复时，应用才连接反馈服务。应用不包含后台遥测、广告或自动崩溃上报服务。</p>
 <p>应用通过 Windows HID 和系统接口读取型号、连接状态、电量、固件及设备提供的序列号等信息，并在您操作时修改支持的设备设置。序列号等唯一标识用于本地识别设备和保存偏好，不会加入自动生成的反馈诊断。</p>
 <h3>本地数据</h3>
 <p>以下数据仅保存在您的电脑上：</p>
@@ -19,11 +19,16 @@
 <li>设置、语言、主题、托盘选择、设备名称和类型偏好。默认设置位于 <code>%APPDATA%\rog-mouse-ctl\settings.ini</code>。</li>
 <li>电量历史，用于绘制曲线和估算续航，默认位于 <code>%LOCALAPPDATA%\rog-battery\history.tsv</code>。各设备按本地标识分别保存时间、电量、充电状态及精度，不在历史中保存用户自定义名称；每台设备保留最近 48 小时、最多 2000 条采样。</li>
 <li>设备状态缓存，默认位于 <code>%LOCALAPPDATA%\rog-mouse-ctl\snapshot.cache</code>。</li>
+<li>商店更新检查记录，保存在 <code>%LOCALAPPDATA%\rog-mouse-ctl\store-updates.json</code>，仅包含应用与包版本、每日尝试和最近成功检查日期、是否有更新及当日稍后提醒标记，不包含设备数据或账号凭据。</li>
 <li>故障诊断与托盘日志，可能包含错误文本、设备状态或本地路径，不会自动上传。</li>
 <li>由您主动保存的设备配置备份，以及自定义存储位置的路径记录。</li>
 <li>通过应用提交的反馈历史、待确认的请求和回复密钥，使用 Windows DPAPI 加密保存在设置目录的 <code>feedback-history.dat</code>，由当前 Windows 用户保护。回复密钥不写入日志、诊断或公开议题。</li>
 </ul>
 <p>诊断日志入口继续保留。独立设备报告窗口已移除，<code>device-report</code> 等命令行报告仍可使用；导出的报告不会自动上传。</p>
+<h3>微软商店更新与评价</h3>
+<p>商店安装版每日第一次启动时通过 Windows <code>StoreContext</code> 官方接口查询可用更新；网络或商店服务暂不可用时进行有限的延迟重试。查询不会自动下载或安装。更新提示只在应用首页显示，下载和安装均需您主动确认；安装前保存本地设置和电量历史。绿色版与模拟设备模式不会自动检查。</p>
+<p>更新查询、下载和安装由 Windows 与微软商店处理必要的应用身份、包版本、授权及连接信息，遵循<a href="https://privacy.microsoft.com/privacystatement">微软隐私声明</a>。应用不会向更新服务附加外设诊断、外设唯一标识、个人设置或电量历史，不接入第三方自动更新服务。更新说明通过商店产品页查看。</p>
+<p>评价完全自愿。仅在您点击评价按钮后打开微软商店官方评价页面，评分和评论由微软商店处理；应用不读取、保存或验证您的评价，也不以评价作为功能使用条件。</p>
 <h3>主动反馈</h3>
 <p>您可以选择问题类型、设备、说明和最多三张截图，并决定是否附带诊断摘要。自动生成的诊断仅包含应用及系统版本、设备原始型号、VID/PID、类型、连接、电量、适配后端及接口与查询摘要，不复制序列号、设备路径、个人路径、用户别名、个人配置或日志原文。即使关闭诊断，提交仍包含应用版本、所选设备基本信息和您填写的内容。</p>
 <p>配置了反馈服务的版本通过 HTTPS 将所选内容发送到 X-Battery 自有反馈中继，由中继在 <code>youmikk/X-Battery</code> 仓库创建公开 GitHub 议题。问题描述、附带的诊断、截图和后续补充回复会公开展示。请勿在描述中填写您不希望公开的信息。</p>
@@ -38,7 +43,7 @@
 </section>
 <section lang="en">
 <h2>English</h2>
-<p>X-Battery is a local Windows application for monitoring peripheral batteries and changing supported mouse settings. Normal battery monitoring and device settings work offline. The app connects to the feedback service only when you submit feedback, add information, or check maintainer replies. It includes no background telemetry, advertising, or automatic crash-reporting service.</p>
+<p>X-Battery is a local Windows application for monitoring peripheral batteries and changing supported mouse settings. Normal battery monitoring and device settings work offline. Store installations silently check Microsoft's official update service on the first launch each day. The app connects to the feedback service only when you submit feedback, add information, or check maintainer replies. It includes no background telemetry, advertising, or automatic crash-reporting service.</p>
 <p>Through Windows HID and system interfaces, the app reads information such as model, connection status, battery level, firmware, and device-provided serial numbers. It changes supported settings when you request an operation. Unique identifiers such as serial numbers are used locally to distinguish devices and store preferences; they are not included in automatically generated feedback diagnostics.</p>
 <h3>Local data</h3>
 <p>The following data stays on your computer:</p>
@@ -46,11 +51,16 @@
 <li>Settings, language, theme, tray selection, device names, and device type preferences. The default settings file is <code>%APPDATA%\rog-mouse-ctl\settings.ini</code>.</li>
 <li>Battery history for charts and runtime estimates, at <code>%LOCALAPPDATA%\rog-battery\history.tsv</code> by default. Timestamps, levels, charging state and precision are stored separately by local device key, without custom device names. Each device retains up to 2,000 samples from the last 48 hours.</li>
 <li>A device snapshot cache, at <code>%LOCALAPPDATA%\rog-mouse-ctl\snapshot.cache</code> by default.</li>
+<li>A Store update check record, at <code>%LOCALAPPDATA%\rog-mouse-ctl\store-updates.json</code>, containing only app and package versions, daily attempt and last successful check dates, update availability and the day's postponement flag. It contains no device data or account credentials.</li>
 <li>Diagnostic and tray logs, which may contain error messages, device status, or local paths. They are not uploaded automatically.</li>
 <li>Device configuration backups you explicitly save, and records of custom storage locations.</li>
 <li>In-app feedback history, requests awaiting confirmation, and reply keys, encrypted with Windows DPAPI in <code>feedback-history.dat</code> in the settings directory and protected for the current Windows user. Reply keys are not written to logs, diagnostics, or public issues.</li>
 </ul>
 <p>The diagnostic log entry remains available. The separate device report window is removed; command-line reports such as <code>device-report</code> remain available and are not uploaded automatically.</p>
+<h3>Microsoft Store updates and reviews</h3>
+<p>Store installations query available updates through the official Windows <code>StoreContext</code> API on the first launch each day. Temporary network or Store failures receive a limited number of delayed retries. Queries do not automatically download or install anything. Update reminders appear only on Home; downloading and installing require your confirmation, and local settings and battery history are saved before installation. Portable and simulated-device modes do not check automatically.</p>
+<p>Windows and Microsoft Store process the app identity, package version, licensing and connection information needed to check, download and install updates, under the <a href="https://privacy.microsoft.com/privacystatement">Microsoft Privacy Statement</a>. The app does not attach peripheral diagnostics, peripheral unique identifiers, personal settings or battery history, and uses no third-party automatic update service. Release information opens the Store product page.</p>
+<p>Reviews are entirely optional. The official Microsoft Store review page opens only when you click the review button. Microsoft Store handles ratings and comments; the app does not read, save or verify your review, and no feature depends on reviewing.</p>
 <h3>Feedback you choose to send</h3>
 <p>You can select an issue category and device, write a description, attach up to three screenshots, and choose whether to include a diagnostic summary. Automatically generated diagnostics contain only app and system versions, the original device model, VID/PID, type, connection, battery state, backend, and interface and query summaries. They do not copy serial numbers, device or personal paths, custom device aliases, personal settings, or raw logs. Even with diagnostics disabled, a submission includes the app version, basic details of the selected device, and the content you provide.</p>
 <p>Builds with a configured feedback service send the selected content over HTTPS to X-Battery's own relay, which creates a public GitHub issue in <code>youmikk/X-Battery</code>. Descriptions, included diagnostics, screenshots, and subsequent replies are public. Do not include information you do not wish to disclose.</p>

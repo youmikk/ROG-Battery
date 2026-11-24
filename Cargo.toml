@@ -1,6 +1,6 @@
 [package]
 name = "x-battery"
-version = "1.4.8"
+version = "1.4.9"
 edition = "2021"
 description = "Peripheral battery monitor and ROG mouse settings utility for Windows"
 
@@ -8,6 +8,12 @@ description = "Peripheral battery monitor and ROG mouse settings utility for Win
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+windows = { version = "0.61.3", features = [
+    "ApplicationModel", "Services_Store", "Win32_Foundation",
+    "Win32_System_Recovery", "Win32_System_WinRT", "Win32_UI_Shell",
+] }
+windows-collections = "0.2.0"
+windows-future = "0.2.1"
 native-windows-gui = { version = "1.0.13", default-features = false, features = [
     "tabs", "tray-notification", "message-window", "cursor", "menu",
     "progress-bar", "trackbar", "combobox", "animation-timer", "notice",

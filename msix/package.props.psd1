@@ -6,7 +6,7 @@
     DisplayName = 'X-Battery'
     ShortName = 'X-Battery'
     Description = 'Peripheral battery monitor and mouse settings utility.'
-    Version = '1.4.8.0'
+    Version = '1.4.9.0'
     Executable = 'x-battery.exe'
     StartupTaskId = 'RogBatteryAutoStart'
 
