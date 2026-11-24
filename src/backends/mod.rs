@@ -25,6 +25,7 @@ pub mod flydigi;
 pub mod gamesir;
 pub mod gearhub;
 pub mod g3m;
+pub mod ajazz_ak980;
 pub mod aula;
 pub mod aula_hfd;
 pub mod aula_hfd_mechanical;
@@ -107,6 +108,7 @@ pub enum BackendId {
     GameSir,
     GearHub,
     G3m,
+    AjazzAk980,
     Aula,
     AulaHfd,
     AulaHfdMechanical,
@@ -129,13 +131,13 @@ pub enum BackendId {
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 56] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 57] = [
     BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
     BackendId::VgnRy, BackendId::MchoseModern, BackendId::MchoseK99, BackendId::Moondrop, BackendId::RapooLegacy,
     BackendId::RapooOffice, BackendId::AulaHfd, BackendId::MchoseMc,
-    BackendId::AulaF99, BackendId::AtkNano, BackendId::EweadnX23, BackendId::EweadnX87, BackendId::Xiberia,
+    BackendId::AulaF99, BackendId::AtkNano, BackendId::AjazzAk980, BackendId::EweadnX23, BackendId::EweadnX87, BackendId::Xiberia,
     BackendId::AtkHoltek, BackendId::FifineHt6, BackendId::MchoseK87s,
     BackendId::Lingbao, BackendId::AulaF108,
     BackendId::RapooMt560, BackendId::MchoseR9, BackendId::AulaV9Pro,
@@ -182,6 +184,7 @@ impl BackendId {
             Self::GameSir => "GameSir controller",
             Self::GearHub => "GearHub Feature mouse",
             Self::G3m => "HECATE G3M PRO",
+            Self::AjazzAk980 => "AJAZZ AK980 PRO",
             Self::Aula => "AULA SC380 PRO",
             Self::AulaHfd => "AULA HFD keyboard",
             Self::AulaHfdMechanical => "AULA HFD mechanical keyboard",
@@ -211,10 +214,10 @@ impl BackendId {
             | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
             | Self::AtkHoltek | Self::FifineHt6 | Self::MchoseK87s
             | Self::Lingbao | Self::AulaF108 | Self::RapooMt560
-            | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901
+            | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901 | Self::AjazzAk980
             | Self::AulaHfdMechanical) { return true; }
         matches!(self, Self::Logitech | Self::Rapoo | Self::Vgn | Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnKeyboard | Self::CompX | Self::Razer
-            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseModern | Self::VgnRy | Self::MchoseGlw | Self::Edifier | Self::EweadnS9 | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::Flydigi | Self::GameSir | Self::GearHub | Self::G3m | Self::Aula | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
+            | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseModern | Self::VgnRy | Self::MchoseGlw | Self::Edifier | Self::EweadnS9 | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::Flydigi | Self::GameSir | Self::GearHub | Self::G3m | Self::AjazzAk980 | Self::Aula | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX | Self::DualSense)
     }
 
     pub fn sample_lifetime(self) -> std::time::Duration {
@@ -224,7 +227,7 @@ impl BackendId {
                 | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
                 | Self::AtkHoltek | Self::FifineHt6 | Self::MchoseK87s
                 | Self::Lingbao | Self::AulaF108 | Self::RapooMt560
-                | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901
+                | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901 | Self::AjazzAk980
                 | Self::AulaHfdMechanical => 120,
             Self::Rapoo | Self::DualSense | Self::XInput => 8,
             Self::Bluetooth => 120,
@@ -243,7 +246,7 @@ impl BackendId {
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
                 | Self::AtkNano | Self::EweadnX87 | Self::Xiberia
                 | Self::AtkHoltek | Self::FifineHt6 | Self::MchoseK87s
-                | Self::Lingbao | Self::MchoseR9 | Self::AulaV9Pro
+                | Self::Lingbao | Self::MchoseR9 | Self::AulaV9Pro | Self::AjazzAk980
                 | Self::DareuEm901 => Some(10_000),
             Self::EweadnX23 => Some(5_000),
             Self::AulaF108 => Some(15_000),
@@ -331,7 +334,7 @@ impl Target {
             | BackendId::MchoseR9 | BackendId::AulaV9Pro | BackendId::DareuEm901
             | BackendId::AulaHfdMechanical
             | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Cherry | BackendId::Lofree | BackendId::Nova | BackendId::Inzone | BackendId::HyperX
-            | BackendId::DualSense | BackendId::VgnBeiying | BackendId::VgnDragonfly3 | BackendId::VgnRy | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::MchoseModern | BackendId::MchoseGlw | BackendId::Edifier | BackendId::EweadnS9 | BackendId::EweadnS9Pro | BackendId::Dareu | BackendId::EightBitDo | BackendId::Flydigi | BackendId::GameSir | BackendId::GearHub | BackendId::G3m | BackendId::Aula) {
+            | BackendId::DualSense | BackendId::VgnBeiying | BackendId::VgnDragonfly3 | BackendId::VgnRy | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::MchoseModern | BackendId::MchoseGlw | BackendId::Edifier | BackendId::EweadnS9 | BackendId::EweadnS9Pro | BackendId::Dareu | BackendId::EightBitDo | BackendId::Flydigi | BackendId::GameSir | BackendId::GearHub | BackendId::G3m | BackendId::AjazzAk980 | BackendId::Aula) {
             interface.path.to_ascii_lowercase()
         } else {
             format!(
@@ -525,6 +528,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::GameSir => &gamesir::GameSir,
         BackendId::GearHub => &gearhub::GearHub,
         BackendId::G3m => &g3m::G3m,
+        BackendId::AjazzAk980 => &ajazz_ak980::AjazzAk980,
         BackendId::Aula => &aula::Aula,
         BackendId::AulaHfd => &aula_hfd::AulaHfd,
         BackendId::AulaHfdMechanical => &aula_hfd_mechanical::AulaHfdMechanical,

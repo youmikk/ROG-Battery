@@ -40,7 +40,7 @@ The table groups implemented integrations by device type. **Coverage is limited 
 | Device type | Brands and protocols with implemented integrations |
 | --- | --- |
 | Mice | ASUS / ROG, Logitech, Rapoo, VGN, VXE, ATK, Razer, MCHOSE, AULA, AJAZZ, Dareu, EWEADN, DELUX, Lingbao, HECATE, Lamzu and WLMouse |
-| Keyboards | ASUS / ROG, Logitech HID++, VGN / VXE, MCHOSE, AULA, EWEADN, CHERRY and Lofree |
+| Keyboards | ASUS / ROG, Logitech HID++, VGN / VXE, MCHOSE, AULA, AJAZZ, EWEADN, CHERRY and Lofree |
 | Headsets | ATK, MCHOSE, EDIFIER, MOONDROP, XIBERIA, FIFINE, Sony INZONE, HyperX and SteelSeries Arctis Nova |
 | Controllers | ASUS / ROG, Sony DualSense / DualSense Edge, 8BitDo, Flydigi, GameSir, and controllers whose current mode and driver expose battery information through Windows XInput |
 | Standard HID | Devices whose descriptors expose standard Battery Strength capabilities. This battery protocol does not provide universal DPI settings. |

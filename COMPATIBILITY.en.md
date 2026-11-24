@@ -14,7 +14,7 @@ When Windows already exposes a battery level for a connected classic or dual-mod
 
 Only currently connected, remembered Bluetooth devices are enumerated, with the Bluetooth address providing a stable identity. Battery data comes from a Windows PnP cached property and is accepted only for complete `BYTE` or `UINT32` values in the `0–100` range. Conflicting values from several nodes for one address, missing cache data, invalid values and disconnected devices do not create a new reading. Re-reading an unchanged cached value does not renew its measurement time, and charging remains unknown. The system Bluetooth card is merged with vendor and standard HID routes for the same physical device through the PnP Container ID; older drivers without container information use a conservative address-and-name fallback.
 
-The background query interval is 30 seconds, and valid samples expire after 120 seconds. This implementation covers classic Bluetooth and dual-mode devices with a classic Bluetooth node. Headsets or other devices that appear only through BLE / GATT may still require a separate WinRT implementation and must not be presented as universal brand support. All 578 Rust regressions pass. No local Bluetooth hardware was available for acceptance testing, so sleep caching, wake recovery and multiple simultaneous devices still require hardware verification.
+The background query interval is 30 seconds, and valid samples expire after 120 seconds. This implementation covers classic Bluetooth and dual-mode devices with a classic Bluetooth node. Headsets or other devices that appear only through BLE / GATT may still require a separate WinRT implementation and must not be presented as universal brand support. All 581 Rust regressions pass. No local Bluetooth hardware was available for acceptance testing, so sleep caching, wake recovery and multiple simultaneous devices still require hardware verification.
 
 ## Unreleased: CompX power-only receivers
 
@@ -34,6 +34,14 @@ Windows descriptors must prove exactly one Report `08` in both directions with 1
 Only `04F3:026F`, the exact product name `X23 Pro Receiver`, `MI_01` Collection `04` and usage `000A:0000` are accepted. The descriptor must prove one 32-byte Input report under the resolved USB receiver, with the confirmed report ID `0` or `4`. The app opens a read-only input handle and sends no Output, Feature, pairing or settings command.
 
 The receiver pushes a status report about every five seconds, and one poll waits at most 1.2 seconds. Byte 4 after the Windows report-ID slot carries `0–100%`; all-zero frames, wrong IDs, short frames, silence and sibling collections do not create a new sample. Charging remains unknown, and an old sample is renewed only by a valid new frame. An independent Windows implementation compared this field with the vendor app, and user diagnostics confirmed the receiver collection. No matching hardware was available for project acceptance testing, so the actual cadence, deep-sleep wake, multiple receivers and vendor-software coexistence remain pending.
+
+## Unreleased: AJAZZ AK980 PRO
+
+The wired link accepts only `0C45:8039`, product `AK980 PRO`, and `MI_02 / FF68:0061`. The 2.4 GHz link accepts only `0C45:FEFE`, product `AJAZZ AK980 PRO 2.4G`, and `MI_03 / FF60:0061`. Both require descriptors proving only an unnumbered 65-byte input/output report and identify replies by the keyboard PID `8039`.
+
+Each poll sends one `GET_DEVICE_INFO`: `AA 10 30`, address, last-packet flag and zero data. A reply must start `55 10`, declare 19–48 bytes, echo the keyboard VID/PID `0C45:8039`, use the known work mode and carry `0–100%`. Work mode is `0` on wired USB and `2` on 2.4 GHz. The `FF67` bulk channel, 2.4 GHz `MI_04` node and mismatched echoes are excluded. Two charge samples are insufficient to classify charging or full state.
+
+The public contributor tested both links at 100%; a normal read took about 14–17 ms. No matching keyboard was available for project acceptance testing, so discharge behavior, sleep/wake, Bluetooth mode, multiple keyboards and web-driver exclusivity remain pending.
 
 ## Version 1.4.7: VGN and MCHOSE receivers
 
