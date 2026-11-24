@@ -32,6 +32,7 @@ pub mod aula_f99;
 pub mod aula_f108;
 pub mod atk_nano;
 pub mod atk_holtek;
+pub mod bluetooth;
 pub mod lingbao;
 mod enumeration;
 pub mod compx;
@@ -120,15 +121,16 @@ pub enum BackendId {
     HyperX,
     DualSense,
     XInput,
+    Bluetooth,
     Xiberia,
     FifineHt6,
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 54] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 55] = [
     BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
-    BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput,
+    BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
     BackendId::VgnRy, BackendId::MchoseModern, BackendId::MchoseK99, BackendId::Moondrop, BackendId::RapooLegacy,
     BackendId::RapooOffice, BackendId::AulaHfd, BackendId::MchoseMc,
     BackendId::AulaF99, BackendId::AtkNano, BackendId::EweadnX87, BackendId::Xiberia,
@@ -193,6 +195,7 @@ impl BackendId {
             Self::HyperX => "HyperX Alpha 2",
             Self::DualSense => "Sony DualSense",
             Self::XInput => "XInput",
+            Self::Bluetooth => "Bluetooth",
             Self::Xiberia => "XIBERIA K06S",
             Self::FifineHt6 => "FIFINE HT6",
             Self::StandardHid => "Standard HID",
@@ -221,6 +224,7 @@ impl BackendId {
                 | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901
                 | Self::AulaHfdMechanical => 120,
             Self::Rapoo | Self::DualSense | Self::XInput => 8,
+            Self::Bluetooth => 120,
             Self::Logitech => 180,
             Self::CompX => 45,
             Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => 120,
@@ -241,6 +245,7 @@ impl BackendId {
             Self::AulaF108 => Some(15_000),
             Self::AulaHfdMechanical => Some(30_000),
             Self::Rapoo | Self::RapooMt560 | Self::DualSense | Self::XInput => Some(2_000),
+            Self::Bluetooth => Some(30_000),
             Self::VgnBeiying | Self::VgnDragonfly3 | Self::VgnRy | Self::VgnKeyboard | Self::MchoseQhw | Self::MchoseMouse | Self::MchoseModern | Self::MchoseGlw | Self::Edifier | Self::EweadnS9 | Self::EweadnS9Pro | Self::Dareu | Self::EightBitDo | Self::Flydigi | Self::GameSir | Self::GearHub | Self::G3m | Self::Aula | Self::CompX | Self::Razer | Self::PageCommand | Self::Headset | Self::Keyboard20 | Self::Cherry | Self::Lofree | Self::Nova | Self::Inzone | Self::HyperX => Some(10_000),
             _ => None,
         }
@@ -419,7 +424,7 @@ pub fn read_additional(detail: bool) -> Result<Vec<Snapshot>, String> {
 fn merge_additional_results(
     results: impl IntoIterator<Item = (BackendId, Result<Vec<Snapshot>, String>)>,
 ) -> Result<Vec<Snapshot>, String> {
-    let mut snapshots = Vec::new();
+    let mut snapshots: Vec<Snapshot> = Vec::new();
     let mut claimed = std::collections::BTreeSet::new();
     let mut failures = Vec::new();
     let mut successful_backends = 0;
@@ -435,6 +440,20 @@ fn merge_additional_results(
             }
         };
         for snapshot in devices {
+            if backend == BackendId::StandardHid
+                && snapshots.iter().any(|other| {
+                    other.target.backend == BackendId::Bluetooth
+                        && bluetooth::same_physical_device(&other.target, &snapshot.target)
+                })
+            {
+                continue;
+            }
+            if backend == BackendId::Bluetooth {
+                snapshots.retain(|other| {
+                    other.target.backend != BackendId::StandardHid
+                        || !bluetooth::same_physical_device(&snapshot.target, &other.target)
+                });
+            }
             if backend == BackendId::StandardHid
                 && claimed.contains(&snapshot.target.channel_key())
             {
@@ -458,6 +477,7 @@ pub fn read_backend(backend: BackendId, detail: bool) -> Result<Vec<Snapshot>, S
 
 pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
     if backend == BackendId::XInput { return xinput::poll(); }
+    if backend == BackendId::Bluetooth { return bluetooth::poll(); }
     let api = HidApi::load()?;
     let enumeration = enumeration::scan(&api)?;
     let present_channels = enumeration.interfaces.iter().map(|i|i.path.clone())
@@ -516,6 +536,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::HyperX => &hyperx::HyperX,
         BackendId::DualSense => &sony::DualSense,
         BackendId::XInput => unreachable!("XInput does not enumerate HID interfaces"),
+        BackendId::Bluetooth => unreachable!("Bluetooth does not enumerate HID interfaces"),
         BackendId::StandardHid => &standard::StandardHid,
         BackendId::Xiberia => &xiberia::Xiberia,
         BackendId::FifineHt6 => &fifine_ht6::FifineHt6,
@@ -667,6 +688,55 @@ mod tests {
             assert_eq!(result.len(), 1);
             assert_eq!(result[0].target.backend, backend);
         }
+    }
+
+    #[test]
+    fn bluetooth_reading_replaces_only_address_verified_standard_hid_duplicate() {
+        let address = ["AA", "BB", "01", "02", "03", "04"].concat();
+        let bluetooth_interface = HidInterface {
+            path: format!("bluetooth:{address}"),
+            serial: address.clone(),
+            product: "Example Headphones".into(),
+            vendor_id: 0,
+            product_id: 0,
+            usage_page: 0,
+            usage: 0,
+            input_len: 0,
+            output_len: 0,
+            feature_len: 0,
+        };
+        let standard_interface = HidInterface {
+            path: format!("\\\\?\\HID#BTHENUM#7&{address}&0&0000#{{hid}}"),
+            serial: String::new(),
+            product: "Example Headphones".into(),
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            usage_page: 1,
+            usage: 2,
+            input_len: 8,
+            output_len: 0,
+            feature_len: 8,
+        };
+        let mut bluetooth = reading(BackendId::Bluetooth);
+        bluetooth.target = Target::new(BackendId::Bluetooth, &bluetooth_interface, 0);
+        let mut standard = reading(BackendId::StandardHid);
+        standard.target = Target::new(BackendId::StandardHid, &standard_interface, 0);
+
+        let result = merge_additional_results([
+            (BackendId::StandardHid, Ok(vec![standard.clone()])),
+            (BackendId::Bluetooth, Ok(vec![bluetooth])),
+        ])
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].target.backend, BackendId::Bluetooth);
+
+        standard.target.name = "Other Headphones".into();
+        let result = merge_additional_results([
+            (BackendId::Bluetooth, Ok(vec![reading(BackendId::Bluetooth)])),
+            (BackendId::StandardHid, Ok(vec![standard])),
+        ])
+        .unwrap();
+        assert_eq!(result.len(), 2);
     }
 
     #[test]

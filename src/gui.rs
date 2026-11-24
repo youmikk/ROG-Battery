@@ -625,6 +625,41 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
         }
     }
     for mut snapshot in poll.snapshots {
+        if backend == crate::backends::BackendId::StandardHid
+            && shared.devices.values().any(|device| {
+                device.basic.as_ref().is_some_and(|other| {
+                    other.target.backend == crate::backends::BackendId::Bluetooth
+                        && crate::backends::bluetooth::same_physical_device(
+                            &other.target,
+                            &snapshot.target,
+                        )
+                })
+            })
+        {
+            continue;
+        }
+        if backend == crate::backends::BackendId::Bluetooth {
+            let duplicates: Vec<String> = shared
+                .devices
+                .iter()
+                .filter_map(|(key, device)| {
+                    device.basic.as_ref().and_then(|other| {
+                        (other.target.backend == crate::backends::BackendId::StandardHid
+                            && crate::backends::bluetooth::same_physical_device(
+                                &snapshot.target,
+                                &other.target,
+                            ))
+                        .then(|| key.clone())
+                    })
+                })
+                .collect();
+            for old_key in duplicates {
+                if shared.promote_device_key(&old_key, &snapshot.target.key) {
+                    shared.device_keys_dirty = true;
+                }
+                shared.devices.remove(&old_key);
+            }
+        }
         if backend == crate::backends::BackendId::StandardHid && shared.devices.values().any(|device|
             device.basic.as_ref().is_some_and(|other| other.target.backend.precedes_standard()
                 && other.connected && other.target.same_hid_path(&snapshot.target))) { continue; }
@@ -688,7 +723,16 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
             quality: status.quality,
         };
         let ident = proto::Identity { model_name: snapshot.target.name.clone(), ..Default::default() };
-        shared.devices.insert(key, DeviceSnapshot { reading, ident, state: None, link: None,
+        let link = (backend == crate::backends::BackendId::Bluetooth)
+            .then(|| snapshot.target.hid().ok().cloned())
+            .flatten()
+            .map(|iface| hid::Link {
+                mode: "Bluetooth".into(),
+                report_id: 0,
+                iface,
+                all_interfaces: Vec::new(),
+            });
+        shared.devices.insert(key, DeviceSnapshot { reading, ident, state: None, link,
             battery_at: status.measured_at,
             full_at: now, basic: Some(snapshot), basic_status: Some(status) });
     }
@@ -4333,6 +4377,58 @@ mod backend_tests {
         shared.publish_additional(BackendId::Razer,vec![first],0,2);
         assert!(!shared.devices.contains_key(&discovery_key));
         assert_eq!(shared.cfg.device_names.get("confirmed-unit").map(String::as_str),Some("My mouse"));
+    }
+    #[test]
+    fn address_verified_bluetooth_replaces_standard_hid_and_preserves_preferences() {
+        let address = ["AA", "BB", "01", "02", "03", "04"].concat();
+        let bluetooth_interface = hid::HidInterface {
+            path: format!("bluetooth:{address}"),
+            serial: address.clone(),
+            product: "Example Headphones".into(),
+            vendor_id: 0,
+            product_id: 0,
+            usage_page: 0,
+            usage: 0,
+            input_len: 0,
+            output_len: 0,
+            feature_len: 0,
+        };
+        let standard_interface = hid::HidInterface {
+            path: format!("\\\\?\\HID#BTHENUM#7&{address}&0&0000#{{hid}}"),
+            serial: String::new(),
+            product: "Example Headphones".into(),
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            usage_page: 1,
+            usage: 2,
+            input_len: 8,
+            output_len: 0,
+            feature_len: 8,
+        };
+        let mut standard = snapshot(BackendId::StandardHid, "standard", 70);
+        standard.target = Target::new(BackendId::StandardHid, &standard_interface, 0);
+        let mut bluetooth = snapshot(BackendId::Bluetooth, "bluetooth", 71);
+        bluetooth.target = Target::new(BackendId::Bluetooth, &bluetooth_interface, 0);
+        let standard_key = standard.target.key.clone();
+        let bluetooth_key = bluetooth.target.key.clone();
+
+        let mut shared = Shared::new(Settings::default());
+        shared.cfg.device_names.insert(standard_key.clone(), "My headphones".into());
+        shared.cfg.device_order = vec![standard_key.clone()];
+        shared.cfg.tray_device = Some(standard_key.clone());
+        let now = std::time::Instant::now();
+        merge_additional_at(&mut shared, BackendId::StandardHid, vec![standard.clone()].into(), now);
+        merge_additional_at(&mut shared, BackendId::Bluetooth, vec![bluetooth].into(), now + Duration::from_secs(1));
+
+        assert_eq!(shared.devices.len(), 1);
+        assert!(shared.devices.contains_key(&bluetooth_key));
+        assert_eq!(shared.cfg.device_names.get(&bluetooth_key).map(String::as_str), Some("My headphones"));
+        assert_eq!(shared.cfg.device_order, vec![bluetooth_key.clone()]);
+        assert_eq!(shared.cfg.tray_device.as_deref(), Some(bluetooth_key.as_str()));
+
+        merge_additional_at(&mut shared, BackendId::StandardHid, vec![standard].into(), now + Duration::from_secs(2));
+        assert_eq!(shared.devices.len(), 1);
+        assert!(shared.devices.contains_key(&bluetooth_key));
     }
     #[test]
     fn razer_sibling_fallback_preserves_preferences_and_latest_receiver_identity() {

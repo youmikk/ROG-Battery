@@ -21,7 +21,10 @@ pub enum DeviceFamily {
 /// 大小写不敏感：设备回报的型号既有全大写（`ROG HARPE ACE MINI`）也有混合。
 pub fn family_of(model_name: &str) -> DeviceFamily {
     let m = model_name.to_ascii_uppercase();
-    const HEADSET: [&str; 6] = ["HEADSET", "DELTA", "HATSU", "耳机", "降临", "棱镜"];
+    const HEADSET: [&str; 14] = [
+        "HEADSET", "HEADPHONE", "HEADPHONES", "EARPHONE", "EARBUDS", "BUDS",
+        "AIRPODS", "SPEAKER", "SOUNDBAR", "DELTA", "HATSU", "耳机", "降临", "棱镜",
+    ];
     const KEYBOARD: [&str; 8] = [
         "KEYBOARD",
         "AZOTH",

@@ -8,6 +8,14 @@ This document records the consolidated 1.4.7 release scope and earlier capabilit
 
 Current combined validation: all 526 Rust tests passed. Per-model hardware acceptance remains documented separately below; protocol simulations, public contributor reports and this project's hardware tests are distinct evidence.
 
+## Unreleased: generic Bluetooth devices
+
+When Windows already exposes a battery level for a connected classic or dual-mode Bluetooth device, the app can display it without a vendor protocol. It does not send query, pairing, audio or settings commands. This applies to mice, keyboards, headsets, speakers and controllers that Windows has identified, and their names and device types remain editable in the app.
+
+Only currently connected, remembered Bluetooth devices are enumerated, with the Bluetooth address providing a stable identity. Battery data comes from a Windows PnP cached property and is accepted only for complete `BYTE` or `UINT32` values in the `0–100` range. Missing cache data, invalid values and disconnected devices do not create a new reading. Charging remains unknown. A Bluetooth device and a standard HID Battery Strength interface are merged only when their names and Bluetooth address match.
+
+The background query interval is 30 seconds, and valid samples expire after 120 seconds. This implementation covers classic Bluetooth and dual-mode devices with a classic Bluetooth node. Headsets or other devices that appear only through BLE / GATT may still require a separate WinRT implementation and must not be presented as universal brand support. All 570 Rust regressions pass. No local Bluetooth hardware was available for acceptance testing, so sleep caching, wake recovery and multiple simultaneous devices still require hardware verification.
+
 ## Version 1.4.7: VGN and MCHOSE receivers
 
 On 2026-11-23, all 397 local regressions, the Windows x64 release build and version/PE checks passed. A read-only probe still obtained valid readings from the existing ROG mouse and VGN V98 Pro V3 keyboard. No newly supported device was attached, so this does not validate the new hardware paths.

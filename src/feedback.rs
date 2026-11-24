@@ -134,6 +134,21 @@ pub fn collect_probe() -> Result<String, String> {
             }
             continue;
         }
+        if backend == super::backends::BackendId::Bluetooth {
+            match super::backends::bluetooth::poll() {
+                Ok(poll) if poll.snapshots.is_empty() => {
+                    let outcome = if poll.present_channels.is_some_and(|channels| channels.is_empty()) {
+                        "no-connected-device"
+                    } else { "no-cached-battery" };
+                    let _ = writeln!(output, "Bluetooth: {outcome}");
+                }
+                Ok(poll) => for snapshot in poll.snapshots {
+                    append_probe_result(&mut output, &snapshot.target, Some(&snapshot));
+                },
+                Err(_) => { let _ = writeln!(output, "Bluetooth: query-failed"); }
+            }
+            continue;
+        }
         let provider: &dyn super::backends::DeviceBackend = match backend {
             super::backends::BackendId::Logitech => &super::backends::logitech::Logitech,
             super::backends::BackendId::Rapoo => &super::backends::rapoo::Rapoo,
@@ -188,6 +203,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::HyperX => &super::backends::hyperx::HyperX,
             super::backends::BackendId::DualSense => &super::backends::sony::DualSense,
             super::backends::BackendId::XInput => unreachable!("XInput is queried without HID"),
+            super::backends::BackendId::Bluetooth => unreachable!("Bluetooth is queried without HID"),
             super::backends::BackendId::StandardHid => &super::backends::standard::StandardHid,
             super::backends::BackendId::Rog => &super::backends::rog::Rog,
         };

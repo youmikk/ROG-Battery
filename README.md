@@ -46,8 +46,9 @@ X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能
 | 耳机 | ATK、MCHOSE 迈从、EDIFIER 漫步者、MOONDROP 水月雨、XIBERIA 西伯利亚、FIFINE、Sony INZONE、HyperX、SteelSeries Arctis Nova |
 | 手柄 | ASUS / ROG、Sony DualSense / DualSense Edge、8BitDo 八位堂、Flydigi 飞智、GameSir 盖世小鸡，以及能通过 Windows XInput 返回电池信息的手柄 |
 | 标准 HID | 描述符提供标准 Battery Strength 电量能力的设备；标准电量协议不提供通用 DPI 设置 |
+| 蓝牙（通用） | Windows 设置中已显示电量的经典蓝牙 / 双模设备；读取系统缓存，不向设备发送命令，也不提供通用 DPI 设置 |
 
-例如，雷柏 VT 系列与 MT 系列、VGN 鼠标与键盘、狼蛛不同代际键盘会使用不同协议；同名系列或共用接收器编号不能直接推断兼容。新增适配中的不少型号已完成协议回归，仍需对应设备实机验收。
+例如，雷柏 VT 系列与 MT 系列、VGN 鼠标与键盘、狼蛛不同代际键盘会使用不同协议；同名系列或共用接收器编号不能直接推断兼容。通用蓝牙路径只显示 Windows 已经提供的电量，蓝牙缓存不提供充电状态时显示为未知；仅支持 BLE / GATT 的设备可能需要后续单独接入。新增适配中的不少型号已完成协议回归，仍需对应设备实机验收。
 
 完整资料：[多品牌兼容性](COMPATIBILITY.md) · [ASUS / ROG 型号目录](ROG_MODELS.md) · [雷柏 nRF54L 型号表](RAPOO_MODELS.md) · [协议研究](PROTOCOLS.md)
 

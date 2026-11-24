@@ -44,8 +44,9 @@ The table groups implemented integrations by device type. **Coverage is limited 
 | Headsets | ATK, MCHOSE, EDIFIER, MOONDROP, XIBERIA, FIFINE, Sony INZONE, HyperX and SteelSeries Arctis Nova |
 | Controllers | ASUS / ROG, Sony DualSense / DualSense Edge, 8BitDo, Flydigi, GameSir, and controllers whose current mode and driver expose battery information through Windows XInput |
 | Standard HID | Devices whose descriptors expose standard Battery Strength capabilities. This battery protocol does not provide universal DPI settings. |
+| Bluetooth (generic) | Connected paired classic or dual-mode devices whose battery Windows already shows in Settings. Readings come from the Windows cache without sending device commands, and no universal DPI controls are exposed. |
 
-Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard generations can use different protocols. A similar name or shared receiver ID does not establish compatibility. Many new integrations have passed protocol tests but still need validation on the corresponding hardware.
+Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard generations can use different protocols. A similar name or shared receiver ID does not establish compatibility. The generic Bluetooth path only displays a level that Windows already exposes; charging remains unknown when the Bluetooth cache has no charging state. BLE-only / GATT devices may require a separate integration. Many new integrations have passed protocol tests but still need validation on the corresponding hardware.
 
 Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
 
