@@ -348,6 +348,18 @@ macro_rules! tr {
     ("操作失败。") => { if $crate::i18n::english() { "Operation failed." } else { "操作失败。" } };
     ("写 LOD 会重置表面标定（厂商确认无恢复命令）。") => { if $crate::i18n::english() { "Changing LOD resets surface calibration. The manufacturer provides no command to restore it." } else { "写 LOD 会重置表面标定（厂商确认无恢复命令）。" } };
     ("「永不」休眠会显著增加耗电，设备闲置时不会自动休眠。") => { if $crate::i18n::english() { "Never sleeping increases power use. The device will stay awake when idle." } else { "「永不」休眠会显著增加耗电，设备闲置时不会自动休眠。" } };
+    ("DPI 预设") => { if $crate::i18n::english() { "DPI presets" } else { "DPI 预设" } };
+    ("保存在鼠标板载内存中；点击切换即可直接在硬件上生效。") => { if $crate::i18n::english() { "Saved in mouse onboard memory; clicks take effect immediately." } else { "保存在鼠标板载内存中；点击切换即可直接在硬件上生效。" } };
+    ("保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「应用」即可写入设备。") => { if $crate::i18n::english() { "Saved in mouse onboard memory, step 50 DPI. Click Switch to change stage, click Apply to write to device." } else { "保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「应用」即可写入设备。" } };
+    ("预设保存在软件中。点击「切换」可切换当前 DPI，修改数值后点击「应用」即可保存预设。") => { if $crate::i18n::english() { "Presets stay in the app. Click Switch to change DPI, click Apply to save presets." } else { "预设保存在软件中。点击「切换」可切换当前 DPI，修改数值后点击「应用」即可保存预设。" } };
+    ("当前回报率") => { if $crate::i18n::english() { "Current polling rate" } else { "当前回报率" } };
+    ("托盘与任务栏") => { if $crate::i18n::english() { "Tray and Taskbar" } else { "托盘与任务栏" } };
+    ("通知与告警") => { if $crate::i18n::english() { "Notifications & Alerts" } else { "通知与告警" } };
+    ("设备采样与通信") => { if $crate::i18n::english() { "Device Polling & Sampling" } else { "设备采样与通信" } };
+    ("数据备份与历史") => { if $crate::i18n::english() { "Data Backup & History" } else { "数据备份与历史" } };
+    ("电量历史记录") => { if $crate::i18n::english() { "Battery history record" } else { "电量历史记录" } };
+    ("记录各设备充放电曲线，最多保留 48 小时") => { if $crate::i18n::english() { "Record charging curve up to 48 hours" } else { "记录各设备充放电曲线，最多保留 48 小时" } };
+    ("存储路径管理") => { if $crate::i18n::english() { "Storage paths" } else { "存储路径管理" } };
 }
 
 #[macro_export]
@@ -839,6 +851,18 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "不可用" => "Unavailable",
         "保存" => "Save",
         "删除" => "Delete",
+        "DPI 预设" => "DPI presets",
+        "保存在鼠标板载内存中；点击切换即可直接在硬件上生效。" => "Saved in mouse onboard memory; clicks take effect immediately.",
+        "保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「应用」即可写入设备。" => "Saved in mouse onboard memory, step 50 DPI. Click Switch to change stage, click Apply to write to device.",
+        "预设保存在软件中。点击「切换」可切换当前 DPI，修改数值后点击「应用」即可保存预设。" => "Presets stay in the app. Click Switch to change DPI, click Apply to save presets.",
+        "当前回报率" => "Current polling rate",
+        "托盘与任务栏" => "Tray and Taskbar",
+        "通知与告警" => "Notifications & Alerts",
+        "设备采样与通信" => "Device Polling & Sampling",
+        "数据备份与历史" => "Data Backup & History",
+        "电量历史记录" => "Battery history record",
+        "记录各设备充放电曲线，最多保留 48 小时" => "Record charging curve up to 48 hours",
+        "存储路径管理" => "Storage paths",
         _ => text,
     }
 }

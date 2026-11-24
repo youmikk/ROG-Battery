@@ -768,9 +768,6 @@ impl Popup {
     pub fn hide(&self) {
         hide(self.hwnd(), &self.state, false)
     }
-    pub fn is_visible(&self) -> bool {
-        self.state.borrow().visible && unsafe { win32::IsWindowVisible(self.hwnd()) } != 0
-    }
     pub fn was_open(&self) -> bool {
         let s = self.state.borrow();
         s.visible || s.dismissed.is_some_and(|t| t.elapsed().as_millis() < 250)
@@ -1361,9 +1358,9 @@ fn draw_dpi(
 ) {
     let t = *p.t;
     p.text(
-        if dpi.is_some_and(|d| d.custom) { crate::tr!("自定义预设") } else { "DPI" },
+        if dpi.is_some_and(|d| d.custom) { crate::tr!("DPI 预设") } else { crate::tr!("DPI 档位") },
         R::new(panel.x + 18.0, panel.y + 6.0, 120.0, 18.0),
-        10.5,
+        11.0,
         true,
         t.text2,
         Align::Left,
@@ -1374,14 +1371,15 @@ fn draw_dpi(
     p.text(
         &current,
         R::new(panel.x + 142.0, panel.y + 6.0, panel.w - 160.0, 18.0),
-        12.0,
+        12.5,
         true,
-        t.text,
+        t.accent,
         Align::Right,
     );
     if let Some(dpi) = dpi {
         let segment = R::new(panel.x + 18.0, panel.y + 28.0, panel.w - 36.0, 40.0);
         p.round(segment, 9.0, t.bg_sunken);
+        p.round_stroke(segment, 9.0, t.border, 1.0);
         let count = dpi.stages.len().max(1);
         let item_w = segment.w / count as f32;
         for (index, stage) in dpi.stages.iter().enumerate() {
@@ -1393,15 +1391,18 @@ fn draw_dpi(
             );
             let active = dpi.active == Some(stage.index);
             let writable = dpi.writable && !dpi.disabled.contains(&stage.index);
-            if active || (writable && hover == Some(hits.len())) {
-                p.round(r, 7.0, if active { t.accent_soft } else { t.card_hover });
+            if active {
+                p.round(r, 7.0, t.accent_soft);
+                p.round_stroke(r, 7.0, t.accent, 1.0);
+            } else if writable && hover == Some(hits.len()) {
+                p.round(r, 7.0, t.card_hover);
             }
-            let color=if active { t.accent } else if writable { t.text2 } else { t.text3 };
-            if let Some(y)=dpi.stage_y.get(&stage.index).filter(|y| **y!=stage.value) {
-                p.text(&stage.value.to_string(),R::new(r.x,r.y,r.w,17.0),10.5,active,color,Align::Center);
-                p.text(&y.to_string(),R::new(r.x,r.y+16.0,r.w,17.0),10.5,active,color,Align::Center);
+            let color = if active { t.accent } else if writable { t.text } else { t.text3 };
+            if let Some(vertical) = dpi.stage_y.get(&stage.index).filter(|vertical| **vertical != stage.value) {
+                p.text(&stage.value.to_string(), R::new(r.x, r.y, r.w, 17.0), 10.5, active, color, Align::Center);
+                p.text(&vertical.to_string(), R::new(r.x, r.y + 16.0, r.w, 17.0), 10.5, active, color, Align::Center);
             } else {
-                p.text(&stage.value.to_string(),R::new(r.x,r.y-2.0,r.w,r.h),12.0,active,color,Align::Center);
+                p.text(&stage.value.to_string(), R::new(r.x, r.y - 1.0, r.w, r.h), 12.0, active, color, Align::Center);
             }
             if writable {
                 let action = if dpi.custom { Action::SetDpiPreset(key.to_string(), stage.value) }
@@ -1415,7 +1416,7 @@ fn draw_dpi(
         p.text(
             crate::tr!("暂未读取到 DPI 信息"),
             R::new(panel.x + 18.0, panel.y + 31.0, panel.w - 36.0, 30.0),
-            11.0,
+            11.5,
             false,
             t.text3,
             Align::Center,
@@ -2045,6 +2046,7 @@ fn draw(
         );
     }
     let footer_y = h - FOOTER;
+    p.hline(11.0, w - 11.0, footer_y, t.border);
     let label = if refreshing.is_some() {
         crate::tr!("正在刷新…").to_string()
     } else if updated {
@@ -2054,30 +2056,34 @@ fn draw(
     };
     p.text(
         &label,
-        R::new(17.0, footer_y, 130.0, FOOTER),
-        10.0,
+        R::new(17.0, footer_y, 140.0, FOOTER),
+        11.0,
         false,
         t.text3,
         Align::Left,
     );
     for (r, label, action) in [
         (
-            R::new(w - 175.0, footer_y + 5.0, 120.0, 32.0),
+            R::new(w - 180.0, footer_y + 6.0, 110.0, 30.0),
             crate::tr!("打开主窗口"),
             Action::Main,
         ),
         (
-            R::new(w - 51.0, footer_y + 5.0, 40.0, 32.0),
+            R::new(w - 62.0, footer_y + 6.0, 50.0, 30.0),
             crate::tr!("退出"),
             Action::Quit,
         ),
     ] {
-        let color = if hover == Some(hits.len()) {
-            t.text
+        let is_hover = hover == Some(hits.len());
+        if is_hover {
+            p.round(r, 6.0, t.card_hover);
+        }
+        let color = if is_hover {
+            t.accent
         } else {
             t.text2
         };
-        p.text(label, r, 11.0, false, color, Align::Center);
+        p.text(label, r, 12.0, is_hover, color, Align::Center);
         hits.push((r, action));
     }
 }

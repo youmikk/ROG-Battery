@@ -1391,6 +1391,45 @@ pub fn with_alpha(color: u32, alpha: u8) -> u32 {
     (color & 0x00FF_FFFF) | ((alpha as u32) << 24)
 }
 
+pub fn lerp_argb(start: u32, end: u32, progress: f32) -> u32 {
+    let progress = progress.clamp(0.0, 1.0);
+    let start_alpha = ((start >> 24) & 0xFF) as f32;
+    let start_red = ((start >> 16) & 0xFF) as f32;
+    let start_green = ((start >> 8) & 0xFF) as f32;
+    let start_blue = (start & 0xFF) as f32;
+    let end_alpha = ((end >> 24) & 0xFF) as f32;
+    let end_red = ((end >> 16) & 0xFF) as f32;
+    let end_green = ((end >> 8) & 0xFF) as f32;
+    let end_blue = (end & 0xFF) as f32;
+    let alpha = (start_alpha + (end_alpha - start_alpha) * progress).round() as u32;
+    let red = (start_red + (end_red - start_red) * progress).round() as u32;
+    let green = (start_green + (end_green - start_green) * progress).round() as u32;
+    let blue = (start_blue + (end_blue - start_blue) * progress).round() as u32;
+    (alpha << 24) | (red << 16) | (green << 8) | blue
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::lerp_argb;
+
+    #[test]
+    fn hover_colors_preserve_endpoints_and_clamp_progress() {
+        let start = 0x0020_4060;
+        let end = 0xFFA0_C0E0;
+        assert_eq!(lerp_argb(start, end, 0.0), start);
+        assert_eq!(lerp_argb(start, end, 1.0), end);
+        assert_eq!(lerp_argb(start, end, -0.5), start);
+        assert_eq!(lerp_argb(start, end, 1.5), end);
+    }
+
+    #[test]
+    fn hover_colors_interpolate_each_argb_channel() {
+        assert_eq!(lerp_argb(0x0020_4060, 0xFFA0_C0E0, 0.5), 0x8060_80A0);
+        assert_eq!(lerp_argb(0xFFA0_C0E0, 0x0020_4060, 0.5), 0x8060_80A0);
+        assert_eq!(lerp_argb(0x7F12_3456, 0x7F12_3456, 0.3), 0x7F12_3456);
+    }
+}
+
 // ==================== 画布 ====================
 
 /// 双缓冲画布。

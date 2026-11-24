@@ -224,6 +224,12 @@ extern "system" {
     pub fn SetProcessWorkingSetSize(process: Handle, min: usize, max: usize) -> i32;
 }
 
+pub fn trim_working_set() {
+    unsafe {
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
 /// `SYSTEMTIME`（wYear..wMilliseconds 共 8 个 WORD）。只用到年月日时分秒。
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

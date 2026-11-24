@@ -40,7 +40,10 @@ msix/store-credentials.psd1
 /test-results/
 /mock-devices.txt
 /tools/mock-devices*
+/tools/启动多品牌UI测试.cmd
 /tools/启动模拟测试.cmd
+/启动多品牌UI测试.cmd
+/直接启动测试程序.cmd
 /src/mock.rs
 *.nwg-backup
 *.bak

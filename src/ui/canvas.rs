@@ -1102,6 +1102,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                     } else {
                         // 悬停态变了才重画（悬停高亮），否则每次移动都重绘整页
                         if hover_changed {
+                            c.anim_wanted.set(true);
+                            set_timer(hwnd, true);
                             drop(ui);
                             unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
                             (c.damage)();
@@ -1123,6 +1125,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 };
                 drop(ui);
                 if changed {
+                    c.anim_wanted.set(true);
+                    set_timer(hwnd, true);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                     (c.damage)();
                 }
@@ -1447,4 +1451,5 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
 fn release_render_memory(c: &Ctx) {
     c.inner.borrow_mut().release();
     c.fonts.borrow_mut().clear();
+    crate::win32::trim_working_set();
 }

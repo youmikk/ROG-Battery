@@ -1,6 +1,6 @@
 
 use crate::ui::dropdown::{drop_current, drop_selected, options};
-use crate::ui::gfx::{with_alpha, Align, Painter, R};
+use crate::ui::gfx::{lerp_argb, with_alpha, Align, Painter, R};
 use crate::ui::layout::{self, font, Frame};
 use crate::ui::palette::{
     hsv_to_rgb, pack_custom_rgb, palette_colors, palette_index, rgb_to_hsv, PAL_CELL, PAL_COLS,
@@ -704,55 +704,77 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let is_mouse = d
         .selected
         .is_some_and(|r| d.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Mouse);
-    let mut x = c.x;
-    for (page, label) in tabs {
-        if let Some(basic) = d.basic {
-            if matches!(page, Page::Light | Page::Keys) || (page == Page::Perf
-                && basic.dpi.current.is_none() && basic.polling_rate.current.is_none()) { continue; }
-        }
-        if page != Page::Battery && !is_mouse {
-            continue;
-        }
-        let r = R::new(
-            x,
-            c.y,
-            (p.measure(label, 12.5, true).0 + 38.0).max(72.0),
-            33.0,
-        );
-        let on = ui.page == page;
-        let glyph = match page {
-            Page::Battery => Icon::Battery,
-            Page::Perf => Icon::Perf,
-            Page::Light => Icon::Light,
-            _ => Icon::Keys,
-        };
-        draw_icon(
-            p,
-            glyph,
-            R::new(r.x + 5.0, r.cy() - 7.0, 14.0, 14.0),
-            if on { t.accent } else { t.text2 },
-            1.3,
-        );
-        p.text(
-            label,
-            R::new(r.x + 21.0, r.y, r.w - 21.0, r.h),
-            12.5,
-            on,
-            if on { t.accent } else { t.text2 },
-            Align::Center,
-        );
-        if on {
-            p.round(
-                R::new(r.x + 8.0, r.bottom() - 2.0, r.w - 16.0, 2.0),
-                1.0,
-                t.accent,
+    let visible_tabs: Vec<_> = tabs
+        .into_iter()
+        .filter(|(page, _)| {
+            if let Some(basic) = d.basic {
+                if matches!(page, Page::Light | Page::Keys)
+                    || (*page == Page::Perf
+                        && basic.dpi.current.is_none()
+                        && basic.polling_rate.current.is_none())
+                {
+                    return false;
+                }
+            }
+            if *page != Page::Battery && !is_mouse {
+                return false;
+            }
+            true
+        })
+        .collect();
+    let count = visible_tabs.len();
+    if count > 0 {
+        let tab_width = 126.0;
+        let container_width = (count as f32 * tab_width + 6.0).min(c.w);
+        let container = R::new(c.x, c.y, container_width, 36.0);
+        p.round(container, 9.0, t.bg_sunken);
+        p.round_stroke(container, 9.0, t.border, 1.0);
+        let actual_tab_width = (container.w - 6.0) / count as f32;
+        for (index, (page, label)) in visible_tabs.into_iter().enumerate() {
+            let tab = R::new(
+                container.x + 3.0 + index as f32 * actual_tab_width,
+                container.y + 3.0,
+                actual_tab_width,
+                30.0,
             );
+            let on = ui.page == page;
+            let act = Act::Nav(page);
+            let glyph = match page {
+                Page::Battery => Icon::Battery,
+                Page::Perf => Icon::Perf,
+                Page::Light => Icon::Light,
+                _ => Icon::Keys,
+            };
+            if on {
+                p.round(tab, 7.0, t.accent);
+            } else if ui.hover == Some(act) {
+                p.round(tab, 7.0, with_alpha(t.text, 0x0E));
+            }
+            let icon_color = if on { t.accent_fg } else { t.text2 };
+            let text_color = if on { t.accent_fg } else { t.text2 };
+            let (text_width, _) = p.measure(label, 12.0, on);
+            let total_width = 14.0 + 6.0 + text_width;
+            let start_x = tab.cx() - total_width * 0.5;
+            draw_icon(
+                p,
+                glyph,
+                R::new(start_x, tab.cy() - 7.0, 14.0, 14.0),
+                icon_color,
+                1.3,
+            );
+            p.text(
+                label,
+                R::new(start_x + 20.0, tab.y, text_width + 2.0, tab.h),
+                12.0,
+                on,
+                text_color,
+                Align::Left,
+            );
+            ui.hot(tab, act);
         }
-        ui.hot(r, Act::Nav(page));
-        x += r.w + 8.0;
+        p.hline(c.x, c.x + c.w, c.y + 44.0, t.border);
+        c.y += 55.0;
     }
-    p.hline(c.x, c.x + c.w, c.y + 34.0, t.border);
-    c.y += 55.0;
 }
 
 fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
@@ -778,7 +800,7 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
         } else {
             crate::tr!("设为标准托盘图标")
         },
-        false,
+        selected,
         if selected {
             Act::None
         } else {
@@ -1150,6 +1172,45 @@ fn draw_drop(p: &mut Painter, ui: &mut Ui, d: &Data, drop: Drop, view_h: f32) {
 
 // ───────────────────────── 电量页 ─────────────────────────
 
+fn draw_device_micro_icon(
+    painter: &mut Painter,
+    kind: crate::tray_prefs::TrayKind,
+    left: f32,
+    top: f32,
+    color: u32,
+) {
+    match kind {
+        crate::tray_prefs::TrayKind::Mouse => {
+            painter.round_stroke(R::new(left, top, 10.0, 14.0), 4.5, color, 1.2);
+            painter.line(left + 5.0, top + 2.5, left + 5.0, top + 5.5, color, 1.2);
+        }
+        crate::tray_prefs::TrayKind::Keyboard => {
+            painter.round_stroke(R::new(left - 2.0, top + 2.0, 15.0, 10.0), 2.0, color, 1.2);
+            painter.line(left, top + 6.5, left + 11.0, top + 6.5, color, 1.0);
+            painter.line(left + 3.5, top + 3.0, left + 3.5, top + 6.5, color, 1.0);
+            painter.line(left + 7.5, top + 3.0, left + 7.5, top + 6.5, color, 1.0);
+        }
+        crate::tray_prefs::TrayKind::Headset => {
+            painter.polyline(
+                &[(left, top + 7.0), (left + 2.0, top + 1.5), (left + 8.0, top + 1.5), (left + 10.0, top + 7.0)],
+                color,
+                1.2,
+            );
+            painter.round(R::new(left - 2.0, top + 6.0, 3.5, 6.0), 1.5, color);
+            painter.round(R::new(left + 8.5, top + 6.0, 3.5, 6.0), 1.5, color);
+        }
+        crate::tray_prefs::TrayKind::Gamepad => {
+            painter.round_stroke(R::new(left - 2.0, top + 2.0, 14.0, 9.0), 3.0, color, 1.2);
+            painter.circle(left + 2.0, top + 6.5, 1.5, color);
+            painter.circle(left + 8.0, top + 6.5, 1.5, color);
+        }
+        _ => {
+            painter.round_stroke(R::new(left, top + 1.0, 11.0, 11.0), 2.5, color, 1.2);
+            painter.circle(left + 5.5, top + 6.5, 1.8, color);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn home_device_card(
     p: &mut Painter,
@@ -1165,99 +1226,152 @@ fn home_device_card(
     let t = p.t;
     if is_ghost {
         p.round(
-            R::new(r.x + 3.0, r.y + 7.0 + lift * 3.0, r.w, r.h),
-            15.0,
-            with_alpha(t.text, (20.0 + lift * 20.0) as u8),
+            R::new(r.x + 2.0, r.y + 4.0 + lift * 2.0, r.w, r.h),
+            12.0,
+            with_alpha(t.text, (18.0 + lift * 18.0) as u8),
         );
     }
-    p.card(
-        r,
-        14.0,
-        if is_ghost { t.card } else { t.card },
-        if is_target || is_ghost {
-            t.accent
-        } else if ui.hover == Some(Act::SelectDevice(index)) {
-            t.accent
+    let is_hovered = !is_ghost && ui.device_drag.is_none() && ui.hover == Some(Act::SelectDevice(index));
+    let anim_progress = {
+        let value = ui.card_hover_anims.entry(dev.key.clone()).or_insert(0.0);
+        let target = if is_hovered { 1.0f32 } else { 0.0f32 };
+        if (*value - target).abs() > 0.005 {
+            let step = 0.14f32;
+            if *value < target {
+                *value = (*value + step).min(target);
+            } else {
+                *value = (*value - step).max(target);
+            }
+            ui.anim_hint = true;
         } else {
-            t.border
-        },
-    );
+            *value = target;
+        }
+        *value
+    };
+    let ease = anim_progress * (2.0 - anim_progress);
+    if ease > 0.01 && !is_ghost {
+        p.round(
+            R::new(r.x, r.y + 1.0, r.w, r.h),
+            10.0,
+            with_alpha(t.accent, (0x14 as f32 * ease) as u8),
+        );
+    }
+    let card_background = lerp_argb(t.card, t.card_hover, ease);
+    let card_border = if is_target || is_ghost {
+        t.accent
+    } else {
+        lerp_argb(t.border, t.accent, ease)
+    };
+    p.card(r, 10.0, card_background, card_border);
     if !is_ghost {
         ui.hot(r, Act::SelectDevice(index));
     }
-    if ui.hover == Some(Act::SelectDevice(index)) || is_ghost {
-        let color = if is_ghost { t.accent } else { t.text3 };
-        for dx in [-3.0, 3.0] {
-            for dy in [-5.5, 0.0, 5.5] {
-                p.circle(r.x + 18.0 + dx, r.y + 21.5 + dy, 1.15, color);
-            }
-        }
-    }
+    let kind = d.cfg.device_kind(dev);
+    let kind_label = kind.label();
+    let displayed = dev.display_percent();
+    let charging = dev.is_charging();
+    let connected = dev.connected;
+    let color = ring_color(t, connected, charging, displayed.map_or(100, |percent| percent.value));
+    let info_x = r.x + 20.0;
+    let text_width = (r.w - 110.0).max(80.0);
+    let icon_color = if !connected {
+        t.text3
+    } else if is_hovered || is_ghost {
+        t.accent
+    } else {
+        t.text2
+    };
+    let first_line_y = r.y + 18.0;
+    draw_device_micro_icon(p, kind, info_x, first_line_y, icon_color);
     p.text(
-        d.cfg.device_kind(dev).label(),
-        R::new(r.x + 31.0, r.y + 12.0, 80.0, 18.0),
-        10.5,
+        kind_label,
+        R::new(info_x + 16.0, first_line_y - 2.0, 36.0, 18.0),
+        11.5,
         false,
-        t.text3,
+        if connected { t.text2 } else { t.text3 },
         Align::Left,
     );
-    let displayed = dev.display_percent();
-    let color = ring_color(t, dev.connected, dev.is_charging(), displayed.map_or(100, |p| p.value));
-    let cy = r.y + 83.0;
+    p.text(
+        "·",
+        R::new(info_x + 48.0, first_line_y - 2.0, 10.0, 18.0),
+        11.5,
+        false,
+        t.text3,
+        Align::Center,
+    );
+    let dot_x = info_x + 62.0;
+    let dot_center_y = first_line_y + 7.0;
+    if !connected {
+        p.circle(dot_x, dot_center_y, 3.0, t.text3);
+    } else if charging {
+        p.circle(dot_x, dot_center_y, 5.0, with_alpha(t.green, 0x38));
+        p.circle(dot_x, dot_center_y, 3.2, t.green);
+    } else {
+        p.circle(dot_x, dot_center_y, 3.0, t.accent);
+    }
+    let status = if !connected {
+        crate::tr!("未连接")
+    } else if charging {
+        crate::tr!("正在充电")
+    } else {
+        crate::tr!("已连接")
+    };
+    p.text(
+        status,
+        R::new(dot_x + 8.0, first_line_y - 2.0, text_width - 70.0, 18.0),
+        11.5,
+        charging,
+        if charging { t.green } else if connected { t.text2 } else { t.text3 },
+        Align::Left,
+    );
+    p.text(
+        d.cfg.device_name(dev),
+        R::new(info_x, r.y + 42.0, text_width, 24.0),
+        15.5,
+        true,
+        t.text,
+        Align::Left,
+    );
+    let hint = if !connected {
+        crate::tr!("连接后更新读数")
+    } else if charging {
+        crate::tr!("正在为设备充电")
+    } else if let Some(level) = dev.coarse_level() {
+        crate::i18n::battery_level(level)
+    } else if dev.is_low() {
+        crate::tr!("电量偏低")
+    } else if displayed.is_some() {
+        crate::tr!("使用中")
+    } else {
+        crate::tr!("电量未知")
+    };
+    p.text(
+        hint,
+        R::new(info_x, r.y + 74.0, text_width, 20.0),
+        12.0,
+        false,
+        if dev.is_low() { t.warn } else { t.text2 },
+        Align::Left,
+    );
+    let ring_center_x = r.right() - 56.0;
+    let ring_center_y = r.cy();
+    let ring_radius = 32.0;
     p.ring(
-        r.cx(),
-        cy,
-        48.0,
-        5.0,
-        displayed.map_or(0, |p| p.value) as f32 / 100.0,
+        ring_center_x,
+        ring_center_y,
+        ring_radius,
+        4.2,
+        displayed.map_or(0, |percent| percent.value) as f32 / 100.0,
         color,
         color,
         t.track,
     );
     p.text(
         &dev.battery_text(true),
-        R::new(r.cx() - 46.0, cy - 21.0, 92.0, 35.0),
-        if displayed.is_some_and(|p| p.approximate) { 23.0 } else { 29.0 },
-        false,
-        if dev.connected { t.text } else { t.text3 },
-        Align::Center,
-    );
-    p.text(
-        if !dev.connected {
-            crate::tr!("未连接")
-        } else if dev.is_charging() {
-            crate::tr!("正在充电")
-        } else if let Some(level) = dev.coarse_level() {
-            crate::i18n::battery_level(level)
-        } else if dev.is_low() {
-            crate::tr!("电量偏低")
-        } else {
-            if displayed.is_some() { crate::tr!("使用中") } else { crate::tr!("电量未知") }
-        },
-        R::new(r.cx() - 45.0, cy + 16.0, 90.0, 16.0),
-        10.0,
-        false,
-        t.text2,
-        Align::Center,
-    );
-    p.text(
-        d.cfg.device_name(dev),
-        R::new(r.x + 16.0, r.y + 151.0, r.w - 32.0, 25.0),
-        14.0,
+        R::new(ring_center_x - 30.0, ring_center_y - 11.0, 60.0, 22.0),
+        if displayed.is_some_and(|percent| percent.approximate) { 15.0 } else { 18.0 },
         true,
-        t.text,
-        Align::Center,
-    );
-    p.text(
-        if !dev.connected {
-            crate::tr!("未连接")
-        } else {
-            crate::tr!("已连接")
-        },
-        R::new(r.x + 16.0, r.y + 181.0, r.w - 32.0, 18.0),
-        11.0,
-        false,
-        t.text3,
+        if connected { t.text } else { t.text3 },
         Align::Center,
     );
 }
@@ -1288,9 +1402,9 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         return;
     }
     let columns = if c.w < 420.0 { 1 } else { 2 };
-    let gap = 18.0;
+    let gap = 16.0;
     let width = (c.w - gap * (columns - 1) as f32) / columns as f32;
-    let height = 220.0;
+    let height = 116.0;
     let drag = ui.device_drag;
     let reflow = drag
         .map(|drag| {
@@ -1315,6 +1429,11 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
             index
         }
     };
+    if let Some(drag) = drag {
+        let target_rect = slot_rect(drag.target);
+        p.round(target_rect, 10.0, with_alpha(t.accent, 0x0A));
+        p.round_stroke(target_rect, 10.0, with_alpha(t.accent, 0x60), 1.2);
+    }
     for (index, dev) in d.readings.iter().enumerate() {
         if drag.is_some_and(|drag| drag.source == index) {
             continue;
@@ -1338,7 +1457,7 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
             dev,
             index,
             r,
-            drag.is_some_and(|drag| drag.target == index && drag.source != index),
+            false,
             false,
             0.0,
         );
@@ -1465,6 +1584,26 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
                 Align::Left,
             );
         }
+    } else if let Some(basic) = d.basic {
+        if selected.is_some_and(|reading| d.cfg.device_kind(reading) == crate::tray_prefs::TrayKind::Mouse) {
+            let mut parts = Vec::new();
+            if let Some(dpi) = basic.dpi.current {
+                parts.push(format!("{dpi} DPI"));
+            }
+            if let Some(hz) = basic.polling_rate.current {
+                parts.push(format!("{hz} Hz"));
+            }
+            if !parts.is_empty() {
+                p.text(
+                    &parts.join("  ·  "),
+                    R::new(x, hero.y + 116.0, hero.right() - x - 20.0, 20.0),
+                    12.0,
+                    false,
+                    t.text2,
+                    Align::Left,
+                );
+            }
+        }
     }
     c.y = hero.bottom();
     if selected.is_some_and(|r| d.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Headset) {
@@ -1477,7 +1616,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         rog_battery_settings(p, ui, d, c);
     }
 
-    c.h2(p, crate::tr!("电量历史"), false);
+    c.h2(p, crate::tr!("历史记录"), false);
 
     let chart = c.card(p, 220.0);
     draw_chart(p, chart, d, ui);
@@ -2078,98 +2217,178 @@ fn known_state<'a>(d: &'a Data) -> Option<&'a crate::proto::State> {
 fn dpi_preset_editor(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
     presets: &crate::device::DpiPresets, c: &mut Cursor) {
     let t = p.t;
-    let title = R::new(c.x, c.y + 4.0, c.w, 32.0);
-    p.text(crate::tr!("DPI 档位"), title, font::H2, true, t.text2, Align::Left);
-    let count = R::new(title.right() - 196.0, title.y, 196.0, 30.0);
-    segmented(p, ui, count, &["1", "2", "3", "4"], presets.values.len().saturating_sub(1),
-        |i| Act::DpiPresetCount(i as u8 + 1));
-    p.text(crate::tr!("启用档数"), R::new(count.x - 104.0, title.y, 96.0, 30.0),
+    let title = R::new(c.x, c.y + 4.0, c.w - 200.0, 32.0);
+    p.text(crate::tr!("DPI 预设"), title, font::H2, true, t.text, Align::Left);
+    let count_width = 176.0;
+    let count = R::new(c.x + c.w - count_width, c.y + 4.0, count_width, 28.0);
+    p.text(crate::tr!("启用档数"), R::new(count.x - 76.0, count.y, 68.0, count.h),
         11.5, false, t.text3, Align::Right);
-    c.y = title.bottom() + 10.0;
-    let card = c.card(p, 4.0 + presets.values.len() as f32 * 46.0 + 58.0);
+    segmented(p, ui, count, &["1", "2", "3", "4"], presets.values.len().saturating_sub(1),
+        |index| Act::DpiPresetCount(index as u8 + 1));
+    c.y = count.bottom() + 12.0;
+    let count_len = presets.values.len();
+    let card_height = count_len as f32 * 46.0 + 44.0;
+    let card = c.card(p, card_height);
+    let mut row_y = card.y + 4.0;
     for (index, value) in presets.values.iter().enumerate() {
-        let row = R::new(card.x, card.y + 4.0 + index as f32 * 46.0, card.w, 46.0);
+        let row = R::new(card.x, row_y, card.w, 46.0);
         let active = basic.dpi.current == Some(*value) && basic.dpi.current_y.is_none_or(|y| y == *value);
         let valid = basic.dpi.values.contains(value);
         let edit = Edit::DpiPreset(index as u8);
-        if active { p.rect(row, t.accent_soft); }
-        p.text(&crate::trf!("档位 {}", index + 1), R::new(row.x + 18.0,row.y,52.0,row.h),11.5,active,
-            if active {t.accent} else {t.text3},Align::Left);
-        let input = R::new(row.x + 74.0,row.cy()-15.0,76.0,30.0);
-        let text = ui.edit_text(edit).map(str::to_string).unwrap_or_else(|| value.to_string());
-        num_box(p,input,&text,ui.focus == Some(edit));
-        p.text("DPI",R::new(input.right()+8.0,row.y,30.0,row.h),12.0,false,t.text3,Align::Left);
-        if basic.dpi.write_effect.is_some() && !basic.dpi.values.is_empty() {
-            ui.hot(input,Act::Focus(edit));
-            button(p,ui,R::new(row.right()-62.0,input.y,52.0,30.0),crate::tr!("应用"),false,Act::ApplyEdit(edit));
-        }
-        let use_rect = R::new(row.right()-124.0,input.y,54.0,30.0);
         if active {
-            p.text(crate::tr!("● 当前使用"),R::new(row.right()-146.0,row.y,76.0,row.h),
-                11.0,true,t.accent,Align::Left);
-        } else if valid && basic.connected && basic.dpi.writable && basic.dpi.write_effect.is_some() {
-            button(p,ui,use_rect,crate::tr!("切换"),false,Act::UseDpiPreset(*value));
-        } else {
-            p.text(if valid {"—"} else {crate::tr!("不可用")},use_rect,11.0,false,p.t.text3,Align::Center);
+            p.rect(row, t.accent_soft);
         }
+        ui.hot(row, Act::None);
+        p.text(
+            &crate::trf!("档位 {}", index + 1),
+            R::new(card.x + 18.0, row.y, 52.0, row.h),
+            11.5,
+            active,
+            if active { t.accent } else { t.text3 },
+            Align::Left,
+        );
+        let input = R::new(card.x + 74.0, row.cy() - 15.0, 76.0, 30.0);
+        let text = ui.edit_text(edit).map(str::to_string).unwrap_or_else(|| value.to_string());
+        num_box(p, input, &text, ui.focus == Some(edit));
+        if basic.dpi.write_effect.is_some() && !basic.dpi.values.is_empty() {
+            ui.hot(input, Act::Focus(edit));
+            let apply_button = R::new(row.right() - 62.0, row.cy() - 15.0, 52.0, 30.0);
+            button(p, ui, apply_button, crate::tr!("应用"), false, Act::ApplyEdit(edit));
+        }
+        p.text("DPI", R::new(input.right() + 8.0, row.y, 30.0, row.h), 12.0, false, t.text3, Align::Left);
+        if active {
+            p.text(
+                crate::tr!("● 当前使用"),
+                R::new(row.right() - 146.0, row.y, 76.0, row.h),
+                11.0,
+                true,
+                t.accent,
+                Align::Left,
+            );
+        } else if valid && basic.connected && basic.dpi.writable && basic.dpi.write_effect.is_some() {
+            let use_rect = R::new(row.right() - 124.0, row.cy() - 15.0, 54.0, 30.0);
+            button(p, ui, use_rect, crate::tr!("切换"), false, Act::UseDpiPreset(*value));
+        } else {
+            let use_rect = R::new(row.right() - 124.0, row.y, 54.0, row.h);
+            p.text(if valid { "—" } else { crate::tr!("不可用") }, use_rect, 11.0, false, t.text3, Align::Center);
+        }
+        row_y += 46.0;
     }
-    let hint = match basic.dpi.write_effect {
-        Some(crate::device::DpiWriteEffect::Stored) => crate::tr!("切换会写入鼠标保存的 DPI；预设列表保存在软件中"),
-        Some(_) => crate::tr!("预设保存在软件中，点击切换后读取确认"),
-        None => crate::tr!("当前连接不支持 DPI 预设写入"),
-    };
-    p.text(crate::tr!("按 DPI 升序排列；减少档数时保留收起的数值"),
-        R::new(card.x+18.0,card.bottom()-52.0,card.w-36.0,22.0),11.0,false,t.text3,Align::Left);
-    p.text(hint,R::new(card.x+18.0,card.bottom()-30.0,card.w-36.0,22.0),11.0,false,t.text3,Align::Left);
+    p.text_wrap(
+        crate::tr!("预设保存在软件中。点击「切换」可切换当前 DPI，修改数值后点击「应用」即可保存预设。"),
+        R::new(card.x + 18.0, row_y + 6.0, card.w - 36.0, 32.0),
+        11.5,
+        t.text3,
+    );
     c.y = card.bottom();
 }
 
 fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
     cfg: &crate::settings::Settings, c: &mut Cursor) {
     let presets = cfg.presets_for(&basic.target.key, &basic.dpi);
+    let has_stages = !basic.dpi.stages.is_empty();
     if basic.dpi.write_effect.is_some() || cfg.dpi_presets.contains_key(&basic.target.key) {
-        let r = R::new(c.x,c.y+4.0,c.w,36.0);
-        segmented(p,ui,r,&[if basic.dpi.stages.is_empty() {crate::tr!("快捷数值")}
-            else {crate::tr!("设备档位")},crate::tr!("自定义预设")],usize::from(presets.enabled),
-            |i| Act::DpiPresetMode(i == 1));
-        c.y = r.bottom()+12.0;
+        let mode_rect = R::new(c.x, c.y + 4.0, c.w.min(320.0), 34.0);
+        segmented(p, ui, mode_rect, &[
+            if has_stages { crate::tr!("设备档位") } else { crate::tr!("快捷数值") },
+            crate::tr!("自定义预设"),
+        ], usize::from(presets.enabled), |index| Act::DpiPresetMode(index == 1));
+        c.y = mode_rect.bottom() + 12.0;
         if presets.enabled {
-            dpi_preset_editor(p,ui,basic,&presets,c);
+            dpi_preset_editor(p, ui, basic, &presets, c);
             return;
         }
     }
-    if !basic.dpi.stage_y.is_empty() && !basic.dpi.stages.is_empty() {
-        c.h2(p,crate::tr!("DPI 档位"),true);
-        let card = c.card(p,48.0 * basic.dpi.stages.len() as f32 + 12.0);
-        for (position,stage) in basic.dpi.stages.iter().enumerate() {
-            let row = R::new(card.x + 18.0,card.y + 6.0 + position as f32 * 48.0,card.w - 36.0,48.0);
-            let active = basic.dpi.active_stage == Some(stage.index);
-            p.text(&crate::trf!("档位 {}", position + 1),R::new(row.x,row.y,66.0,row.h),12.0,active,
-                if active {p.t.accent} else {p.t.text2},Align::Left);
-            for (column,edit,value,axis) in [(0,Edit::BasicDpiX(stage.index),Some(stage.value),"X"),
-                (1,Edit::BasicDpiY(stage.index),basic.dpi.stage_y.get(&stage.index).copied(),"Y")] {
-                let x = row.x + 70.0 + column as f32 * 106.0;
-                p.text(axis,R::new(x,row.y,14.0,row.h),11.5,false,p.t.text3,Align::Left);
-                let r = R::new(x + 18.0,row.cy()-15.0,80.0,30.0);
-                let text = ui.edit_text(edit).map(str::to_string).or_else(|| value.map(|v|v.to_string())).unwrap_or_else(||"—".into());
+    if has_stages {
+        let t = p.t;
+        c.h2(p, crate::tr!("DPI 档位"), true);
+        let stages_count = basic.dpi.stages.len();
+        let card_height = stages_count as f32 * 46.0 + 40.0;
+        let card = c.card(p, card_height);
+        let mut row_y = card.y + 4.0;
+        for (position, stage) in basic.dpi.stages.iter().enumerate() {
+            let row = R::new(card.x, row_y, card.w, 46.0);
+            let active = basic.dpi.active_stage == Some(stage.index)
+                || (basic.dpi.active_stage.is_none() && basic.dpi.current == Some(stage.value));
+            if active {
+                p.rect(row, t.accent_soft);
+            }
+            ui.hot(row, Act::None);
+            p.text(
+                &crate::trf!("档位 {}", position + 1),
+                R::new(card.x + 18.0, row.y, 52.0, row.h),
+                11.5,
+                active,
+                if active { t.accent } else { t.text3 },
+                Align::Left,
+            );
+            let edit_x = Edit::BasicDpiX(stage.index);
+            if !basic.dpi.stage_y.is_empty() {
+                let edit_y = Edit::BasicDpiY(stage.index);
+                let text_x = ui.edit_text(edit_x).map(str::to_string)
+                    .unwrap_or_else(|| stage.value.to_string());
+                let vertical = basic.dpi.stage_y.get(&stage.index).copied().unwrap_or(stage.value);
+                let text_y = ui.edit_text(edit_y).map(str::to_string)
+                    .unwrap_or_else(|| vertical.to_string());
+                p.text("X", R::new(card.x + 74.0, row.y, 14.0, row.h), 11.5, false, t.text3, Align::Left);
+                let box_x = R::new(card.x + 90.0, row.cy() - 15.0, 68.0, 30.0);
+                p.text("Y", R::new(box_x.right() + 10.0, row.y, 14.0, row.h), 11.5, false, t.text3, Align::Left);
+                let box_y = R::new(box_x.right() + 26.0, row.cy() - 15.0, 68.0, 30.0);
                 if basic.dpi.stage_editable {
-                    num_box(p,r,&text,ui.focus==Some(edit));
-                    if basic.connected { ui.hot(r,Act::Focus(edit)); }
+                    num_box(p, box_x, &text_x, ui.focus == Some(edit_x));
+                    num_box(p, box_y, &text_y, ui.focus == Some(edit_y));
+                    if basic.connected {
+                        ui.hot(box_x, Act::Focus(edit_x));
+                        ui.hot(box_y, Act::Focus(edit_y));
+                    }
                 } else {
-                    p.text(&text,r,12.5,active,if active {p.t.accent}else{p.t.text2},Align::Center);
+                    p.text(&text_x, box_x, 12.5, active, if active { t.accent } else { t.text2 }, Align::Center);
+                    p.text(&text_y, box_y, 12.5, active, if active { t.accent } else { t.text2 }, Align::Center);
+                }
+                p.text("DPI", R::new(box_y.right() + 8.0, row.y, 30.0, row.h), 12.0, false, t.text3, Align::Left);
+            } else {
+                let text = ui.edit_text(edit_x).map(str::to_string)
+                    .unwrap_or_else(|| stage.value.to_string());
+                let value_box = R::new(card.x + 74.0, row.cy() - 15.0, 76.0, 30.0);
+                if basic.dpi.stage_editable {
+                    num_box(p, value_box, &text, ui.focus == Some(edit_x));
+                    if basic.connected {
+                        ui.hot(value_box, Act::Focus(edit_x));
+                    }
+                } else {
+                    p.text(&text, value_box, 12.5, active, if active { t.accent } else { t.text2 }, Align::Center);
+                }
+                p.text("DPI", R::new(value_box.right() + 8.0, row.y, 30.0, row.h), 12.0, false, t.text3, Align::Left);
+            }
+            if active {
+                p.text(
+                    crate::tr!("● 当前使用"),
+                    R::new(row.right() - 146.0, row.y, 76.0, row.h),
+                    11.0,
+                    true,
+                    t.accent,
+                    Align::Left,
+                );
+            } else if basic.connected && basic.dpi.stage_writable {
+                let switch_button = R::new(row.right() - 124.0, row.cy() - 15.0, 54.0, 30.0);
+                if let Some(context) = basic.dpi.stage_context() {
+                    button(p, ui, switch_button, crate::tr!("切换"), false, Act::BasicDpiStage(*stage, context));
+                } else if basic.dpi.writable {
+                    button(p, ui, switch_button, crate::tr!("切换"), false, Act::BasicDpi(stage.value));
                 }
             }
             if basic.connected && basic.dpi.stage_editable {
-                button(p,ui,R::new(row.right()-130.0,row.cy()-15.0,60.0,30.0),crate::tr!("应用"),false,
-                    Act::ApplyEdit(Edit::BasicDpiX(stage.index)));
+                let apply_button = R::new(row.right() - 62.0, row.cy() - 15.0, 52.0, 30.0);
+                button(p, ui, apply_button, crate::tr!("应用"), false, Act::ApplyEdit(edit_x));
             }
-            if basic.connected && basic.dpi.stage_writable {
-                if let Some(context) = basic.dpi.stage_context() {
-                    button(p,ui,R::new(row.right()-62.0,row.cy()-15.0,62.0,30.0),
-                        if active {crate::tr!("当前")} else {crate::tr!("切换")},active,Act::BasicDpiStage(*stage,context));
-                }
-            }
+            row_y += 46.0;
         }
+        p.text_wrap(
+            crate::tr!("保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「应用」即可写入设备。"),
+            R::new(card.x + 18.0, row_y + 6.0, card.w - 36.0, 32.0),
+            11.5,
+            t.text3,
+        );
         c.y = card.bottom();
         return;
     }
@@ -2201,19 +2420,29 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
         let t = p.t;
         let segment = R::new(card.x + 18.0, card.bottom() - 49.0, card.w - 36.0, 36.0);
         p.round(segment, 9.0, t.bg_sunken);
+        p.round_stroke(segment, 9.0, t.border, 1.0);
         let width = segment.w / choices.len() as f32;
         let can_write = basic.connected && if configured { basic.dpi.stage_writable } else { basic.dpi.writable };
         for (position, stage) in choices.iter().enumerate() {
             let r = R::new(segment.x + position as f32 * width + 3.0, segment.y + 3.0, width - 6.0, segment.h - 6.0);
             let active = if configured { basic.dpi.active_stage == Some(stage.index) }
                 else { basic.dpi.current == Some(stage.value) };
-            if active { p.round(r, 7.0, t.accent_soft); }
+            let act = if configured {
+                basic.dpi.stage_context().map(|context| Act::BasicDpiStage(*stage, context))
+            } else {
+                Some(Act::BasicDpi(stage.value))
+            };
+            if active {
+                p.round(r, 7.0, t.accent);
+            } else if ui.hover == act {
+                p.round(r, 7.0, with_alpha(t.text, 0x0E));
+            }
             p.text(&stage.value.to_string(), r, 12.0, active,
-                if active { t.accent } else if can_write { t.text2 } else { t.text3 }, Align::Center);
+                if active { t.accent_fg } else if can_write { t.text2 } else { t.text3 }, Align::Center);
             if can_write {
-                if configured {
-                    if let Some(context) = basic.dpi.stage_context() { ui.hot(r, Act::BasicDpiStage(*stage, context)); }
-                } else { ui.hot(r, Act::BasicDpi(stage.value)); }
+                if let Some(act) = act {
+                    ui.hot(r, act);
+                }
             }
         }
     }
@@ -2224,22 +2453,42 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     if let Some(basic) = d.basic {
         basic_dpi(p, ui, basic, d.cfg, c);
         if basic.polling_rate.current.is_some() || !basic.polling_rate.values.is_empty() {
-            c.h2(p,crate::tr!("回报率"),false);
+            c.h2(p, crate::tr!("回报率"), false);
             let rate = &basic.polling_rate;
-            let card = c.card(p, if rate.values.is_empty() {layout::ROW_H} else {102.0});
-            let control = row_label(p,row_area(card,card.y),crate::tr!("回报率"),None,140.0);
-            let text = rate.current.map(|hz|format!("{hz} Hz")).unwrap_or_else(||"—".into());
-            p.text(&text,control,font::BODY,true,p.t.text,Align::Right);
-            if !rate.values.is_empty() {
-                let area = R::new(card.x + 18.0,card.bottom()-49.0,card.w-36.0,36.0);
-                let width = area.w / rate.values.len() as f32;
-                for (position,hz) in rate.values.iter().enumerate() {
-                    let r = R::new(area.x + position as f32 * width,area.y,width-5.0,area.h);
-                    let active = rate.current == Some(*hz);
-                    if basic.connected && rate.writable {
-                        button(p,ui,r,&hz.to_string(),active,Act::BasicPollingRate(*hz));
-                    } else { p.text(&hz.to_string(),r,12.0,active,p.t.text3,Align::Center); }
-                }
+            let card = c.card(p, layout::ROW_H);
+            let area = row_area(card, card.y);
+            let value_strings: Vec<String> = rate.values.iter().map(|value| value.to_string()).collect();
+            let labels: Vec<&str> = value_strings.iter().map(String::as_str).collect();
+            let selected = rate.current.and_then(|current| rate.values.iter().position(|&value| value == current)).unwrap_or(usize::MAX);
+            let segment_width = (labels.len() as f32 * 64.0).clamp(160.0, 320.0);
+            let control = row_label(
+                p,
+                area,
+                crate::tr!("轮询频率"),
+                Some(crate::tr!("越高越跟手，也越耗电")),
+                segment_width + 40.0,
+            );
+            if !rate.values.is_empty() && basic.connected && rate.writable {
+                let values = rate.values.clone();
+                segmented(
+                    p,
+                    ui,
+                    R::new(control.x, control.cy() - 15.0, segment_width, 30.0),
+                    &labels,
+                    selected,
+                    move |index| Act::BasicPollingRate(values[index]),
+                );
+                p.text(
+                    "Hz",
+                    R::new(control.x + segment_width + 8.0, control.y, 24.0, control.h),
+                    11.0,
+                    false,
+                    p.t.text3,
+                    Align::Left,
+                );
+            } else {
+                let text = rate.current.map(|hz| format!("{hz} Hz")).unwrap_or_else(|| "—".into());
+                p.text(&text, control, font::BODY, true, p.t.text, Align::Right);
             }
             c.y = card.bottom();
         }
@@ -2757,22 +3006,31 @@ pub fn settings_header(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     page_heading(p, ui, &mut c, crate::tr!("设置"), Some(Act::Nav(previous)));
     ui.chrome.extend(ui.hots.drain(content_hits..));
     let tabs_w = c.w.min(660.0);
+    let container = R::new(c.x, c.y, tabs_w, 36.0);
+    p.round(container, 9.0, p.t.bg_sunken);
+    p.round_stroke(container, 9.0, p.t.border, 1.0);
+    let tab_width = (container.w - 6.0) / 4.0;
     for (index, (section, label)) in [
         (SettingsSection::General, crate::tr!("常规")),
         (SettingsSection::Battery, crate::tr!("电量与托盘")),
         (SettingsSection::Data, crate::tr!("数据与存储")),
         (SettingsSection::About, crate::tr!("关于")),
     ].into_iter().enumerate() {
-        let r = R::new(c.x + index as f32 * tabs_w / 4.0, c.y, tabs_w / 4.0 - 6.0, 34.0);
+        let r = R::new(container.x + 3.0 + index as f32 * tab_width, container.y + 3.0, tab_width, 30.0);
         let on = section == ui.settings_section;
         let act = Act::SettingsSection(section);
-        if on || ui.hover == Some(act) {
-            p.round(r, 8.0, if on { p.t.accent_soft } else { p.t.card_hover });
+        if on {
+            p.round(r, 7.0, p.t.accent);
+            p.text(label, r, 12.5, true, p.t.accent_fg, Align::Center);
+        } else {
+            if ui.hover == Some(act) {
+                p.round(r, 7.0, with_alpha(p.t.text, 0x0E));
+            }
+            p.text(label, r, 12.5, false, p.t.text2, Align::Center);
         }
-        p.text(label, r, 12.5, on, if on { p.t.accent } else { p.t.text2 }, Align::Center);
         ui.chrome_hot(r, act);
     }
-    p.hline(c.x, c.x + c.w, c.y + 42.0, p.t.border);
+    p.hline(c.x, c.x + c.w, c.y + 44.0, p.t.border);
 }
 
 fn settings(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
@@ -2878,9 +3136,8 @@ fn settings_general(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 }
 
 fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
-    c.h2(p, crate::tr!("托盘与通知"), true);
-    let rows = 3.0 + if d.native_notifications_supported { 1.0 } else { 0.0 };
-    let card = c.card(p, layout::ROW_H * rows);
+    c.h2(p, crate::tr!("托盘与任务栏"), true);
+    let card = c.card(p, layout::ROW_H * 3.0);
     let mut y = card.y;
     // 托盘
     {
@@ -2929,13 +3186,12 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             Drop::TrayDevice,
             d,
         );
-        if d.native_notifications_supported {
-            row_rule(p, card, area);
-            y += layout::ROW_H;
-        }
     }
-    if d.native_notifications_supported {
-        let area = row_area(card, y);
+    c.y = card.bottom();
+    c.h2(p, crate::tr!("通知与告警"), false);
+    let card = c.card(p, layout::ROW_H);
+    {
+        let area = row_area(card, card.y);
         let ctl = row_label(
             p,
             area,
@@ -2944,11 +3200,13 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             40.0,
         );
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
-        p.switch(sw, d.cfg.notify_low_battery, true);
-        ui.hot(sw, Act::Toggle(Pref::LowBatteryNotify));
+        p.switch(sw, d.cfg.notify_low_battery, d.native_notifications_supported);
+        if d.native_notifications_supported {
+            ui.hot(sw, Act::Toggle(Pref::LowBatteryNotify));
+        }
     }
     c.y = card.bottom();
-    c.h2(p, crate::tr!("电量读取"), false);
+    c.h2(p, crate::tr!("设备采样与通信"), false);
     let card = c.card(p, layout::ROW_H * 2.0);
     let mut y = card.y;
     // 刷新间隔
@@ -2992,8 +3250,47 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.y = card.bottom();
 }
 
+fn compact_path(path: &str, max_len: usize) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= max_len {
+        path.to_string()
+    } else if max_len <= 3 {
+        chars[..max_len].iter().collect()
+    } else {
+        let prefix_len = 12.min(max_len - 3);
+        let prefix: String = chars[..prefix_len].iter().collect();
+        let suffix_len = max_len - prefix_len - 3;
+        let suffix: String = chars[chars.len() - suffix_len..].iter().collect();
+        format!("{prefix}...{suffix}")
+    }
+}
+
+#[cfg(test)]
+mod compact_path_tests {
+    use super::compact_path;
+
+    #[test]
+    fn shortened_paths_preserve_unicode_prefix_and_filename() {
+        let path = format!("C:\\{}\\history.jsonl", "电量历史资料".repeat(10));
+        let shortened = compact_path(&path, 36);
+        let prefix: String = path.chars().take(12).collect();
+        assert_eq!(shortened.chars().count(), 36);
+        assert!(shortened.starts_with(&prefix));
+        assert!(shortened.ends_with("\\history.jsonl"));
+        assert!(shortened.contains("..."));
+    }
+
+    #[test]
+    fn short_paths_are_unchanged_and_small_limits_do_not_panic() {
+        assert_eq!(compact_path("C:\\data", 36), "C:\\data");
+        for max_len in 0..16 {
+            assert!(compact_path("C:\\很长的历史文件保存路径\\history.jsonl", max_len).chars().count() <= max_len);
+        }
+    }
+}
+
 fn settings_data(p: &mut Painter, ui: &mut Ui, _d: &Data, c: &mut Cursor) {
-    c.h2(p, crate::tr!("数据"), true);
+    c.h2(p, crate::tr!("数据备份与历史"), true);
     let card = c.card(p, layout::ROW_H * 2.0);
     let mut y = card.y;
     // 备份与还原
@@ -3006,9 +3303,9 @@ fn settings_data(p: &mut Painter, ui: &mut Ui, _d: &Data, c: &mut Cursor) {
             Some(crate::tr!("把全部 31 项参数存成一个文本文件")),
             230.0,
         );
-        let b1 = R::new(ctl.x, ctl.cy() - 15.0, 110.0, 30.0);
+        let b1 = R::new(ctl.x, ctl.cy() - 15.0, 105.0, 30.0);
         button(p, ui, b1, crate::tr!("备份到文件"), false, Act::Backup);
-        let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 110.0, 30.0);
+        let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 105.0, 30.0);
         button(p, ui, b2, crate::tr!("从文件还原"), false, Act::Restore);
         row_rule(p, card, area);
         y += layout::ROW_H;
@@ -3019,7 +3316,7 @@ fn settings_data(p: &mut Painter, ui: &mut Ui, _d: &Data, c: &mut Cursor) {
         let ctl = row_label(
             p,
             area,
-            crate::tr!("历史记录"),
+            crate::tr!("电量历史"),
             Some(crate::tr!("电量采样点，最多保留 48 小时")),
             230.0,
         );
@@ -3032,28 +3329,29 @@ fn settings_data(p: &mut Painter, ui: &mut Ui, _d: &Data, c: &mut Cursor) {
             false,
             Act::OpenHistoryFolder,
         );
-        let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 90.0, 30.0);
+        let b2 = R::new(b1.right() + 10.0, ctl.cy() - 15.0, 80.0, 30.0);
         button(p, ui, b2, crate::tr!("清空"), false, Act::ClearHistory);
     }
     c.y = card.bottom();
 
     // ---- 存储路径 ----
-    c.h2(p, crate::tr!("存储路径"), false);
+    c.h2(p, crate::tr!("存储路径管理"), false);
     let card = c.card(p, layout::ROW_H * 2.0);
     {
         // 历史文件
         let area = row_area(card, card.y);
         let hp = crate::history::history_path().display().to_string();
+        let short_hp = compact_path(&hp, 36);
         let status = if crate::history::history_path_is_custom() {
             crate::tr!("已自定义")
         } else {
             crate::tr!("默认")
         };
         let title = crate::trf!("历史文件保存位置（{status}）", status = status);
-        let ctl = row_label(p, area, &title, Some(&hp), 128.0);
-        let b1 = R::new(ctl.right() - 52.0, ctl.cy() - 15.0, 52.0, 30.0);
+        let ctl = row_label(p, area, &title, Some(&short_hp), 128.0);
+        let b1 = R::new(ctl.right() - 54.0, ctl.cy() - 15.0, 54.0, 30.0);
         button(p, ui, b1, crate::tr!("更改"), false, Act::ChangeHistoryPath);
-        let b2 = R::new(b1.x - 64.0, ctl.cy() - 15.0, 56.0, 30.0);
+        let b2 = R::new(b1.x - 62.0, ctl.cy() - 15.0, 54.0, 30.0);
         button(p, ui, b2, crate::tr!("默认"), false, Act::ResetHistoryPath);
         row_rule(p, card, area);
     }
@@ -3061,14 +3359,15 @@ fn settings_data(p: &mut Painter, ui: &mut Ui, _d: &Data, c: &mut Cursor) {
         // 设置文件
         let area = row_area(card, card.y + layout::ROW_H);
         let sp = crate::paths::settings_file().display().to_string();
+        let short_sp = compact_path(&sp, 36);
         let status = if crate::paths::custom_settings_file().is_some() {
             crate::tr!("已自定义")
         } else {
             crate::tr!("默认")
         };
         let title = crate::trf!("设置文件保存位置（{status}）", status = status);
-        let ctl = row_label(p, area, &title, Some(&sp), 128.0);
-        let b1 = R::new(ctl.right() - 52.0, ctl.cy() - 15.0, 52.0, 30.0);
+        let ctl = row_label(p, area, &title, Some(&short_sp), 128.0);
+        let b1 = R::new(ctl.right() - 54.0, ctl.cy() - 15.0, 54.0, 30.0);
         button(
             p,
             ui,
@@ -3077,7 +3376,7 @@ fn settings_data(p: &mut Painter, ui: &mut Ui, _d: &Data, c: &mut Cursor) {
             false,
             Act::ChangeSettingsPath,
         );
-        let b2 = R::new(b1.x - 64.0, ctl.cy() - 15.0, 56.0, 30.0);
+        let b2 = R::new(b1.x - 62.0, ctl.cy() - 15.0, 54.0, 30.0);
         button(p, ui, b2, crate::tr!("默认"), false, Act::ResetSettingsPath);
     }
     c.y = card.bottom();

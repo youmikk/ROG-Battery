@@ -24,7 +24,7 @@ name = "rog-mouse-ctl"
 path = "src/main.rs"
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true

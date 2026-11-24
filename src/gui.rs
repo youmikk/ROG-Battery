@@ -855,29 +855,50 @@ impl Shared {
 
     fn replace_mock_readings(&mut self, readings: Vec<crate::device::DeviceReading>) {
         let now = std::time::Instant::now();
+        let mut old_devices = std::mem::take(&mut self.devices);
         self.devices = readings
             .into_iter()
             .map(|reading| {
+                let key = reading.key.clone();
                 let ident = proto::Identity {
                     model_name: reading.name.clone(),
                     ..Default::default()
                 };
+                let previous = old_devices.remove(&key);
+                let (device_state, basic) = if let Some(previous) = previous {
+                    let mut basic = previous.basic;
+                    if let Some(snapshot) = &mut basic {
+                        snapshot.battery = reading.battery.clone();
+                        snapshot.connected = reading.connected;
+                    }
+                    (previous.state, basic)
+                } else if reading.family == crate::device::DeviceFamily::Mouse {
+                    if is_mock_rog_mouse(&reading.name) {
+                        (Some(mock_rog_state()), None)
+                    } else {
+                        (None, Some(mock_basic_snapshot(&reading)))
+                    }
+                } else {
+                    (None, None)
+                };
                 (
-                    reading.key.clone(),
+                    key,
                     DeviceSnapshot {
                         reading,
-                        state: None,
+                        state: device_state,
                         ident,
                         link: None,
                         full_at: now,
-                        basic: None,
+                        basic,
                         basic_status: None,
                         battery_at: Some(now),
                     },
                 )
             })
             .collect();
-        self.primary_key = None;
+        if self.primary_key.as_ref().map_or(true, |key| !self.devices.contains_key(key)) {
+            self.primary_key = None;
+        }
         self.rebuild_readings();
     }
 
@@ -1072,6 +1093,240 @@ impl Shared {
             _ => String::new(),
         }
     }
+}
+
+fn is_mock_rog_mouse(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.contains("ROG")
+        || upper.contains("ASUS")
+        || upper.contains("GLADIUS")
+        || upper.contains("CHAKRAM")
+        || upper.contains("SPATHA")
+        || upper.contains("KERIS")
+        || upper.contains("HARPE")
+}
+
+fn mock_rog_state() -> proto::State {
+    let mut device_state = proto::State::default();
+    device_state.enc = [
+        proto::encode_dpi(400),
+        proto::encode_dpi(800),
+        proto::encode_dpi(1600),
+        proto::encode_dpi(3200),
+    ];
+    device_state.rgb = [
+        [255, 60, 60],
+        [60, 220, 80],
+        [60, 140, 255],
+        [255, 200, 40],
+    ];
+    device_state.active_stage = 2;
+    device_state.poll_code = 3;
+    device_state.debounce_code = 2;
+    device_state.power = 1;
+    device_state.light_rgb = [0, 160, 255];
+    device_state
+}
+
+fn mock_basic_snapshot(reading: &crate::device::DeviceReading) -> crate::backends::Snapshot {
+    let stages = vec![
+        crate::device::DpiStage { index: 0, value: 400 },
+        crate::device::DpiStage { index: 1, value: 800 },
+        crate::device::DpiStage { index: 2, value: 1600 },
+        crate::device::DpiStage { index: 3, value: 3200 },
+    ];
+    let stage_y = std::collections::BTreeMap::from([
+        (0, 400), (1, 800), (2, 1600), (3, 3200),
+    ]);
+    let values = (100..=32000).step_by(50).collect();
+    crate::backends::Snapshot {
+        target: crate::backends::Target {
+            key: reading.key.clone(),
+            name: reading.name.clone(),
+            family: crate::device::DeviceFamily::Mouse,
+            backend: crate::backends::BackendId::Logitech,
+            endpoint: crate::backends::Endpoint::XInput(0),
+            address: 0,
+            verified_identity: true,
+        },
+        battery: reading.battery.clone(),
+        dpi: crate::device::Dpi {
+            current: Some(800),
+            current_y: Some(800),
+            values,
+            writable: true,
+            write_effect: Some(crate::device::DpiWriteEffect::Current),
+            stages,
+            active_stage: Some(1),
+            profile: Some(1),
+            configuration_token: None,
+            stage_writable: true,
+            stage_editable: true,
+            stage_y,
+        },
+        polling_rate: crate::device::PollingRate {
+            current: Some(1000),
+            values: vec![125, 250, 500, 1000, 2000, 4000, 8000],
+            writable: true,
+        },
+        connected: reading.connected,
+        battery_at: Some(std::time::Instant::now()),
+        battery_unavailable: false,
+    }
+}
+
+fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>) {
+    let link_key = target_link.map(|target| target.device_key().to_string());
+    let target_key = match cmd {
+        Cmd::BasicDpi { target, .. }
+        | Cmd::BasicDpiStage { target, .. }
+        | Cmd::BasicDpiEdit { target, .. }
+        | Cmd::BasicDpiPreset { target, .. }
+        | Cmd::BasicPollingRate { target, .. } => Some(target.key.as_str()),
+        _ => link_key.as_deref().or(state.active_key.as_deref()),
+    };
+
+    match cmd {
+        Cmd::BasicDpiStage { stage, .. } => {
+            if let Some(key) = target_key {
+                if let Some(device) = state.devices.get_mut(key) {
+                    if let Some(basic) = &mut device.basic {
+                        basic.dpi.active_stage = Some(stage.index);
+                        basic.dpi.current = Some(stage.value);
+                        let vertical = basic.dpi.stage_y.get(&stage.index).copied().unwrap_or(stage.value);
+                        basic.dpi.current_y = Some(vertical);
+                    }
+                }
+            }
+        }
+        Cmd::BasicDpiEdit { stage, x, y, .. } => {
+            if let Some(key) = target_key {
+                if let Some(device) = state.devices.get_mut(key) {
+                    if let Some(basic) = &mut device.basic {
+                        if let Some(saved) = basic.dpi.stages.iter_mut().find(|saved| saved.index == stage.index) {
+                            saved.value = *x;
+                        }
+                        basic.dpi.stage_y.insert(stage.index, *y);
+                        if basic.dpi.active_stage == Some(stage.index) {
+                            basic.dpi.current = Some(*x);
+                            basic.dpi.current_y = Some(*y);
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::BasicDpiPreset { stage, value, .. } => {
+            if let Some(key) = target_key {
+                if let Some(device) = state.devices.get_mut(key) {
+                    if let Some(basic) = &mut device.basic {
+                        if let Some(saved) = basic.dpi.stages.iter_mut().find(|saved| saved.index == stage.index) {
+                            saved.value = *value;
+                        }
+                        basic.dpi.stage_y.insert(stage.index, *value);
+                        if basic.dpi.active_stage == Some(stage.index) {
+                            basic.dpi.current = Some(*value);
+                            basic.dpi.current_y = Some(*value);
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::BasicDpi { dpi, .. } => {
+            if let Some(key) = target_key {
+                if let Some(device) = state.devices.get_mut(key) {
+                    if let Some(basic) = &mut device.basic {
+                        basic.dpi.current = Some(*dpi);
+                        basic.dpi.current_y = Some(*dpi);
+                    }
+                }
+            }
+        }
+        Cmd::BasicPollingRate { hz, .. } => {
+            if let Some(key) = target_key {
+                if let Some(device) = state.devices.get_mut(key) {
+                    if let Some(basic) = &mut device.basic {
+                        basic.polling_rate.current = Some(*hz);
+                    }
+                }
+            }
+        }
+        Cmd::Stage(stage) => {
+            for device in state.devices.values_mut() {
+                if let Some(device_state) = &mut device.state {
+                    device_state.active_stage = *stage;
+                }
+            }
+        }
+        Cmd::Dpi { stage, dpi, rgb } => {
+            for device in state.devices.values_mut() {
+                if let Some(device_state) = &mut device.state {
+                    if *stage < proto::DPI_STAGES {
+                        device_state.enc[*stage] = proto::encode_dpi(*dpi);
+                        if let Some(color) = rgb {
+                            device_state.rgb[*stage] = *color;
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::Poll(hz) => {
+            let code = proto::poll_code_of(*hz).unwrap_or(3);
+            for device in state.devices.values_mut() {
+                if let Some(device_state) = &mut device.state {
+                    device_state.poll_code = code;
+                }
+            }
+        }
+        Cmd::Debounce(code) => {
+            for device in state.devices.values_mut() {
+                if let Some(device_state) = &mut device.state {
+                    device_state.debounce_code = *code;
+                }
+            }
+        }
+        Cmd::Snap(enabled) => {
+            for device in state.devices.values_mut() {
+                if let Some(device_state) = &mut device.state {
+                    device_state.angle_snap = *enabled;
+                }
+            }
+        }
+        Cmd::Tuning(enabled) => {
+            for device in state.devices.values_mut() {
+                if let Some(device_state) = &mut device.state {
+                    device_state.angle_tuning = *enabled;
+                }
+            }
+        }
+        Cmd::Light { mode, rgb, .. } => {
+            for device in state.devices.values_mut() {
+                if let Some(device_state) = &mut device.state {
+                    device_state.power = *mode;
+                    if let Some(color) = rgb {
+                        device_state.light_rgb = *color;
+                    }
+                }
+            }
+        }
+        Cmd::AutoStart(enabled) => {
+            state.autostart = (
+                if *enabled {
+                    crate::autostart::AutoStartState::Enabled
+                } else {
+                    crate::autostart::AutoStartState::Disabled
+                },
+                state.autostart.1.clone(),
+            );
+        }
+        _ => {}
+    }
+
+    state.results.push_back(CmdResult {
+        label: cmd.label(),
+        ok: Some("已生效".into()),
+        err: None,
+        hint: "",
+    });
 }
 
 fn popup_dpi_states(shared: &Shared) -> BTreeMap<String, crate::ui::tray_popup::DpiState> {
@@ -1662,7 +1917,11 @@ fn handle_act(a: Act, env: &UiEnv) {
             if let Some(displayed) = displayed {
                 persist_device_reorder(&mut lock_shared(env.shared), &displayed, from, to);
             }
-            env.canvas.with_ui_mut(|ui| ui.device_drag = None);
+            env.canvas.with_ui_mut(|ui| {
+                ui.device_drag = None;
+                ui.hover = None;
+                ui.card_hover_anims.clear();
+            });
             env.canvas.repaint_now();
         }
         Act::ToggleDeviceTray => {
@@ -1739,7 +1998,7 @@ fn handle_act(a: Act, env: &UiEnv) {
             if choice == crate::ui::widget::CloseChoice::Minimize {
                 let cfg = env.cfg();
                 let action = window_close_action("minimize", cfg.tray_enabled,
-                    cfg.taskbar_widget_enabled && env.taskbar.screen_rect().is_some());
+                    cfg.taskbar_widget_enabled && env.taskbar.host_available());
                 if action == WindowCloseAction::Hide {
                     env.window.set_visible(false);
                 } else if let Some(hwnd) = env.window.handle.hwnd() {
@@ -3463,6 +3722,14 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     let readings = crate::mock::readings().unwrap_or_default();
                     let mut state = lock_shared(&shared_t);
                     state.replace_mock_readings(readings);
+                    let mut ran = 0usize;
+                    while let Some((cmd, target)) = state.pending.pop_front() {
+                        apply_mock_cmd(&mut state, &cmd, target.as_ref());
+                        ran += 1;
+                        if ran >= MAX_PENDING * 2 {
+                            break;
+                        }
+                    }
                     state.want_full = false;
                     state.status = Status::Ok;
                     state.frames = 0;
@@ -3584,6 +3851,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 tray_broadcast.re_add();
                 taskbar_broadcast.recreate();
             }
+            if matches!(msg, 0x007e | 0x02e0 | 0x031a | 0x031e | 0x0320) {
+                taskbar_broadcast.invalidate();
+            }
 
             // SIZE_MINIMIZED = 1
             if msg == 0x0005 && wp as usize == 1 {
@@ -3613,7 +3883,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             E::OnWindowClose => {
                 let s = lock_shared(&shared_e);
                 let action = window_close_action(&s.cfg.close_mode, s.cfg.tray_enabled,
-                    s.cfg.taskbar_widget_enabled && taskbar_updates.screen_rect().is_some());
+                    s.cfg.taskbar_widget_enabled && taskbar_updates.host_available());
                 drop(s);
 
                 if action == WindowCloseAction::Ask {
@@ -3912,7 +4182,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 // A hidden window must remain reachable when the last battery
                 // expires, Explorer restarts or the taskbar strip is unavailable.
                 let tray_enabled = lock_shared(&shared_tray).cfg.tray_enabled;
-                if !tray_enabled && taskbar_strip.screen_rect().is_none()
+                if !tray_enabled && !taskbar_strip.host_available()
                     && win32::IsWindowVisible(hwnd) == 0 {
                     win32::ShowWindow(hwnd, 7); // SW_SHOWMINNOACTIVE
                 }
@@ -3923,7 +4193,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 clicks.set(TrayClicks::default());
                 win32::KillTimer(message_hwnd, CLICK_TIMER);
                 if wp == crate::taskbar_widget::CLICK_QUERY_OPEN {
-                    return Some(isize::from(popup_tray.is_visible()));
+                    return Some(isize::from(popup_tray.was_open()));
                 }
                 if wp == crate::taskbar_widget::CLICK_CLOSE {
                     popup_tray.hide();
@@ -4169,6 +4439,49 @@ mod backend_tests {
         }
         assert_eq!(window_close_action("minimize", false, false), WindowCloseAction::Minimize);
         assert_eq!(window_close_action("quit", false, false), WindowCloseAction::Quit);
+    }
+
+    #[test]
+    fn mock_mouse_settings_survive_battery_refresh_without_changing_other_devices() {
+        let mouse = DeviceReading {
+            key: "mock-mouse".into(), name: "Logitech G304".into(),
+            family: DeviceFamily::Mouse, connected: true, ..Default::default()
+        };
+        let other = DeviceReading {
+            key: "mock-other".into(), name: "Razer mouse".into(),
+            family: DeviceFamily::Mouse, connected: true, ..Default::default()
+        };
+        let mut shared = Shared::new(Settings::default());
+        shared.replace_mock_readings(vec![mouse.clone(), other.clone()]);
+        let target = shared.devices["mock-mouse"].basic.as_ref().unwrap().target.clone();
+        apply_mock_cmd(&mut shared, &Cmd::BasicDpi { target: target.clone(), dpi: 2400 }, None);
+        apply_mock_cmd(&mut shared, &Cmd::BasicPollingRate { target, hz: 500 }, None);
+        shared.replace_mock_readings(vec![mouse, other]);
+        let basic = shared.devices["mock-mouse"].basic.as_ref().unwrap();
+        assert_eq!(basic.dpi.current, Some(2400));
+        assert_eq!(basic.dpi.current_y, Some(2400));
+        assert_eq!(basic.polling_rate.current, Some(500));
+        let untouched = shared.devices["mock-other"].basic.as_ref().unwrap();
+        assert_eq!(untouched.dpi.current, Some(800));
+        assert_eq!(untouched.polling_rate.current, Some(1000));
+    }
+
+    #[test]
+    fn mock_rog_mouse_keeps_its_hardware_controls_after_refresh() {
+        let mouse = DeviceReading {
+            key: "mock-rog".into(), name: "ROG Keris".into(),
+            family: DeviceFamily::Mouse, connected: true, ..Default::default()
+        };
+        let mut shared = Shared::new(Settings::default());
+        shared.replace_mock_readings(vec![mouse.clone()]);
+        assert!(shared.devices["mock-rog"].basic.is_none());
+        assert!(shared.devices["mock-rog"].state.is_some());
+        apply_mock_cmd(&mut shared, &Cmd::Dpi { stage: 2, dpi: 2400, rgb: None }, None);
+        apply_mock_cmd(&mut shared, &Cmd::Poll(500), None);
+        shared.replace_mock_readings(vec![mouse]);
+        let device_state = shared.devices["mock-rog"].state.as_ref().unwrap();
+        assert_eq!(device_state.enc[2], proto::encode_dpi(2400));
+        assert_eq!(device_state.poll_code, proto::poll_code_of(500).unwrap());
     }
 
     #[test]

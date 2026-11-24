@@ -478,6 +478,7 @@ pub struct Ui {
     /// 由 `pages::page` 每帧按页面决定（设备页为 true）。锁定时 `hot` 不登记
     /// 命中区，点哪儿都不产生动作；画面上另有一层遮罩说明原因。
     pub locked: bool,
+    pub card_hover_anims: std::collections::HashMap<String, f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -543,6 +544,7 @@ impl Default for Ui {
             close_choice: CloseChoice::Minimize,
             close_remember: false,
             locked: false,
+            card_hover_anims: std::collections::HashMap::new(),
         }
     }
 }
@@ -931,7 +933,10 @@ impl Ui {
     pub fn cancel_press(&mut self) {
         self.pressed = None;
         self.pressed_slide = None;
-        self.device_drag = None;
+        if self.device_drag.take().is_some() {
+            self.hover = None;
+            self.card_hover_anims.clear();
+        }
         self.pointer.down = false;
         self.pointer.dragging = None;
     }
@@ -956,6 +961,8 @@ impl Ui {
             return false;
         };
         let now = std::time::Instant::now();
+        self.hover = None;
+        self.card_hover_anims.clear();
         self.device_drag = Some(DeviceDrag {
             source,
             target: source,
@@ -993,6 +1000,8 @@ impl Ui {
 
     pub fn finish_device_drag(&mut self) -> Option<Act> {
         let drag = self.device_drag.take()?;
+        self.hover = None;
+        self.card_hover_anims.clear();
         (drag.source != drag.target).then_some(Act::ReorderDevice(
             drag.source, drag.target, self.device_list_revision,
         ))
@@ -1151,6 +1160,35 @@ mod drag_tests {
         ui.sync_devices(&readings(&["gamepad", "keyboard", "headset", "mouse"]));
         assert_eq!(ui.on_release(270.0, 270.0, 20.0), None);
         assert!(!ui.activate_device_drag(275.0, 270.0, 20.0));
+    }
+
+    #[test]
+    fn device_drag_clears_hover_transitions_on_start_and_release() {
+        let mut ui = pressed_card();
+        ui.hover = Some(Act::SelectDevice(3));
+        ui.card_hover_anims.insert("gamepad".into(), 0.8);
+        assert!(ui.activate_device_drag(30.0, 110.0, 20.0));
+        assert!(ui.hover.is_none());
+        assert!(ui.card_hover_anims.is_empty());
+        ui.hover = Some(Act::SelectDevice(0));
+        ui.card_hover_anims.insert("mouse".into(), 0.4);
+        assert!(ui.finish_device_drag().is_some());
+        assert!(ui.hover.is_none());
+        assert!(ui.card_hover_anims.is_empty());
+    }
+
+    #[test]
+    fn cancelled_device_drag_drops_hover_and_pending_clicks() {
+        let mut ui = pressed_card();
+        assert!(ui.activate_device_drag(30.0, 110.0, 20.0));
+        ui.hover = Some(Act::SelectDevice(0));
+        ui.card_hover_anims.insert("mouse".into(), 1.0);
+        ui.cancel_press();
+        assert!(ui.device_drag.is_none());
+        assert!(ui.hover.is_none());
+        assert!(ui.card_hover_anims.is_empty());
+        assert!(!ui.pointer.down);
+        assert_eq!(ui.on_release(30.0, 110.0, 20.0), None);
     }
 
     #[test]
