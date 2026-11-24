@@ -210,7 +210,7 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         let mut s = String::new();
-        s.push_str("# rog-mouse-ctl 设置\n");
+        s.push_str("# X-Battery 设置\n");
         s.push_str("# 位置：%APPDATA%\\rog-mouse-ctl\\settings.ini\n");
         s.push_str("# 删除本文件即恢复默认值。改完重启程序生效。\n\n");
         s.push_str("# 快照缓存有效期（秒）。一次读全 19 帧约 591ms，缓存命中则零成本。\n");

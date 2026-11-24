@@ -62,7 +62,7 @@ X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/youmikk/X-Battery/releases/latest) 下载 `rog-mouse-ctl.exe` 并运行，或通过 [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) 安装。
+1. 从 [GitHub Releases](https://github.com/youmikk/X-Battery/releases/latest) 下载 `x-battery.exe` 并运行，或通过 [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) 安装。
 2. 按兼容性说明中的连接方式接入设备。程序自动读取状态；单设备直接打开详情，多设备显示设备列表。
 3. 单击数字托盘或任务栏电量条打开快速查看面板。点击支持的鼠标或耳机可展开快捷控制，再次点击收起。
 4. 进入 **设置 → 电量与托盘** 调整显示选项；在设备详情中修改名称、类型与标准托盘选择。
@@ -110,17 +110,17 @@ X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能
 | 快照缓存 | `%LOCALAPPDATA%/rog-mouse-ctl/snapshot.cache` |
 | 配置备份 | `%USERPROFILE%/Documents/rog-mouse-ctl/backups/` |
 
-设置和历史位置可在应用内调整。程序文件名和数据目录沿用 `rog-mouse-ctl`，以兼容已有安装与设置。商店版数据由 Windows 管理，绿色版数据及自定义位置中的文件需手动清理。
+设置和历史位置可在应用内调整。可执行文件已更名为 `x-battery.exe`，数据目录仍沿用 `rog-mouse-ctl`，以兼容已有安装与设置。商店版数据由 Windows 管理，绿色版数据及自定义位置中的文件需手动清理。
 
 ## 命令行
 
 多品牌只读查询与诊断：
 
 ```powershell
-rog-mouse-ctl.exe devices
-rog-mouse-ctl.exe device-report
-rog-mouse-ctl.exe device-report --probe
-rog-mouse-ctl.exe --help
+x-battery.exe devices
+x-battery.exe device-report
+x-battery.exe device-report --probe
+x-battery.exe --help
 ```
 
 `devices` 查看当前设备与读数；`device-report` 输出设备与查询摘要；`--probe` 先执行只读查询，再生成同一次运行的报告。报告不会自动上传，也不包含原始报文或设备唯一标识。
@@ -128,11 +128,11 @@ rog-mouse-ctl.exe --help
 ROG 专用查询与设置示例：
 
 ```powershell
-rog-mouse-ctl.exe info
-rog-mouse-ctl.exe quick
-rog-mouse-ctl.exe setdpi 2 1600
-rog-mouse-ctl.exe backup
-rog-mouse-ctl.exe estimate
+x-battery.exe info
+x-battery.exe quick
+x-battery.exe setdpi 2 1600
+x-battery.exe backup
+x-battery.exe estimate
 ```
 
 这些命令沿用 ROG 协议，并非多品牌通用设置命令。`setdpi` 等操作会修改设备配置，保留与保存参数见 `--help`；其他品牌的快捷 DPI 使用应用内对应设备的控制项。
@@ -146,7 +146,7 @@ rustup toolchain install stable-x86_64-pc-windows-gnu
 cargo +stable-x86_64-pc-windows-gnu build --release --locked
 ```
 
-产物为 `target/release/rog-mouse-ctl.exe`。仓库包含所需 Windows 导入库与图标资源，无需额外安装运行时。更新图标时使用 `windres -O coff -I assets -i assets/app.rc -o assets/app.o` 重新生成资源。
+产物为 `target/release/x-battery.exe`。仓库包含所需 Windows 导入库、图标和版本资源，无需额外安装运行时。更新图标或文件信息时使用 `windres -O coff -I assets -i assets/app.rc -o assets/app.o` 重新生成资源。
 
 发布前可运行本地测试、构建及版本校验：
 

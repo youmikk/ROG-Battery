@@ -7,7 +7,7 @@
     ShortName = 'X-Battery'
     Description = 'Peripheral battery monitor and mouse settings utility.'
     Version = '1.4.8.0'
-    Executable = 'rog-mouse-ctl.exe'
+    Executable = 'x-battery.exe'
     StartupTaskId = 'RogBatteryAutoStart'
 
     # Optional overrides. Otherwise use tools on PATH or in the Windows SDK.

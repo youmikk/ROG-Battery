@@ -22,7 +22,7 @@ if ($Tag -and $Tag -cne "v$version") {
 $result = [ordered]@{ Version = $version; StoreVersion = $storeVersion; Tag = $Tag }
 if ($SourceOnly) { return [pscustomobject]$result }
 
-if (-not $Executable) { $Executable = Join-Path $repo 'target/release/rog-mouse-ctl.exe' }
+if (-not $Executable) { $Executable = Join-Path $repo 'target/release/x-battery.exe' }
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 $bytes = [IO.File]::ReadAllBytes($Executable)
 if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
@@ -38,6 +38,12 @@ if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) {
 }
 if ([BitConverter]::ToUInt16($bytes, $pe + 0x18 + 0x44) -ne 2) {
     throw 'Release executable must use the Windows GUI subsystem.'
+}
+$versionInfo = (Get-Item -LiteralPath $Executable).VersionInfo
+if ($versionInfo.FileDescription -cne 'X-Battery' -or
+    $versionInfo.ProductName -cne 'X-Battery' -or
+    $versionInfo.OriginalFilename -cne 'x-battery.exe') {
+    throw 'Release executable version resources do not identify X-Battery / x-battery.exe.'
 }
 
 $scratch = Join-Path $repo 'scratch/release-validation'

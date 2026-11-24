@@ -2787,7 +2787,7 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
     if let Err(e) = nwg::FileDialog::builder()
         .title(title)
         .action(action)
-        .filters(crate::tr!("rog-mouse-ctl 备份(*.txt)|所有文件(*.*)"))
+        .filters(crate::tr!("X-Battery 备份(*.txt)|所有文件(*.*)"))
         .default_folder(folder)
         .build(&mut fd)
     {

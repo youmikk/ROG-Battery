@@ -80,9 +80,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\rog-mouse-ctl.exe dist\
-          $h = (Get-FileHash dist\rog-mouse-ctl.exe -Algorithm SHA256).Hash.ToLower()
-          "$h  rog-mouse-ctl.exe" | Out-File -FilePath dist\rog-mouse-ctl.exe.sha256 -Encoding ascii
+          Copy-Item target\release\x-battery.exe dist\
+          $h = (Get-FileHash dist\x-battery.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  x-battery.exe" | Out-File -FilePath dist\x-battery.exe.sha256 -Encoding ascii
           "sha256 = $h"
           Get-ChildItem dist | ForEach-Object { '{0}  {1:N0} B' -f $_.Name, $_.Length }
 
@@ -111,7 +111,7 @@ jobs:
             throw "Release $tag already exists. Published assets must not be overwritten."
           } else {
             "Release $tag 不存在，新建"
-            gh release create $tag dist\rog-mouse-ctl.exe dist\rog-mouse-ctl.exe.sha256 `
+            gh release create $tag dist\x-battery.exe dist\x-battery.exe.sha256 `
               --verify-tag --title "X-Battery $ver" --notes-file $notes
           }
           if ($LASTEXITCODE -ne 0) { throw "Release publishing failed" }

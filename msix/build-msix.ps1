@@ -124,7 +124,7 @@ if (-not $SkipInstalledVersionCheck) {
 
 $exeName = $props.Executable
 if (-not $exeName) {
-    throw "package.props.psd1 里缺少 Executable 键（应为 'rog-mouse-ctl.exe'）"
+    throw "package.props.psd1 里缺少 Executable 键（应为 'x-battery.exe'）"
 }
 
 function Find-Tool {

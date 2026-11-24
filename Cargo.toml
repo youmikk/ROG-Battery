@@ -1,5 +1,5 @@
 [package]
-name = "rog-mouse-ctl"
+name = "x-battery"
 version = "1.4.8"
 edition = "2021"
 description = "Peripheral battery monitor and ROG mouse settings utility for Windows"
@@ -20,7 +20,7 @@ winapi = { version = "0.3.9", features = [
 ] }
 
 [[bin]]
-name = "rog-mouse-ctl"
+name = "x-battery"
 path = "src/main.rs"
 
 [profile.release]

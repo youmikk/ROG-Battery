@@ -60,7 +60,7 @@ Portable users can exit the app and replace the executable. This README describe
 
 ## Getting started
 
-1. Download and run `rog-mouse-ctl.exe` from [GitHub Releases](https://github.com/youmikk/X-Battery/releases/latest), or install from [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US).
+1. Download and run `x-battery.exe` from [GitHub Releases](https://github.com/youmikk/X-Battery/releases/latest), or install from [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US).
 2. Connect the device using a mode listed in the compatibility notes. Readings update automatically. A single device opens its details; multiple devices open the device list.
 3. Click the numeric tray icon or taskbar strip to open quick view. Click a supported mouse or headset to expand its controls, and click again to collapse them.
 4. Open **Settings → Battery & tray** for display options. Device details let you change names, types and the standard tray selection.
@@ -108,17 +108,17 @@ Optional diagnostics contain app and system versions, original device model, VID
 | Snapshot cache | `%LOCALAPPDATA%/rog-mouse-ctl/snapshot.cache` |
 | Configuration backups | `%USERPROFILE%/Documents/rog-mouse-ctl/backups/` |
 
-Settings and history locations can be changed in the app. The executable and data directories retain the `rog-mouse-ctl` name for compatibility with existing installations and settings. Windows manages Store app data; portable data and files saved to custom locations may require manual removal.
+Settings and history locations can be changed in the app. The executable is now `x-battery.exe`, while data directories retain the `rog-mouse-ctl` name for compatibility with existing installations and settings. Windows manages Store app data; portable data and files saved to custom locations may require manual removal.
 
 ## Command line
 
 Read-only multi-brand queries and diagnostics:
 
 ```powershell
-rog-mouse-ctl.exe devices
-rog-mouse-ctl.exe device-report
-rog-mouse-ctl.exe device-report --probe
-rog-mouse-ctl.exe --help
+x-battery.exe devices
+x-battery.exe device-report
+x-battery.exe device-report --probe
+x-battery.exe --help
 ```
 
 `devices` lists devices and readings. `device-report` generates a device and query summary; `--probe` performs read-only queries first and reports results from the same process. Reports are not uploaded automatically and exclude raw communication payloads and unique device identifiers.
@@ -126,11 +126,11 @@ rog-mouse-ctl.exe --help
 ROG-specific query and settings examples:
 
 ```powershell
-rog-mouse-ctl.exe info
-rog-mouse-ctl.exe quick
-rog-mouse-ctl.exe setdpi 2 1600
-rog-mouse-ctl.exe backup
-rog-mouse-ctl.exe estimate
+x-battery.exe info
+x-battery.exe quick
+x-battery.exe setdpi 2 1600
+x-battery.exe backup
+x-battery.exe estimate
 ```
 
 These commands use the ROG protocol rather than universal multi-brand settings. Operations such as `setdpi` change device configuration; see `--help` for keep and save options. Use the device's in-app controls for supported DPI shortcuts on other brands.
@@ -144,7 +144,7 @@ rustup toolchain install stable-x86_64-pc-windows-gnu
 cargo +stable-x86_64-pc-windows-gnu build --release --locked
 ```
 
-The output is `target/release/rog-mouse-ctl.exe`. Required Windows import libraries and icon resources are included; no additional runtime installation is needed. After changing icons, regenerate resources with `windres -O coff -I assets -i assets/app.rc -o assets/app.o`.
+The output is `target/release/x-battery.exe`. Required Windows import libraries plus icon and version resources are included; no additional runtime installation is needed. After changing icons or file information, regenerate resources with `windres -O coff -I assets -i assets/app.rc -o assets/app.o`.
 
 Run local tests, build and version checks before publishing:
 

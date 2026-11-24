@@ -249,7 +249,7 @@ macro_rules! tr {
     ("✘ 后台正在执行别的操作，这次开机自启没有提交") => { if $crate::i18n::english() { "✘ Another operation is running. Startup was not changed." } else { "✘ 后台正在执行别的操作，这次开机自启没有提交" } };
     ("选择备份保存位置") => { if $crate::i18n::english() { "Save backup" } else { "选择备份保存位置" } };
     ("选择要还原的备份文件") => { if $crate::i18n::english() { "Open backup to restore" } else { "选择要还原的备份文件" } };
-    ("rog-mouse-ctl 备份(*.txt)|所有文件(*.*)") => { if $crate::i18n::english() { "rog-mouse-ctl backup(*.txt)|All files(*.*)" } else { "rog-mouse-ctl 备份(*.txt)|所有文件(*.*)" } };
+    ("X-Battery 备份(*.txt)|所有文件(*.*)") => { if $crate::i18n::english() { "X-Battery backup(*.txt)|All files(*.*)" } else { "X-Battery 备份(*.txt)|所有文件(*.*)" } };
     ("✘ 没拿到选中的文件") => { if $crate::i18n::english() { "✘ Could not get the selected file" } else { "✘ 没拿到选中的文件" } };
     ("✘ 后台正在执行别的操作，请稍后再试") => { if $crate::i18n::english() { "✘ Another operation is running. Please try again shortly." } else { "✘ 后台正在执行别的操作，请稍后再试" } };
     ("历史文件") => { if $crate::i18n::english() { "History file" } else { "历史文件" } };
@@ -730,7 +730,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "✘ 后台正在执行别的操作，这次开机自启没有提交" => "✘ Another operation is running. Startup was not changed.",
         "选择备份保存位置" => "Save backup",
         "选择要还原的备份文件" => "Open backup to restore",
-        "rog-mouse-ctl 备份(*.txt)|所有文件(*.*)" => "rog-mouse-ctl backup(*.txt)|All files(*.*)",
+        "X-Battery 备份(*.txt)|所有文件(*.*)" => "X-Battery backup(*.txt)|All files(*.*)",
         "✘ 没拿到选中的文件" => "✘ Could not get the selected file",
         "✘ 后台正在执行别的操作，请稍后再试" => "✘ Another operation is running. Please try again shortly.",
         "历史文件" => "History file",

@@ -1,4 +1,4 @@
-//! rog-mouse-ctl —— 通用 ROG 鼠标 HID 参数控制工具。
+//! X-Battery —— 多品牌外设电量监控与 ROG 鼠标 HID 参数控制工具。
 //!
 //! 面向 ROG 鼠标这一套私有 HID 参数协议（真机验证用 ROG HARPE ACE MINI，非型号专属）。
 //! 完全不依赖 ASUS 驱动 / Armoury Crate / GearLink：自己枚举 HID 接口、
@@ -43,42 +43,42 @@ mod win32;
 
 use std::process::ExitCode;
 
-const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依赖 ASUS 驱动）
+const USAGE: &str = r#"x-battery.exe —— X-Battery 外设电量与 ROG 鼠标参数控制
 
 用法：
-  rog-mouse-ctl version                       打印版本号（和 GitHub tag 一致）
-  rog-mouse-ctl devices                       多品牌只读设备与电量列表
-  rog-mouse-ctl device-report                 输出不含序列号与接口路径的适配报告
-  rog-mouse-ctl device-report --probe         只读探测电量/DPI并导出同次运行的脱敏报告
-  rog-mouse-ctl info [--fresh]                读全部信息（一次读全，默认吃 30 秒缓存）
-  rog-mouse-ctl backup [文件]                 备份全部 31 项设置（默认 %USERPROFILE%\Documents\rog-mouse-ctl\backups\）
-  rog-mouse-ctl restore <文件> [--save]       从备份还原（能量块最后单独重写并断言）
-  rog-mouse-ctl save                          把当前 RAM 设置提交进 flash（0x50 0x03）
+  x-battery.exe version                       打印版本号（和 GitHub tag 一致）
+  x-battery.exe devices                       多品牌只读设备与电量列表
+  x-battery.exe device-report                 输出不含序列号与接口路径的适配报告
+  x-battery.exe device-report --probe         只读探测电量/DPI并导出同次运行的脱敏报告
+  x-battery.exe info [--fresh]                读全部信息（一次读全，默认吃 30 秒缓存）
+  x-battery.exe backup [文件]                 备份全部 31 项设置（默认 %USERPROFILE%\Documents\rog-mouse-ctl\backups\）
+  x-battery.exe restore <文件> [--save]       从备份还原（能量块最后单独重写并断言）
+  x-battery.exe save                          把当前 RAM 设置提交进 flash（0x50 0x03）
 
-  rog-mouse-ctl setdpi <1-4> <dpi> [RRGGBB]   设置某档 DPI 与该档颜色（同一帧）
-  rog-mouse-ctl setpoll <125|250|500|1000>    回报率
-  rog-mouse-ctl setstage <1-4>                当前 DPI 档位
-  rog-mouse-ctl setdebounce <0-7>             去抖：0=关 1=8ms … 7=32ms
-  rog-mouse-ctl setsnap <0|1>                 角度吸附
-  rog-mouse-ctl settuning <-20..20>           角度微调（步进 5）
-  rog-mouse-ctl setlod <low|high>             抬起距离（⚠️ 会重置表面标定）
-  rog-mouse-ctl setlight <mode> [亮] [RRGGBB] 灯光 mode: 0=Static 1=Breathing 2=ColorCycle
+  x-battery.exe setdpi <1-4> <dpi> [RRGGBB]   设置某档 DPI 与该档颜色（同一帧）
+  x-battery.exe setpoll <125|250|500|1000>    回报率
+  x-battery.exe setstage <1-4>                当前 DPI 档位
+  x-battery.exe setdebounce <0-7>             去抖：0=关 1=8ms … 7=32ms
+  x-battery.exe setsnap <0|1>                 角度吸附
+  x-battery.exe settuning <-20..20>           角度微调（步进 5）
+  x-battery.exe setlod <low|high>             抬起距离（⚠️ 会重置表面标定）
+  x-battery.exe setlight <mode> [亮] [RRGGBB] 灯光 mode: 0=Static 1=Breathing 2=ColorCycle
                                               4=React 6=BatteryState 240=Off
-  rog-mouse-ctl setbutton <0-7> <dstHex>      按键绑定（dst=0x0000 即禁用，需 --yes）
-  rog-mouse-ctl setsleep <code>               休眠：0=1分 1=2分 2=3分 3=5分 4=10分 255=永不
-  rog-mouse-ctl setlowbatt <0-100>            低电量告警阈值（%）
-  rog-mouse-ctl setfulleffect <0|1>           充满电时的灯效开关
+  x-battery.exe setbutton <0-7> <dstHex>      按键绑定（dst=0x0000 即禁用，需 --yes）
+  x-battery.exe setsleep <code>               休眠：0=1分 1=2分 2=3分 3=5分 4=10分 255=永不
+  x-battery.exe setlowbatt <0-100>            低电量告警阈值（%）
+  x-battery.exe setfulleffect <0|1>           充满电时的灯效开关
 
-  rog-mouse-ctl cache                         查看快照缓存状态
-  rog-mouse-ctl cache clear                   删除快照缓存
-  rog-mouse-ctl dump                          列出所有 ASUS HID 接口（排障用，不打开链路）
+  x-battery.exe cache                         查看快照缓存状态
+  x-battery.exe cache clear                   删除快照缓存
+  x-battery.exe dump                          列出所有 ASUS HID 接口（排障用，不打开链路）
 
-  rog-mouse-ctl estimate                      电量历史 + 续航/充满时间估算（顺手记一条采样）
+  x-battery.exe estimate                      电量历史 + 续航/充满时间估算（顺手记一条采样）
 
-  rog-mouse-ctl quick                          轻量读取：只读 3 帧，输出 KEY=VALUE
-  rog-mouse-ctl info --light                   同 quick（只读 3 帧）
+  x-battery.exe quick                          轻量读取：只读 3 帧，输出 KEY=VALUE
+  x-battery.exe info --light                   同 quick（只读 3 帧）
 
-  rog-mouse-ctl raw <cmdHex> <subHex> [tailHex...] [--dongle]
+  x-battery.exe raw <cmdHex> <subHex> [tailHex...] [--dongle]
                                               原始帧调试口（**只读**核对用）
 
 通用开关：
@@ -89,14 +89,14 @@ const USAGE: &str = r#"rog-mouse-ctl —— ROG 鼠标 HID 参数控制（不依
   --yes      确认危险操作（目前只有 setbutton … 0 需要）
 
 示例：
-  rog-mouse-ctl info
-  rog-mouse-ctl info --fresh
-  rog-mouse-ctl backup
-  rog-mouse-ctl setpoll 500                 # 改成 500 再自动改回 1000，仅演示
-  rog-mouse-ctl setpoll 500 --keep --save   # 真正留在 500 并写入 flash
-  rog-mouse-ctl setdpi 1 500                # 1 档改 500 DPI，跑完自动还原
-  rog-mouse-ctl setlight 0 70 ff0000        # Static 红色 70% 亮度，跑完自动还原
-  rog-mouse-ctl restore backup.txt --save
+  x-battery.exe info
+  x-battery.exe info --fresh
+  x-battery.exe backup
+  x-battery.exe setpoll 500                 # 改成 500 再自动改回 1000，仅演示
+  x-battery.exe setpoll 500 --keep --save   # 真正留在 500 并写入 flash
+  x-battery.exe setdpi 1 500                # 1 档改 500 DPI，跑完自动还原
+  x-battery.exe setlight 0 70 ff0000        # Static 红色 70% 亮度，跑完自动还原
+  x-battery.exe restore backup.txt --save
 "#;
 
 fn main() -> ExitCode {
@@ -113,7 +113,7 @@ fn main() -> ExitCode {
     // 裸跑如果进 CLI 只会打印帮助然后退出，双击的人什么都看不到。
     //
     // 唯一例外是 `--help` / `-h` / `help`：这几个仍然走 CLI 打印帮助，
-    // 否则在命令行里敲 `rog-mouse-ctl --help` 会弹出一个窗口，很奇怪。
+    // 否则在命令行里敲 `x-battery.exe --help` 会弹出一个窗口，很奇怪。
     //
     // `--autostart` 是**开机自启专用参数**（见 `src/autostart.rs` 的 `RUN_ARG`）。
     // 它必须和裸跑走同一条路进 GUI —— 开机时没有控制台，不 FreeConsole 会闪黑框；
@@ -331,7 +331,7 @@ fn run_gui(start_hidden: bool) -> ExitCode {
                 format!("{} GUI 启动失败：{e}\n", settings::timestamp_for_humans()),
             );
             let text = win32::to_wide(&crate::trf!("图形界面启动失败：\n\n{e}", e = e));
-            let caption = win32::to_wide("rog-mouse-ctl");
+            let caption = win32::to_wide("X-Battery");
             // MB_OK(0) | MB_ICONERROR(0x10)
             unsafe {
                 win32::MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10);
@@ -548,7 +548,7 @@ fn cmd_cache(pos: &[&str]) -> Result<(), String> {
             Ok(())
         }
         Some(other) => Err(format!(
-            "cache 只接受 clear，收到 {other:?}\n\n用法：rog-mouse-ctl cache [clear]"
+            "cache 只接受 clear，收到 {other:?}\n\n用法：x-battery.exe cache [clear]"
         )),
     }
 }

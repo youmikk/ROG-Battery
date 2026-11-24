@@ -21,10 +21,10 @@ try {
 
     $dist = Join-Path $repo "dist/$($source.Version)"
     New-Item -ItemType Directory -Force -Path $dist | Out-Null
-    Copy-Item -LiteralPath (Join-Path $repo 'target/release/rog-mouse-ctl.exe') -Destination $dist
-    [IO.File]::WriteAllText((Join-Path $dist 'rog-mouse-ctl.exe.sha256'),
-        "$($verified.Sha256)  rog-mouse-ctl.exe`n", [Text.Encoding]::ASCII)
-    $files = @('rog-mouse-ctl.exe')
+    Copy-Item -LiteralPath (Join-Path $repo 'target/release/x-battery.exe') -Destination $dist
+    [IO.File]::WriteAllText((Join-Path $dist 'x-battery.exe.sha256'),
+        "$($verified.Sha256)  x-battery.exe`n", [Text.Encoding]::ASCII)
+    $files = @('x-battery.exe')
     $hashes = foreach ($file in $files) {
         $hash = (Get-FileHash -LiteralPath (Join-Path $dist $file) -Algorithm SHA256).Hash.ToLowerInvariant()
         "$hash  $file"
