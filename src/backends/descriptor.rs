@@ -123,6 +123,21 @@ impl Descriptor {
             })
     }
 
+    /// Prove the sole input byte-array report without requiring an output side.
+    pub fn single_input_byte_report_id(&self, interface: &HidInterface, length: u16) -> Option<u8> {
+        if self.caps.usage_page != interface.usage_page || self.caps.usage != interface.usage
+            || self.caps.input_report_byte_length != length
+            || self.caps.number_input_button_caps != 0 { return None; }
+        let count = self.caps.number_input_value_caps;
+        if !(1..=32).contains(&count) { return None; }
+        let mut values: Vec<HIDP_VALUE_CAPS> = (0..count)
+            .map(|_| unsafe { core::mem::zeroed() }).collect();
+        let mut returned = count;
+        if unsafe { (self.api.get_value_caps)(0, values.as_mut_ptr(), &mut returned, self.preparsed) } < 0
+            || returned != count { return None; }
+        single_byte_report_id(&values, length)
+    }
+
     /// Identify independently proven byte-array reports when the two directions
     /// use different IDs. Neither direction may contain a second report.
     pub fn single_input_output_byte_report_ids(&self, interface: &HidInterface,

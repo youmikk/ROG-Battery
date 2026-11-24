@@ -16,6 +16,7 @@ mod descriptor;
 pub mod edifier;
 pub mod eweadn;
 pub mod eweadn_s9pro;
+pub mod eweadn_x23;
 pub mod eweadn_x87;
 pub mod dareu;
 pub mod dareu_em901;
@@ -97,6 +98,7 @@ pub enum BackendId {
     Edifier,
     EweadnS9,
     EweadnS9Pro,
+    EweadnX23,
     EweadnX87,
     Dareu,
     DareuEm901,
@@ -127,13 +129,13 @@ pub enum BackendId {
     StandardHid,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 55] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 56] = [
     BackendId::Logitech, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
     BackendId::VgnRy, BackendId::MchoseModern, BackendId::MchoseK99, BackendId::Moondrop, BackendId::RapooLegacy,
     BackendId::RapooOffice, BackendId::AulaHfd, BackendId::MchoseMc,
-    BackendId::AulaF99, BackendId::AtkNano, BackendId::EweadnX87, BackendId::Xiberia,
+    BackendId::AulaF99, BackendId::AtkNano, BackendId::EweadnX23, BackendId::EweadnX87, BackendId::Xiberia,
     BackendId::AtkHoltek, BackendId::FifineHt6, BackendId::MchoseK87s,
     BackendId::Lingbao, BackendId::AulaF108,
     BackendId::RapooMt560, BackendId::MchoseR9, BackendId::AulaV9Pro,
@@ -171,6 +173,7 @@ impl BackendId {
             Self::Edifier => "EDIFIER Halo Space",
             Self::EweadnS9 => "EWEADN S9",
             Self::EweadnS9Pro => "EWEADN S9 PRO 8K",
+            Self::EweadnX23 => "EWEADN X23 Pro",
             Self::EweadnX87 => "EWEADN X87 keyboard",
             Self::Dareu => "DAREU Jm",
             Self::DareuEm901 => "DAREU EM901 / CM610 Pro",
@@ -205,7 +208,7 @@ impl BackendId {
     pub fn precedes_standard(self) -> bool {
         if matches!(self, Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
             | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
-            | Self::AtkNano | Self::EweadnX87 | Self::Xiberia
+            | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
             | Self::AtkHoltek | Self::FifineHt6 | Self::MchoseK87s
             | Self::Lingbao | Self::AulaF108 | Self::RapooMt560
             | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901
@@ -218,7 +221,7 @@ impl BackendId {
         std::time::Duration::from_secs(match self {
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
-                | Self::AtkNano | Self::EweadnX87 | Self::Xiberia
+                | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
                 | Self::AtkHoltek | Self::FifineHt6 | Self::MchoseK87s
                 | Self::Lingbao | Self::AulaF108 | Self::RapooMt560
                 | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901
@@ -242,6 +245,7 @@ impl BackendId {
                 | Self::AtkHoltek | Self::FifineHt6 | Self::MchoseK87s
                 | Self::Lingbao | Self::MchoseR9 | Self::AulaV9Pro
                 | Self::DareuEm901 => Some(10_000),
+            Self::EweadnX23 => Some(5_000),
             Self::AulaF108 => Some(15_000),
             Self::AulaHfdMechanical => Some(30_000),
             Self::Rapoo | Self::RapooMt560 | Self::DualSense | Self::XInput => Some(2_000),
@@ -321,7 +325,7 @@ impl Target {
             razer::collection_group(interface)
         } else if interface.serial.is_empty() || matches!(backend, BackendId::MchoseK99 | BackendId::Moondrop | BackendId::RapooLegacy | BackendId::Rapoo | BackendId::CompX
             | BackendId::RapooOffice | BackendId::AulaHfd | BackendId::MchoseMc
-            | BackendId::AulaF99 | BackendId::AtkNano | BackendId::EweadnX87 | BackendId::Xiberia
+            | BackendId::AulaF99 | BackendId::AtkNano | BackendId::EweadnX23 | BackendId::EweadnX87 | BackendId::Xiberia
             | BackendId::AtkHoltek | BackendId::FifineHt6 | BackendId::MchoseK87s
             | BackendId::Lingbao | BackendId::AulaF108 | BackendId::RapooMt560
             | BackendId::MchoseR9 | BackendId::AulaV9Pro | BackendId::DareuEm901
@@ -512,6 +516,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Edifier => &edifier::Edifier,
         BackendId::EweadnS9 => &eweadn::EweadnS9,
         BackendId::EweadnS9Pro => &eweadn_s9pro::EweadnS9Pro,
+        BackendId::EweadnX23 => &eweadn_x23::EweadnX23,
         BackendId::EweadnX87 => &eweadn_x87::EweadnX87,
         BackendId::Dareu => &dareu::Dareu,
         BackendId::DareuEm901 => &dareu_em901::DareuEm901,
