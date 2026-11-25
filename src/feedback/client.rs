@@ -247,7 +247,7 @@ fn valid_device(device: &Device) -> bool {
         && device.model.as_ref().is_none_or(|v| text(v, 1, 120, false))
 }
 
-pub fn validate_draft(draft: &Draft) -> Result<(), String> {
+pub fn validate_details(draft: &Draft) -> Result<(), String> {
     if !matches!(draft.category.as_str(), "device" | "battery" | "dpi" | "other")
         || !valid_device(&draft.device) || !text(&draft.description, 5, 2000, true)
         || draft.images.len() > 3 { return Err(invalid()); }
@@ -261,6 +261,11 @@ pub fn validate_draft(draft: &Draft) -> Result<(), String> {
                 "The diagnostic summary contains identifiers, paths or credentials. Generate a new summary."));
         }
     }
+    Ok(())
+}
+
+pub fn validate_draft(draft: &Draft) -> Result<(), String> {
+    validate_details(draft)?;
     for picture in &draft.images { validate_image(picture)?; }
     Ok(())
 }
@@ -270,13 +275,30 @@ fn dimensions(width: u32, height: u32) -> bool {
         && u64::from(width) * u64::from(height) <= 60_000_000
 }
 
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 { crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1))); }
+const fn crc32_table() -> [u32; 256] {
+    let mut table = [0; 256];
+    let mut index = 0;
+    while index < table.len() {
+        let mut value = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            value = (value >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(value & 1));
+            bit += 1;
+        }
+        table[index] = value;
+        index += 1;
     }
-    !crc
+    table
+}
+
+const CRC32_TABLE: [u32; 256] = crc32_table();
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut checksum = u32::MAX;
+    for byte in bytes {
+        checksum = (checksum >> 8) ^ CRC32_TABLE[((checksum ^ u32::from(*byte)) & 255) as usize];
+    }
+    !checksum
 }
 
 fn png(bytes: &[u8]) -> bool {
@@ -489,6 +511,17 @@ fn http(endpoint: &Endpoint, method: &str, route: &str, bearer: Option<&str>, bo
     let mut length = 4u32;
     if unsafe { WinHttpQueryHeaders(request.0, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
         null(), (&mut status as *mut u32).cast(), &mut length, null_mut()) } == 0 { return Err(network_error()); }
+    if status == 429 {
+        let header = wide("Retry-After");
+        let mut buffer = [0u16; 32];
+        let mut length = (buffer.len() * 2) as u32;
+        let value = if unsafe { WinHttpQueryHeaders(request.0, WINHTTP_QUERY_CUSTOM, header.as_ptr(),
+            buffer.as_mut_ptr().cast(), &mut length, null_mut()) } != 0 {
+            Some(String::from_utf16_lossy(&buffer[..buffer.iter().position(|value| *value == 0)
+                .unwrap_or(buffer.len())]))
+        } else { None };
+        return Err(rate_limit_error(value.as_deref()));
+    }
     // Only this relay status can carry an explicit terminal rejection. Other
     // errors remain uncertain and must not release a pending request.
     if !matches!(status, 200 | 201 | 202 | 502) { return Err(http_error(status)); }
@@ -543,6 +576,20 @@ fn http_error(status: u32) -> String {
             "The service did not accept this feedback. The original is preserved. Check it and submit on GitHub."),
         _ => network_error(),
     }
+}
+
+fn rate_limit_error(retry_after: Option<&str>) -> String {
+    let Some(seconds) = retry_after.and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|seconds| (1..=86400).contains(seconds)) else { return http_error(429); };
+    let wait = if seconds >= 3600 {
+        format!("{} {}", seconds.div_ceil(3600), message("小时", "hour(s)"))
+    } else if seconds >= 60 {
+        format!("{} {}", seconds.div_ceil(60), message("分钟", "minute(s)"))
+    } else {
+        format!("{} {}", seconds, message("秒", "second(s)"))
+    };
+    message(&format!("反馈请求较频繁，请在约 {wait}后重试。原反馈已保留，也可以先新建另一份反馈。"),
+        &format!("Too many feedback requests. Retry in about {wait}. Your original is preserved; you can start another draft meanwhile."))
 }
 
 fn random<const N: usize>() -> Result<[u8; N], String> {
@@ -996,6 +1043,74 @@ pub fn fallback(draft: &Draft) -> Result<Fallback, String> {
 mod tests {
     use super::*;
     const REQUEST: &str = "12345678-1234-4234-8234-123456789abc";
+
+    #[test]
+    fn png_crc_matches_the_standard_and_previous_bitwise_algorithm() {
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        assert_eq!(crc32(&[]), 0);
+        let bytes: Vec<u8> = (0..100_000).map(|index| (index * 37) as u8).collect();
+        let mut expected = u32::MAX;
+        for byte in &bytes {
+            expected ^= u32::from(*byte);
+            for _bit in 0..8 {
+                expected = (expected >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(expected & 1));
+            }
+        }
+        assert_eq!(crc32(&bytes), !expected);
+    }
+
+    #[test]
+    fn form_validation_leaves_attachment_scanning_to_the_worker() {
+        let mut report = draft();
+        report.images.push(Image {
+            name: "screenshot.png".into(), mime_type: "image/png".into(), data_base64: "invalid-base64".into(),
+        });
+        assert!(validate_details(&report).is_ok());
+        assert!(validate_draft(&report).is_err());
+        report.description = "no".into();
+        assert!(validate_details(&report).is_err());
+    }
+
+    #[test]
+    fn completed_feedback_does_not_block_a_second_identical_submission() {
+        let mut history = History::default();
+        let original = prepare_entry(&mut history, draft(), "1.4.9").unwrap();
+        complete_entry(&mut history, &original, CreateReceipt {
+            number: 123, url: format!("{REPOSITORY}/issues/123"), reply_access: true,
+        }).unwrap();
+        let second = prepare_entry(&mut history, draft(), "1.4.9").unwrap();
+        assert_ne!(original.request_id, second.request_id);
+        assert_ne!(original.reply_key, second.reply_key);
+        assert_eq!(history.entries.len(), 2);
+        assert_eq!(history.entries[0].status, Status::Completed);
+        assert_eq!(history.entries[1].status, Status::Pending);
+        assert!(validate_history(&history).is_ok());
+    }
+
+    #[test]
+    fn a_new_report_preserves_the_previous_uncertain_submission() {
+        let mut history = History::default();
+        let original = prepare_entry(&mut history, draft(), "1.4.9").unwrap();
+        let mut next = draft();
+        next.description = "A different battery problem".into();
+        let second = prepare_entry(&mut history, next, "1.4.9").unwrap();
+        assert_ne!(original.request_id, second.request_id);
+        assert_eq!(history.entries[0].request_id, original.request_id);
+        assert_eq!(history.entries[0].reply_key, original.reply_key);
+        assert_eq!(history.entries[0].status, Status::Pending);
+    }
+
+    #[test]
+    fn rate_limit_messages_report_wait_times_and_reject_invalid_headers() {
+        assert!(rate_limit_error(Some("37")).contains("37"));
+        assert!(rate_limit_error(Some("61")).contains('2'));
+        assert!(rate_limit_error(Some("3600")).contains('1'));
+        assert!(rate_limit_error(Some("86400")).contains("24"));
+        for value in [None, Some("0"), Some("-1"), Some("86401"), Some("999999999999999999"),
+            Some("tomorrow")] {
+            assert_eq!(rate_limit_error(value), http_error(429));
+        }
+    }
 
     fn draft() -> Draft {
         Draft { category: "battery".into(), device: Device { name: "Example mouse".into(), family: "mouse".into(),
