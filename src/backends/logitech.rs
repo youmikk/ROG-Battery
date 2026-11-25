@@ -1153,7 +1153,8 @@ fn collection_group(interface: &HidInterface) -> String {
 fn preferred_interfaces(interfaces: &[HidInterface]) -> Vec<&HidInterface> {
     let mut groups = std::collections::BTreeMap::new();
     for interface in interfaces.iter().filter(|interface| interface.vendor_id == 0x046d
-        && interface.usage_page >= 0xff00 && interface.input_len >= 7 && interface.output_len >= 7) {
+        && interface.usage_page >= 0xff00 && interface.input_len >= 7 && interface.output_len >= 7
+        && !super::logitech_headset::management(interface)) {
         let rank = |interface: &HidInterface| (interface.input_len >= 20 && interface.output_len >= 20,
             interface.usage_page == 0xff00 && interface.usage == 2);
         let best = groups.entry(collection_group(interface)).or_insert(interface);
@@ -1508,6 +1509,37 @@ mod tests {
         assert_eq!(chosen.len(), 2);
         assert!(chosen.iter().any(|interface| interface.path == long.path));
         assert!(chosen.iter().all(|interface| interface.output_len == 20));
+    }
+
+    #[test]
+    fn hidpp_selection_excludes_only_the_dedicated_headset_interface() {
+        let mut headset = target().hid().unwrap().clone();
+        headset.path = "headset-receiver-one".into();
+        headset.product_id = 0x0af7;
+        headset.usage_page = 0xffa0;
+        headset.input_len = 64;
+        headset.output_len = 64;
+        let mut second_headset = headset.clone();
+        second_headset.path = "headset-receiver-two".into();
+        let mouse = target().hid().unwrap().clone();
+        let mut sibling = headset.clone();
+        sibling.path = "headset-other-collection".into();
+        sibling.usage_page = 0xff00;
+        let mut other_product = headset.clone();
+        other_product.path = "other-product".into();
+        other_product.product_id = 0x0af8;
+        let interfaces = [headset, second_headset, mouse, sibling, other_product];
+        let chosen = preferred_interfaces(&interfaces);
+        assert_eq!(chosen.len(), 3);
+        for expected in &interfaces[2..] {
+            assert!(chosen.iter().any(|interface| interface.path == expected.path));
+        }
+        for (input_len, output_len) in [(20, 64), (64, 20)] {
+            let mut variant = interfaces[0].clone();
+            variant.input_len = input_len;
+            variant.output_len = output_len;
+            assert_eq!(preferred_interfaces(&[variant]).len(), 1);
+        }
     }
 
     fn profile_bytes() -> Vec<u8> {

@@ -13,7 +13,7 @@ const KIND_POWER: u8 = 0x05;
 const TAG_BATTERY: u8 = 0x04;
 const TIMEOUT_MS: u32 = 1_500;
 
-fn management(i: &HidInterface) -> bool {
+pub(super) fn management(i: &HidInterface) -> bool {
     i.vendor_id == VENDOR && i.product_id == PRODUCT
         && i.usage_page == 0xffa0 && i.input_len == FRAME_BYTES
         && i.output_len == FRAME_BYTES
