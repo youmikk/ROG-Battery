@@ -2,6 +2,10 @@
 
 日期：2026-11-25。仓库：`D:\codex\rog-mouse-ctl`，分支：`main`，审查基线：`8820946`，应用版本：`1.4.9`。
 
+## 后续交叉复查
+
+ROG 恢复后再次交叉审查本轮全部 21 个业务文件，确认并修复 StandardHID 拓扑键变化导致 GUI 丢弃新读数，以及 Veekos 描述符过滤前过早拒绝多集合的条件性回归。完整报告、证据边界与逐项提交见 [DEVICE_DETECTION_REGRESSION_REVIEW.md](DEVICE_DETECTION_REGRESSION_REVIEW.md)。集成后 **903 项测试全部通过**；新 EXE 只读验收继续识别龙鳞 Ace Mini（47%、DPI 800）和 VGN V98 Pro V3（100%）。最新交付为 `D:\codex\scratch\post-audit-regression-20261125\release\x-battery.exe`；下方前两阶段验证保留为历史记录。
+
 ## 实机回归补充：ROG OMNI 配对表偏移
 
 用户试用后报告 ROG 不识别，现场已复现：新测试版能枚举到 OMNI 的 FF02/FF01 接口，但 `quick` 返回“没有可用的命令通道”；旧版在同一设备上正常读取电量。问题出在 `src/hid.rs` 的 `parse_pairing_table`，不在 Windows 权限或用户设置。
