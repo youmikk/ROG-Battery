@@ -1,22 +1,17 @@
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 
-use core::ffi::c_void;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
-use crate::win32::{self, to_wide};
+use crate::win32::to_wide;
+
+mod startup;
 
 // ============================================================
 // 对外类型
 // ============================================================
 
-/// 开机自启的当前状态。
-///
-/// **不要简化成 `bool`**：`DisabledByUser` 和 `DisabledByPolicy` 都是「没启用」，
-/// 但用户点「开启」时行为完全不同 —— 前者再请求会**静默失败**（系统记着用户拒绝过，
-/// 必须让用户去「设置 → 应用 → 启动」手动开），后者是组策略禁止、程序无解。
-/// 合并成 bool 就没法给用户正确的提示。
+/// 区分用户禁用与策略限制，便于提示正确的恢复方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoStartState {
     /// 未启用，可以请求启用。
@@ -62,9 +57,7 @@ impl AutoStartState {
     }
 }
 
-/// 重新启用时的结果，比单纯 `Ok(())` 多带信息 —— 因为 WinRT 那条路
-/// **成功也可能没真的启用**（用户拒绝时 `RequestEnableAsync` 返回
-/// `DisabledByUser` 而不是报错）。
+/// 请求成功后仍需检查最终状态，用户拒绝不属于 API 错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnableOutcome {
     /// 最终状态。
@@ -87,11 +80,7 @@ pub enum AutoStartPath {
 }
 
 impl AutoStartPath {
-    /// 短名，直接给界面用。
-    ///
-    /// 曾经的 `describe()` 返回「绿色版（HKCU\...\Run）」这种长串，
-    /// 但 UI 上那个标签只有 275 px，长串会被截断 —— 短名 + 失败时的完整解释
-    /// 更实用，所以长版本删掉了（不留死代码）。
+    /// 设置页显示的路径名称。
     pub fn short(self) -> &'static str {
         match self {
             AutoStartPath::WinRt => "MSIX 包内",
@@ -108,24 +97,12 @@ impl AutoStartPath {
 const APPMODEL_ERROR_NO_PACKAGE: i32 = 15700;
 const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
 
-// `GetCurrentPackageFullName`：kernel32 直接导出（内部转发到 KernelBase，
-// 但导入库里有这条转发记录，`ld` 能解，不需要 libkernelbase.a）。
-//
-// 注意：extern 块**不能**用 `///` 文档注释（编译器报 unused doc comment），
-// 只能写成 `//` 普通注释。
 #[link(name = "kernel32")]
 extern "system" {
     fn GetCurrentPackageFullName(len: *mut u32, name: *mut u16) -> i32;
 }
 
-/// 当前进程的包身份。`Some(true)` = MSIX 包内，`Some(false)` = 绿色版，
-/// `None` = 查询本身失败（调不通 API，理论上不该发生）。
-///
-/// 为什么要三态而不是 `bool`：原先写的是 `rc != APPMODEL_ERROR_NO_PACKAGE`，
-/// 那样**任何错误**（拒绝访问、API 缺失）都被当成「有包身份」，
-/// 于是绿色版会错误地去等 WinRT，报一个和真实原因无关的失败。
-/// 只有明确拿到 `122`（`ERROR_INSUFFICIENT_BUFFER`，说明有包但缓冲区不够）
-/// 才算真有包身份。
+/// 包身份查询失败时保留未知状态。
 fn package_identity() -> Option<bool> {
     let mut len: u32 = 0;
     let rc = unsafe { GetCurrentPackageFullName(&mut len, core::ptr::null_mut()) };
@@ -142,10 +119,7 @@ pub fn is_packaged() -> bool {
     package_identity() == Some(true)
 }
 
-/// 判定该走哪条自启路径。
-///
-/// 包身份**查询失败**时返回 `Unknown`，让上层显示「无法判定运行形态」，
-/// 而不是瞎猜一条路径然后失败在别的地方（见 [`package_identity`]）。
+/// 按包身份选择自启入口。
 pub fn detect_path() -> AutoStartPath {
     match package_identity() {
         Some(true) => AutoStartPath::WinRt,
@@ -496,476 +470,14 @@ fn registry_disable() -> Result<(), String> {
 }
 
 // ============================================================
-// MSIX 包内：WinRT StartupTask
-// ============================================================
-
-/// manifest 里的 `TaskId`，必须**一字不差**。
-/// 见 `msix\AppxManifest.xml.template` 的 `<desktop:StartupTask TaskId="...">`。
-const STARTUP_TASK_ID: &str = "RogBatteryAutoStart";
-
-const CO_E_NOTINITIALIZED: u32 = 0x8004_01F0;
-const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
-const ERROR_ELEMENT_NOT_FOUND: u32 = 0x8007_0490;
-
-/// `IActivationFactory` 的 IID，固定值。
-const IID_ACTIVATION_FACTORY: Guid = Guid {
-    data1: 0xAF86_E2E0,
-    data2: 0xB12D,
-    data3: 0x4C6A,
-    data4: [0x9C, 0x5A, 0xD7, 0xAA, 0x65, 0x10, 0x1E, 0x90],
-};
-
-/// `IStartupTaskStatics` 的 IID。**不是自己算的**，是从系统 WinRT 元数据查的
-/// （见模块文档）。手抄成常量以免每次都去调 PowerShell。
-const IID_STARTUP_TASK_STATICS: Guid = Guid {
-    data1: 0xEE5B_60BD,
-    data2: 0xA148,
-    data3: 0x41A7,
-    data4: [0xB2, 0x6E, 0xE8, 0xB8, 0x8A, 0x1E, 0x62, 0xF8],
-};
-
-/// `IAsyncInfo` 的 IID。用它 QI 出来的对象有**独立、无继承歧义**的 vtable，
-/// 轮询状态比在 `IAsyncOperation<T>` 上数槽位安全得多（我在后者身上错过三次）。
-const IID_ASYNC_INFO: Guid = Guid {
-    data1: 0x0000_0036,
-    data2: 0x0000,
-    data3: 0x0000,
-    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
-};
-
-/// `IStartupTaskStatics`：`[6] GetForCurrentPackageAsync` `[7] GetAsync(taskId)`
-const STATICS_GET_ASYNC: usize = 7;
-
-/// `IAsyncInfo`（**独立 vtable**）：`[6] get_Id` `[7] get_Status`
-/// `[8] get_ErrorCode` `[9] Cancel` `[10] Close`
-const ASYNC_INFO_GET_STATUS: usize = 7;
-const ASYNC_INFO_GET_ERROR_CODE: usize = 8;
-
-/// `IAsyncOperation<T>`：COM 规则是**派生接口在前**，所以
-/// `[6] put_Completed` `[7] get_Completed` `[8] GetResults`，
-/// `[9..13]` 才是继承来的 `IAsyncInfo` 那五个。
-///
-/// 注意 `GetResults` 在 **`[8]`**（不是 `[11]`）。我一开始按「基接口在前」
-/// 推断成 `[11]`，结果调到了 `IAsyncInfo::get_Status`，只好又改回来。
-const ASYNC_GET_RESULTS: usize = 8;
-
-/// `IStartupTask`：`[6] RequestEnableAsync` `[7] Disable`
-/// `[8] get_State` `[9] get_TaskId`
-const TASK_REQUEST_ENABLE: usize = 6;
-const TASK_DISABLE: usize = 7;
-const TASK_GET_STATE: usize = 8;
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct Guid {
-    data1: u32,
-    data2: u16,
-    data3: u16,
-    data4: [u8; 8],
-}
-
-type HResult = i32;
-
-type FnRoInitialize = unsafe extern "system" fn(i32) -> HResult;
-type FnRoUninitialize = unsafe extern "system" fn();
-type FnWindowsCreateString = unsafe extern "system" fn(*const u16, u32, *mut *mut c_void) -> HResult;
-type FnWindowsDeleteString = unsafe extern "system" fn(*mut c_void) -> HResult;
-type FnRoGetActivationFactory =
-    unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HResult;
-
-type FnRelease = unsafe extern "system" fn(*mut c_void) -> u32;
-type FnQueryInterface = unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HResult;
-
-/// combase.dll 的函数表，进程内只加载一次。
-struct RoApi {
-    _module: win32::Handle,
-    ro_initialize: FnRoInitialize,
-    ro_uninitialize: FnRoUninitialize,
-    create_string: FnWindowsCreateString,
-    delete_string: FnWindowsDeleteString,
-    get_factory: FnRoGetActivationFactory,
-}
-
-impl RoApi {
-    fn load() -> Result<RoApi, String> {
-        unsafe {
-            let name = to_wide("combase.dll");
-            let module = win32::LoadLibraryW(name.as_ptr());
-            if module.is_null() || module == win32::INVALID_HANDLE_VALUE {
-                return Err(format!("无法加载 combase.dll（GetLastError={}）", win32::last_error()));
-            }
-
-            fn sym(module: win32::Handle, name: &str) -> *mut c_void {
-                let c = to_wide(name);
-                // GetProcAddress 要的是 ANSI 名字（带 NUL）
-                let ansi: Vec<u8> = c
-                    .iter()
-                    .map(|&u| if u < 128 { u as u8 } else { b'?' })
-                    .collect();
-                unsafe { win32::GetProcAddress(module, ansi.as_ptr()) }
-            }
-
-            macro_rules! take {
-                ($name:literal, $ty:ty) => {{
-                    let p = sym(module, $name);
-                    if p.is_null() {
-                        return Err(format!("combase.dll 缺少导出函数 {}", $name));
-                    }
-                    core::mem::transmute::<*mut c_void, $ty>(p)
-                }};
-            }
-
-            Ok(RoApi {
-                _module: module,
-                ro_initialize: take!("RoInitialize", FnRoInitialize),
-                ro_uninitialize: take!("RoUninitialize", FnRoUninitialize),
-                create_string: take!("WindowsCreateString", FnWindowsCreateString),
-                delete_string: take!("WindowsDeleteString", FnWindowsDeleteString),
-                get_factory: take!("RoGetActivationFactory", FnRoGetActivationFactory),
-            })
-        }
-    }
-}
-
-/// 取 vtable 里的第 `index` 个函数指针。
-///
-/// # Safety
-///
-/// `obj` 必须是一个活的 COM/WinRT 对象指针，且 `index` 必须落在该接口
-/// （**含 IInspectable 的 3 个槽**）的真实方法范围内。写错一格不会编译报错，
-/// 只会运行时崩。
-unsafe fn vtable_call<T>(obj: *mut c_void, index: usize) -> T {
-    let vt = *(obj as *mut *const usize);
-    core::mem::transmute_copy::<usize, T>(&*vt.add(index))
-}
-
-/// 一次 WinRT 会话。`Drop` 时调 `RoUninitialize`。
-///
-/// 注意 `RoInitialize` 的失败要区分：`RPC_E_CHANGED_MODE`（`0x80010106`）
-/// 表示该线程已用别的套间模型初始化过，**不算失败**，可以继续用。
-struct RoSession {
-    api: RoApi,
-    needs_uninit: bool,
-}
-
-impl RoSession {
-    fn open() -> Result<RoSession, String> {
-        let api = RoApi::load()?;
-        let rc = unsafe { (api.ro_initialize)(1) }; // RO_INIT_MULTITHREADED
-        let u = rc as u32;
-        let needs_uninit = if u == 0 {
-            true
-        } else if u == RPC_E_CHANGED_MODE {
-            false // 别人已经初始化过，不归我们 uninit
-        } else if u == CO_E_NOTINITIALIZED {
-            return Err("RoInitialize 返回 CO_E_NOTINITIALIZED（不该发生）".to_string());
-        } else {
-            return Err(format!("RoInitialize 失败：0x{u:08X}"));
-        };
-        Ok(RoSession { api, needs_uninit })
-    }
-
-    /// 建 HSTRING。返回的句柄必须用 `delete_string` 释放。
-    fn hstring(&self, s: &str) -> Result<*mut c_void, String> {
-        let units: Vec<u16> = s.encode_utf16().collect();
-        let mut hs: *mut c_void = core::ptr::null_mut();
-        let rc = unsafe { (self.api.create_string)(units.as_ptr(), units.len() as u32, &mut hs) };
-        if rc != 0 {
-            return Err(format!("WindowsCreateString 失败：0x{:08X}", rc as u32));
-        }
-        Ok(hs)
-    }
-
-    fn free_hstring(&self, hs: *mut c_void) {
-        if !hs.is_null() {
-            unsafe {
-                (self.api.delete_string)(hs);
-            }
-        }
-    }
-
-    /// 拿 `IStartupTask` 对象（调用方负责 `Release`）。
-    ///
-    /// vtable 槽位（**都含 IInspectable 的 3 个槽**）：
-    /// - `factory[0]` = QueryInterface → `IStartupTaskStatics`
-    /// - `statics[6]` = `GetAsync`（`[3]` 是 `GetIids`，别搞错）
-    /// - `op[7]` = `get_Status`，`op[8]` = `get_ErrorCode`，`op[11]` = `GetResults`
-    unsafe fn activate(&self, task_id: &str) -> Result<*mut c_void, String> {
-        let class = "Windows.ApplicationModel.StartupTask";
-        let hs_class = self.hstring(class)?;
-
-        let mut factory: *mut c_void = core::ptr::null_mut();
-        let rc = (self.api.get_factory)(hs_class, &IID_ACTIVATION_FACTORY, &mut factory);
-        self.free_hstring(hs_class);
-        if rc != 0 {
-            let u = rc as u32;
-            let hint = if u == CO_E_NOTINITIALIZED {
-                "（忘了 RoInitialize）"
-            } else {
-                ""
-            };
-            return Err(format!("RoGetActivationFactory 失败：0x{u:08X}{hint}"));
-        }
-
-        // QI 到 IStartupTaskStatics
-        let qi: FnQueryInterface = vtable_call(factory, 0);
-        let mut statics: *mut c_void = core::ptr::null_mut();
-        let rc = qi(factory, &IID_STARTUP_TASK_STATICS, &mut statics);
-        let release_factory: FnRelease = vtable_call(factory, 2);
-        release_factory(factory);
-        if rc != 0 {
-            return Err(format!("QueryInterface(IStartupTaskStatics) 失败：0x{:08X}", rc as u32));
-        }
-
-        // GetAsync。**槽位是 [7]**，`[6]` 是 `GetForCurrentPackageAsync()`
-        // （不接受 taskId —— 错用会让 hs_id 被当成 out 指针写坏，rc 却是 S_OK）。
-        let hs_id = self.hstring(task_id)?;
-        type FnGetAsync = unsafe extern "system" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> HResult;
-        let get_async: FnGetAsync = vtable_call(statics, STATICS_GET_ASYNC);
-        let mut op: *mut c_void = core::ptr::null_mut();
-        let rc = get_async(statics, hs_id, &mut op);
-        self.free_hstring(hs_id);
-        let release_statics: FnRelease = vtable_call(statics, 2);
-        release_statics(statics);
-
-        if rc != 0 {
-            let u = rc as u32;
-            let hint = if u == ERROR_ELEMENT_NOT_FOUND {
-                "（TaskId 不存在：绿色版，或 manifest 没声明 startupTask）"
-            } else {
-                ""
-            };
-            return Err(format!("StartupTask.GetAsync 失败：0x{u:08X}{hint}"));
-        }
-        if op.is_null() {
-            // 槽位错的时候就是这个症状：rc = S_OK 但 out 指针没被写。
-            return Err("StartupTask.GetAsync 成功但返回了空 IAsyncOperation（vtable 槽位可能不对）".to_string());
-        }
-
-        // 等完成。照 C# 的 `.Wait(5000)`：轮询 get_Status，间隔 20ms。
-        //
-        // **先 QI 到 `IAsyncInfo`**，用它自己的独立 vtable 取 `get_Status`。
-        // 为什么不直接在 `IAsyncOperation<T>` 上数槽位：那个接口继承 IAsyncInfo，
-        // COM 规则是「派生在前、基接口在后」，`get_Status` 落在 `[10]`；我在这上面
-        // 连错了三次（先当 [4]→崩、再当 [7]→拿到 get_Completed 的 null handler
-        // →status 恒 0 永不完成、再当 [10] 才对）。QI 一次把歧义彻底消掉。
-        let qi_info: FnQueryInterface = vtable_call(op, 0);
-        let mut info: *mut c_void = core::ptr::null_mut();
-        let rc = qi_info(op, &IID_ASYNC_INFO, &mut info);
-        if rc != 0 || info.is_null() {
-            let release_op: FnRelease = vtable_call(op, 2);
-            release_op(op);
-            return Err(format!("QueryInterface(IAsyncInfo) 失败：0x{:08X}", rc as u32));
-        }
-
-        type FnGetStatus = unsafe extern "system" fn(*mut c_void, *mut i32) -> HResult;
-        let get_status: FnGetStatus = vtable_call(info, ASYNC_INFO_GET_STATUS);
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        let mut status: i32 = 0;
-        loop {
-            if Instant::now() >= deadline {
-                let release_info: FnRelease = vtable_call(info, 2);
-                release_info(info);
-                let release_op: FnRelease = vtable_call(op, 2);
-                release_op(op);
-                return Err("StartupTask.GetAsync 超时（5 秒未完成）".to_string());
-            }
-            let rc = get_status(info, &mut status);
-            if rc != 0 {
-                let release_info: FnRelease = vtable_call(info, 2);
-                release_info(info);
-                let release_op: FnRelease = vtable_call(op, 2);
-                release_op(op);
-                return Err(format!("IAsyncInfo.get_Status 失败：0x{:08X}", rc as u32));
-            }
-            if status != 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-
-        match status {
-            1 => {
-                // Completed → GetResults。**槽位是 [8]**（派生接口在前）。
-                type FnGetResults = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HResult;
-                let get_results: FnGetResults = vtable_call(op, ASYNC_GET_RESULTS);
-                let mut task: *mut c_void = core::ptr::null_mut();
-                let rc = get_results(op, &mut task);
-                let release_info: FnRelease = vtable_call(info, 2);
-                release_info(info);
-                let release_op: FnRelease = vtable_call(op, 2);
-                release_op(op);
-                if rc != 0 {
-                    return Err(format!("GetResults 失败：0x{:08X}", rc as u32));
-                }
-                Ok(task)
-            }
-            2 => {
-                let release_info: FnRelease = vtable_call(info, 2);
-                release_info(info);
-                let release_op: FnRelease = vtable_call(op, 2);
-                release_op(op);
-                Err("StartupTask.GetAsync 被取消".to_string())
-            }
-            3 => {
-                type FnGetError = unsafe extern "system" fn(*mut c_void, *mut HResult) -> HResult;
-                let get_err: FnGetError = vtable_call(info, ASYNC_INFO_GET_ERROR_CODE);
-                let mut e: HResult = 0;
-                let _ = get_err(info, &mut e);
-                let release_info: FnRelease = vtable_call(info, 2);
-                release_info(info);
-                let release_op: FnRelease = vtable_call(op, 2);
-                release_op(op);
-                Err(format!("StartupTask.GetAsync 出错：0x{:08X}", e as u32))
-            }
-            other => {
-                let release_info: FnRelease = vtable_call(info, 2);
-                release_info(info);
-                let release_op: FnRelease = vtable_call(op, 2);
-                release_op(op);
-                Err(format!("StartupTask.GetAsync 异常状态（status={other}）"))
-            }
-        }
-    }
-
-    /// `IStartupTask::get_State`。**只读**，槽位 `[8]`。
-    unsafe fn get_state(&self, task: *mut c_void) -> Result<AutoStartState, String> {
-        type FnGetState = unsafe extern "system" fn(*mut c_void, *mut i32) -> HResult;
-        let f: FnGetState = vtable_call(task, TASK_GET_STATE);
-        let mut st: i32 = -1;
-        let rc = f(task, &mut st);
-        if rc != 0 {
-            return Err(format!("IStartupTask.get_State 失败：0x{:08X}", rc as u32));
-        }
-        Ok(AutoStartState::from_winrt(st))
-    }
-
-    /// `IStartupTask::RequestEnableAsync`。
-    ///
-    /// 会**弹系统确认框**。用户点「否」时不报错，而是返回 `DisabledByUser`
-    /// —— 所以调用方必须检查返回值而不是只看 `Ok`。
-    unsafe fn request_enable(&self, task: *mut c_void) -> Result<AutoStartState, String> {
-        // IStartupTask: [6] get_State [7] get_TaskId [8] RequestEnableAsync [9] Disable
-        // RequestEnableAsync 的 ABI 与 GetAsync 一样是 (this, out IAsyncOperation)
-        type FnRequestEnable = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HResult;
-        // **槽位 [6] 是 RequestEnableAsync**。我早期版本这里写的是 `[6]` 当
-        // `get_State` —— 那会把「查状态」变成「弹系统框并真的启用自启」。
-        let f: FnRequestEnable = vtable_call(task, TASK_REQUEST_ENABLE);
-        let mut op: *mut c_void = core::ptr::null_mut();
-        let rc = f(task, &mut op);
-        if rc != 0 {
-            return Err(format!("RequestEnableAsync 失败：0x{:08X}", rc as u32));
-        }
-        if op.is_null() {
-            return Err("RequestEnableAsync 返回了空 IAsyncOperation".to_string());
-        }
-
-        // 同样等完成。RequestEnableAsync 返回 IAsyncOperation<StartupTaskState>，
-        // GetResults 出来的是 enum（int）而不是对象。
-        //
-        // 和 `activate` 一样先 QI 到 IAsyncInfo 拿干净的 `get_Status`。
-        let qi_info: FnQueryInterface = vtable_call(op, 0);
-        let mut info: *mut c_void = core::ptr::null_mut();
-        let rc = qi_info(op, &IID_ASYNC_INFO, &mut info);
-        if rc != 0 || info.is_null() {
-            let release_op: FnRelease = vtable_call(op, 2);
-            release_op(op);
-            return Err(format!("RequestEnableAsync QI(IAsyncInfo) 失败：0x{:08X}", rc as u32));
-        }
-
-        type FnGetStatus = unsafe extern "system" fn(*mut c_void, *mut i32) -> HResult;
-        let get_status: FnGetStatus = vtable_call(info, ASYNC_INFO_GET_STATUS);
-        let deadline = Instant::now() + Duration::from_millis(5000);
-        let mut status: i32 = 0;
-        loop {
-            if Instant::now() >= deadline {
-                let release_info: FnRelease = vtable_call(info, 2);
-                release_info(info);
-                let release_op: FnRelease = vtable_call(op, 2);
-                release_op(op);
-                return Err("RequestEnableAsync 超时（5 秒未完成）".to_string());
-            }
-            let rc = get_status(info, &mut status);
-            if rc != 0 {
-                let release_info: FnRelease = vtable_call(info, 2);
-                release_info(info);
-                let release_op: FnRelease = vtable_call(op, 2);
-                release_op(op);
-                return Err(format!("RequestEnableAsync 的 get_Status 失败：0x{:08X}", rc as u32));
-            }
-            if status != 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-
-        let result = if status == 1 {
-            // IAsyncOperation<enum T> 的 GetResults 直接写 int。槽位 [8]。
-            type FnGetResultsInt = unsafe extern "system" fn(*mut c_void, *mut i32) -> HResult;
-            let get_results: FnGetResultsInt = vtable_call(op, ASYNC_GET_RESULTS);
-            let mut v: i32 = -1;
-            let rc = get_results(op, &mut v);
-            if rc != 0 {
-                Err(format!("RequestEnableAsync 的 GetResults 失败：0x{:08X}", rc as u32))
-            } else {
-                Ok(AutoStartState::from_winrt(v))
-            }
-        } else {
-            Err(format!("RequestEnableAsync 未完成（status={status}）"))
-        };
-
-        let release_info: FnRelease = vtable_call(info, 2);
-        release_info(info);
-        let release_op: FnRelease = vtable_call(op, 2);
-        release_op(op);
-        result
-    }
-
-    /// `IStartupTask::Disable`。无需确认，同步返回。**槽位是 [7]**
-    /// （我早期写成 `[9]`，那是 `get_TaskId`）。
-    unsafe fn disable(&self, task: *mut c_void) -> Result<(), String> {
-        type FnDisable = unsafe extern "system" fn(*mut c_void) -> HResult;
-        let f: FnDisable = vtable_call(task, TASK_DISABLE);
-        let rc = f(task);
-        if rc != 0 {
-            return Err(format!("IStartupTask.Disable 失败：0x{:08X}", rc as u32));
-        }
-        Ok(())
-    }
-}
-
-impl Drop for RoSession {
-    fn drop(&mut self) {
-        if self.needs_uninit {
-            unsafe {
-                (self.api.ro_uninitialize)();
-            }
-        }
-    }
-}
-
-/// 包内：查状态。
-fn winrt_state() -> Result<AutoStartState, String> {
-    let session = RoSession::open()?;
-    unsafe {
-        let task = session.activate(STARTUP_TASK_ID)?;
-        let st = session.get_state(task);
-        let release: FnRelease = vtable_call(task, 2);
-        release(task);
-        st
-    }
-}
-
-// ============================================================
 // 对外接口
 // ============================================================
 
-/// 查当前自启状态。**永不返回 `Err`** —— 读不到就返回 `Unknown`，
-/// 因为「查状态失败」不该阻止 GUI 渲染，界面上显示「状态未知」即可。
+/// 查询失败时以未知状态显示。
 pub fn state() -> (AutoStartState, AutoStartPath) {
     let path = detect_path();
     let st = match path {
-        AutoStartPath::WinRt => winrt_state().unwrap_or(AutoStartState::Unknown),
+        AutoStartPath::WinRt => startup::state().unwrap_or(AutoStartState::Unknown),
         AutoStartPath::Registry => registry_state(),
         AutoStartPath::Unknown => AutoStartState::Unknown,
     };
@@ -987,16 +499,7 @@ pub fn enable() -> Result<EnableOutcome, String> {
             })
         }
         AutoStartPath::WinRt => {
-            let session = RoSession::open()?;
-            let new_state = unsafe {
-                let task = session.activate(STARTUP_TASK_ID)?;
-                let r = session.request_enable(task);
-                let release: FnRelease = vtable_call(task, 2);
-                release(task);
-                r
-            };
-            // 用户拒绝时 request_enable 返回 DisabledByUser，不是 Err
-            let st = new_state.unwrap_or(AutoStartState::Unknown);
+            let st = startup::enable()?;
             Ok(EnableOutcome {
                 enabled: st.is_enabled(),
                 state: st,
@@ -1021,23 +524,12 @@ pub fn disable() -> Result<EnableOutcome, String> {
             })
         }
         AutoStartPath::WinRt => {
-            let session = RoSession::open()?;
-            unsafe {
-                let task = session.activate(STARTUP_TASK_ID)?;
-                let r = session.disable(task);
-                let st = match session.get_state(task) {
-                    Ok(s) => s,
-                    Err(_) => AutoStartState::Unknown,
-                };
-                let release: FnRelease = vtable_call(task, 2);
-                release(task);
-                r?;
-                Ok(EnableOutcome {
-                    enabled: st.is_enabled(),
-                    state: st,
-                    path,
-                })
-            }
+            let st = startup::disable()?;
+            Ok(EnableOutcome {
+                enabled: st.is_enabled(),
+                state: st,
+                path,
+            })
         }
         AutoStartPath::Unknown => Err("无法判定运行形态（包身份读取失败）".to_string()),
     }
