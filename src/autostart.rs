@@ -128,54 +128,40 @@ pub fn detect_path() -> AutoStartPath {
     }
 }
 
-/// 这次启动是不是「开机自启」拉起来的。
-///
-/// 绿色版不需要猜：Run 键和 Startup 里的 VBS 都显式带 [`RUN_ARG`]。
-/// MSIX 版做不到 —— `desktop:StartupTask` 是**系统激活**，命令行里没有参数，
-/// 双击图标和开机启动的 argv 完全一样。所以这里看父进程：
-///
-/// - 用户手动启动（开始菜单 / 桌面快捷方式 / 任务栏）→ 父进程是 `explorer.exe`
-/// - 登录时由 StartupTask 拉起 → 父进程是系统激活宿主（`svchost.exe` /
-///   `RuntimeBroker.exe` 之类）
-///
-/// 判不出来（快照失败）时返回 `false`：宁可多弹一次窗口，也不要让用户
-/// 点了图标以为没反应。
+/// MSIX 无自启参数，以已启用的自启及已知父进程推断；信息不足时显示主窗口。
 pub fn launched_at_logon() -> bool {
     if package_identity() != Some(true) {
         return false;
     }
     let me = std::process::id();
-    let parent_is_explorer = crate::win32::parent_exe_name(me)
-        .map(|n| n.eq_ignore_ascii_case("explorer.exe"))
-        .unwrap_or(false);
+    let parent = crate::win32::parent_exe_name(me);
     let gap = parent_gap_secs(me);
+    if !decide_hidden(parent.as_deref(), true, gap) {
+        return false;
+    }
     let autostart_on = state().0.is_enabled();
-    let hidden = decide_hidden(parent_is_explorer, autostart_on, gap);
+    let hidden = decide_hidden(parent.as_deref(), autostart_on, gap);
+    let parent_is_explorer = parent.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("explorer.exe"));
     note_launch(parent_is_explorer, gap, autostart_on, hidden);
     hidden
 }
 
-/// 登录自启的时间窗（秒）。
-///
-/// 为什么需要它：Win11 的 `desktop:StartupTask` 有时由 **explorer.exe** 拉起
-/// （和用户双击图标一模一样），光看父进程名分不出来。改成看「我们和父进程谁先
-/// 出生」——登录自启时 explorer 刚起来、我们紧跟其后；用户手动点图标时 explorer
-/// 已经跑了几小时，差值很大。
+/// Explorer 启动后的登录自启推断窗口。
 const LOGON_WINDOW_SECS: i64 = 120;
 
-pub fn decide_hidden(
-    parent_is_explorer: bool,
+fn decide_hidden(
+    parent: Option<&str>,
     autostart_on: bool,
     parent_gap_secs: Option<i64>,
 ) -> bool {
-    // 父进程是系统激活宿主（svchost / RuntimeBroker …）→ 一定是登录自启。
-    if !parent_is_explorer {
-        return true;
+    if !autostart_on {
+        return false;
     }
-    // 父进程是 explorer：只有「自启开着 + 我们紧跟 explorer 出生」才算。
-    match parent_gap_secs {
-        Some(gap) if autostart_on && (0..=LOGON_WINDOW_SECS).contains(&gap) => true,
-        _ => false,
+    let Some(parent) = parent else { return false; };
+    if parent.eq_ignore_ascii_case("explorer.exe") {
+        parent_gap_secs.is_some_and(|gap| (0..=LOGON_WINDOW_SECS).contains(&gap))
+    } else {
+        ["svchost.exe", "RuntimeBroker.exe"].iter().any(|host| parent.eq_ignore_ascii_case(host))
     }
 }
 
@@ -187,10 +173,7 @@ fn parent_gap_secs(me: u32) -> Option<i64> {
     Some((mine as i64 - theirs as i64) / 10_000_000)
 }
 
-/// 把这次启动的判定依据落到 `last-launch.txt`。
-///
-/// 为什么留这个文件：登录自启的父进程到底是谁，只有用户真重启一次才知道；
-/// 没有现场记录就只能猜。写入失败一律忽略 —— 诊断信息不该影响启动。
+/// 记录自启推断依据，写入失败不影响启动。
 fn note_launch(parent_is_explorer: bool, gap: Option<i64>, autostart_on: bool, hidden: bool) {
     let path = crate::paths::settings_file().with_file_name("last-launch.txt");
     let line = format!(
@@ -215,16 +198,9 @@ const ERROR_SUCCESS: i32 = 0;
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-/// 值名。用 `RogMouseCtl` 而不是 `X-Battery`：注册表值名允许空格但
-/// 命令行工具/脚本处理时容易漏引号。
+/// 保留旧值名以兼容已有启动项。
 const RUN_VALUE_NAME: &str = "RogMouseCtl";
-/// 启动时传给程序的参数。GUI 是默认形态（无参数），这个参数的作用是
-/// **让 `main` 把它和裸跑同等处理**（见 `src/main.rs` 的入口分流），
-/// 同时便于在任务管理器里认出这条启动项。
-///
-/// 用 `pub` 是因为 `main.rs` 的入口分流要拿它做比较 —— 若把字符串在
-/// `main.rs` 里再写一遍，两边一旦不同步就会变成「自启勾了但开机没反应」，
-/// 而且编译期不会报错。
+/// 绿色版启动项与 GUI 入口共用的后台启动参数。
 pub const RUN_ARG: &str = "--autostart";
 
 use crate::win32::{RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
@@ -532,5 +508,34 @@ pub fn disable() -> Result<EnableOutcome, String> {
             })
         }
         AutoStartPath::Unknown => Err("无法判定运行形态（包身份读取失败）".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_or_manual_launchers_keep_the_window_visible() {
+        for parent in [None, Some("powershell.exe"), Some("Taskmgr.exe"), Some("cmd.exe")] {
+            assert!(!decide_hidden(parent, true, Some(1)));
+        }
+    }
+
+    #[test]
+    fn disabled_startup_never_hides_an_implicit_launch() {
+        for parent in ["explorer.exe", "svchost.exe", "RuntimeBroker.exe"] {
+            assert!(!decide_hidden(Some(parent), false, Some(1)));
+        }
+    }
+
+    #[test]
+    fn explorer_requires_a_recent_known_logon_gap() {
+        for gap in [None, Some(-1), Some(121), Some(3600)] {
+            assert!(!decide_hidden(Some("explorer.exe"), true, gap));
+        }
+        assert!(decide_hidden(Some("EXPLORER.EXE"), true, Some(0)));
+        assert!(decide_hidden(Some("explorer.exe"), true, Some(120)));
+        assert!(decide_hidden(Some("RuntimeBroker.exe"), true, None));
     }
 }
