@@ -27,6 +27,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use crate::ui::gfx::{self, Canvas as GfxCanvas, Fonts, Painter, R};
 use crate::ui::layout::Frame;
@@ -58,12 +59,6 @@ const WM_SETCURSOR: u32 = 0x0020;
 const WM_GETDLGCODE: u32 = 0x0087;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
-/// `SetTimer` 的节拍。
-///
-/// **这个常量没写进 match 之前绝不能省** —— 少一个 `const` 声明时，
-/// `WM_TIMER => ...` 会被 Rust 当成「新绑定变量」，静默匹配**所有**消息，
-/// 编译只报 `warning: unused variable`，运行起来整个窗口过程全走那一支。
-/// 我这次真踩了：加完 `WM_TIMER` 分支就收到这两条警告。
 const WM_TIMER: u32 = 0x0113;
 /// 拖边框缩放开始 / 结束（`WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE`）。
 const WM_ENTERSIZEMOVE: u32 = 0x0231;
@@ -74,12 +69,6 @@ const WM_EXITSIZEMOVE: u32 = 0x0232;
 const SETTLE_TIMER_ID: usize = 3;
 const SETTLE_MS: u32 = 260;
 
-/// 窗口正在被拖动缩放。
-///
-/// 缩放期间系统每帧都要重排，而我们一帧要重画整块内存位图（全屏时 2560×1440，
-/// 约 14 MB），两边抢 CPU 就是用户说的「缩小页面明显卡顿」。缩放期间把 60fps
-/// 动效定时器关掉，松手后下一帧按需重开。
-static RESIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// 捕获被系统收回（切窗口、弹窗抢焦点等）。
 const WM_CAPTURECHANGED: u32 = 0x0215;
 /// 系统要求放弃当前模态状态（拖拽中按 Esc、菜单弹出等）。
@@ -277,12 +266,7 @@ pub fn set_window_pos(
     unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), x, y, cx, cy, flags) };
 }
 
-/// 充电动效定时器的 ID。`SetTimer` 的 id 只要在**这个窗口**内唯一即可，
-/// 取 1 是因为本窗口只有一个定时器。注意必须 >0：传 0 会让系统自动分配 id
-/// 并返回它，那样 `KillTimer(0)` 就杀不掉，定时器一直跑。
 const ANIM_TIMER_ID: usize = 1;
-/// 动效帧间隔。16ms ≈ 60fps，和显示器刷新对齐就够了；
-/// 更快不会更顺（合成器本来就在 60Hz 合成），只会白烧 CPU。
 const ANIM_INTERVAL_MS: u32 = 16;
 
 #[link(name = "kernel32")]
@@ -463,12 +447,7 @@ struct Ctx {
     fonts: Rc<RefCell<Fonts>>,
     /// 注册进来的绘制过程。`None` = gui.rs 还没注册，此时只铺底色。
     paint: Rc<RefCell<Option<PaintFn>>>,
-    /// 「当前页想要动效」。由 `Canvas::set_animating` 写，
-    /// `WM_SHOWWINDOW`（窗口重新可见时）读它来决定要不要恢复定时器。
-    ///
-    /// 用 `Rc<Cell<bool>>` 而不是 `AtomicBool`：只在 GUI 线程上读写，
-    /// 原子类型会让人误以为可以跨线程，而且得多加一层 `Arc`。
-    anim_wanted: Rc<Cell<bool>>,
+    animation: Rc<Animation>,
 }
 
 /// 自绘内容区。
@@ -490,8 +469,7 @@ pub struct Canvas {
     damage: Rc<dyn Fn()>,
     /// 绘制过程。与 `Ctx.paint` 指向同一个 `RefCell`。
     paint: Rc<RefCell<Option<PaintFn>>>,
-    /// 与 `Ctx.anim_wanted` 指向同一个 `Cell`。
-    anim_wanted: Rc<Cell<bool>>,
+    animation: Rc<Animation>,
     /// 父窗口句柄：第一次用时取一次就记住（GetParent 每次拖动都会进 WM_SIZE）。
     parent: Cell<Handle>,
     /// 上一次铺满时的客户区像素尺寸。WM_SIZE 与「最大化」会为同一次尺寸变化
@@ -578,7 +556,7 @@ impl Canvas {
             acts: Rc::new(RefCell::new(Vec::new())),
             damage,
             paint: Rc::new(RefCell::new(None)),
-            anim_wanted: Rc::new(Cell::new(false)),
+            animation: Rc::new(Animation::default()),
             parent: Cell::new(std::ptr::null_mut()),
             last_fit: Cell::new(None),
         };
@@ -595,7 +573,7 @@ impl Canvas {
             paint: Rc::clone(&me.paint),
             scale: me.scale,
             cursor: Cell::new(IDC_ARROW),
-            anim_wanted: Rc::clone(&me.anim_wanted),
+            animation: Rc::clone(&me.animation),
         });
         let raw = Box::into_raw(ctx);
         // SAFETY: 指针来自 `Box::into_raw`，在 `WM_DESTROY` 里用 `Box::from_raw` 收回。
@@ -627,26 +605,13 @@ impl Canvas {
         unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
     }
 
-    /// 告诉 canvas「当前页要不要一直重画」。
-    ///
-    /// 充电动效是唯一的使用者：它按「进程启动到现在的毫秒数」算相位（见
-    /// `gfx::Painter::arc_comet` 里的 `OnceLock<Instant>`），必须有人不停
-    /// 触发重画才会动。调用点在 gui.rs 每帧画完后根据「当前页 + 充电状态」
-    /// 算一次 —— 重复传同一个值没有额外代价（内部先比一下再决定动不动系统）。
     pub fn set_animating(&self, on: bool) {
-        if self.anim_wanted.get() == on {
-            return;
-        }
-        self.anim_wanted.set(on);
-        // 不可见时先记下来，`WM_SHOWWINDOW` 会补上。
-        //
-        // **必须用 `IsWindowVisible` 而不是 `GetClientRect`**：窗口被隐藏
-        // （收进托盘 `ShowWindow(hwnd, SW_HIDE)`）时客户区尺寸依然是
-        // 1100×740，`r.width() > 0` 照样成立 —— 我第一版就是这么写的，
-        // 结果托盘里躺着的窗口每 16ms 醒一次做无效重绘。
-        // SAFETY: 句柄来自本结构，`IsWindowVisible` 对已销毁句柄只返回 0。
-        let visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
-        set_timer(self.hwnd, on && visible);
+        self.animation.wanted.set(on);
+        self.animation.sync(self.hwnd);
+    }
+
+    pub fn set_resizing(&self, resizing: bool) {
+        self.animation.set_resizing(self.hwnd, resizing);
     }
 
     /// 把子窗口铺满父窗口客户区。主窗口 `WM_SIZE` 时调。
@@ -711,6 +676,7 @@ impl Canvas {
     /// 只在**确实不可见**时调：窗口还露着就释放，下一帧立刻又分配回来，
     /// 白折腾一遍还要多一次 3 MB 的分配。
     pub fn release_render_memory(&self) {
+        self.animation.suspend(self.hwnd);
         self.inner.borrow_mut().release();
         self.fonts.borrow_mut().clear();
         // 删掉 GDI+ 位图只是归还给私有堆，那些页仍然算在进程头上；窗口都不可见了，
@@ -829,20 +795,68 @@ fn fill_background(target: Handle, hwnd: Handle) {
     }
 }
 
-/// 打开或关掉动画定时器。
-///
-/// **重复调用要幂等**：`SetTimer` 用同一个 id 再调一次不会叠加，只是改间隔；
-/// 但 `KillTimer` 一个不存在的 id 会失败（无害）。所以两个方向都不需要
-/// 先查询当前状态，直接调即可。
-fn set_timer(hwnd: Handle, on: bool) {
-    // 缩放期间一律不开动效定时器（见 `RESIZING`）。
-    let on = on && !RESIZING.load(std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        if on {
-            SetTimer(hwnd, ANIM_TIMER_ID, ANIM_INTERVAL_MS, 0);
-        } else {
-            KillTimer(hwnd, ANIM_TIMER_ID);
+#[derive(Default)]
+struct Animation {
+    wanted: Cell<bool>,
+    running: Cell<bool>,
+    resizing: Cell<bool>,
+    settle_until: Cell<Option<Instant>>,
+}
+
+impl Animation {
+    fn visible(hwnd: Handle) -> bool {
+        unsafe {
+            IsWindowVisible(hwnd) != 0 && crate::win32::IsIconic(GetParent(hwnd)) == 0
         }
+    }
+
+    fn sync(&self, hwnd: Handle) {
+        let on = self.wanted.get() && !self.resizing.get() && self.settle_until.get().is_none()
+            && Self::visible(hwnd);
+        if on && !self.running.get() {
+            self.running.set(unsafe { SetTimer(hwnd, ANIM_TIMER_ID, ANIM_INTERVAL_MS, 0) } != 0);
+        } else if !on {
+            self.stop(hwnd);
+        }
+    }
+
+    fn stop(&self, hwnd: Handle) {
+        if self.running.replace(false) {
+            unsafe { KillTimer(hwnd, ANIM_TIMER_ID) };
+        }
+    }
+
+    fn cancel_settle(&self, hwnd: Handle) {
+        if self.settle_until.take().is_some() {
+            unsafe { KillTimer(hwnd, SETTLE_TIMER_ID) };
+        }
+    }
+
+    fn suspend(&self, hwnd: Handle) {
+        self.stop(hwnd);
+        self.cancel_settle(hwnd);
+        self.resizing.set(false);
+    }
+
+    fn size_changed(&self, hwnd: Handle) {
+        self.stop(hwnd);
+        self.cancel_settle(hwnd);
+        if Self::visible(hwnd) {
+            let deadline = Instant::now() + Duration::from_millis(u64::from(SETTLE_MS));
+            if unsafe { SetTimer(hwnd, SETTLE_TIMER_ID, SETTLE_MS, 0) } != 0 {
+                self.settle_until.set(Some(deadline));
+            }
+            self.sync(hwnd);
+        }
+    }
+
+    fn set_resizing(&self, hwnd: Handle, resizing: bool) {
+        self.resizing.set(resizing);
+        if !resizing {
+            self.cancel_settle(hwnd);
+            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+        }
+        self.sync(hwnd);
     }
 }
 
@@ -890,6 +904,11 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                             if mem != 0 {
                                 gfx::blit(target as gfx::Gdi, mem, pw, ph);
                             }
+                            let wanted = {
+                                let ui = c.ui.borrow();
+                                mem != 0 && (ui.anim_hint || !ui.status.is_empty())
+                            };
+                            c.animation.wanted.set(wanted);
                             *c.paint.borrow_mut() = Some(f);
                         }
                         None => {
@@ -903,6 +922,9 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 }
             }
             EndPaint(hwnd, &ps);
+            if let Some(c) = ctx_of(hwnd) {
+                c.animation.sync(hwnd);
+            }
             0
         }
 
@@ -911,14 +933,10 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 if wp == SIZE_MINIMIZED {
                     // 最小化后没有可见像素：位图（最大一块）和字体缓存先还回去，
                     // 恢复时 ensure() 会按当时的尺寸重建。
+                    c.animation.suspend(hwnd);
                     release_render_memory(&c);
                 } else {
-                    // 最大化 / 还原时系统在放动画，我们这边同时跑 60fps 重绘就是
-                    // 两边抢 CPU（用户反馈「取消全屏明显卡顿」）。先停动效，
-                    // 260ms 后再放开 —— 那时动画已经结束。
-                    RESIZING.store(true, std::sync::atomic::Ordering::Relaxed);
-                    set_timer(hwnd, false);
-                    unsafe { SetTimer(hwnd, SETTLE_TIMER_ID, SETTLE_MS, 0) };
+                    c.animation.size_changed(hwnd);
                     // SAFETY: 传空矩形 = 整个客户区。
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                     (c.damage)();
@@ -946,48 +964,25 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
             0
         }
 
-        // 充电动效的节拍。
-        //
-        // 只在「当前页有动效」时才会被 `set_animating` 打开，定时器一旦触发就
-        // 重画一次 —— 用 `InvalidateRect` 而不是 `UpdateWindow`：定时器每 16ms
-        // 来一次，同步重画会把消息队列堵住（用户拖窗口时明显卡）。
-        // 定时器回调只负责「标脏」，真正的绘制仍是 WM_PAINT 那次。
-        WM_ENTERSIZEMOVE => {
-            RESIZING.store(true, std::sync::atomic::Ordering::Relaxed);
-            set_timer(hwnd, false);
-            0
-        }
-
-        WM_EXITSIZEMOVE => {
-            RESIZING.store(false, std::sync::atomic::Ordering::Relaxed);
-            // 松手补一帧：缩放中画的是中间尺寸，最后一帧要按最终尺寸重画。
-            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+        WM_ENTERSIZEMOVE | WM_EXITSIZEMOVE => {
+            if let Some(c) = ctx_of(hwnd) {
+                c.animation.set_resizing(hwnd, msg == WM_ENTERSIZEMOVE);
+            }
             0
         }
 
         WM_TIMER => {
-            if wp == SETTLE_TIMER_ID {
-                unsafe { KillTimer(hwnd, SETTLE_TIMER_ID) };
-                RESIZING.store(false, std::sync::atomic::Ordering::Relaxed);
-                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
-                return 0;
-            }
-            if wp == ANIM_TIMER_ID {
-                // 上一帧画完才知道「还需不需要继续动」：充电结束、toast 淡出
-                // 完成之后没人会再来关这个定时器（`want_anim` 只在收到 Notice
-                // 时重算），所以这里按上一帧的事实自我了断。
-                let keep = ctx_of(hwnd).map(|c| {
-                    let ui = c.ui.borrow();
-                    ui.anim_hint || !ui.status.is_empty()
-                });
-                match keep {
-                    Some(false) => {
-                        if let Some(c) = ctx_of(hwnd) {
-                            c.anim_wanted.set(false);
-                        }
-                        set_timer(hwnd, false);
+            if let Some(c) = ctx_of(hwnd) {
+                if wp == SETTLE_TIMER_ID && c.animation.settle_until.get()
+                    .is_some_and(|deadline| Instant::now() >= deadline) {
+                    c.animation.cancel_settle(hwnd);
+                    c.animation.sync(hwnd);
+                    if Animation::visible(hwnd) {
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
                     }
-                    _ => {
+                } else if wp == ANIM_TIMER_ID {
+                    c.animation.sync(hwnd);
+                    if c.animation.running.get() {
                         InvalidateRect(hwnd, std::ptr::null(), 0);
                     }
                 }
@@ -998,12 +993,12 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
         WM_SHOWWINDOW => {
             let showing = wp != 0;
             if let Some(c) = ctx_of(hwnd) {
-                set_timer(hwnd, showing && c.anim_wanted.get());
                 if showing {
                     // 隐藏期间位图已释放：立刻补一帧，别让用户看到第一帧空白。
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                     (c.damage)();
                 } else {
+                    c.animation.suspend(hwnd);
                     release_render_memory(&c);
                 }
             }
@@ -1063,8 +1058,6 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                         let started = ui.activate_device_drag(x, y, scroll);
                         drop(ui);
                         if started {
-                            c.anim_wanted.set(true);
-                            set_timer(hwnd, true);
                             InvalidateRect(hwnd, std::ptr::null(), 0);
                             (c.damage)();
                         }
@@ -1087,8 +1080,6 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                     } else {
                         // 悬停态变了才重画（悬停高亮），否则每次移动都重绘整页
                         if hover_changed {
-                            c.anim_wanted.set(true);
-                            set_timer(hwnd, true);
                             drop(ui);
                             unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
                             (c.damage)();
@@ -1110,8 +1101,6 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
                 };
                 drop(ui);
                 if changed {
-                    c.anim_wanted.set(true);
-                    set_timer(hwnd, true);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                     (c.damage)();
                 }
@@ -1418,6 +1407,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
         WM_DESTROY => {
             let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Ctx;
             if !raw.is_null() {
+                (*raw).animation.suspend(hwnd);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 // SAFETY: 指针由 `Canvas::create` 用 `Box::into_raw` 写入，此处只收回一次。
                 drop(Box::from_raw(raw));
@@ -1437,4 +1427,298 @@ fn release_render_memory(c: &Ctx) {
     c.inner.borrow_mut().release();
     c.fonts.borrow_mut().clear();
     crate::win32::trim_working_set();
+}
+
+#[cfg(test)]
+mod animation_tests {
+    use super::*;
+    use native_windows_gui as nwg;
+    use winapi::um::winuser as wu;
+
+    struct TestCanvas {
+        canvas: Canvas,
+        owner: nwg::Window,
+        handler: nwg::RawEventHandler,
+    }
+
+    impl TestCanvas {
+        fn new() -> Self {
+            nwg::init().unwrap();
+            let mut owner = nwg::Window::default();
+            nwg::Window::builder().title("Animation regression")
+                .flags(nwg::WindowFlags::POPUP).position((-32000, -32000))
+                .size((800, 600)).build(&mut owner).unwrap();
+            let canvas = Canvas::create(owner.handle.hwnd().unwrap() as _,
+                0, 0, 800, 600, 1.0, Rc::new(|| {})).unwrap();
+            let events = canvas.clone();
+            let handler = nwg::bind_raw_event_handler(&owner.handle, 0x10170,
+                move |_, message, param, data| {
+                    if message == wu::WM_WINDOWPOSCHANGING {
+                        let position = unsafe { &mut *(data as *mut wu::WINDOWPOS) };
+                        position.x = -32000;
+                        position.y = -32000;
+                        position.flags &= !wu::SWP_NOMOVE;
+                    }
+                    if matches!(message, WM_ENTERSIZEMOVE | WM_EXITSIZEMOVE) {
+                        events.set_resizing(message == WM_ENTERSIZEMOVE);
+                    }
+                    if message == WM_SIZE && param == SIZE_MINIMIZED {
+                        events.release_render_memory();
+                    }
+                    None
+                }).unwrap();
+            unsafe { wu::ShowWindow(owner.handle.hwnd().unwrap(), wu::SW_SHOWNOACTIVATE); }
+            assert!(Animation::visible(canvas.hwnd()));
+            Self { canvas, owner, handler }
+        }
+
+        fn paint_pages(&self) {
+            let readings = [crate::device::DeviceReading {
+                key: "animation-device".into(), name: "Test mouse".into(),
+                family: crate::device::DeviceFamily::Mouse,
+                connected: true,
+                battery: Some(crate::device::Battery {
+                    percent: Some(50), charging: Some(true), estimated_percent: None,
+                    voltage_mv: None, approximate: false, level: None,
+                }),
+                ..Default::default()
+            }, crate::device::DeviceReading {
+                key: "second-animation-device".into(), name: "Second test mouse".into(),
+                family: crate::device::DeviceFamily::Mouse, connected: true,
+                ..Default::default()
+            }];
+            self.canvas.with_ui_mut(|ui| ui.sync_devices(&readings));
+            let cfg = crate::settings::Settings::default();
+            let estimate = crate::history::Estimate::default();
+            let audio = crate::audio::Snapshot::default();
+            self.canvas.set_painter(Box::new(move |inner, fonts, ui, args| {
+                let data = Data {
+                    selected: Some(&readings[0]), state: None, ident: None, link_mode: "",
+                    status: String::new(), plot: None, estimate: &estimate, rows: 0,
+                    cfg: &cfg, autostart_text: "", autostart_on: false,
+                    native_notifications_supported: false, version: "test",
+                    readings: &readings, audio: &audio, basic: None,
+                    store: crate::store::View {
+                        phase: crate::store::Phase::Unsupported, available: false,
+                        home_visible: false, failure: None, last_checked_day: None,
+                    },
+                };
+                draw_frame(inner, fonts, ui, args, &crate::ui::theme::LIGHT, &data)
+            }));
+            self.canvas.repaint_now();
+            assert!(self.canvas.inner.borrow().covers(800, 600));
+        }
+
+        fn send(&self, message: u32, param: usize) {
+            unsafe { SendMessageW(self.canvas.hwnd(), message, param, 0); }
+        }
+
+        fn dispatch_timer(&self, timer: usize) {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let mut message: wu::MSG = unsafe { std::mem::zeroed() };
+                if unsafe { wu::PeekMessageW(&mut message, self.canvas.hwnd() as _,
+                    WM_TIMER, WM_TIMER, wu::PM_REMOVE) } != 0 {
+                    let matched = message.wParam == timer;
+                    unsafe { wu::DispatchMessageW(&message); }
+                    if matched { return; }
+                }
+                assert!(Instant::now() < deadline, "timer {timer} did not fire");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn assert_stopped(&self) {
+            assert!(!self.canvas.animation.running.get());
+            assert_eq!(unsafe { KillTimer(self.canvas.hwnd(), ANIM_TIMER_ID) }, 0);
+        }
+
+        fn assert_no_settle_timer(&self) {
+            assert!(self.canvas.animation.settle_until.get().is_none());
+            assert_eq!(unsafe { KillTimer(self.canvas.hwnd(), SETTLE_TIMER_ID) }, 0);
+        }
+    }
+
+    impl Drop for TestCanvas {
+        fn drop(&mut self) {
+            nwg::unbind_raw_event_handler(&self.handler).unwrap();
+        }
+    }
+
+    #[test]
+    fn resize_settle_restores_existing_animation_demand() {
+        let fixture = TestCanvas::new();
+        fixture.canvas.set_animating(true);
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+        fixture.send(WM_SIZE, 0);
+        fixture.assert_stopped();
+        fixture.canvas.set_animating(true);
+        fixture.assert_stopped();
+        fixture.dispatch_timer(SETTLE_TIMER_ID);
+        assert!(fixture.canvas.animation.running.get());
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+        fixture.assert_no_settle_timer();
+    }
+
+    #[test]
+    fn parent_resize_stays_paused_until_exit_and_is_per_canvas() {
+        let first = TestCanvas::new();
+        let second = TestCanvas::new();
+        first.canvas.set_animating(true);
+        second.canvas.set_animating(true);
+        unsafe { wu::SendMessageW(first.owner.handle.hwnd().unwrap(), WM_ENTERSIZEMOVE, 0, 0); }
+        first.send(WM_SIZE, 0);
+        first.dispatch_timer(SETTLE_TIMER_ID);
+        first.assert_stopped();
+        second.dispatch_timer(ANIM_TIMER_ID);
+        unsafe { wu::SendMessageW(first.owner.handle.hwnd().unwrap(), WM_EXITSIZEMOVE, 0, 0); }
+        first.dispatch_timer(ANIM_TIMER_ID);
+        first.assert_no_settle_timer();
+    }
+
+    #[test]
+    fn queued_settle_tick_does_not_end_a_new_resize_pause() {
+        let fixture = TestCanvas::new();
+        fixture.canvas.set_animating(true);
+        fixture.send(WM_SIZE, 0);
+        assert_ne!(unsafe { wu::PostMessageW(fixture.canvas.hwnd() as _,
+            WM_TIMER, SETTLE_TIMER_ID, 0) }, 0);
+        fixture.send(WM_SIZE, 0);
+        fixture.dispatch_timer(SETTLE_TIMER_ID);
+        fixture.assert_stopped();
+        assert!(fixture.canvas.animation.settle_until.get().is_some());
+        fixture.dispatch_timer(SETTLE_TIMER_ID);
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+        fixture.assert_no_settle_timer();
+    }
+
+    #[test]
+    fn painted_hover_runs_to_completion_without_external_animation_requests() {
+        let fixture = TestCanvas::new();
+        fixture.paint_pages();
+        fixture.assert_stopped();
+        let card = fixture.canvas.with_ui(|ui| {
+            ui.hots.iter().find(|hot| hot.act == Act::SelectDevice(0)).unwrap().rect
+        });
+        let position = card.cx() as isize | ((card.cy() as isize) << 16);
+        unsafe { SendMessageW(fixture.canvas.hwnd(), WM_MOUSEMOVE, 0, position); }
+        fixture.canvas.repaint_now();
+        assert!(fixture.canvas.animation.running.get());
+        for _ in 0..12 {
+            if !fixture.canvas.animation.running.get() { break; }
+            fixture.dispatch_timer(ANIM_TIMER_ID);
+            fixture.canvas.repaint_now();
+        }
+        assert_eq!(fixture.canvas.with_ui(|ui| ui.card_hover_anims["animation-device"]), 1.0);
+        fixture.assert_stopped();
+        fixture.send(WM_MOUSELEAVE, 0);
+        fixture.canvas.repaint_now();
+        assert!(fixture.canvas.animation.running.get());
+        for _ in 0..12 {
+            if !fixture.canvas.animation.running.get() { break; }
+            fixture.dispatch_timer(ANIM_TIMER_ID);
+            fixture.canvas.repaint_now();
+        }
+        assert_eq!(fixture.canvas.with_ui(|ui| ui.card_hover_anims["animation-device"]), 0.0);
+        fixture.assert_stopped();
+    }
+
+    #[test]
+    fn drag_lift_and_reflow_run_only_while_the_painted_transition_is_active() {
+        let fixture = TestCanvas::new();
+        fixture.paint_pages();
+        let source = fixture.canvas.with_ui(|ui| {
+            ui.hots.iter().find(|hot| hot.act == Act::SelectDevice(0)).unwrap().rect
+        });
+        fixture.canvas.with_ui_mut(|ui| {
+            ui.pointer.down = true;
+            ui.pointer.press_x = source.cx();
+            ui.pointer.press_y = source.cy();
+            ui.on_press(source.cx(), source.cy(), 0.0);
+        });
+        let moved = (source.cx() as isize + 6) | ((source.cy() as isize) << 16);
+        unsafe { SendMessageW(fixture.canvas.hwnd(), WM_MOUSEMOVE, 0, moved); }
+        assert!(fixture.canvas.with_ui(|ui| ui.device_drag.is_some()));
+        fixture.canvas.repaint_now();
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+        fixture.canvas.with_ui_mut(|ui| {
+            let drag = ui.device_drag.as_mut().unwrap();
+            drag.started_at = Instant::now() - Duration::from_secs(1);
+            drag.target_changed_at = drag.started_at;
+        });
+        fixture.canvas.repaint_now();
+        fixture.assert_stopped();
+        let target = fixture.canvas.with_ui(|ui| {
+            ui.hots.iter().find(|hot| hot.act == Act::SelectDevice(1)).unwrap().rect
+        });
+        let moved = target.cx() as isize | ((target.cy() as isize) << 16);
+        unsafe { SendMessageW(fixture.canvas.hwnd(), WM_MOUSEMOVE, 0, moved); }
+        fixture.canvas.repaint_now();
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+        fixture.canvas.with_ui_mut(|ui| {
+            let drag = ui.device_drag.as_mut().unwrap();
+            assert_eq!(drag.target, 1);
+            drag.target_changed_at = Instant::now() - Duration::from_secs(1);
+        });
+        fixture.canvas.repaint_now();
+        fixture.assert_stopped();
+        assert!(fixture.canvas.with_ui(|ui| ui.device_drag.is_some()));
+    }
+
+    #[test]
+    fn toast_expiry_stops_timer_and_static_charging_does_not_restart_it() {
+        let fixture = TestCanvas::new();
+        fixture.canvas.with_ui_mut(|ui| {
+            ui.page = Page::Battery;
+            ui.set_status("Test status");
+        });
+        fixture.paint_pages();
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+        fixture.canvas.with_ui_mut(|ui| ui.status_time = Some(Instant::now() - Duration::from_secs(3)));
+        fixture.canvas.repaint_now();
+        assert!(fixture.canvas.with_ui(|ui| ui.status.is_empty()));
+        fixture.assert_stopped();
+        fixture.canvas.repaint_now();
+        fixture.assert_stopped();
+    }
+
+    #[test]
+    fn hiding_cancels_both_timers_and_stale_ticks_do_not_repaint() {
+        let fixture = TestCanvas::new();
+        fixture.canvas.set_animating(true);
+        fixture.send(WM_SIZE, 0);
+        unsafe { wu::ShowWindow(fixture.canvas.hwnd() as _, wu::SW_HIDE); }
+        fixture.assert_stopped();
+        fixture.assert_no_settle_timer();
+        fixture.canvas.set_animating(true);
+        fixture.send(WM_SIZE, 0);
+        unsafe { wu::ValidateRect(fixture.canvas.hwnd() as _, std::ptr::null()); }
+        fixture.send(WM_TIMER, ANIM_TIMER_ID);
+        fixture.send(WM_TIMER, SETTLE_TIMER_ID);
+        assert_eq!(unsafe { wu::GetUpdateRect(fixture.canvas.hwnd() as _, std::ptr::null_mut(), 0) }, 0);
+        fixture.assert_stopped();
+        fixture.assert_no_settle_timer();
+        fixture.canvas.with_ui_mut(|ui| ui.set_status("Visible again"));
+        unsafe { wu::ShowWindow(fixture.canvas.hwnd() as _, wu::SW_SHOWNOACTIVATE); }
+        fixture.paint_pages();
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+    }
+
+    #[test]
+    fn minimized_parent_suspends_animation_until_a_visible_frame() {
+        let fixture = TestCanvas::new();
+        fixture.canvas.with_ui_mut(|ui| ui.set_status("Test status"));
+        fixture.paint_pages();
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+        unsafe { wu::ShowWindow(fixture.owner.handle.hwnd().unwrap(), wu::SW_SHOWMINNOACTIVE); }
+        assert_ne!(unsafe { wu::IsIconic(fixture.owner.handle.hwnd().unwrap()) }, 0);
+        fixture.canvas.set_animating(true);
+        fixture.send(WM_TIMER, ANIM_TIMER_ID);
+        fixture.assert_stopped();
+        fixture.assert_no_settle_timer();
+        unsafe { wu::ShowWindow(fixture.owner.handle.hwnd().unwrap(), wu::SW_SHOWNOACTIVATE); }
+        assert_eq!(unsafe { wu::IsIconic(fixture.owner.handle.hwnd().unwrap()) }, 0);
+        fixture.canvas.repaint_now();
+        fixture.dispatch_timer(ANIM_TIMER_ID);
+    }
 }

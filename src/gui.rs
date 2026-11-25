@@ -4155,6 +4155,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
             if matches!(msg, 0x007e | 0x02e0 | 0x031a | 0x031e | 0x0320) {
                 taskbar_broadcast.invalidate();
             }
+            if matches!(msg, 0x0231 | 0x0232) {
+                canvas_min.set_resizing(msg == 0x0231);
+            }
 
             // SIZE_MINIMIZED = 1
             if msg == 0x0005 && wp as usize == 1 {
@@ -4337,23 +4340,6 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         _ => {}
                     }
                 }
-
-                // ⓪ 充电动效开关。
-                //
-                // 判据是「当前页 == 电量页 **且** 设备报告正在充电」。
-                // 放在这里而不是 painter 里：`set_animating` 要 `&Canvas`，
-                // 而 painter 闭包只有 `Ui` / `Fonts` / `GfxCanvas`。
-                // 代价是判断基于上一轮读到的 `state`（最多落后一个刷新间隔），
-                // 但动效从「该出现」到「真出现」晚 60 秒用户是感觉不到的。
-                let want_anim = {
-                    let s = lock_shared(&shared_e);
-                    let on_battery = canvas.with_ui(|u| u.page == crate::ui::widget::Page::Battery);
-                    let charging = on_battery && s.quick.map(|q| q.charging).unwrap_or(false);
-                    let toast_active = canvas.with_ui(|u| !u.status.is_empty());
-                    let dragging_device = canvas.with_ui(|u| u.device_drag.is_some());
-                    charging || toast_active || dragging_device
-                };
-                canvas.set_animating(want_anim);
 
                 // ① canvas 攒下的交互动作
                 let acts = canvas.take_acts();
