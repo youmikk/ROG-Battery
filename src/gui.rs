@@ -475,6 +475,12 @@ fn mark_rog_unread(device: &mut DeviceSnapshot, present: Option<&std::collection
 fn reconcile_rog_identity(records: &mut BTreeMap<String, DeviceSnapshot>, link: &hid::Link,
     identity: &proto::Identity) -> Option<DeviceSnapshot> {
     let link_key = link.device_key();
+    let same = records.values().filter(|previous| previous.ident.same_device(identity))
+        .max_by_key(|previous| previous.battery_at).cloned();
+    if same.is_some() {
+        records.retain(|_, previous| !(previous.ident.device_id().is_none()
+            && previous.link.as_ref().is_some_and(|previous| previous.device_key() == link_key)));
+    }
     for previous in records.values_mut().filter(|previous|
         previous.link.as_ref().is_some_and(|previous| previous.device_key() == link_key)
             && previous.ident.conflicts_with(identity)) {
@@ -482,8 +488,7 @@ fn reconcile_rog_identity(records: &mut BTreeMap<String, DeviceSnapshot>, link: 
         previous.reading.quality = crate::device::ReadingQuality::Stale;
         previous.state = None;
     }
-    records.values().filter(|previous| previous.ident.same_device(identity))
-        .max_by_key(|previous| previous.battery_at).cloned()
+    same
 }
 
 fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
@@ -5388,6 +5393,35 @@ mod backend_tests {
         assert_eq!(records.len(), 1);
         assert_eq!(shared.active_key.as_ref(), records.keys().next());
         assert_eq!(records.values().next().unwrap().link.as_ref().unwrap().iface.path, "receiver-c");
+    }
+
+    #[test]
+    fn rog_known_identity_retires_anonymous_channel_records_without_migrating_their_history() {
+        let mut anonymous = history_owner_device("receiver", DeviceFamily::Mouse, true, None);
+        let link = anonymous.link.clone().unwrap();
+        anonymous.reading.key = link.device_key();
+        let anonymous_key = anonymous.reading.key.clone();
+        anonymous.reading.battery = snapshot(BackendId::Rog, "receiver", 47).battery;
+        let mut known = history_owner_device("wired", DeviceFamily::Mouse, true, None);
+        known.ident.mouse_sn = "known-device".into();
+        known.reading.key = crate::backends::rog::identity_key(known.link.as_ref().unwrap(), &known.ident);
+        let known_key = known.reading.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        shared.cfg.device_names.insert(anonymous_key.clone(), "Unconfirmed device".into());
+        shared.cfg.device_names.insert(known_key.clone(), "Known device".into());
+        let mut records = BTreeMap::from([(anonymous_key.clone(), anonymous), (known_key.clone(), known)]);
+        let mut outcome = rog_energy_outcome();
+        Arc::make_mut(&mut outcome.snapshot).identity.mouse_sn = "known-device".into();
+        let previous = reconcile_rog_identity(&mut records, &link, &outcome.snapshot.identity);
+        let record = rog_record(&link, &outcome, previous.as_ref()).unwrap();
+        records.insert(record.reading.key.clone(), record);
+        shared.replace_rog_records(records);
+        assert_eq!(shared.devices.len(), 1);
+        assert!(shared.devices[&known_key].reading.connected);
+        assert!(!shared.devices.contains_key(&anonymous_key));
+        assert!(shared.key_aliases.is_empty());
+        assert_eq!(shared.cfg.device_names[&known_key], "Known device");
+        assert_eq!(shared.cfg.device_names[&anonymous_key], "Unconfirmed device");
     }
 
     #[test]
