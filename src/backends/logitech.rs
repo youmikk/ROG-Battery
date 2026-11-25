@@ -710,14 +710,20 @@ impl<C: Channel> Session<C> {
     }
 
     fn read_snapshot(&mut self, target: &Target, detail: bool) -> Result<Snapshot, String> {
-        let battery = self.battery()?;
-        let battery_at = battery.as_ref().map(|_| std::time::Instant::now());
         let mut target = target.clone();
-        if let Ok(Some(key)) = self.identity_key() {
+        target.key = target.unverified_key();
+        target.verified_identity = false;
+        if self.legacy {
+            if detail || target.family == DeviceFamily::Unknown {
+                self.identify_legacy(&mut target);
+            }
+        } else if let Ok(Some(key)) = self.identity_key() {
             target.key = key;
             target.verified_identity = true;
         }
-        if detail || target.family == DeviceFamily::Unknown {
+        let battery = self.battery()?;
+        let battery_at = battery.as_ref().map(|_| std::time::Instant::now());
+        if !self.legacy && (detail || target.family == DeviceFamily::Unknown) {
             self.identify(&mut target);
         }
         let mut dpi = if target.family == DeviceFamily::Mouse {
@@ -729,10 +735,28 @@ impl<C: Channel> Session<C> {
             dpi.writable = false;
             dpi.stage_writable = false;
         }
+        let polling_rate = if target.family == DeviceFamily::Mouse {
+            self.rate_info(&target).ok().flatten().map(|info| info.rate).unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        if target.verified_identity {
+            let current = if self.legacy {
+                let slot = self.address - 1;
+                let pairing = self.read_register(0xff, 0x2b5, &[0x20 + slot])?;
+                let extended = self.read_register(0xff, 0x2b5, &[0x30 + slot])?;
+                legacy_identity_key(&pairing, &extended)
+            } else {
+                self.identity_key()?
+            };
+            if current.as_ref() != Some(&target.key) {
+                return Err("设备标识已变化，请刷新后再试".into());
+            }
+        }
         Ok(Snapshot {
             target,
             battery,
-            battery_unavailable: false, battery_at, polling_rate: Default::default(),
+            battery_unavailable: false, battery_at, polling_rate,
             dpi,
             connected: true,
         })
@@ -1106,11 +1130,7 @@ impl DeviceBackend for Logitech {
         let lock = super::channel::lock(&collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p|p.into_inner());
         let mut session = Session::open(target)?;
-        let mut snapshot = session.read_snapshot(target, detail)?;
-        if snapshot.target.family == DeviceFamily::Mouse {
-            snapshot.polling_rate = session.rate_info(&snapshot.target).ok().flatten().map(|info|info.rate).unwrap_or_default();
-        }
-        Ok(snapshot)
+        session.read_snapshot(target, detail)
     }
 
     fn set_dpi(&self, _: &HidApi, target: &Target, dpi: u16) -> Result<(), String> {
@@ -1980,8 +2000,6 @@ mod tests {
     fn battery_survives_failed_device_identity_query() {
         let (channel, steps) = channel(vec![
             ping(),
-            data(0, 0, &[0x10, 4], &[1]),
-            data(1, 1, &[], &[65, 4, 0]),
             Step {
                 address: None,
                 feature: 0,
@@ -1989,9 +2007,13 @@ mod tests {
                 parameters: vec![0, 3],
                 reply: Reply::Error(0xff, 2),
             },
+            data(0, 0, &[0x10, 4], &[1]),
+            data(1, 1, &[], &[65, 4, 0]),
             data(0, 0, &[0x81, 0], &[0]),
             data(0, 0, &[0x22, 1], &[0]),
             data(0, 0, &[0x22, 2], &[0]),
+            data(0, 0, &[0x80, 0x61], &[0]),
+            data(0, 0, &[0x80, 0x60], &[0]),
         ]);
         let snapshot = Session::from_channel(channel, &target())
             .unwrap()
@@ -2000,6 +2022,127 @@ mod tests {
         assert_eq!(snapshot.battery.unwrap().percent, Some(65));
         assert!(snapshot.connected);
         assert!(!snapshot.target.verified_identity);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[derive(Default)]
+    struct SnapshotChannel {
+        unit: Option<[u8; 4]>,
+        after_battery: Option<Option<[u8; 4]>>,
+        after_rate: bool,
+        identity_reads: usize,
+    }
+
+    impl Channel for SnapshotChannel {
+        fn output_len(&self) -> u16 { 20 }
+
+        fn transact(&mut self, packet: &[u8], _: u32,
+            matcher: &mut dyn FnMut(&[u8]) -> bool) -> Option<Vec<u8>> {
+            let payload = match (packet[2], packet[3] >> 4) {
+                (0, 1) => vec![2, 0, 0x5a],
+                (0, 0) => match &packet[4..6] {
+                    [0, 3] => vec![3],
+                    [0x10, 4] => vec![1],
+                    [0x80, 0x60] => vec![2],
+                    _ => vec![0],
+                },
+                (3, 0) => {
+                    self.identity_reads += 1;
+                    let mut payload = vec![0];
+                    payload.extend_from_slice(&self.unit.unwrap_or([0; 4]));
+                    payload
+                }
+                (1, 1) => {
+                    if let Some(unit) = self.after_battery.take() { self.unit = unit; }
+                    vec![65, 4, 0]
+                }
+                (2, 0) => vec![1],
+                (2, 1) => {
+                    if std::mem::take(&mut self.after_rate) { self.unit = Some([5, 6, 7, 8]); }
+                    vec![1]
+                }
+                _ => panic!("unexpected snapshot request: {packet:?}"),
+            };
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&packet[..4]);
+            response[4..4 + payload.len()].copy_from_slice(&payload);
+            assert!(matcher(&response));
+            Some(response)
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_a_unit_replaced_after_its_battery_reply() {
+        let mut target = target();
+        target.family = DeviceFamily::Keyboard;
+        let channel = SnapshotChannel { unit: Some([1, 2, 3, 4]),
+            after_battery: Some(Some([5, 6, 7, 8])), ..Default::default() };
+        let mut session = Session::from_channel(channel, &target).unwrap();
+        assert!(session.read_snapshot(&target, false).is_err());
+        assert_eq!(session.device.identity_reads, 2);
+    }
+
+    #[test]
+    fn snapshot_requires_the_initial_identity_to_remain_available() {
+        let mut target = target();
+        target.family = DeviceFamily::Keyboard;
+        let channel = SnapshotChannel { unit: Some([1, 2, 3, 4]),
+            after_battery: Some(None), ..Default::default() };
+        let mut session = Session::from_channel(channel, &target).unwrap();
+        assert!(session.read_snapshot(&target, false).is_err());
+        assert_eq!(session.device.identity_reads, 2);
+    }
+
+    #[test]
+    fn snapshot_keeps_stable_identity_and_does_not_promote_a_late_identity() {
+        for unit in [Some([1, 2, 3, 4]), None] {
+            let mut target = target();
+            target.family = DeviceFamily::Keyboard;
+            let fallback = target.key.clone();
+            target.key = "previous-verified-identity".into();
+            target.verified_identity = true;
+            let channel = SnapshotChannel { unit, after_battery: Some(Some([1, 2, 3, 4])),
+                ..Default::default() };
+            let mut session = Session::from_channel(channel, &target).unwrap();
+            let snapshot = session.read_snapshot(&target, false).unwrap();
+            assert_eq!(snapshot.battery.unwrap().percent, Some(65));
+            assert_eq!(snapshot.target.verified_identity, unit.is_some());
+            assert_eq!(snapshot.target.key, if unit.is_some() {
+                crate::device::stable_key("logitech-unit:01020304")
+            } else { fallback });
+            assert_eq!(session.device.identity_reads, if unit.is_some() { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn snapshot_identity_check_includes_the_polling_rate_query() {
+        let target = target();
+        let channel = SnapshotChannel { unit: Some([1, 2, 3, 4]),
+            after_rate: true, ..Default::default() };
+        let mut session = Session::from_channel(channel, &target).unwrap();
+        assert!(session.read_snapshot(&target, false).is_err());
+        assert!(!session.device.after_rate);
+        assert_eq!(session.device.identity_reads, 2);
+    }
+
+    #[test]
+    fn legacy_snapshot_rejects_a_replaced_receiver_slot() {
+        let mut target = target();
+        target.address = 2;
+        target.hid_mut().product_id = 0xc52b;
+        target.family = DeviceFamily::Unknown;
+        let (channel, steps) = channel(vec![
+            Step { address: Some(2), feature: 0, function: 1,
+                parameters: vec![0, 0, 0x5a], reply: Reply::Error(0x8f, 1) },
+            data(0x83, 0xb5, &[0x21], &[0x21, 0, 0, 0x40, 0x08, 0, 0, 1]),
+            data(0x83, 0xb5, &[0x31], &[0x31, 1, 2, 3, 4]),
+            data(0x83, 0xb5, &[0x41], &[0x41, 4, b'K', b'8', b'1', b'0']),
+            data(0x81, 0x0d, &[], &[42, 0, 0x30]),
+            data(0x83, 0xb5, &[0x21], &[0x21, 0, 0, 0x40, 0x08, 0, 0, 1]),
+            data(0x83, 0xb5, &[0x31], &[0x31, 5, 6, 7, 8]),
+        ]);
+        let mut session = Session::from_channel(channel, &target).unwrap();
+        assert!(session.read_snapshot(&target, true).is_err());
         assert!(steps.lock().unwrap().is_empty());
     }
 
@@ -2025,7 +2168,10 @@ mod tests {
         extended.address = Some(0xff);
         let mut name = data(0x83, 0xb5, &[0x41], &[0x41, 4, b'K', b'8', b'1', b'0']);
         name.address = Some(0xff);
-        let (channel, steps) = channel(vec![negotiation, battery, pairing, extended, name]);
+        let pairing_check = data(0x83, 0xb5, &[0x21], &[0x21, 0, 0, 0x40, 0x08, 0, 0, 1]);
+        let extended_check = data(0x83, 0xb5, &[0x31], &[0x31, 0x12, 0x34, 0x56, 0x78]);
+        let (channel, steps) = channel(vec![negotiation, pairing, extended, name, battery,
+            pairing_check, extended_check]);
         let snapshot = Session::from_channel(channel, &target)
             .unwrap()
             .read_snapshot(&target, true)
@@ -2056,7 +2202,6 @@ mod tests {
                 parameters: vec![0, 0, 0x5a],
                 reply: Reply::Error(0x8f, 1),
             },
-            data(0x81, 0x0d, &[], &[42, 0, 0x30]),
         ];
         for slot in [0x20, 0x30, 0x40] {
             script.push(Step {
@@ -2067,6 +2212,7 @@ mod tests {
                 reply: Reply::Error(0x8f, 2),
             });
         }
+        script.push(data(0x81, 0x0d, &[], &[42, 0, 0x30]));
         let (channel, steps) = channel(script);
         let snapshot = Session::from_channel(channel, &target)
             .unwrap()
@@ -2074,7 +2220,7 @@ mod tests {
             .unwrap();
         assert!(snapshot.connected);
         assert_eq!(snapshot.battery.unwrap().percent, Some(42));
-        assert_eq!(snapshot.target.key, target.key);
+        assert_eq!(snapshot.target.key, target.unverified_key());
         assert!(!snapshot.target.verified_identity);
         assert!(steps.lock().unwrap().is_empty());
     }
