@@ -3368,6 +3368,9 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         s.full = Some(configuration.state().clone());
         s.ident = Some(snap.identity.clone());
     }
+    if let Some(state) = &mut s.full {
+        q.apply_to(state);
+    }
 
     s.frames = out.frames_read;
     s.elapsed_ms = out.elapsed.as_millis();
@@ -5150,6 +5153,29 @@ mod backend_tests {
         previous.poll_code = 3;
         previous.active_stage = 2;
         shared.full = Some(previous);
+        apply_outcome(&rog_energy_outcome(), &mut shared, 0);
+        let state = shared.ui_state().unwrap();
+        assert_eq!(state.power, 47);
+        assert_eq!(state.poll_code, 3);
+        assert_eq!(state.active_stage, 2);
+    }
+
+    #[test]
+    fn rog_partial_light_read_preserves_the_latest_valid_light_settings() {
+        let mut shared = Shared::new(Settings::default());
+        shared.full = Some(proto::State::default());
+        let update = snapshot::fetch_light_with(3, "Wireless24G", |report_id, command, sub, _| {
+            let mut frame = vec![0; 21];
+            frame[..3].copy_from_slice(&[report_id, command, sub]);
+            match sub {
+                0x07 => frame[5] = 48,
+                0x04 => frame[13] = 3,
+                0x00 => frame[12] = 2,
+                _ => return None,
+            }
+            Some(frame)
+        });
+        apply_outcome(&update, &mut shared, 0);
         apply_outcome(&rog_energy_outcome(), &mut shared, 0);
         let state = shared.ui_state().unwrap();
         assert_eq!(state.power, 47);
