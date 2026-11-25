@@ -75,8 +75,10 @@ fn response_payload(frame: &[u8], input_report_id: u8) -> Option<&[u8]> {
     if input_report_id == 0 {
         (frame.len() == PAYLOAD_BYTES).then_some(frame)
     } else {
-        (frame.len() == REPORT_BYTES as usize && frame.first() == Some(&input_report_id))
-            .then_some(&frame[1..])
+        if frame.len() != REPORT_BYTES as usize || frame.first() != Some(&input_report_id) {
+            return None;
+        }
+        frame.get(1..)
     }
 }
 
@@ -329,6 +331,20 @@ mod tests {
         base[0] = 4;
         assert_eq!(active_profile(&base), None);
         assert_eq!(active_profile(&[0; 55]), None);
+    }
+
+    #[test]
+    fn empty_and_truncated_payloads_are_defensively_rejected_for_all_report_layouts() {
+        for input_id in [0, 1, 0x83] {
+            let expected_length = if input_id == 0 { PAYLOAD_BYTES } else { REPORT_BYTES as usize };
+            for length in 0..=REPORT_BYTES as usize + 1 {
+                let frame = vec![input_id; length];
+                let parsed = response_payload(&frame, input_id);
+                assert_eq!(parsed.map(<[u8]>::len),
+                    (length == expected_length).then_some(PAYLOAD_BYTES));
+            }
+        }
+        assert!(response_payload(&[0; REPORT_BYTES as usize], 0x83).is_none());
     }
 
     #[test]
