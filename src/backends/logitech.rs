@@ -361,11 +361,14 @@ impl<C: Channel> Session<C> {
         let info = self.request(index, 1, &[0])?;
         if info.len() < 3 || info[0] != 0 { return Err("设备返回的 DPI 列表无效".into()); }
         let separate_axes = info[2] & 1 != 0;
-        let mut values = self.extended_dpi_list(index, 0)?;
-        if separate_axes {
-            let y_values = self.extended_dpi_list(index, 1)?;
-            values.retain(|value| y_values.contains(value));
-        }
+        let values = (|| {
+            let mut values = self.extended_dpi_list(index, 0)?;
+            if separate_axes {
+                let y_values = self.extended_dpi_list(index, 1)?;
+                values.retain(|value| y_values.binary_search(value).is_ok());
+            }
+            Ok::<_, String>(values)
+        })().unwrap_or_default();
         let payload = self.request(index, 5, &[0])?;
         let (x, y) = decode_extended_dpi(&payload, separate_axes).ok_or("无法读取当前 DPI")?;
         let writable = values.contains(&x) && y.is_none_or(|y| y == x);
@@ -1042,6 +1045,9 @@ fn decode_dpi_list(data: &[u8]) -> Result<Vec<u16>, DpiListError> {
             if step == 0 || end <= previous || (end - previous) % step != 0 {
                 return Err(DpiListError::Invalid("DPI 范围无效"));
             }
+            if values.len() + usize::from((end - previous) / step) > usize::from(u16::MAX) {
+                return Err(DpiListError::Invalid("DPI 范围过长"));
+            }
             for value in
                 (u32::from(previous) + u32::from(step)..=u32::from(end)).step_by(step as usize)
             {
@@ -1050,7 +1056,7 @@ fn decode_dpi_list(data: &[u8]) -> Result<Vec<u16>, DpiListError> {
         } else {
             values.push(word);
         }
-        if values.len() > 2048 {
+        if values.len() > usize::from(u16::MAX) {
             return Err(DpiListError::Invalid("DPI 范围过长"));
         }
     }
@@ -1369,6 +1375,43 @@ mod tests {
         assert_eq!(dpi.values, vec![400, 800, 1600]);
         assert!(dpi.stages.is_empty());
         assert!(!dpi.writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extended_dpi_supports_the_full_hero_two_range_without_quadratic_axis_matching() {
+        let script = vec![ping(), data(0, 0, &[0x22, 1], &[0]),
+            data(0, 0, &[0x22, 2], &[4]), data(4, 0, &[], &[1]),
+            data(4, 1, &[0], &[0, 0, 3]),
+            data(4, 2, &[0, 0, 0], &[0, 0, 0, 0, 100, 0xe0, 1, 0xab, 0xe0, 0, 0]),
+            data(4, 2, &[0, 1, 0], &[0, 1, 0, 0, 100, 0xe0, 1, 0xab, 0xe0, 0, 0]),
+            data(4, 5, &[0], &[0, 3, 0x20, 3, 0x20, 3, 0x20, 3, 0x20, 2])];
+        let (channel, steps) = channel(script);
+        let dpi = Session::from_channel(channel, &target()).unwrap().dpi().unwrap();
+        assert_eq!(dpi.current, Some(800));
+        assert_eq!(dpi.current_y, Some(800));
+        assert_eq!(dpi.values.len(), 43_901);
+        assert_eq!(dpi.values.first(), Some(&100));
+        assert_eq!(dpi.values.last(), Some(&44_000));
+        assert!(dpi.writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_invalid_extended_dpi_list_does_not_hide_current_dpi_or_authorize_a_write() {
+        let script = || vec![ping(), data(0, 0, &[0x22, 1], &[0]),
+            data(0, 0, &[0x22, 2], &[4]), data(4, 0, &[], &[1]),
+            data(4, 1, &[0], &[0, 0, 3]),
+            data(4, 2, &[0, 0, 0], &[1, 0, 0, 0, 100, 0, 0]),
+            data(4, 5, &[0], &[0, 3, 0x20, 3, 0x20, 3, 0x20, 3, 0x20, 2])];
+        let (channel, steps) = channel(script());
+        let dpi = Session::from_channel(channel, &target()).unwrap().dpi().unwrap();
+        assert_eq!(dpi.current, Some(800));
+        assert!(dpi.values.is_empty());
+        assert!(!dpi.writable);
+        assert!(steps.lock().unwrap().is_empty());
+        let (channel, steps) = self::channel(script());
+        assert!(Session::from_channel(channel, &target()).unwrap().set_dpi(&target(), 1600).is_err());
         assert!(steps.lock().unwrap().is_empty());
     }
 
@@ -2114,5 +2157,13 @@ mod tests {
         assert!(decode_dpi_list(&[0xe0, 0, 0, 0]).is_err());
         assert!(decode_dpi_list(&[0x01, 0x90]).is_err());
         assert_eq!(decode_current_dpi(&[0, 0, 0, 3, 0x20]), Some(800));
+    }
+
+    #[test]
+    fn dpi_range_expansion_is_bounded_by_the_u16_domain_before_allocation() {
+        let values = decode_dpi_list(&[0, 1, 0xe0, 1, 0xff, 0xff, 0, 0]).unwrap();
+        assert_eq!(values.len(), usize::from(u16::MAX));
+        assert_eq!(values.last(), Some(&u16::MAX));
+        assert!(decode_dpi_list(&[0, 1, 0xe0, 1, 0xff, 0xff, 0, 1, 0, 0]).is_err());
     }
 }
