@@ -252,14 +252,7 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
             link.report_id,
             &settings::timestamp_for_humans(),
         );
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Err(e) = crate::paths::ensure_dir(parent) {
-                    return fail(e, "");
-                }
-            }
-        }
-        match std::fs::write(path, text.as_bytes()) {
+        match crate::paths::write_atomic(path, text.as_bytes()) {
             Ok(_) => CmdResult {
                 label,
                 ok: Some(crate::trf!(
