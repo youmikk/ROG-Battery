@@ -57,7 +57,7 @@ fn rgb_hex(c: [u8; 3]) -> String {
 /// 解析 `RRGGBB` 或 `#RRGGBB`。
 pub fn parse_rgb(s: &str) -> Result<[u8; 3], String> {
     let t = s.trim().trim_start_matches('#');
-    if t.len() != 6 {
+    if t.len() != 6 || !t.is_ascii() {
         return Err(format!("颜色必须是 6 位十六进制 RRGGBB，收到 {s:?}"));
     }
     let mut out = [0u8; 3];
@@ -307,4 +307,51 @@ pub fn parse(text: &str) -> Result<Backup, String> {
 /// 备份缺少能量块时给出明确警告 —— 这正是文档第 5 节事故的根因。
 pub fn energy_missing(b: &Backup) -> bool {
     b.poweroff_code.is_none() && b.low_warn.is_none() && b.full_effect.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgb_accepts_hex_colors_with_optional_prefix_and_whitespace() {
+        for (input, expected) in [
+            ("000000", [0, 0, 0]),
+            ("ffffff", [255, 255, 255]),
+            ("ABCDEF", [0xab, 0xcd, 0xef]),
+            ("aBcD12", [0xab, 0xcd, 0x12]),
+            ("#123456", [0x12, 0x34, 0x56]),
+            (" \t#123456\r\n", [0x12, 0x34, 0x56]),
+        ] {
+            assert_eq!(parse_rgb(input).unwrap(), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn rgb_rejects_six_byte_unicode_without_panicking() {
+        for input in ["中文", "a中bc", "12é34", "ab🦀", "a\u{0301}bcd"] {
+            assert_eq!(input.len(), 6);
+            assert!(parse_rgb(input).is_err(), "{input:?}");
+            assert!(parse_rgb(&format!("#{input}")).is_err(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn rgb_rejects_invalid_lengths_and_non_hex_ascii() {
+        for input in ["", "#", "12345", "1234567", "gg0000", "12 456", "12\0abc"] {
+            assert!(parse_rgb(input).is_err(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn backup_records_unicode_colors_as_rejected_fields() {
+        let parsed = parse("dpi1_rgb=中文\ndpi2_rgb=a中bc\nlight_rgb=ab🦀\npoll_code=3").unwrap();
+        assert_eq!(parsed.poll_code, Some(3));
+        assert_eq!(parsed.dpi_rgb, [None; DPI_STAGES]);
+        assert_eq!(parsed.light_rgb, None);
+        assert_eq!(parsed.rejected.len(), 3);
+        for key in ["dpi1_rgb", "dpi2_rgb", "light_rgb"] {
+            assert!(parsed.rejected.iter().any(|message| message.starts_with(key)));
+        }
+    }
 }
