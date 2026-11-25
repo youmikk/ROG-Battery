@@ -54,8 +54,30 @@ struct Quick {
     level: u8,
     charging: bool,
     voltage_mv: u16,
-    poll_code: u8,
-    active_stage: u8,
+    poll_code: Option<u8>,
+    active_stage: Option<u8>,
+}
+
+impl Quick {
+    fn from_snapshot(snapshot: &snapshot::Snapshot) -> Option<Self> {
+        snapshot.battery()?;
+        let state = &snapshot.state;
+        Some(Self {
+            level: state.power,
+            charging: state.charging != 0,
+            voltage_mv: state.voltage_mv,
+            poll_code: snapshot.parsed_frame("12:04:00").then_some(state.poll_code),
+            active_stage: snapshot.parsed_frame("12:00:00").then_some(state.active_stage),
+        })
+    }
+
+    fn apply_to(self, state: &mut proto::State) {
+        state.power = self.level;
+        state.charging = u8::from(self.charging);
+        state.voltage_mv = self.voltage_mv;
+        if let Some(code) = self.poll_code { state.poll_code = code; }
+        if let Some(stage) = self.active_stage { state.active_stage = stage; }
+    }
 }
 
 #[derive(Default)]
@@ -493,20 +515,11 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         }
         let name = ident.display_name();
         let family = crate::device::family_of(&name);
-        let complete = out.snapshot.frames.contains_key("12:04:02")
-            && out.snapshot.frames.contains_key("12:05:00")
-            && out.snapshot.frames.contains_key("12:03:00");
-        let mut state = if needs_full && complete {
-            Some(out.snapshot.state.clone())
-        } else {
-            previous.as_ref().and_then(|d| d.state.clone())
-        };
-        if let Some(st) = &mut state {
-            st.power = out.snapshot.state.power;
-            st.charging = out.snapshot.state.charging;
-            st.voltage_mv = out.snapshot.state.voltage_mv;
-            st.poll_code = out.snapshot.state.poll_code;
-            st.active_stage = out.snapshot.state.active_stage;
+        let configuration = out.snapshot.configuration().ok();
+        let mut state = configuration.as_ref().map(|config| config.state().clone())
+            .or_else(|| previous.as_ref().and_then(|device| device.state.clone()));
+        if let (Some(state), Some(quick)) = (&mut state, Quick::from_snapshot(&out.snapshot)) {
+            quick.apply_to(state);
         }
         let battery = battery.or_else(|| previous.as_ref().and_then(|d| d.reading.battery.clone()));
         let record = DeviceSnapshot {
@@ -528,7 +541,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             state: if is_connected { state } else { None },
             ident,
             link: Some(link),
-            full_at: if needs_full && complete {
+            full_at: if configuration.is_some() {
                 std::time::Instant::now()
             } else {
                 previous
@@ -1064,11 +1077,7 @@ impl Shared {
     fn ui_state(&self) -> Option<proto::State> {
         let mut st = self.full.clone()?;
         if let Some(q) = self.quick {
-            st.power = q.level;
-            st.charging = if q.charging { 1 } else { 0 };
-            st.voltage_mv = q.voltage_mv;
-            st.poll_code = q.poll_code;
-            st.active_stage = q.active_stage;
+            q.apply_to(&mut st);
         }
         Some(st)
     }
@@ -3323,36 +3332,19 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
         return None;
     }
 
-    let have_power = snap.battery().is_some();
-    if !have_power {
+    let Some(q) = Quick::from_snapshot(snap) else {
         // 保留上一轮的电量显示（比清成「—」更不吓人），但**不产生新采样**。
         s.frames = out.frames_read;
         s.elapsed_ms = out.elapsed.as_millis();
         s.status = Status::Asleep;
         return None;
-    }
-
-    let st = &snap.state;
-    let q = Quick {
-        level: st.power,
-        charging: st.charging != 0,
-        voltage_mv: st.voltage_mv,
-        poll_code: st.poll_code,
-        active_stage: st.active_stage,
     };
     s.quick = Some(q);
     s.last_ok_at = Some(std::time::Instant::now());
 
-    // 全量快照才填 `full`：3 帧轻量读取里 DPI 颜色、按键表都是默认值，
-    // 拿它刷性能/灯光/按键页会把界面刷成假的（颜色全黑、按键全 0）。
-    //
-    // 要求 DPI 帧 / 按键帧 / 灯光帧都在 —— 少任何一帧都说明不是全量。
-    let is_full = snap.frames.contains_key("12:04:02")
-        && snap.frames.contains_key("12:05:00")
-        && snap.frames.contains_key("12:03:00");
-    if is_full {
+    if let Ok(configuration) = snap.configuration() {
         s.device_family = crate::device::family_of(&snap.identity.model_name);
-        s.full = Some(st.clone());
+        s.full = Some(configuration.state().clone());
         s.ident = Some(snap.identity.clone());
     }
 
@@ -5109,6 +5101,40 @@ mod backend_tests {
     use super::*;
     use crate::backends::{BackendId, Snapshot, Target};
     use crate::device::{Battery, BatteryLevel, DeviceFamily, DeviceReading, Dpi};
+
+    fn rog_energy_outcome() -> FetchOutcome {
+        snapshot::fetch_light_with(3, "Wireless24G", |report_id, command, sub, _| {
+            (sub == 0x07).then(|| vec![report_id, command, sub, 0, 0, 47, 4, 20, 0, 0, 0, 0, 0])
+        })
+    }
+
+    #[test]
+    fn rog_invalid_configuration_frames_never_publish_default_settings() {
+        let mut shared = Shared::new(Settings::default());
+        let mut outcome = rog_energy_outcome();
+        let snapshot = Arc::make_mut(&mut outcome.snapshot);
+        for key in ["12:04:02", "12:05:00", "12:03:00"] {
+            snapshot.frames.insert(key.into(), vec![3, 0x12]);
+            snapshot.failed.insert(key.into(), "short frame".into());
+        }
+        apply_outcome(&outcome, &mut shared, 0);
+        assert!(shared.full.is_none());
+        assert_eq!(shared.quick.unwrap().level, 47);
+    }
+
+    #[test]
+    fn rog_partial_light_read_preserves_independent_settings() {
+        let mut shared = Shared::new(Settings::default());
+        let mut previous = proto::State::default();
+        previous.poll_code = 3;
+        previous.active_stage = 2;
+        shared.full = Some(previous);
+        apply_outcome(&rog_energy_outcome(), &mut shared, 0);
+        let state = shared.ui_state().unwrap();
+        assert_eq!(state.power, 47);
+        assert_eq!(state.poll_code, 3);
+        assert_eq!(state.active_stage, 2);
+    }
 
     fn dormant_store_updates() -> StoreUpdates {
         StoreUpdates {
