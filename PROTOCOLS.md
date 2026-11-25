@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：迈从接收器增量（未发布）
+
+核对 MyFinder `a763adb5a0c44076f9331ab8fad63a899b5326c7` 的 [mchose.py](https://github.com/wushuai0802/myfinder-device-battery/blob/a763adb5a0c44076f9331ab8fad63a899b5326c7/engine/providers/mchose.py) 与 [test_mchose_v3.py](https://github.com/wushuai0802/myfinder-device-battery/blob/a763adb5a0c44076f9331ab8fad63a899b5326c7/engine/tests/test_mchose_v3.py)。所查仓库为 AGPL-3.0；本次使用协议和型号事实，复用本项目已有实现，没有引入上游代码或运行时依赖。
+
+`3837:101D / MCHOSE V7 Pro` 使用 `FF01:0001`，报告总长 64 字节且包含 ID `4D`。状态请求为 `4D 01 01 00 00 09 00 00 08` 加零填充；回复核对命令、声明长度及可选 XOR，byte 20 为百分比，byte 19 为充电值。V7 的 0 是不发布的占位状态；忙回复 `[FF]` 与合法零电量分开处理，不沿用到已有 A7 的零电量规则。V7 无本项目实帧，适配依据为上游实现和合成测试。
+
+`3837:1014` 的 `MCHOSE A7 V3 Ultra+` 有上游 2026-11-22 Windows 描述符变体成功记录；公开 `ULTRA_42` 前缀对应 42%、未充电，测试中的尾部零填充是重建内容。新增例外只扩展这一完整产品名和 `MI_02`，不把同 PID 的其他设备当成同型号。未知 V7 物理归属时拒绝读取；扫描失败只跳过新增 V7，保留原 A7 候选。
+
 最近核对：2026-11-23。本文记录上游源码中的协议、型号识别和状态处理依据。上游目录项、上游测试、协议实现和本项目实机验证是不同证据，不能合并成“已兼容全部型号”。
 
 本轮适配工作统一纳入 **1.4.7**，此前 1.4.7～1.4.12 与未发布开发记录按该版本归并。526 项 Rust 集中回归已通过；下文历史阶段的测试数字仅用于追溯，新增设备的实机验收仍逐型号记录。

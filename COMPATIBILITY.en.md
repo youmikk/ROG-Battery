@@ -2,6 +2,19 @@
 
 [简体中文](COMPATIBILITY.md)
 
+## Unreleased: MCHOSE V7 Pro and A7 V3 Ultra+ receiver additions
+
+This section covers development after 1.4.10 and is not released yet.
+
+| Model and connection | Capability | Admission rules |
+| --- | --- | --- |
+| MCHOSE V7 Pro `3837:101D` | Read-only battery and known charging states | Exact product name, `FF01:0001`, descriptor-proven `4D/64` input/output reports, and one management collection per physical USB receiver |
+| MCHOSE A7 V3 Ultra+ `3837:1014` | Windows descriptor-variant battery support | Exact product name and `MI_02 / FF01:0001`; the reviewed initialized-array descriptor exception is restricted to this combination |
+
+Both reuse the existing `4D 01 01 00 00 09 00 00 08` status query. No DPI, pairing or firmware commands are sent. V7 busy responses, zero placeholders, unknown charging values and malformed frames do not create a measurement; explicit offline reports clear the reading. Unresolved V7 topology prevents access, while a failed V7 rescan preserves existing A7 candidates.
+
+All 14 module tests passed, including independent receivers, rescan failures, malformed frames, offline and recovery. V7 evidence is upstream code and synthetic vectors; the `1014` descriptor variant has an upstream hardware report. Neither addition is hardware-verified by this project. Cold start, charging, sleep/wake, two identical receivers and vendor-driver coexistence still need validation. See [protocol research](PROTOCOLS.en.md) for pinned sources.
+
 Version 1.4.5 adds `0x2202` extended DPI reads and validated scalar writes, with simulated protocol coverage and Logitech hardware validation pending. Battery observations now distinguish live, cached and stale readings; failed queries alone do not establish disconnection. See [protocol research](PROTOCOLS.en.md) for upstream catalogs and capability boundaries.
 
 This document records the consolidated 1.4.7 release scope and earlier capabilities with their hardware-validation limits. Work previously labeled 1.4.7–1.4.12 or unreleased is consolidated into 1.4.7. Intermediate validation records remain for traceability and do not identify separate release targets. Discovery, model recognition and parser tests do not verify hardware compatibility.

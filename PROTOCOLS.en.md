@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: MCHOSE receiver additions (unreleased)
+
+Reviewed MyFinder revision `a763adb5a0c44076f9331ab8fad63a899b5326c7`: [mchose.py](https://github.com/wushuai0802/myfinder-device-battery/blob/a763adb5a0c44076f9331ab8fad63a899b5326c7/engine/providers/mchose.py) and [test_mchose_v3.py](https://github.com/wushuai0802/myfinder-device-battery/blob/a763adb5a0c44076f9331ab8fad63a899b5326c7/engine/tests/test_mchose_v3.py), under AGPL-3.0. Protocol facts extend our existing implementation; no upstream implementation or runtime dependency is bundled.
+
+V7 Pro `3837:101D` uses `FF01:0001`, numbered `4D` reports of 64 bytes including the report ID, and the existing `0900` status request. Replies validate the command, declared length and optional XOR; byte 20 carries percentage and byte 19 charging. V7 zero placeholders and busy replies do not publish measurements. Existing A7 zero-percent behavior remains unchanged. V7 vectors are synthetic, not captured hardware reports.
+
+The `3837:1014 / MCHOSE A7 V3 Ultra+ / MI_02` descriptor variant has an upstream Windows success report dated 2026-11-22. Its public `ULTRA_42` prefix represents 42%, not charging; the test reconstructs trailing zero padding. The exception does not apply to other names sharing the PID. Unresolved V7 topology rejects access; failed rescans preserve existing A7 candidates.
+
 Last reviewed on 2026-11-23. The [Chinese research record](PROTOCOLS.md) contains the full source and protocol matrix. An upstream catalog entry, a protocol implementation, simulated tests, a community report, and hardware verification are separate evidence levels.
 
 This work is consolidated into **1.4.7**, combining the earlier 1.4.7–1.4.12 and unreleased development records. All 526 Rust tests passed in the combined run. Historical test counts below provide traceability; new hardware acceptance remains recorded per model.
