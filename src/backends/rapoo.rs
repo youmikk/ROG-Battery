@@ -237,6 +237,38 @@ fn parse_status(frame: &[u8]) -> Option<(Battery, Dpi)> {
     ))
 }
 
+fn offline_snapshot(target: &Target) -> Snapshot {
+    Snapshot {
+        target: target.clone(), battery: None, dpi: Dpi::default(), connected: false,
+        battery_unavailable: true, battery_at: None, polling_rate: Default::default(),
+    }
+}
+
+fn read_with(target: &Target,
+    mut read_status: impl FnMut(Duration) -> Result<Option<(Instant, Battery, Dpi)>, String>,
+    read_config: impl FnOnce(&Dpi) -> Result<Dpi, String>) -> Result<Snapshot, String> {
+    let Some((mut taken, mut battery, status)) = read_status(FIRST_REPORT_WAIT)? else {
+        return Ok(offline_snapshot(target));
+    };
+    let mut dpi = read_config(&status).unwrap_or(status);
+    match read_status(Duration::ZERO) {
+        Ok(Some((new_taken, new_battery, new_status))) => {
+            taken = new_taken;
+            battery = new_battery;
+            if dpi.profile != new_status.profile || dpi.active_stage != new_status.active_stage
+                || dpi.current != new_status.current || dpi.current_y != new_status.current_y {
+                dpi = new_status;
+            }
+        },
+        Ok(None) => return Ok(offline_snapshot(target)),
+        Err(_) => dpi.disable_writes(),
+    }
+    Ok(Snapshot {
+        target: target.clone(), battery: Some(battery), dpi, connected: true,
+        battery_unavailable: false, battery_at: Some(taken), polling_rate: Default::default(),
+    })
+}
+
 impl DeviceBackend for Rapoo {
     fn discover(&self, _: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         // 用完整接口路径隔离设备；拔出后停止旧监听，重连不沿用旧采样。
@@ -261,25 +293,9 @@ impl DeviceBackend for Rapoo {
         if !is_control(target.hid()?) {
             return Err(crate::tr!("此雷柏型号尚未适配").into());
         }
-        let (mut taken,mut battery,status)=latest_status(target,None,FIRST_REPORT_WAIT)?;
         // Configuration failure never clears independently received battery data.
-        let mut dpi=super::rapoo_config::read(api,target,&status).unwrap_or(status);
-        if let Ok((new_taken,new_battery,new_status))=latest_status(target,None,Duration::ZERO) {
-            taken=new_taken;battery=new_battery;
-            if dpi.profile!=new_status.profile || dpi.active_stage!=new_status.active_stage
-                || dpi.current!=new_status.current || dpi.current_y!=new_status.current_y {
-                dpi=new_status;
-            }
-        } else {
-            dpi.disable_writes();
-        }
-        Ok(Snapshot {
-            target: target.clone(),
-            battery: Some(battery),
-            dpi,
-            connected: true,
-            battery_unavailable: false, battery_at: Some(taken), polling_rate: Default::default(),
-        })
+        read_with(target, |wait| latest_sample(target, None, wait),
+            |status| super::rapoo_config::read(api, target, status))
     }
 
     fn set_dpi_stage(&self,api:&HidApi,target:&Target,stage:crate::device::DpiStage,context:crate::device::StageContext)->Result<(),String> {
@@ -289,14 +305,25 @@ impl DeviceBackend for Rapoo {
 }
 
 pub(super) fn latest_status(target:&Target,after:Option<Instant>,wait:Duration)->Result<(Instant,Battery,Dpi),String> {
-    let started=Instant::now();
+    latest_sample(target, after, wait)?
+        .ok_or_else(|| crate::tr!("雷柏状态报告不可用，请唤醒设备后重试").into())
+}
+
+fn latest_sample(target: &Target, after: Option<Instant>, wait: Duration)
+    -> Result<Option<(Instant, Battery, Dpi)>, String> {
     let session=status_reader(target.hid()?);
+    status_from_session(target, &session, after, wait)
+}
+
+fn status_from_session(target: &Target, session: &StatusReader, after: Option<Instant>,
+    wait: Duration) -> Result<Option<(Instant, Battery, Dpi)>, String> {
+    let started=Instant::now();
     let state=session.state.lock().unwrap_or_else(|e|e.into_inner());
     let (state,_)=session.changed.wait_timeout_while(state,wait,|s| !s.failed &&
         s.confirmed_after(Instant::now(),after).is_none())
         .unwrap_or_else(|e|e.into_inner());
     let sample=state.confirmed_after(Instant::now(),after);
-    let result=sample.and_then(|s|s.1.clone().map(|(battery,dpi)|(s.0,battery,dpi)));
+    let result=sample.map(|s|s.1.clone().map(|(battery,dpi)|(s.0,battery,dpi)));
     trace::record(target.hid()?,BackendId::Rapoo,"read-status",0,STATUS_REPORT,0,
         sample.map(|s|s.2).unwrap_or(0),started,if result.is_some(){trace::Outcome::Ok}else{trace::Outcome::NoReply});
     result.ok_or_else(||crate::tr!("雷柏状态报告不可用，请唤醒设备后重试").into())
@@ -305,6 +332,129 @@ pub(super) fn latest_status(target:&Target,after:Option<Instant>,wait:Duration)-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_target() -> Target {
+        Target::new(BackendId::Rapoo, &HidInterface {
+            vendor_id: VID, product_id: 0x4b01, usage_page: 0xff00, usage: 2,
+            input_len: 19, output_len: 0, feature_len: 0, serial: String::new(),
+            product: "Rapoo fixture".into(), path: "rapoo-isolated-fixture".into(),
+        }, 0)
+    }
+
+    #[test]
+    fn offline_during_configuration_clears_the_published_snapshot() {
+        for configuration_succeeds in [false, true] {
+            let target = test_target();
+            let session = StatusReader::default();
+            session.state.lock().unwrap().receive(&report(), Instant::now());
+            let sample = read_with(&target,
+                |wait| status_from_session(&target, &session, None, wait),
+                |status| {
+                    let mut offline = report();
+                    offline[7] = 0;
+                    session.state.lock().unwrap().receive(&offline, Instant::now());
+                    if configuration_succeeds { Ok(status.clone()) }
+                    else { Err("configuration unavailable".into()) }
+                }).unwrap();
+            assert!(!sample.connected);
+            assert!(sample.battery.is_none());
+            assert!(sample.battery_at.is_none());
+            assert!(sample.battery_unavailable);
+            assert!(!sample.dpi.writable);
+        }
+    }
+
+    #[test]
+    fn initial_offline_status_skips_configuration_and_does_not_affect_another_receiver() {
+        let target = test_target();
+        let offline = StatusReader::default();
+        let independent = StatusReader::default();
+        let mut frame = report();
+        frame[7] = 0;
+        offline.state.lock().unwrap().receive(&frame, Instant::now());
+        frame[7] = 1;
+        frame[8] = 42;
+        let measured = Instant::now();
+        independent.state.lock().unwrap().receive(&frame, measured);
+        let sample = read_with(&target,
+            |wait| status_from_session(&target, &offline, None, wait),
+            |_| panic!("offline receiver must not query configuration")).unwrap();
+        assert!(!sample.connected);
+        assert!(sample.battery_unavailable);
+        let mut other_interface = target.hid().unwrap().clone();
+        other_interface.path = "independent-rapoo-fixture".into();
+        let other = Target::new(BackendId::Rapoo, &other_interface, 0);
+        let sample = read_with(&other,
+            |wait| status_from_session(&other, &independent, None, wait),
+            |_| Err("configuration unavailable".into())).unwrap();
+        assert_ne!(target.key, sample.target.key);
+        assert!(sample.connected);
+        assert_eq!(sample.battery.unwrap().percent, Some(42));
+        assert_eq!(sample.battery_at, Some(measured));
+    }
+
+    #[test]
+    fn configuration_failure_and_silence_preserve_valid_sample_without_renewing_it() {
+        let target = test_target();
+        let session = StatusReader::default();
+        let measured = Instant::now() - Duration::from_secs(1);
+        session.state.lock().unwrap().receive(&report(), measured);
+        let sample = read_with(&target,
+            |wait| status_from_session(&target, &session, None, wait),
+            |_| Err("configuration unavailable".into())).unwrap();
+        assert!(sample.connected);
+        assert!(!sample.battery_unavailable);
+        assert_eq!(sample.battery.unwrap().percent, Some(75));
+        assert_eq!(sample.battery_at, Some(measured));
+    }
+
+    #[test]
+    fn failed_status_recheck_disables_writes_without_inventing_an_offline_frame() {
+        let target = test_target();
+        let session = StatusReader::default();
+        let measured = Instant::now();
+        session.state.lock().unwrap().receive(&report(), measured);
+        let sample = read_with(&target,
+            |wait| status_from_session(&target, &session, None, wait),
+            |status| {
+                session.state.lock().unwrap().failed = true;
+                let mut configured = status.clone();
+                configured.writable = true;
+                Ok(configured)
+            }).unwrap();
+        assert!(sample.connected);
+        assert_eq!(sample.battery.unwrap().percent, Some(75));
+        assert_eq!(sample.battery_at, Some(measured));
+        assert!(!sample.dpi.writable);
+    }
+
+    #[test]
+    fn newer_valid_status_during_configuration_replaces_battery_and_dpi() {
+        let target = test_target();
+        let session = StatusReader::default();
+        let updated_at = Instant::now();
+        session.state.lock().unwrap().receive(&report(), updated_at - Duration::from_secs(1));
+        let sample = read_with(&target,
+            |wait| status_from_session(&target, &session, None, wait),
+            |status| {
+                let mut updated = report();
+                updated[8] = 0;
+                updated[7] = 2;
+                updated[3..5].copy_from_slice(&1200u16.to_le_bytes());
+                session.state.lock().unwrap().receive(&updated, updated_at);
+                let mut configured = status.clone();
+                configured.writable = true;
+                Ok(configured)
+            }).unwrap();
+        assert!(sample.connected);
+        let battery = sample.battery.unwrap();
+        assert_eq!(battery.percent, Some(0));
+        assert_eq!(battery.charging, Some(true));
+        assert_eq!(sample.battery_at, Some(updated_at));
+        assert_eq!(sample.dpi.current, Some(1200));
+        assert!(!sample.dpi.writable);
+    }
+
     #[test]
     fn expanded_catalog_requires_the_nrf54l_status_interface() {
         let mut interface = HidInterface {
