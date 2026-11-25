@@ -1450,6 +1450,7 @@ impl Signal {
     /// 「请求退出」的唯一出口：置标志 + 唤醒后台线程。
     /// 结束消息循环（`nwg::stop_thread_dispatch()`）留给调用点 —— 那是 UI 线程的事。
     fn request_quit(&self) {
+        let _guard = lock_poke(&self.poke);
         self.shutdown.store(true, Ordering::Relaxed);
         self.cv.notify_all();
     }
@@ -1505,18 +1506,14 @@ impl Signal {
 
     fn wait_for_work_with_limit(&self, seen: &mut u64, limit: Option<u64>) -> bool {
         let interval = self.work_interval_ms(limit);
-        let mut n = lock_poke(&self.poke);
-        if *n == *seen {
-            let (g, _) = self
-                .cv
-                .wait_timeout(n, Duration::from_millis(interval))
-                .unwrap_or_else(|p| p.into_inner());
-            n = g;
-        }
+        let (request, _) = self.cv.wait_timeout_while(
+            lock_poke(&self.poke), Duration::from_millis(interval),
+            |request| *request == *seen && !self.shutdown.load(Ordering::Relaxed),
+        ).unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.shutdown.load(Ordering::Relaxed) {
             return false;
         }
-        *seen = *n;
+        *seen = *request;
         true
     }
 }
@@ -4789,6 +4786,68 @@ mod autostart_publication_tests {
         let state = lock_shared(&shared);
         assert_eq!(state.autostart, expected);
         assert_eq!(state.results.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    #[test]
+    fn quit_before_wait_skips_the_polling_interval_even_with_pending_work() {
+        for pending in [false, true] {
+            let signal = Signal::new(1);
+            if pending { signal.request_refresh(); }
+            signal.request_quit();
+            let started = std::time::Instant::now();
+            assert!(!signal.wait_for_work(&mut 0));
+            assert!(started.elapsed() < Duration::from_millis(500));
+        }
+    }
+
+    #[test]
+    fn quit_wakes_all_concurrent_waiters() {
+        let signal = Arc::new(Signal::new(60));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let workers: Vec<_> = (0..2).map(|_| {
+            let signal = Arc::clone(&signal);
+            let barrier = Arc::clone(&barrier);
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                sender.send(signal.wait_for_work_with_limit(&mut 0, Some(2000))).unwrap();
+            })
+        }).collect();
+        barrier.wait();
+        std::thread::sleep(Duration::from_millis(20));
+        signal.request_quit();
+        let results: Vec<_> = (0..2).map(|_| receiver.recv_timeout(Duration::from_millis(500))).collect();
+        for worker in workers { worker.join().unwrap(); }
+        assert_eq!(results, vec![Ok(false), Ok(false)]);
+    }
+
+    #[test]
+    fn quit_serializes_with_the_wait_predicate_lock() {
+        let signal = Arc::new(Signal::new(60));
+        let guard = lock_poke(&signal.poke);
+        let worker_signal = Arc::clone(&signal);
+        let (started, entered) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            worker_signal.request_quit();
+            finished.send(()).unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        let blocked = done.recv_timeout(Duration::from_millis(100));
+        let shutdown_before_unlock = signal.shutdown.load(Ordering::Relaxed);
+        drop(guard);
+        worker.join().unwrap();
+        assert_eq!(blocked, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        assert!(!shutdown_before_unlock);
+        assert!(signal.shutdown.load(Ordering::Relaxed));
+        assert!(!signal.wait_for_work(&mut 0));
     }
 }
 
