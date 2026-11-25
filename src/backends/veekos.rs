@@ -1,5 +1,6 @@
 //! Veekos Shine 60 2.4G receiver status page; read-only Feature access.
 use super::*;
+use super::descriptor::FeatureReportProof;
 use crate::win32::to_wide;
 use std::collections::BTreeMap;
 use winapi::um::cfgmgr32::{CM_Get_Device_IDW, CM_Get_Parent, CM_Locate_DevNodeW};
@@ -18,11 +19,11 @@ fn management(i: &HidInterface) -> bool {
         && i.path.to_ascii_lowercase().contains("&mi_02")
 }
 
-fn report_id(api: &HidApi, i: &HidInterface) -> Option<u8> {
-    if !management(i) { return None; }
-    let descriptor = descriptor::Descriptor::open(api, i)?;
-    [0x83, 0].into_iter().find(|id|
-        descriptor.feature_reports(i, REPORT_BYTES, &[*id], &[*id]))
+fn report_proof(api: &HidApi, interface: &HidInterface) -> FeatureReportProof {
+    if !management(interface) { return FeatureReportProof::Unknown; }
+    let Some(descriptor) = descriptor::Descriptor::open(api, interface)
+        else { return FeatureReportProof::Unknown; };
+    descriptor.single_feature_report(interface, REPORT_BYTES, &[0x83, 0])
 }
 
 fn device_instance(interface: &HidInterface) -> Option<String> {
@@ -75,7 +76,7 @@ fn usb_parent(interface: &HidInterface) -> Option<String> {
 
 fn select_with<'a>(interfaces: &'a [HidInterface],
     mut parent: impl FnMut(&HidInterface) -> Option<String>,
-    mut proof: impl FnMut(&HidInterface) -> Option<u8>) -> Vec<(&'a HidInterface, u8)> {
+    mut proof: impl FnMut(&HidInterface) -> FeatureReportProof) -> Vec<(&'a HidInterface, u8)> {
     let mut groups: BTreeMap<String, Vec<&HidInterface>> = BTreeMap::new();
     for interface in interfaces.iter().filter(|interface| management(interface)) {
         if device_instance(interface).is_none() { return Vec::new(); }
@@ -84,9 +85,19 @@ fn select_with<'a>(interfaces: &'a [HidInterface],
         groups.entry(key).or_default().push(interface);
     }
     let mut selected = Vec::new();
-    for members in groups.into_values() {
-        let [interface] = members.as_slice() else { continue; };
-        if let Some(report_id) = proof(interface) { selected.push((*interface, report_id)); }
+    'groups: for members in groups.into_values() {
+        let mut candidate = None;
+        for interface in members {
+            match proof(interface) {
+                FeatureReportProof::Match(report_id) => {
+                    if candidate.is_some() { continue 'groups; }
+                    candidate = Some((interface, report_id));
+                }
+                FeatureReportProof::Mismatch => {}
+                FeatureReportProof::Unknown => continue 'groups,
+            }
+        }
+        if let Some(candidate) = candidate { selected.push(candidate); }
     }
     selected
 }
@@ -105,7 +116,7 @@ fn target(interface: &HidInterface) -> Target {
 }
 
 fn candidates(api: &HidApi, interfaces: &[HidInterface]) -> Vec<(Target, u8)> {
-    select_with(interfaces, usb_parent, |interface| report_id(api, interface))
+    select_with(interfaces, usb_parent, |interface| report_proof(api, interface))
         .into_iter().map(|(interface, report_id)| (target(interface), report_id)).collect()
 }
 
@@ -189,6 +200,97 @@ mod tests {
         frame
     }
 
+    fn feature_proof(interface: &HidInterface, buttons: &[u8], values: Option<&[u8]>)
+        -> FeatureReportProof {
+        let caps = crate::win32::HidpCaps {
+            usage: interface.usage,
+            usage_page: interface.usage_page,
+            input_report_byte_length: interface.input_len,
+            output_report_byte_length: interface.output_len,
+            feature_report_byte_length: interface.feature_len,
+            number_feature_button_caps: buttons.len() as u16,
+            number_feature_value_caps: 1,
+            ..Default::default()
+        };
+        descriptor::feature_report_proof_with(&caps, interface, REPORT_BYTES, &[0x83, 0],
+            |is_button, _| if is_button { Some(buttons.to_vec()) } else { values.map(<[u8]>::to_vec) })
+    }
+
+    #[test]
+    fn complete_mismatch_sibling_does_not_hide_the_only_matching_collection() {
+        let first = interface();
+        let mut sibling = first.clone();
+        sibling.path = sibling.path.replace("col01", "col02");
+        for report_id in [0, 0x83] {
+            assert_eq!(feature_proof(&first, &[report_id, report_id], Some(&[report_id])),
+                FeatureReportProof::Match(report_id));
+            assert_eq!(feature_proof(&sibling, &[0x84], Some(&[0x84])),
+                FeatureReportProof::Mismatch);
+            for interfaces in [vec![first.clone(), sibling.clone()], vec![sibling.clone(), first.clone()]] {
+                let selected = select_with(&interfaces,
+                    |_| Some(r"usb\vid_3151&pid_5026\receiver".into()),
+                    |interface| {
+                        let id = if interface.path == first.path { report_id } else { 0x84 };
+                        feature_proof(interface, &[id, id], Some(&[id]))
+                    });
+                assert_eq!(selected.len(), 1);
+                assert_eq!(selected[0].0.path, first.path);
+                assert_eq!(selected[0].1, report_id);
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_sibling_blocks_only_its_physical_receiver_in_either_order() {
+        let first = interface();
+        let mut sibling = first.clone();
+        sibling.path = sibling.path.replace("col01", "col02");
+        let mut independent = first.clone();
+        independent.path = independent.path.replace("&fixture&", "&independent&");
+        for incomplete in [None, Some(vec![]), Some(vec![0x84, 0x84])] {
+            assert_eq!(feature_proof(&sibling, &[0x84], incomplete.as_deref()), FeatureReportProof::Unknown);
+            for interfaces in [vec![first.clone(), sibling.clone(), independent.clone()],
+                vec![independent.clone(), sibling.clone(), first.clone()]] {
+                let selected = select_with(&interfaces, |interface| {
+                    let instance = if interface.path == independent.path { "independent" } else { "receiver" };
+                    Some(format!(r"usb\vid_3151&pid_5026\{instance}"))
+                }, |interface| {
+                    if interface.path == sibling.path { feature_proof(interface, &[0x84], incomplete.as_deref()) }
+                    else { feature_proof(interface, &[0x83], Some(&[0x83])) }
+                });
+                assert_eq!(selected.len(), 1);
+                assert_eq!(selected[0].0.path, independent.path);
+            }
+        }
+    }
+
+    #[test]
+    fn two_matching_collections_are_rejected_even_with_different_report_ids() {
+        let first = interface();
+        let mut sibling = first.clone();
+        sibling.path = sibling.path.replace("col01", "col02");
+        for sibling_id in [0, 0x83] {
+            for interfaces in [vec![first.clone(), sibling.clone()], vec![sibling.clone(), first.clone()]] {
+                assert!(select_with(&interfaces, |_| Some(r"usb\vid_3151&pid_5026\receiver".into()),
+                    |interface| {
+                        let id = if interface.path == first.path { 0 } else { sibling_id };
+                        feature_proof(interface, &[id], Some(&[id]))
+                    }).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn complete_mismatches_never_create_a_target() {
+        let first = interface();
+        let mut sibling = first.clone();
+        sibling.path = sibling.path.replace("col01", "col02");
+        for interfaces in [vec![first.clone()], vec![first, sibling]] {
+            assert!(select_with(&interfaces, |_| Some(r"usb\vid_3151&pid_5026\receiver".into()),
+                |interface| feature_proof(interface, &[0x84], Some(&[0x84]))).is_empty());
+        }
+    }
+
     #[test]
     fn independent_receivers_are_selected_in_either_enumeration_order() {
         let first = interface();
@@ -198,7 +300,7 @@ mod tests {
             let selected = select_with(&interfaces, |interface| {
                 let instance = if interface.path == first.path { "first" } else { "second" };
                 Some(format!(r"usb\vid_3151&pid_5026\{instance}"))
-            }, |_| Some(0x83));
+            }, |interface| feature_proof(interface, &[0x83], Some(&[0x83])));
             assert_eq!(selected.len(), 2);
             assert_ne!(target(selected[0].0).key, target(selected[1].0).key);
         }
@@ -220,10 +322,7 @@ mod tests {
             } else {
                 r"usb\vid_3151&pid_5026\ambiguous"
             }.into())
-        }, |interface| {
-            assert_eq!(interface.path, independent.path);
-            Some(0)
-        });
+        }, |interface| feature_proof(interface, &[0], Some(&[0])));
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].0.path, independent.path);
         assert_eq!(selected[0].1, 0);
@@ -237,7 +336,8 @@ mod tests {
         let interfaces = [first.clone(), second.clone()];
         let selected = select_with(&interfaces, |interface| Some(format!(
             r"usb\vid_3151&pid_5026\{}", if interface.path == first.path { "first" } else { "second" }
-        )), |interface| (interface.path == second.path).then_some(0x83));
+        )), |interface| feature_proof(interface, &[0x83],
+            if interface.path == second.path { Some(&[0x83]) } else { None }));
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].0.path, second.path);
     }

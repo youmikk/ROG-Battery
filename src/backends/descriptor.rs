@@ -3,6 +3,13 @@ use crate::{hid::HidInterface, win32::*};
 use std::collections::BTreeMap;
 use winapi::shared::hidpi::{HIDP_BUTTON_CAPS, HIDP_VALUE_CAPS};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FeatureReportProof {
+    Match(u8),
+    Mismatch,
+    Unknown,
+}
+
 pub(super) struct Descriptor {
     api: HidApi,
     handle: Handle,
@@ -33,20 +40,22 @@ impl Descriptor {
             2 => (self.caps.number_feature_button_caps, self.caps.number_feature_value_caps),
             _ => return None,
         };
-        collect_ids(button_count, value_count, |buttons, count| {
-            let mut returned = count;
-            if buttons {
-                let mut caps: Vec<HIDP_BUTTON_CAPS> = (0..count).map(|_| unsafe { core::mem::zeroed() }).collect();
-                if unsafe { (self.api.get_button_caps)(kind, caps.as_mut_ptr(), &mut returned, self.preparsed) } < 0
-                    || returned != count { return None; }
-                Some(caps.iter().map(|cap| cap.ReportID).collect())
-            } else {
-                let mut caps: Vec<HIDP_VALUE_CAPS> = (0..count).map(|_| unsafe { core::mem::zeroed() }).collect();
-                if unsafe { (self.api.get_value_caps)(kind, caps.as_mut_ptr(), &mut returned, self.preparsed) } < 0
-                    || returned != count { return None; }
-                Some(caps.iter().map(|cap| cap.ReportID).collect())
-            }
-        })
+        collect_ids(button_count, value_count, |buttons, count| self.report_cap_ids(kind, buttons, count))
+    }
+
+    fn report_cap_ids(&self, kind: u32, buttons: bool, count: u16) -> Option<Vec<u8>> {
+        let mut returned = count;
+        if buttons {
+            let mut caps: Vec<HIDP_BUTTON_CAPS> = (0..count).map(|_| unsafe { core::mem::zeroed() }).collect();
+            if unsafe { (self.api.get_button_caps)(kind, caps.as_mut_ptr(), &mut returned, self.preparsed) } < 0
+                || returned != count { return None; }
+            Some(caps.iter().map(|cap| cap.ReportID).collect())
+        } else {
+            let mut caps: Vec<HIDP_VALUE_CAPS> = (0..count).map(|_| unsafe { core::mem::zeroed() }).collect();
+            if unsafe { (self.api.get_value_caps)(kind, caps.as_mut_ptr(), &mut returned, self.preparsed) } < 0
+                || returned != count { return None; }
+            Some(caps.iter().map(|cap| cap.ReportID).collect())
+        }
     }
 
     pub fn only_input_output_report(&self, interface: &HidInterface, id: u8, length: u16) -> bool {
@@ -72,6 +81,12 @@ impl Descriptor {
             && length > 0 && self.caps.feature_report_byte_length == length
             && self.report_ids(2).is_some_and(|ids| !ids.is_empty()
                 && required.iter().all(|id| ids.contains(id)) && ids.iter().all(|id| allowed.contains(id)))
+    }
+
+    pub fn single_feature_report(&self, interface: &HidInterface, length: u16, allowed: &[u8])
+        -> FeatureReportProof {
+        feature_report_proof_with(&self.caps, interface, length, allowed,
+            |buttons, count| self.report_cap_ids(2, buttons, count))
     }
 
     /// Prove one simple byte-array feature report without assuming that the
@@ -212,6 +227,23 @@ impl Drop for Descriptor {
     }
 }
 
+pub(super) fn feature_report_proof_with(caps: &HidpCaps, interface: &HidInterface,
+    length: u16, allowed: &[u8], read: impl FnMut(bool, u16) -> Option<Vec<u8>>) -> FeatureReportProof {
+    if length == 0 || caps.usage_page != interface.usage_page || caps.usage != interface.usage
+        || caps.input_report_byte_length != interface.input_len
+        || caps.output_report_byte_length != interface.output_len
+        || caps.feature_report_byte_length != interface.feature_len {
+        return FeatureReportProof::Unknown;
+    }
+    let Some(ids) = collect_ids(caps.number_feature_button_caps, caps.number_feature_value_caps, read)
+        else { return FeatureReportProof::Unknown; };
+    match single_id(ids) {
+        Some(report_id) if caps.feature_report_byte_length == length && allowed.contains(&report_id)
+            => FeatureReportProof::Match(report_id),
+        _ => FeatureReportProof::Mismatch,
+    }
+}
+
 fn collect_ids(buttons: u16, values: u16,
     mut read: impl FnMut(bool, u16) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
     if buttons > 512 || values > 512 || (buttons == 0 && values == 0) { return None; }
@@ -267,6 +299,90 @@ fn feature_byte_report_lengths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn feature_fixture(buttons: u16, values: u16) -> (HidInterface, HidpCaps) {
+        let interface = HidInterface {
+            path: "feature-proof-fixture".into(), serial: String::new(), product: String::new(),
+            vendor_id: 0x3151, product_id: 0x5026, usage_page: 0xffff, usage: 2,
+            input_len: 0, output_len: 0, feature_len: 65,
+        };
+        let caps = HidpCaps {
+            usage: interface.usage, usage_page: interface.usage_page,
+            feature_report_byte_length: interface.feature_len,
+            number_feature_button_caps: buttons, number_feature_value_caps: values,
+            ..Default::default()
+        };
+        (interface, caps)
+    }
+
+    #[test]
+    fn feature_proof_reads_all_caps_and_collapses_repeated_supported_ids() {
+        for report_id in [0, 0x83] {
+            for (buttons, values) in [(2, 1), (2, 0), (0, 1)] {
+                let (interface, caps) = feature_fixture(buttons, values);
+                let mut calls = Vec::new();
+                let proof = feature_report_proof_with(&caps, &interface, 65, &[0x83, 0],
+                    |is_button, count| {
+                        calls.push((is_button, count));
+                        Some(vec![report_id; usize::from(count)])
+                    });
+                assert_eq!(proof, FeatureReportProof::Match(report_id));
+                assert_eq!(calls, [(true, buttons), (false, values)].into_iter()
+                    .filter(|(_, count)| *count != 0).collect::<Vec<_>>());
+            }
+        }
+    }
+
+    #[test]
+    fn complete_unsupported_or_multiple_feature_ids_are_mismatches() {
+        let (interface, caps) = feature_fixture(1, 1);
+        for (button_id, value_id) in [(0x84, 0x84), (0, 0x83), (0x83, 0x84)] {
+            let mut calls = 0;
+            assert_eq!(feature_report_proof_with(&caps, &interface, 65, &[0x83, 0],
+                |is_button, _| {
+                    calls += 1;
+                    Some(vec![if is_button { button_id } else { value_id }])
+                }), FeatureReportProof::Mismatch);
+            assert_eq!(calls, 2);
+        }
+    }
+
+    #[test]
+    fn failed_or_partial_feature_caps_are_unknown_even_after_an_unsupported_id() {
+        let (interface, caps) = feature_fixture(1, 1);
+        for failed_buttons in [false, true] {
+            for incomplete in [None, Some(vec![]), Some(vec![0x84, 0x84])] {
+                assert_eq!(feature_report_proof_with(&caps, &interface, 65, &[0x83, 0],
+                    |is_button, _| if is_button == failed_buttons { incomplete.clone() }
+                        else { Some(vec![0x84]) }), FeatureReportProof::Unknown);
+            }
+        }
+    }
+
+    #[test]
+    fn inconsistent_feature_metadata_never_proves_a_mismatch() {
+        for mutate in [
+            |caps: &mut HidpCaps| caps.usage ^= 1,
+            |caps: &mut HidpCaps| caps.usage_page ^= 1,
+            |caps: &mut HidpCaps| caps.input_report_byte_length = 65,
+            |caps: &mut HidpCaps| caps.output_report_byte_length = 65,
+            |caps: &mut HidpCaps| caps.feature_report_byte_length = 64,
+        ] {
+            let (interface, mut caps) = feature_fixture(1, 1);
+            mutate(&mut caps);
+            assert_eq!(feature_report_proof_with(&caps, &interface, 65, &[0x83, 0],
+                |_, _| panic!("inconsistent metadata")), FeatureReportProof::Unknown);
+        }
+    }
+
+    #[test]
+    fn empty_or_excessive_feature_capability_counts_remain_unknown() {
+        for (buttons, values) in [(0, 0), (513, 0), (0, 513), (1, 513)] {
+            let (interface, caps) = feature_fixture(buttons, values);
+            assert_eq!(feature_report_proof_with(&caps, &interface, 65, &[0x83, 0],
+                |_, _| panic!("unsupported capability counts")), FeatureReportProof::Unknown);
+        }
+    }
 
     #[test]
     fn windows_report_initialization_must_confirm_both_directions_and_the_requested_id() {
