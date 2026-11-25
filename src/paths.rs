@@ -92,7 +92,12 @@ fn relocate_settings(
 ) -> Result<(), String> {
     let destination = new_path.as_deref().unwrap_or(default);
     let text = destination.to_str().ok_or("配置保存路径必须是有效文本")?;
-    if destination == pointer || text.trim().is_empty() {
+    let destination_location = physical_location(destination)
+        .map_err(|error| format!("无法解析配置保存位置：{error}"))?;
+    let pointer_location = physical_location(pointer)
+        .map_err(|error| format!("无法解析配置重定向位置：{error}"))?;
+    if destination_location.as_os_str().as_encoded_bytes()
+        .eq_ignore_ascii_case(pointer_location.as_os_str().as_encoded_bytes()) || text.trim().is_empty() {
         return Err("配置保存位置无效".into());
     }
     write_atomic(destination, contents)?;
@@ -107,6 +112,25 @@ fn relocate_settings(
     }
     *cached = Some(new_path);
     Ok(())
+}
+
+fn physical_location(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let mut ancestor = std::path::absolute(path)?;
+    let mut missing = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut physical) => {
+                for name in missing.into_iter().rev() { physical.push(name); }
+                return Ok(physical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = ancestor.file_name() else { return Err(error); };
+                missing.push(name.to_owned());
+                if !ancestor.pop() { return Err(error); }
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// 快照缓存文件（跨进程复用，省掉 690ms 的全量读取）
@@ -351,6 +375,40 @@ mod tests {
         assert_eq!(cached, Some(None));
         assert!(!pointer.exists());
         assert_eq!(std::fs::read(default).unwrap(), b"updated");
+    }
+
+    #[test]
+    fn settings_relocation_rejects_pointer_aliases_before_writing_any_file() {
+        let scratch = Scratch::new();
+        let pointer = scratch.0.join("custom_settings_path.txt");
+        let original = scratch.0.join("settings.ini");
+        std::fs::write(&original, b"original settings").unwrap();
+        let pointer_bytes = original.to_str().unwrap().as_bytes();
+        std::fs::write(&pointer, pointer_bytes).unwrap();
+        let aliases = [
+            scratch.0.join("CUSTOM_SETTINGS_PATH.TXT"),
+            scratch.0.join(".").join("custom_settings_path.txt"),
+            pointer.canonicalize().unwrap(),
+        ];
+        for alias in aliases {
+            let mut cached = Some(Some(original.clone()));
+            assert!(relocate_settings(&pointer, &original, Some(alias), b"replacement", &mut cached).is_err());
+            assert_eq!(cached, Some(Some(original.clone())));
+            assert_eq!(std::fs::read(&pointer).unwrap(), pointer_bytes);
+            assert_eq!(std::fs::read(&original).unwrap(), b"original settings");
+        }
+    }
+
+    #[test]
+    fn settings_relocation_rejects_pointer_aliases_before_the_directory_exists() {
+        let scratch = Scratch::new();
+        let directory = scratch.0.join("new-settings");
+        let pointer = directory.join("custom_settings_path.txt");
+        let mut cached = Some(None);
+        let alias = directory.join("CUSTOM_SETTINGS_PATH.TXT");
+        assert!(relocate_settings(&pointer, &directory.join("settings.ini"), Some(alias), b"settings", &mut cached).is_err());
+        assert_eq!(cached, Some(None));
+        assert!(!directory.exists());
     }
 
     #[test]
