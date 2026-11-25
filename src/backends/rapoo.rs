@@ -80,6 +80,8 @@ fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
                 return;
             }
         };
+        trace::record(&interface, BackendId::Rapoo, "listener-open", 0,
+            STATUS_REPORT, 0, 0, started, trace::Outcome::Ok);
         while !worker.stop.load(Ordering::Acquire) {
             // 无回帧时继续等下一帧，超时不关闭接口，也不重置仍在有效期内的采样。
             let read_started = Instant::now();
@@ -87,17 +89,25 @@ fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
                 if frame.first() == Some(&STATUS_REPORT) {
                     trace::record(&interface, BackendId::Rapoo, "receive-status", 0,
                         STATUS_REPORT, 0, frame.len(), read_started,
-                        if parse_status(&frame).is_some() { trace::Outcome::Ok } else { trace::Outcome::InvalidData });
+                        if parse_status(&frame).is_some() { trace::Outcome::Ok }
+                        else if frame.len() >= 9 && frame[7] == 0 && frame[2] <= 6 { trace::Outcome::Offline }
+                        else { trace::Outcome::InvalidData });
                 }
                 let mut state = worker.state.lock().unwrap_or_else(|error| error.into_inner());
                 state.receive(&frame, Instant::now());
                 worker.changed.notify_all();
             } else if read_started.elapsed() < Duration::from_millis(100) {
+                trace::record(&interface, BackendId::Rapoo, "listener-immediate-failure", 0,
+                    STATUS_REPORT, 0, 0, read_started, trace::Outcome::NoReply);
                 // 拔出设备等立即失败不能形成忙循环；下一轮枚举会重建监听。
                 worker.state.lock().unwrap_or_else(|error| error.into_inner()).failed = true;
                 worker.changed.notify_all();
                 break;
             }
+        }
+        if worker.stop.load(Ordering::Acquire) {
+            trace::record(&interface, BackendId::Rapoo, "listener-stopped", 0,
+                STATUS_REPORT, 0, 0, Instant::now(), trace::Outcome::Ok);
         }
     });
     if spawned.is_err() {
@@ -324,8 +334,14 @@ fn status_from_session(target: &Target, session: &StatusReader, after: Option<In
         .unwrap_or_else(|e|e.into_inner());
     let sample=state.confirmed_after(Instant::now(),after);
     let result=sample.map(|s|s.1.clone().map(|(battery,dpi)|(s.0,battery,dpi)));
-    trace::record(target.hid()?,BackendId::Rapoo,"read-status",0,STATUS_REPORT,0,
-        sample.map(|s|s.2).unwrap_or(0),started,if result.is_some(){trace::Outcome::Ok}else{trace::Outcome::NoReply});
+    let outcome = match &result {
+        Some(Some(_)) => trace::Outcome::Ok,
+        Some(None) => trace::Outcome::Offline,
+        None => trace::Outcome::NoReply,
+    };
+    trace::record_sample(target.hid()?, BackendId::Rapoo, "read-cached-status", 0, STATUS_REPORT, 0,
+        sample.map(|sample| sample.2).unwrap_or(0), started, outcome,
+        state.sample.as_ref().map(|sample| sample.0));
     result.ok_or_else(||crate::tr!("雷柏状态报告不可用，请唤醒设备后重试").into())
 }
 

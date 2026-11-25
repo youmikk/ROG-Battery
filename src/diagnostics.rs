@@ -2,6 +2,19 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+pub mod readings;
+
+pub fn unix_millis() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis()).unwrap_or(0)
+}
+
+pub fn anonymous_id(value: &str) -> u64 {
+    use std::hash::BuildHasher;
+    static HASHER: OnceLock<std::collections::hash_map::RandomState> = OnceLock::new();
+    HASHER.get_or_init(Default::default).hash_one(value)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DeviceInfo {
     pub model: String,

@@ -27,6 +27,11 @@ impl Task {
     }
 }
 
+pub(super) enum DiagnosticReport {
+    Summary(String),
+    Complete(String),
+}
+
 pub(super) struct Model {
     pub(super) view: View,
     pub(super) devices: Vec<Candidate>,
@@ -47,7 +52,9 @@ pub(super) struct Model {
     pub(super) error: String,
     pub(super) task: Option<Task>,
     pub(super) submitted: bool,
-    pub(super) diagnostics_override: Option<String>,
+    pub(super) diagnostics_override: Option<DiagnosticReport>,
+    pub(super) inventory_report: Option<String>,
+    pub(super) inventory_generation: u64,
     pub(super) restored_draft: Option<client::Draft>,
     pub(super) reply_drafts: std::collections::BTreeMap<u64, String>,
     generation: u64,
@@ -76,6 +83,8 @@ impl Default for Model {
             task: None,
             submitted: false,
             diagnostics_override: None,
+            inventory_report: None,
+            inventory_generation: 0,
             restored_draft: None,
             reply_drafts: Default::default(),
             generation: 0,
@@ -84,6 +93,10 @@ impl Default for Model {
 }
 
 impl Model {
+    pub(super) fn has_complete_diagnostics(&self) -> bool {
+        matches!(self.diagnostics_override, Some(DiagnosticReport::Complete(_)))
+    }
+
     pub(super) fn busy(&self) -> bool {
         self.task.is_some()
     }
@@ -119,6 +132,8 @@ impl Model {
         self.draft_retry = None;
         self.restored_draft = None;
         self.diagnostics_override = None;
+        self.inventory_report = None;
+        self.inventory_generation = self.inventory_generation.wrapping_add(1);
         self.error.clear();
         self.images.clear();
         self.current = None;
@@ -133,7 +148,7 @@ impl Model {
         self.selected = (!self.devices.is_empty()).then_some(0);
         self.connection = self.selected
             .map(|index| super::connection_index(&self.devices[index].device.connection))
-            .unwrap_or(0);
+            .unwrap_or(3);
         self.initialized = true;
     }
 
@@ -189,6 +204,19 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_feedback_requires_a_new_inventory_without_guessing_the_connection() {
+        let mut model = Model::default();
+        model.reopen(Vec::new(), false);
+        let generation = model.inventory_generation;
+        model.inventory_report = Some("previous interfaces".into());
+        assert_eq!(model.connection, 3);
+        model.new_form();
+        assert_ne!(model.inventory_generation, generation);
+        assert!(model.inventory_report.is_none());
+        assert!(!model.busy());
+    }
 
     fn entry(number: u64) -> client::Entry {
         client::Entry {

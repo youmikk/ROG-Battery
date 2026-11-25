@@ -333,6 +333,19 @@ struct DeviceSnapshot {
     battery_at: Option<std::time::Instant>,
 }
 
+fn record_reading_diagnostic(surface: crate::diagnostics::readings::Surface,
+    reading: &crate::device::DeviceReading, record: Option<&DeviceSnapshot>, cfg: &Settings,
+    enabled: bool, now: std::time::Instant) {
+    let matching = record.filter(|record| &record.reading == reading);
+    let interface = matching.and_then(|record| record.basic.as_ref()
+        .and_then(|snapshot| snapshot.target.hid().ok()).or_else(|| record.link.as_ref().map(|link| &link.iface)));
+    let lifetime = matching.map(|record| record.basic.as_ref().map(|snapshot| snapshot.target.backend.sample_lifetime())
+        .unwrap_or_else(|| rog_sample_lifetime(cfg)));
+    crate::diagnostics::readings::observe(surface, reading, matching.and_then(|record| record.battery_at),
+        interface.map(|interface| interface.path.as_str()), lifetime,
+        enabled && (reading.display_percent().is_some() || reading.coarse_level().is_some()), now);
+}
+
 fn rog_sample_lifetime(settings: &Settings) -> Duration {
     Duration::from_secs(settings.refresh_interval_sec.saturating_mul(3).max(180))
 }
@@ -878,12 +891,16 @@ impl Shared {
                 if status.expire(now, basic.target.backend.sample_lifetime()) {
                     device.reading.quality = status.quality;
                     basic.disable_writes();
+                    record_reading_diagnostic(crate::diagnostics::readings::Surface::Expired,
+                        &device.reading, Some(device), &self.cfg, true, now);
                     changed = true;
                 }
             } else if device.basic.is_none()
                 && device.battery_at.is_some_and(|at| now.saturating_duration_since(at) >= rog_lifetime)
                 && device.reading.quality != crate::device::ReadingQuality::Stale {
                 device.reading.quality = crate::device::ReadingQuality::Stale;
+                record_reading_diagnostic(crate::diagnostics::readings::Surface::Expired,
+                    &device.reading, Some(device), &self.cfg, true, now);
                 device.state = None;
                 if self.primary_key.as_ref() == Some(&device.reading.key) {
                     self.full = None;
@@ -959,6 +976,11 @@ impl Shared {
     }
 
     fn rebuild_readings(&mut self) {
+        let now = std::time::Instant::now();
+        for device in self.devices.values() {
+            record_reading_diagnostic(crate::diagnostics::readings::Surface::Published,
+                &device.reading, Some(device), &self.cfg, true, now);
+        }
         self.readings = self.devices.values().map(|device| device.reading.clone()).collect();
         self.sort_readings();
         self.observe_history();
@@ -2568,7 +2590,12 @@ fn handle_act(a: Act, env: &UiEnv) {
                 let connection = link.map(|link| match link.mode.as_str() {
                     "Wireless24G" => "2.4GHz", "Wired" => "USB", "Bluetooth" => "Bluetooth", _ => "unknown",
                 }).unwrap_or("unknown");
-                crate::feedback::candidate(s.cfg.device_name(reading).to_string(), reading, interface, backend, connection, family)
+                let lifetime = backend.filter(|backend| *backend != crate::backends::BackendId::Rog)
+                    .map(|backend| backend.sample_lifetime()).unwrap_or_else(|| rog_sample_lifetime(&s.cfg));
+                let address = basic.filter(|basic| basic.target.backend == crate::backends::BackendId::Logitech)
+                    .map(|basic| basic.target.address);
+                crate::feedback::candidate(s.cfg.device_name(reading).to_string(), reading, interface,
+                    backend, address, connection, family, record.and_then(|record| record.battery_at), lifetime)
             }).collect();
             let dark = crate::ui::theme::resolve(&s.cfg.theme) == crate::ui::theme::Mode::Dark;
             drop(s);
@@ -3852,24 +3879,24 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                 )
             };
             let theme = *ui.mode.theme();
-            let readings = {
-                let s = lock_shared(&shared_p);
+            let (readings, record, history) = {
+                let mut s = lock_shared(&shared_p);
                 if let Some(key) = ui.selected_device.as_ref().and_then(|k| s.key_aliases.get(k)) {
                     if s.devices.contains_key(key) {
                         ui.selected_device = Some(key.clone());
                     }
                 }
-                s.readings.clone()
-            };
-            ui.sync_devices(&readings);
-            let selected = ui
-                .selected_device
-                .as_ref()
-                .and_then(|key| readings.iter().find(|r| &r.key == key));
-            let (record, history) = {
-                let mut s = lock_shared(&shared_p);
+                let readings = s.readings.clone();
+                ui.sync_devices(&readings);
                 s.active_key = ui.selected_device.clone();
+                let now = std::time::Instant::now();
+                for reading in readings.iter().filter(|reading| ui.page == crate::ui::widget::Page::Home
+                    || ui.selected_device.as_ref() == Some(&reading.key)) {
+                    record_reading_diagnostic(crate::diagnostics::readings::Surface::Main,
+                        reading, s.devices.get(&reading.key), &s.cfg, true, now);
+                }
                 (
+                    readings,
                     ui.selected_device
                         .as_ref()
                         .and_then(|k| s.devices.get(k))
@@ -3877,6 +3904,10 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     ui.selected_device.as_ref().and_then(|key| s.histories.get(key)).cloned().unwrap_or_default(),
                 )
             };
+            let selected = ui
+                .selected_device
+                .as_ref()
+                .and_then(|key| readings.iter().find(|r| &r.key == key));
             if let Some(record) = &record {
                 if let Some(basic) = &record.basic {
                     err_text = if lock_shared(&shared_p).source_busy.contains(&basic.target.backend) {
@@ -4451,6 +4482,11 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         popup_dpi_states(&s),
                         s.refresh_generation,
                     );
+                    let now = std::time::Instant::now();
+                    for reading in &readings {
+                        record_reading_diagnostic(crate::diagnostics::readings::Surface::Taskbar,
+                            reading, s.devices.get(&reading.key), &cfg, cfg.taskbar_widget_enabled, now);
+                    }
                     drop(s);
                     taskbar_updates.sync(
                         cfg.taskbar_widget_enabled,

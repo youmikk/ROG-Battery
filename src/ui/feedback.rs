@@ -15,7 +15,7 @@ use winapi::um::winuser as wu;
 
 mod layout;
 mod state;
-use state::{Model, Task, View};
+use state::{DiagnosticReport, Model, Task, View};
 
 pub fn text<'a>(zh: &'a str, en: &'a str) -> &'a str {
     if crate::i18n::english() {
@@ -137,6 +137,7 @@ enum ResultMessage {
     Images(Result<Vec<client::Image>, String>),
     Fallback(Result<client::Fallback, String>),
     SoftwareDiagnostics(String),
+    DeviceInventory(String),
     Failed,
 }
 struct Colors {
@@ -208,6 +209,7 @@ struct Controls {
     description_count: Cell<usize>,
     applied: RefCell<std::collections::BTreeMap<usize, layout::NativeState>>,
     scrollbar: Cell<Option<(i32, u32, i32)>>,
+    inventory_working: Cell<bool>,
 }
 pub struct Dialog {
     controls: Rc<Controls>,
@@ -311,14 +313,18 @@ impl Controls {
     }
     fn diagnostics(&self) -> String {
         let s = self.state.borrow();
-        if let Some(value) = &s.diagnostics_override {
+        if let Some(DiagnosticReport::Complete(value)) = &s.diagnostics_override {
             return value.clone();
         }
-        if s.software {
-            return format!("App: X-Battery {}\nSystem: {}\nLog: preparing safe summary\nSoftware log summary\n",
-                crate::gui::APP_VERSION, crate::feedback::system_version());
+        if s.restored_draft.is_some() {
+            return String::new();
         }
-        let mut value = s
+        let mut value = if let Some(DiagnosticReport::Summary(value)) = &s.diagnostics_override {
+            value.clone()
+        } else if s.software {
+            format!("App: X-Battery {}\nSystem: {}\nLog: preparing safe summary\nSoftware log summary\n",
+                crate::gui::APP_VERSION, crate::feedback::system_version())
+        } else { s
             .selected
             .and_then(|i| s.devices.get(i).map(|d| d.diagnostics.clone()))
             .unwrap_or_else(|| {
@@ -327,12 +333,13 @@ impl Controls {
                     crate::gui::APP_VERSION,
                     crate::feedback::system_version()
                 )
-            });
-        value.push_str(&format!(
+            }) };
+        if !s.software { value.push_str(&format!(
             "Selected connection: {}\n",
             ["2.4GHz", "USB", "Bluetooth", "unknown"][s.connection]
-        ));
-        value
+        )); }
+        crate::feedback::with_inventory(&value, s.inventory_report.as_deref()
+            .unwrap_or("HID interface inventory: preparing; not yet collected\n"))
     }
     fn draft(&self) -> client::Draft {
         let s = self.state.borrow();
@@ -486,9 +493,22 @@ impl Controls {
                 }
                 if device.is_none() {
                     y += 10.0;
+                    self.label(text("设备品牌（必填）", "Brand (required)"), 25.0, y, 300.0, 20.0, 11.0, true, false);
+                    self.label(text("完整型号（必填）", "Full model (required)"), 335.0, y, 300.0, 20.0, 11.0, true, false);
+                    y += 26.0;
                     self.edit(self.brand.handle, R::new(25.0, y, 300.0, 37.0));
                     self.edit(self.model.handle, R::new(335.0, y, 300.0, 37.0));
-                    y += 37.0;
+                    y += 45.0;
+                    self.label(text("请按包装或机身填写，保留 Pro / Max / 代数等后缀。无需查找 VID/PID。",
+                        "Use the full model from the label, including Pro / Max / generation. No VID/PID lookup needed."),
+                        25.0, y, 610.0, 40.0, 10.0, false, true);
+                    y += 40.0;
+                } else if device.is_some_and(|device| device.battery == "—") {
+                    y += 10.0;
+                    self.label(text("请核对完整型号；不一致时选择“列表中没有我的设备”填写。",
+                        "Check the full model; select 'My device is not listed' to correct it."),
+                        25.0, y, 610.0, 36.0, 10.0, false, true);
+                    y += 36.0;
                 }
                 y += 10.0;
                 self.label(
@@ -538,7 +558,7 @@ impl Controls {
                 let mut x = 25.0;
                 for (i, name) in [
                     text("设备未识别", "Not detected"),
-                    text("电量不准确", "Battery reading"),
+                    text("电量异常或不显示", "Battery reading"),
                     text("DPI 无法切换", "DPI switching"),
                     text("其他问题", "Other"),
                 ]
@@ -583,8 +603,8 @@ impl Controls {
                     .push((self.description.handle, R::new(37.0, y + 11.0, 586.0, 85.0)));
                 self.label(
                     text(
-                        "什么时候出现？你期待看到什么？",
-                        "When does it happen? What did you expect?",
+                        "何时出现？是否间歇发生？官方驱动能否显示电量？",
+                        "When? Intermittent? Does the official app show battery?",
                     ),
                     37.0,
                     y + 101.0,
@@ -657,9 +677,9 @@ impl Controls {
                 self.label(
                     text(
                         if s.software { "自动整理近期运行记录，可预览或关闭" }
-                            else { "设备信息与近期读取记录，帮助定位问题" },
+                            else { "包含所有已检测 HID 接口编号与近期读取记录" },
                         if s.software { "Recent activity is summarized automatically; preview or opt out" }
-                            else { "Device details and recent queries to help investigate" },
+                            else { "All detected HID interface IDs and recent readings" },
                     ),
                     70.0,
                     y + 33.0,
@@ -731,7 +751,7 @@ impl Controls {
                 y += 20.0;
                 self.label(
                     if s.software { text("近期运行记录", "Recent activity") }
-                        else { text("近期读取记录", "Recent queries") },
+                        else { text("读取过程与设备接口清单", "Reading history and HID interfaces") },
                     25.0,
                     y,
                     600.0,
@@ -764,10 +784,10 @@ impl Controls {
                 }
                 self.label(
                     text(
-                        if s.software { "仅提取操作类型、错误码与耗时，不上传原始日志。" }
-                            else { "记录请求结果和耗时，不包含原始通信数据。" },
-                        if s.software { "Operation types, error codes and timings only. Raw logs are not uploaded." }
-                            else { "Query results and timing only, without raw communication data." },
+                        if s.software { "附带近期事件摘要与 HID 接口清单，不上传原始日志。" }
+                            else { "包含采样时间、状态变化及 HID 接口清单，不含原始报文。" },
+                        if s.software { "Recent event summaries and HID interfaces; no raw logs." }
+                            else { "Sample timing, state changes and HID interfaces; no raw packets." },
                     ),
                     25.0,
                     y,
@@ -778,7 +798,7 @@ impl Controls {
                     true,
                 );
                 y += 46.0;
-                self.decorations.borrow_mut().push(Decoration::Note(text("不包含序列号、电脑用户名、文件路径或个人配置。提交时仅附带你在此看到的内容。","No serials, account names, file paths or personal settings. Only the details shown here are attached.").into(),R::new(25.0,y,610.0,60.0)));
+                self.decorations.borrow_mut().push(Decoration::Note(text("不包含序列号、电脑用户名、本机完整路径或个人配置。提交时仅附带你在此看到的内容。","No serials, account names, full local paths or personal settings. Only the details shown here are attached.").into(),R::new(25.0,y,610.0,60.0)));
                 y += 80.0;
             }
             View::History => {
@@ -1309,6 +1329,37 @@ impl Controls {
         self.scroll.set(0.0);
         self.rebuild();
         self.prepare_software_diagnostics();
+        self.prepare_inventory();
+    }
+    fn prepare_inventory(&self) {
+        let generation = {
+            let model = self.state.borrow();
+            if !model.initialized || !matches!(model.view, View::Form | View::Diagnostics)
+                || model.inventory_report.is_some() || model.restored_draft.is_some()
+                || model.has_complete_diagnostics()
+                || self.inventory_working.get() { return; }
+            model.inventory_generation
+        };
+        self.inventory_working.set(true);
+        let results = self.results.clone();
+        let notice = self.notice;
+        let spawned = std::thread::Builder::new().name("feedback-inventory".into()).spawn(move || {
+            let report = std::panic::catch_unwind(crate::feedback::inventory::collect)
+                .unwrap_or_else(|_| "HID interface inventory: collection failed\n".into());
+            results.lock().unwrap_or_else(|error| error.into_inner())
+                .push((generation, ResultMessage::DeviceInventory(report)));
+            notice.notice();
+        });
+        if spawned.is_err() {
+            self.inventory_working.set(false);
+            self.state.borrow_mut().inventory_report = Some("HID interface inventory: worker unavailable\n".into());
+        }
+    }
+
+    fn inventory_ready(&self) -> bool {
+        let model = self.state.borrow();
+        !model.attach_diagnostics || model.restored_draft.is_some()
+            || model.has_complete_diagnostics() || model.inventory_report.is_some()
     }
     fn prepare_software_diagnostics(&self) {
         let prepare = {
@@ -1477,6 +1528,12 @@ impl Controls {
                     self.error(error);
                     return;
                 }
+                if !self.inventory_ready() {
+                    self.prepare_inventory();
+                    self.error(text("正在收集设备接口信息，请稍后提交；也可关闭附带诊断。",
+                        "Collecting HID interfaces. Submit shortly, or turn off diagnostics."));
+                    return;
+                }
                 let Some(submit) = submit else {
                     self.error(text("应用内提交尚未启用。内容已保留，可复制后前往 GitHub 提交。","In-app submission is not enabled. Your draft is preserved; copy it and submit on GitHub."));
                     return;
@@ -1485,6 +1542,12 @@ impl Controls {
                 self.work(Task::Submit, move || submit(draft, retry));
             }
             Action::Fallback => {
+                if !self.inventory_ready() {
+                    self.prepare_inventory();
+                    self.error(text("正在收集设备接口信息，请稍后复制；也可关闭附带诊断。",
+                        "Collecting HID interfaces. Copy shortly, or turn off diagnostics."));
+                    return;
+                }
                 let draft = self.draft();
                 self.work(Task::Fallback, move || ResultMessage::Fallback(client::fallback(&draft)));
             }
@@ -1631,6 +1694,18 @@ impl Controls {
     fn complete(&self) {
         let messages = std::mem::take(&mut *self.results.lock().unwrap_or_else(|e| e.into_inner()));
         for (generation, message) in messages {
+            if let ResultMessage::DeviceInventory(report) = message {
+                self.inventory_working.set(false);
+                let mut model = self.state.borrow_mut();
+                if generation == model.inventory_generation && model.restored_draft.is_none()
+                    && !model.has_complete_diagnostics() {
+                    model.inventory_report = Some(report);
+                }
+                drop(model);
+                self.rebuild();
+                self.prepare_inventory();
+                continue;
+            }
             if let ResultMessage::Reply(number, draft, Ok(_)) = &message {
                 self.state.borrow_mut().confirm_reply(*number, draft);
             }
@@ -1712,7 +1787,9 @@ impl Controls {
                             .position(|c| *c == draft.category)
                             .unwrap_or(3);
                         s.attach_diagnostics = draft.diagnostics.is_some();
-                        s.diagnostics_override = draft.diagnostics;
+                        s.diagnostics_override = draft.diagnostics.map(DiagnosticReport::Complete);
+                        s.inventory_report = None;
+                        s.inventory_generation = s.inventory_generation.wrapping_add(1);
                         s.images = images;
                         s.submitted = false;
                         s.view = View::Form;
@@ -1729,8 +1806,9 @@ impl Controls {
                     Err(e) => self.state.borrow_mut().error = e,
                 },
                 ResultMessage::SoftwareDiagnostics(report) => {
-                    self.state.borrow_mut().diagnostics_override = Some(report);
+                    self.state.borrow_mut().diagnostics_override = Some(DiagnosticReport::Summary(report));
                 }
+                ResultMessage::DeviceInventory(_) => unreachable!(),
                 ResultMessage::Fallback(result) => match result {
                     Ok(fallback) => {
                         let error = if !copy_report(self.window.handle, &fallback.markdown) {
@@ -1864,8 +1942,10 @@ fn diagnostic_rows(value: &str) -> (Vec<(String, String)>, Vec<String>) {
     let mut queries = Vec::new();
     let mut querying = false;
     for line in value.lines().filter(|line| !line.trim().is_empty()) {
-        if line.starts_with("Protocol query summary") || line == "Software log summary" {
+        if line.starts_with("Protocol query summary") || line == "Software log summary"
+            || line.starts_with("Reading timeline") || line.starts_with("HID interface inventory") {
             querying = true;
+            queries.push(line.to_string());
             continue;
         }
         if querying && !line.starts_with("Selected connection:") {
@@ -2015,18 +2095,21 @@ mod tests {
         controls.set_description("修改设置后保存失败，重启后未保留。");
         let generation = controls.state.borrow_mut().begin_task(Task::SoftwareDiagnostics).unwrap();
         let report = "App: X-Battery test\nSoftware log summary\noperation=settings_save_failed; os_error=17\n";
+        let inventory = "HID interface inventory: complete; total=1\nVID/PID=24AE:1415\n";
+        controls.state.borrow_mut().inventory_report = Some(inventory.into());
         controls.results.lock().unwrap().push((generation, ResultMessage::SoftwareDiagnostics(report.into())));
         controls.complete();
         let draft = controls.draft();
         assert_eq!(draft.category, "other");
         assert!(crate::feedback::software::is_device(&draft.device));
-        assert_eq!(draft.diagnostics.as_deref(), Some(report));
+        let expected = crate::feedback::with_inventory(report, inventory);
+        assert_eq!(draft.diagnostics.as_deref(), Some(expected.as_str()));
         assert!(client::validate_details(&draft).is_ok());
         assert!(!controls.items.borrow().iter().any(|item|
             matches!(item.action, Action::Devices | Action::Device(_) | Action::Connection(_) | Action::Category(_))));
         controls.action(Action::Diagnostics);
         assert_eq!(controls.state.borrow().view, View::Diagnostics);
-        assert_eq!(controls.diagnostics(), report);
+        assert_eq!(controls.diagnostics(), expected);
         controls.action(Action::Back);
         controls.action(Action::ToggleDiagnostics);
         assert!(controls.draft().diagnostics.is_none());
@@ -2058,6 +2141,110 @@ mod tests {
         assert_eq!(controls.state.borrow().view, View::Success);
         assert!(controls.state.borrow().submitted);
         draft
+    }
+
+    #[test]
+    fn unknown_device_feedback_includes_all_interfaces_and_has_named_required_fields() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(Vec::new(), false);
+        let inventory = "HID interface inventory: complete\nVID/PID=24AE:1415\nVID/PID=046D:C52B\n";
+        controls.state.borrow_mut().inventory_report = Some(inventory.into());
+        controls.brand.set_text("Rapoo");
+        controls.model.set_text("VT1 PRO MAX V2");
+        controls.set_description("连接后没有电量，官方驱动可以显示。");
+        controls.rebuild();
+        for label in [text("设备品牌（必填）", "Brand (required)"), text("完整型号（必填）", "Full model (required)")] {
+            assert!(controls.labels.borrow().iter().any(|item| item.text == label));
+        }
+        assert_eq!(controls.state.borrow().connection, 3);
+        let preview = controls.diagnostics();
+        let draft = submit_offline(controls);
+        assert_eq!(draft.device.brand.as_deref(), Some("Rapoo"));
+        assert_eq!(draft.device.model.as_deref(), Some("VT1 PRO MAX V2"));
+        assert_eq!(draft.diagnostics.as_deref(), Some(preview.as_str()));
+        assert!(preview.contains("VID/PID=24AE:1415"));
+        assert!(preview.contains("VID/PID=046D:C52B"));
+    }
+
+    #[test]
+    fn editing_a_restored_draft_preserves_its_complete_diagnostics() {
+        for software in [false, true] {
+            let (_owner, _notice, dialog) = regression_dialog();
+            let controls = &dialog.controls;
+            if software { controls.state.borrow_mut().reopen_software(); }
+            else { controls.state.borrow_mut().reopen(Vec::new(), false); }
+            controls.brand.set_text("Rapoo");
+            controls.model.set_text("VT1");
+            controls.set_description("Battery disappears after the device sleeps.");
+            let original = "App: X-Battery test\nSelected connection: USB\nHID interface inventory\nVID/PID=24AE:1415\n";
+            let mut draft = controls.draft();
+            draft.diagnostics = Some(original.into());
+            let generation = controls.state.borrow_mut().begin_task(Task::Draft).unwrap();
+            controls.results.lock().unwrap().push((generation,
+                ResultMessage::Draft("pending-request".into(), Ok(draft))));
+            controls.complete();
+            controls.set_description("Battery disappears after every sleep and reconnect.");
+            controls.state.borrow_mut().edit_draft();
+            assert!(controls.state.borrow().restored_draft.is_none());
+            assert!(controls.inventory_ready());
+            controls.inventory_working.set(true);
+            let inventory_generation = controls.state.borrow().inventory_generation;
+            controls.results.lock().unwrap().push((inventory_generation,
+                ResultMessage::DeviceInventory("HID interface inventory\nVID/PID=046D:C52B\n".into())));
+            controls.complete();
+            controls.action(Action::ToggleDiagnostics);
+            assert!(controls.draft().diagnostics.is_none());
+            controls.action(Action::ToggleDiagnostics);
+            let preview = controls.diagnostics();
+            assert_eq!(preview, original);
+            assert_eq!(submit_offline(controls).diagnostics.as_deref(), Some(original));
+            controls.state.borrow_mut().new_form();
+            assert!(!controls.state.borrow().has_complete_diagnostics());
+            assert!(controls.state.borrow().inventory_report.is_none());
+        }
+    }
+
+    #[test]
+    fn detected_device_feedback_also_includes_other_hid_interfaces() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        let candidate = Candidate {
+            label: "Detected mouse".into(), battery: "75%".into(),
+            diagnostics: "Model: Detected mouse\nVID/PID: 24AE:1415\n".into(),
+            device: client::Device { name: "Detected mouse".into(), family: "mouse".into(),
+                connection: "USB".into(), brand: None, model: None },
+        };
+        controls.state.borrow_mut().reopen(vec![candidate], false);
+        controls.state.borrow_mut().inventory_report = Some(
+            "HID interface inventory\nVID/PID=24AE:1415\nVID/PID=046D:C52B\n".into());
+        controls.set_description("The detected mouse sometimes loses its battery reading.");
+        let preview = controls.diagnostics();
+        let draft = submit_offline(controls);
+        assert_eq!(draft.device.name, "Detected mouse");
+        assert_eq!(draft.diagnostics.as_deref(), Some(preview.as_str()));
+        assert!(preview.contains("VID/PID=046D:C52B"));
+    }
+
+    #[test]
+    fn inventory_collection_does_not_lock_editing_or_overwrite_a_newer_form() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(Vec::new(), false);
+        let old_generation = controls.state.borrow().inventory_generation;
+        controls.inventory_working.set(true);
+        assert!(Action::Manual.enabled(&controls.state.borrow()));
+        assert!(Action::ToggleDiagnostics.enabled(&controls.state.borrow()));
+        controls.state.borrow_mut().new_form();
+        controls.state.borrow_mut().inventory_report = Some("new interfaces".into());
+        controls.results.lock().unwrap().push((old_generation, ResultMessage::DeviceInventory("old interfaces".into())));
+        controls.complete();
+        assert_eq!(controls.state.borrow().inventory_report.as_deref(), Some("new interfaces"));
+        controls.state.borrow_mut().inventory_report = None;
+        assert!(!controls.inventory_ready());
+        controls.state.borrow_mut().attach_diagnostics = false;
+        assert!(controls.inventory_ready());
+        assert!(controls.draft().diagnostics.is_none());
     }
 
     #[test]
@@ -2837,6 +3024,7 @@ impl Dialog {
             description_count: Cell::new(0),
             applied: RefCell::new(Default::default()),
             scrollbar: Cell::new(None),
+            inventory_working: Cell::new(false),
         });
         let callback = c.clone();
         let handler = nwg::full_bind_event_handler(&c.window.handle, move |event, data, handle| {
@@ -3185,6 +3373,7 @@ impl Dialog {
         c.window.set_visible(true);
         c.window.set_focus();
         c.prepare_software_diagnostics();
+        c.prepare_inventory();
         if history && !c.state.borrow().busy() {
             c.work(Task::History, || ResultMessage::History(client::load_history()));
         }

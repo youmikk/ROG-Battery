@@ -2,6 +2,24 @@
 use std::fmt::Write;
 pub mod client;
 pub mod software;
+pub mod inventory;
+
+pub fn with_inventory(summary: &str, inventory: &str) -> String {
+    const LIMIT: usize = 20 * 1024;
+    const TRUNCATED: &str = "\nDiagnostic summary truncated to fit the report.\n";
+    let available = LIMIT.saturating_sub(inventory.len() + TRUNCATED.len() + 1);
+    let mut output = String::new();
+    for line in summary.split_inclusive('\n') {
+        if output.len() + line.len() > available {
+            output.push_str(TRUNCATED);
+            break;
+        }
+        output.push_str(line);
+    }
+    output.push('\n');
+    output.push_str(inventory);
+    output
+}
 
 #[derive(Clone)]
 pub struct Candidate {
@@ -14,7 +32,8 @@ pub struct Candidate {
 
 pub fn candidate(label: String, reading: &crate::device::DeviceReading,
     interface: Option<&crate::hid::HidInterface>, backend: Option<crate::backends::BackendId>,
-    connection: &str, family: crate::device::DeviceFamily) -> Candidate {
+    address: Option<u8>, connection: &str, family: crate::device::DeviceFamily,
+    measured: Option<std::time::Instant>, lifetime: std::time::Duration) -> Candidate {
     let family = family_code(family);
     let name = clean(&reading.name);
     let mut diagnostics = format!("App: X-Battery {}\nSystem: {}\nModel: {}\nType: {}\nConnection: {}\nBattery: {}\nReading: {:?}\nConnected: {}\n",
@@ -26,9 +45,10 @@ pub fn candidate(label: String, reading: &crate::device::DeviceReading,
             interface.input_len, interface.output_len, interface.feature_len);
         if let Some(backend) = backend {
             let _ = writeln!(diagnostics, "Provider: {}", backend.name());
-            diagnostics.push_str(&crate::backends::trace::render_selected(backend, interface.vendor_id, interface.product_id));
+            diagnostics.push_str(&crate::backends::trace::render_selected(backend, interface, address));
         }
     }
+    diagnostics.push_str(&crate::diagnostics::readings::report(reading, measured, lifetime));
     Candidate { label, battery: reading.battery_text(true), diagnostics,
         device: client::Device { name, family: family.into(), connection: connection.into(), brand: None, model: None } }
 }
@@ -278,6 +298,16 @@ fn append_probe_result(output: &mut String, target: &super::backends::Target,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_budget_preserves_inventory_and_marks_truncated_history() {
+        let inventory = format!("HID interface inventory\n{}", "VID/PID=24AE:1415\n".repeat(500));
+        let summary = "battery state change\n".repeat(1500);
+        let report = with_inventory(&summary, &inventory);
+        assert!(report.len() <= 20 * 1024);
+        assert!(report.contains("Diagnostic summary truncated"));
+        assert!(report.ends_with(&inventory));
+    }
     #[test]
     fn xinput_report_uses_slot_without_fabricated_usb_identity() {
         let target = crate::backends::xinput::target(1);

@@ -209,9 +209,10 @@ impl<C: Channel> Session<C> {
             reply_matches(reply, address, feature, fn_sw)
         });
         let Some(reply) = reply else {
-            trace::record(
+            trace::record_address(
                 &self.interface,
                 BackendId::Logitech,
+                address,
                 "query",
                 logical_feature,
                 function,
@@ -223,9 +224,10 @@ impl<C: Channel> Session<C> {
             return Err("HID++ 设备无应答".into());
         };
         let Some(payload) = hidpp_payload(&reply) else {
-            trace::record(
+            trace::record_address(
                 &self.interface,
                 BackendId::Logitech,
+                address,
                 "query",
                 logical_feature,
                 function,
@@ -238,9 +240,10 @@ impl<C: Channel> Session<C> {
         };
         if reply[2] == 0xff || reply[2] == 0x8f {
             self.last_protocol_error = Some((reply[2], reply.get(5).copied().unwrap_or(0)));
-            trace::record(
+            trace::record_address(
                 &self.interface,
                 BackendId::Logitech,
+                address,
                 "query",
                 logical_feature,
                 function,
@@ -254,9 +257,10 @@ impl<C: Channel> Session<C> {
                 code = reply.get(5).copied().unwrap_or(0)
             ));
         }
-        trace::record(
+        trace::record_address(
             &self.interface,
             BackendId::Logitech,
+            address,
             "query",
             logical_feature,
             function,
@@ -657,9 +661,10 @@ impl<C: Channel> Session<C> {
             Some(reply) => trace::Outcome::Rejected(u32::from(reply[5])),
             None => trace::Outcome::NoReply,
         };
-        trace::record(
+        trace::record_address(
             &self.interface,
             BackendId::Logitech,
+            address,
             "read-register",
             register,
             sub_id,
