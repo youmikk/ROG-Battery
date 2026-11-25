@@ -80,7 +80,12 @@ class FakeGithub {
       const rows = this.comments.filter(row => row.issue === Number(commentMatch[1]));
       return Response.json(rows.slice((page - 1) * 100, page * 100));
     }
-    if (url.pathname.endsWith("/issues")) return Response.json([...this.issues].reverse());
+    if (url.pathname.endsWith("/issues")) {
+      const page = Number(url.searchParams.get("page"));
+      const rows = [...this.issues].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)
+        || right.number - left.number);
+      return Response.json(rows.slice((page - 1) * 100, page * 100));
+    }
     const issueMatch = /\/issues\/(\d+)$/.exec(url.pathname);
     if (issueMatch) {
       const row = this.issues.find(issue => issue.number === Number(issueMatch[1]));
@@ -106,7 +111,7 @@ function setup() {
   let now = BASE_TIME;
   const coordinator = new FeedbackCoordinator({ storage }, env, { fetch: github.fetch, now: () => now });
   env.FEEDBACK = { idFromName: name => name, get: () => ({ fetch: request => coordinator.fetch(request) }) };
-  return { storage, bucket, github, env, coordinator, advance: ms => { now += ms; } };
+  return { storage, bucket, github, env, coordinator, now: () => now, advance: ms => { now += ms; } };
 }
 
 function request(path, data, { key, ip = IP, method = data === undefined ? "GET" : "POST", headers = {} } = {}) {
@@ -158,6 +163,37 @@ function assertIdle(coordinator) {
   assert.equal(coordinator.activeByIp.size, 0);
   assert.equal(coordinator.bodyBytes, 0);
   assert.equal(coordinator.queues.size, 0);
+}
+
+async function pendingRecovery(kind) {
+  const state = setup();
+  if (kind === "reply") await state.coordinator.fetch(request("/feedback", body()));
+  state.github.loseIssueResponse = kind === "issue";
+  state.github.loseCommentResponse = kind === "reply";
+  const retry = (coordinator = state.coordinator) => coordinator.fetch(kind === "issue"
+    ? request("/feedback", body())
+    : request("/feedback/123/replies", { schema: 1, requestId: UUID, body: "分页恢复测试。" }, { key: KEY }));
+  assert.equal((await retry()).status, 202);
+  const pathname = kind === "issue" ? "/repos/youmikk/X-Battery/issues" : "/repos/youmikk/X-Battery/issues/123/comments";
+  return { ...state, retry, recordKey: kind === "issue" ? `request:${UUID}` : `reply:123:${UUID}`,
+    restart: () => new FeedbackCoordinator({ storage: state.storage }, state.env, { fetch: state.github.fetch, now: state.now }),
+    pages: () => state.github.calls.filter(call => call.method === "GET" && new URL(call.url).pathname === pathname)
+      .map(call => Number(new URL(call.url).searchParams.get("page"))),
+    posts: () => state.github.calls.filter(call => call.method === "POST" && new URL(call.url).pathname === pathname),
+    append: count => {
+      for (let index = 0; index < count; index++) {
+        if (kind === "issue") {
+          const number = state.github.nextIssue++;
+          state.github.issues.push({ number, html_url: `https://github.com/youmikk/X-Battery/issues/${number}`,
+            body: "Unrelated issue", user: { login: "other" }, created_at: "2026-11-23T00:00:01Z" });
+        } else {
+          const id = 10000 + state.github.comments.length;
+          state.github.comments.push({ id, issue: 123, html_url: `https://github.com/youmikk/X-Battery/issues/123#issuecomment-${id}`,
+            body: "Unrelated reply", user: { login: "other" }, created_at: "2026-11-23T02:00:00Z" });
+        }
+      }
+    },
+  };
 }
 
 test("binds platform fetch to the global receiver for submissions and replies", async () => {
@@ -814,4 +850,160 @@ test("oversized input returns promptly even if stream cancellation never resolve
     headers: { "Content-Type": "application/json" }, body: stream, duplex: "half" });
   await assert.rejects(promptly(readJson(oversized, 5)), error => error.status === 413);
   assert.equal(cancelled, true);
+});
+
+for (const kind of ["issue", "reply"]) {
+  test(`${kind} recovery scans beyond 500 rows in bounded batches across coordinator restarts`, async () => {
+    const state = await pendingRecovery(kind);
+    state.append(1200);
+    assert.equal((await state.storage.get(state.recordKey)).recoveryPage, undefined);
+    state.advance(6000);
+    const pending = await state.retry();
+    assert.equal(pending.status, 202);
+    assert.equal(pending.headers.get("Retry-After"), "5");
+    assert.deepEqual(state.pages(), kind === "issue" ? [1, 2, 3, 4, 5] : [13, 12, 11, 10, 9]);
+    const first = await state.storage.get(state.recordKey);
+    assert.equal(first.recoveryPage, kind === "issue" ? 6 : 8);
+    assert.equal(first.checks, 0);
+    assert.ok(Buffer.byteLength(JSON.stringify(first)) < 2000);
+    if (kind === "reply") state.append(600);
+    const restarted = state.restart();
+    state.advance(5000);
+    await restarted.alarm();
+    assert.deepEqual(state.pages().slice(5), kind === "issue" ? [6, 7, 8, 9, 10] : [8, 7, 6, 5, 4]);
+    assert.equal((await state.storage.get(state.recordKey)).recoveryPage, kind === "issue" ? 11 : 3);
+    state.advance(5000);
+    const result = await state.retry(state.restart());
+    assert.equal(result.status, 200);
+    const receipt = await result.json();
+    assert.equal(kind === "issue" ? receipt.number : receipt.id, kind === "issue" ? 123 : 1000);
+    assert.deepEqual(state.pages().slice(10), kind === "issue" ? [11, 12, 13] : [3, 2, 1]);
+    const complete = await state.storage.get(state.recordKey);
+    assert.equal(complete.state, "complete");
+    assert.equal(complete.recoveryPage, undefined);
+    assert.equal(state.posts().length, 1);
+    if (kind === "reply") {
+      assert.equal(state.github.calls.filter(call => call.method === "GET" && call.url.endsWith("/issues/123")).length, 1);
+    }
+  });
+
+  for (const failure of ["network", "invalid page", "checkpoint storage"]) {
+    test(`${kind} recovery resumes the unconfirmed page after ${failure} failure`, async () => {
+      const state = await pendingRecovery(kind);
+      state.append(1200);
+      const failedPage = kind === "issue" ? 3 : 11;
+      let fail = true;
+      if (failure === "checkpoint storage") {
+        const put = state.storage.put.bind(state.storage);
+        state.storage.put = async (key, value) => {
+          if (fail && key === state.recordKey && value.recoveryPage === (kind === "issue" ? 4 : 10)) {
+            fail = false;
+            throw new Error("Checkpoint failed before storage accepted it");
+          }
+          return put(key, value);
+        };
+      } else {
+        const fetch = state.coordinator.github.fetch;
+        state.coordinator.github.fetch = async (input, init) => {
+          const response = await fetch(input, init);
+          if (fail && Number(new URL(input).searchParams.get("page")) === failedPage) {
+            fail = false;
+            if (failure === "network") throw new Error("Page response lost");
+            return Response.json({ message: "Not a page" });
+          }
+          return response;
+        };
+      }
+      state.advance(6000);
+      assert.equal((await state.retry()).status, 202);
+      assert.equal(fail, false);
+      assert.deepEqual(state.pages(), kind === "issue" ? [1, 2, 3] : [13, 12, 11]);
+      assert.equal((await state.storage.get(state.recordKey)).recoveryPage, failedPage);
+      const before = state.pages().length;
+      const restarted = state.restart();
+      let result;
+      for (let batch = 0; batch < 3; batch++) {
+        state.advance(3600000);
+        const previous = state.pages().length;
+        result = await state.retry(restarted);
+        assert.ok(state.pages().length - previous <= 5);
+        if (result.status === 200) break;
+        assert.equal(result.status, 202);
+      }
+      assert.equal(state.pages()[before], failedPage);
+      assert.equal(result.status, 200);
+      assert.equal(state.posts().length, 1);
+    });
+  }
+
+  test(`${kind} recovery retries the matching page if durable completion fails`, async () => {
+    const state = await pendingRecovery(kind);
+    state.append(501);
+    state.advance(6000);
+    assert.equal((await state.retry()).status, 202);
+    const matchingPage = kind === "issue" ? 6 : 1;
+    assert.equal((await state.storage.get(state.recordKey)).recoveryPage, matchingPage);
+    const put = state.storage.put.bind(state.storage);
+    let fail = true;
+    state.storage.put = async (key, value) => {
+      if (fail && key === state.recordKey && value.state === "complete") {
+        fail = false;
+        throw new Error("Completion could not be persisted");
+      }
+      return put(key, value);
+    };
+    state.advance(5000);
+    assert.equal((await state.retry()).status, 202);
+    assert.equal(fail, false);
+    assert.equal((await state.storage.get(state.recordKey)).recoveryPage, matchingPage);
+    state.advance(3600000);
+    assert.equal((await state.retry(state.restart())).status, 200);
+    assert.deepEqual(state.pages().slice(-2), [matchingPage, matchingPage]);
+    assert.equal(state.posts().length, 1);
+  });
+
+  test(`${kind} recovery starts a new pass after exhaustion to find a late visible receipt`, async () => {
+    const state = await pendingRecovery(kind);
+    const rows = kind === "issue" ? state.github.issues : state.github.comments;
+    const receipt = rows.pop();
+    state.append(650);
+    state.advance(6000);
+    assert.equal((await state.retry()).status, 202);
+    state.advance(5000);
+    assert.equal((await state.retry()).status, 202);
+    const exhausted = await state.storage.get(state.recordKey);
+    assert.equal(exhausted.recoveryPage, null);
+    assert.equal(exhausted.checks, 1);
+    rows.unshift(receipt);
+    const restarted = state.restart();
+    state.advance(3600000);
+    const before = state.pages().length;
+    assert.equal((await state.retry(restarted)).status, 202);
+    assert.equal(state.pages()[before], kind === "issue" ? 1 : 7);
+    state.advance(5000);
+    assert.equal((await state.retry(restarted)).status, 200);
+    assert.equal(state.posts().length, 1);
+  });
+}
+
+test("one alarm bounds recovery to three records and five pages per record", async () => {
+  const state = await pendingRecovery("issue");
+  const keys = [state.recordKey];
+  for (let index = 0; index < 3; index++) {
+    const requestId = `45a526bf-b747-4d42-81e8-d1036d01f98${index}`;
+    state.github.loseIssueResponse = true;
+    assert.equal((await state.coordinator.fetch(request("/feedback", body({ requestId }),
+      { ip: index.toString(16).repeat(64) }))).status, 202);
+    keys.push(`request:${requestId}`);
+  }
+  state.append(1200);
+  state.advance(6000);
+  await state.coordinator.alarm();
+  assert.equal(state.pages().length, 15);
+  const records = await Promise.all(keys.map(key => state.storage.get(key)));
+  assert.equal(records.filter(record => record.recoveryPage === 6).length, 3);
+  assert.equal(records.filter(record => record.recoveryPage === undefined).length, 1);
+  assert.ok(records.every(record => record.state === "pending"));
+  assert.equal(state.storage.scheduled, state.now() + 5000);
+  assert.equal(state.posts().length, 4);
 });

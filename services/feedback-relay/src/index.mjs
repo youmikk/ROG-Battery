@@ -273,7 +273,7 @@ export class FeedbackCoordinator {
       const issue = await this.storage.get(`issue:${record.number}`);
       if (issue) await this.storage.put(`issue:${record.number}`, { owner: issue.owner, createdAt: issue.createdAt });
     }
-    const { title, body, ...minimal } = record;
+    const { title, body, recoveryPage, ...minimal } = record;
     await this.storage.put(recordKey, { ...minimal, state: "complete", receipt, completedAt: this.now() });
   }
 
@@ -288,13 +288,21 @@ export class FeedbackCoordinator {
   }
 
   async reconcile(recordKey, record) {
+    let continuing = false;
     try {
-      const receipt = record.kind === "issue" ? await this.github.findIssue(record.marker, record.createdAt)
-        : await this.github.findReply(record.number, record.marker);
+      const checkpoint = async recoveryPage => {
+        const updated = { ...record, recoveryPage };
+        await this.storage.put(recordKey, updated);
+        record = updated;
+      };
+      const receipt = record.kind === "issue"
+        ? await this.github.findIssue(record.marker, record.createdAt, record.recoveryPage, checkpoint)
+        : await this.github.findReply(record.number, record.marker, record.recoveryPage, checkpoint);
       if (receipt) { await this.complete(recordKey, record, receipt); return receipt; }
+      continuing = record.recoveryPage !== null;
     } catch { /* Keep the journal; no blind retry after an uncertain write. */ }
-    const checks = record.checks + 1;
-    const nextCheckAt = this.now() + Math.min(HOUR, 5_000 * 2 ** Math.min(checks, 10));
+    const checks = continuing ? record.checks : record.checks + 1;
+    const nextCheckAt = this.now() + (continuing ? 5_000 : Math.min(HOUR, 5_000 * 2 ** Math.min(checks, 10)));
     await this.storage.put(recordKey, { ...record, state: "pending", checks, nextCheckAt });
     await this.schedule(nextCheckAt);
     return null;

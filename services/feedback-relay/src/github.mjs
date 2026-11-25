@@ -1,5 +1,7 @@
 import { API_ORIGIN, REPOSITORY, HttpError, checkedIssueNumber, checkGithubUrl, encoder } from "./security.mjs";
 
+const RECOVERY_PAGES = 5;
+
 export class GithubRejected extends Error {
   constructor(status) { super("GitHub rejected the request."); this.status = status; }
 }
@@ -62,17 +64,21 @@ export class Github {
     return this.commentReceipt(value, number);
   }
 
-  async findIssue(marker, since) {
+  async findIssue(marker, since, startPage, checkpoint = async () => {}) {
     // Do not depend on GitHub Search indexing to recover an interrupted write.
     const threshold = since - 60_000;
-    for (let page = 1; page <= 5; page++) {
+    let page = Number.isSafeInteger(startPage) && startPage > 0 ? startPage : 1;
+    for (let scanned = 0; scanned < RECOVERY_PAGES; scanned++) {
       const rows = await this.request(`/issues?state=all&sort=created&direction=desc&per_page=100&page=${page}`);
       if (!Array.isArray(rows)) throw new Error("Invalid issue list.");
       for (const row of rows) {
         if (!row.pull_request && this.authored(row) && typeof row.body === "string"
           && row.body.includes(marker)) return this.issueReceipt(row);
       }
-      if (rows.length < 100 || rows.some(row => Date.parse(row.created_at) < threshold)) return null;
+      const finished = rows.length < 100 || rows.some(row => Date.parse(row.created_at) < threshold);
+      await checkpoint(finished ? null : page + 1);
+      if (finished) return null;
+      page++;
     }
     return null;
   }
@@ -96,11 +102,25 @@ export class Github {
     return { comments, truncated: first > 1 };
   }
 
-  async findReply(number, marker) {
-    const issue = await this.issue(number);
-    const { comments } = await this.recentComments(number, issue.comments ?? 0, 5);
-    const found = comments.find(row => this.authored(row) && typeof row.body === "string" && row.body.includes(marker));
-    return found ? this.commentReceipt(found, number) : null;
+  async findReply(number, marker, startPage, checkpoint = async () => {}) {
+    let page = startPage;
+    if (!Number.isSafeInteger(page) || page < 1) {
+      const issue = await this.issue(number);
+      const count = issue.comments ?? 0;
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error("Invalid comment count.");
+      page = Math.max(1, Math.ceil(count / 100));
+      await checkpoint(page);
+    }
+    for (let scanned = 0; scanned < RECOVERY_PAGES; scanned++) {
+      const rows = await this.request(`/issues/${number}/comments?per_page=100&page=${page}`);
+      if (!Array.isArray(rows)) throw new Error("Invalid comment list.");
+      const found = rows.find(row => this.authored(row) && typeof row.body === "string" && row.body.includes(marker));
+      if (found) return this.commentReceipt(found, number);
+      await checkpoint(page === 1 ? null : page - 1);
+      if (page === 1) return null;
+      page--;
+    }
+    return null;
   }
 
   async thread(number) {
