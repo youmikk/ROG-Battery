@@ -201,6 +201,7 @@ fn usb_group_with(interface: &HidInterface, mut instance: u32,
 }
 
 fn usb_group(interface: &HidInterface) -> Option<String> {
+    if interface.serial.is_empty() { return None; }
     usb_group_with(interface, interface_devnode(&interface.path)?, |instance| {
         let mut buffer = [0u16; MAX_DEVICE_ID_LEN];
         if unsafe { CM_Get_Device_IDW(instance, buffer.as_mut_ptr(), buffer.len() as u32, 0) } != CR_SUCCESS {
@@ -216,8 +217,10 @@ fn usb_group(interface: &HidInterface) -> Option<String> {
 
 fn target_for(interface: &HidInterface, physical_group: Option<&str>) -> Target {
     let mut target = Target::new(BackendId::StandardHid, interface, 0);
-    let identity = physical_group.map_or_else(|| format!("path:{}", interface.path.to_ascii_lowercase()),
-        |group| format!("physical:{}", group.to_ascii_lowercase()));
+    let identity = physical_group.filter(|_| !interface.serial.is_empty())
+        .map_or_else(|| format!("path:{}", interface.path.to_ascii_lowercase()),
+            |group| format!("physical:{}:{}:serial:{}:{}", group.len(), group.to_ascii_lowercase(),
+                interface.serial.len(), interface.serial));
     target.key = crate::device::stable_key(&format!("Standard HID:{:04x}:{:04x}:{identity}",
         interface.vendor_id, interface.product_id));
     target
@@ -472,6 +475,48 @@ mod tests {
         let second = target_for(&interface("receiver-b-col01"), Some(r"usb\vid_1234&pid_5678\second"));
         assert_eq!(first.key, sibling.key);
         assert_ne!(first.key, second.key);
+    }
+
+    #[test]
+    fn logical_slots_with_one_usb_parent_keep_full_serials_or_exact_paths() {
+        let parent = Some(r"usb\vid_1234&pid_5678\shared-receiver");
+        let mut first = interface("slot-a-col01");
+        first.serial = "ABC-1".into();
+        let mut sibling = first.clone();
+        sibling.path = "slot-a-col02".into();
+        assert_eq!(target_for(&first, parent).key, target_for(&sibling, parent).key);
+        let mut second = interface("slot-b-col01");
+        for serial in ["ABC-2", "abc-1", "ABC1", " ABC-1 "] {
+            second.serial = serial.into();
+            assert_ne!(target_for(&first, parent).key, target_for(&second, parent).key);
+        }
+        first.serial.clear();
+        second.serial.clear();
+        assert_ne!(target_for(&first, parent).key, target_for(&second, parent).key);
+        assert_eq!(target_for(&first, parent).key, target_for(&first, None).key);
+        first.path = second.path.to_ascii_uppercase();
+        assert_eq!(target_for(&first, parent).key, target_for(&second, parent).key);
+    }
+
+    #[test]
+    fn cache_does_not_share_samples_between_distinct_serials_on_one_receiver() {
+        let mut cache = Cache::default();
+        cache.observe(&report(&["slot-a", "slot-b"], &[]));
+        let mut first = interface("slot-a");
+        let mut second = interface("slot-b");
+        first.serial = "ABC-1".into();
+        second.serial = "ABC-2".into();
+        let parent = Some(r"usb\vid_1234&pid_5678\shared-receiver");
+        let first = target_for(&first, parent);
+        let second = target_for(&second, parent);
+        let first_lease = register(&mut cache, &first);
+        let second_lease = register(&mut cache, &second);
+        let now = Instant::now();
+        let first_percent = normalize_percent(18, 0, 100).unwrap();
+        cache.sample(&first_lease, Some(first_percent), now).unwrap();
+        assert_eq!(cache.sample(&second_lease, None, now).unwrap(), None);
+        cache.sample(&second_lease, normalize_percent(88, 0, 100), now).unwrap();
+        assert_eq!(cache.sample(&first_lease, None, now).unwrap(), Some((first_percent, now)));
     }
 
     fn report(paths: &[&str], skipped: &[&str]) -> crate::hid::EnumerateReport {
