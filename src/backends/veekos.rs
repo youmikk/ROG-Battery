@@ -1,5 +1,8 @@
 //! Veekos Shine 60 2.4G receiver status page; read-only Feature access.
 use super::*;
+use crate::win32::to_wide;
+use std::collections::BTreeMap;
+use winapi::um::cfgmgr32::{CM_Get_Device_IDW, CM_Get_Parent, CM_Locate_DevNodeW};
 
 pub struct VeekosShine60;
 
@@ -22,14 +25,73 @@ fn report_id(api: &HidApi, i: &HidInterface) -> Option<u8> {
         descriptor.feature_reports(i, REPORT_BYTES, &[*id], &[*id]))
 }
 
-fn candidates(api: &HidApi, interfaces: &[HidInterface]) -> Vec<(Target, u8)> {
-    let matches: Vec<_> = interfaces
-        .iter()
-        .filter_map(|interface| report_id(api, interface).map(|id| (interface, id)))
-        .collect();
-    let [(interface, id)] = matches.as_slice() else {
-        return Vec::new();
-    };
+fn device_instance(interface: &HidInterface) -> Option<String> {
+    if !management(interface) { return None; }
+    let path = interface.path.to_ascii_lowercase();
+    let parts: Vec<_> = path.split('#').collect();
+    if parts.len() != 4 || parts[0] != r"\\?\hid" || parts[2].is_empty()
+        || parts[3].is_empty() || path.contains('\0')
+        || parts[1].contains('\\') || parts[2].contains('\\') { return None; }
+    let fields: Vec<_> = parts[1].split('&').collect();
+    for required in ["vid_3151", "pid_5026", "mi_02"] {
+        if fields.iter().filter(|field| **field == required).count() != 1 { return None; }
+    }
+    for prefix in ["vid_", "pid_", "mi_"] {
+        if fields.iter().filter(|field| field.starts_with(prefix)).count() != 1 { return None; }
+    }
+    let collections: Vec<_> = fields.iter().filter_map(|field| field.strip_prefix("col")).collect();
+    if collections.len() > 1 || collections.iter().any(|index|
+        index.len() != 2 || !index.bytes().all(|byte| byte.is_ascii_hexdigit())) { return None; }
+    Some(format!("hid\\{}\\{}", parts[1], parts[2]))
+}
+
+fn physical_parent(name: &str) -> bool {
+    let parts: Vec<_> = name.split('\\').collect();
+    if parts.len() != 3 || parts[0] != "usb" || parts[2].is_empty() || name.contains('\0') {
+        return false;
+    }
+    let fields: Vec<_> = parts[1].split('&').collect();
+    fields.len() == 2 && fields.contains(&"vid_3151") && fields.contains(&"pid_5026")
+}
+
+fn usb_parent(interface: &HidInterface) -> Option<String> {
+    let mut instance = to_wide(&device_instance(interface)?);
+    let mut node = 0;
+    if unsafe { CM_Locate_DevNodeW(&mut node, instance.as_mut_ptr(), 0) } != 0 { return None; }
+    for _ in 0..8 {
+        let mut parent = 0;
+        if unsafe { CM_Get_Parent(&mut parent, node, 0) } != 0 { return None; }
+        let mut buffer = [0u16; 512];
+        if unsafe { CM_Get_Device_IDW(parent, buffer.as_mut_ptr(), buffer.len() as u32, 0) } != 0 {
+            return None;
+        }
+        let length = buffer.iter().position(|unit| *unit == 0)?;
+        let name = String::from_utf16(&buffer[..length]).ok()?.to_ascii_lowercase();
+        if physical_parent(&name) { return Some(name); }
+        node = parent;
+    }
+    None
+}
+
+fn select_with<'a>(interfaces: &'a [HidInterface],
+    mut parent: impl FnMut(&HidInterface) -> Option<String>,
+    mut proof: impl FnMut(&HidInterface) -> Option<u8>) -> Vec<(&'a HidInterface, u8)> {
+    let mut groups: BTreeMap<String, Vec<&HidInterface>> = BTreeMap::new();
+    for interface in interfaces.iter().filter(|interface| management(interface)) {
+        if device_instance(interface).is_none() { return Vec::new(); }
+        let Some(key) = parent(interface).map(|key| key.to_ascii_lowercase())
+            .filter(|key| physical_parent(key)) else { return Vec::new(); };
+        groups.entry(key).or_default().push(interface);
+    }
+    let mut selected = Vec::new();
+    for members in groups.into_values() {
+        let [interface] = members.as_slice() else { continue; };
+        if let Some(report_id) = proof(interface) { selected.push((*interface, report_id)); }
+    }
+    selected
+}
+
+fn target(interface: &HidInterface) -> Target {
     let mut target = Target::new(BackendId::VeekosShine60, interface, 0);
     target.name = "Veekos Shine 60".into();
     target.family = DeviceFamily::Keyboard;
@@ -39,7 +101,12 @@ fn candidates(api: &HidApi, interfaces: &[HidInterface]) -> Vec<(Target, u8)> {
         interface.path
     ));
     target.verified_identity = true;
-    vec![(target, *id)]
+    target
+}
+
+fn candidates(api: &HidApi, interfaces: &[HidInterface]) -> Vec<(Target, u8)> {
+    select_with(interfaces, usb_parent, |interface| report_id(api, interface))
+        .into_iter().map(|(interface, report_id)| (target(interface), report_id)).collect()
 }
 
 fn decode(frame: &[u8], id: u8) -> Option<u8> {
@@ -120,6 +187,88 @@ mod tests {
         let mut frame = vec![0; usize::from(REPORT_BYTES)];
         frame[..4].copy_from_slice(&[id, 0, level, 100]);
         frame
+    }
+
+    #[test]
+    fn independent_receivers_are_selected_in_either_enumeration_order() {
+        let first = interface();
+        let mut second = first.clone();
+        second.path = second.path.replace("&fixture&", "&second&");
+        for interfaces in [vec![first.clone(), second.clone()], vec![second.clone(), first.clone()]] {
+            let selected = select_with(&interfaces, |interface| {
+                let instance = if interface.path == first.path { "first" } else { "second" };
+                Some(format!(r"usb\vid_3151&pid_5026\{instance}"))
+            }, |_| Some(0x83));
+            assert_eq!(selected.len(), 2);
+            assert_ne!(target(selected[0].0).key, target(selected[1].0).key);
+        }
+    }
+
+    #[test]
+    fn ambiguous_physical_receiver_does_not_suppress_an_independent_receiver() {
+        let first = interface();
+        let mut sibling = first.clone();
+        sibling.path = sibling.path.replace("col01", "col02").replace("&fixture&", "&alias&");
+        let mut independent = first.clone();
+        independent.path = independent.path.replace("&fixture&", "&independent&");
+        let interfaces = [first.clone(), sibling, independent.clone()];
+        let selected = select_with(&interfaces, |interface| {
+            Some(if interface.path == independent.path {
+                r"usb\vid_3151&pid_5026\independent"
+            } else if interface.path == first.path {
+                r"USB\VID_3151&PID_5026\AMBIGUOUS"
+            } else {
+                r"usb\vid_3151&pid_5026\ambiguous"
+            }.into())
+        }, |interface| {
+            assert_eq!(interface.path, independent.path);
+            Some(0)
+        });
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.path, independent.path);
+        assert_eq!(selected[0].1, 0);
+    }
+
+    #[test]
+    fn failed_report_proof_is_isolated_after_physical_grouping() {
+        let first = interface();
+        let mut second = first.clone();
+        second.path = second.path.replace("&fixture&", "&second&");
+        let interfaces = [first.clone(), second.clone()];
+        let selected = select_with(&interfaces, |interface| Some(format!(
+            r"usb\vid_3151&pid_5026\{}", if interface.path == first.path { "first" } else { "second" }
+        )), |interface| (interface.path == second.path).then_some(0x83));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.path, second.path);
+    }
+
+    #[test]
+    fn unresolved_or_nonphysical_parent_never_assumes_collection_independence() {
+        let first = interface();
+        let mut second = first.clone();
+        second.path = second.path.replace("&fixture&", "&second&");
+        for invalid in [None, Some(r"usb\vid_3151&pid_5026&mi_02\second"),
+            Some(r"usb\vid_3151&pid_5029\second"), Some(r"usb\vid_3151&pid_5026\")] {
+            assert!(select_with(&[first.clone(), second.clone()], |interface| {
+                if interface.path == first.path { Some(r"usb\vid_3151&pid_5026\first".into()) }
+                else { invalid.map(str::to_string) }
+            }, |_| panic!("unresolved topology must not reach report proof")).is_empty());
+        }
+    }
+
+    #[test]
+    fn device_instance_requires_the_exact_reviewed_usb_interface() {
+        let original = interface();
+        assert!(device_instance(&original).is_some());
+        for path in [original.path.replace("mi_02", "mi_020"),
+            original.path.replace("pid_5026", "pid_5029"),
+            original.path.replace("col01", "colGG"),
+            original.path.replace("mi_02", "mi_02&mi_03"),
+            original.path.replace("&fixture&", "&fixture\\other&")] {
+            let mut wrong = original.clone();
+            wrong.path = path;
+            assert!(device_instance(&wrong).is_none());
+        }
     }
 
     #[test]
