@@ -416,33 +416,7 @@ fn migrate_history_at(source: &Path, target: &Path, now_sec: i64) -> Result<Devi
 
 /// 同目录临时文件写完并刷盘后替换目标，读者只会看到替换前或替换后的完整文件。
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        crate::paths::ensure_dir(parent)?;
-    }
-    let mut allocated = None;
-    for _ in 0..16 {
-        let mut name = path.as_os_str().to_owned();
-        name.push(format!(".tmp-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
-        let temp = PathBuf::from(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&temp) {
-            Ok(file) => { allocated = Some((temp, file)); break; }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("创建历史临时文件 {} 失败：{error}", temp.display())),
-        }
-    }
-    let (temp, mut file) = allocated.ok_or("无法创建历史临时文件")?;
-    let written = file.write_all(bytes).and_then(|_| file.sync_all());
-    drop(file);
-    let result = written.map_err(|error| format!("写入历史临时文件 {} 失败：{error}", temp.display()))
-        .and_then(|_| {
-            crate::paths::replace_file(&temp, path)
-                .map_err(|error| format!("替换历史文件 {} 失败：{error}", path.display()))
-        });
-    if result.is_err() { let _ = std::fs::remove_file(temp); }
-    result
+    crate::paths::write_atomic(path, bytes).map_err(|error| format!("保存历史记录失败：{error}"))
 }
 
 // ==================== 跨进程互斥 ====================

@@ -160,6 +160,8 @@ pub fn replace_file(source: &std::path::Path, target: &std::path::Path) -> std::
     let destination = parent.join(name);
     let source: Vec<u16> = physical.as_os_str().encode_wide().chain(Some(0)).collect();
     let target: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+    static REPLACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = REPLACE_LOCK.lock().map_err(|_| std::io::Error::other("Atomic replacement lock unavailable"))?;
     if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(),
         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
         return Err(std::io::Error::last_os_error());
@@ -169,24 +171,34 @@ pub fn replace_file(source: &std::path::Path, target: &std::path::Path) -> std::
 
 /// 写入同目录临时文件后原子替换，失败时保留目标。
 pub fn write_atomic(p: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() {
             ensure_dir(parent)?;
         }
     }
-    let mut tmp = p.to_path_buf().into_os_string();
-    tmp.push(format!(".tmp{}", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-
-    if let Err(e) = std::fs::write(&tmp, bytes) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("写临时文件 {} 失败：{e}", tmp.display()));
+    let mut allocated = None;
+    for _ in 0..16 {
+        let mut name = p.as_os_str().to_owned();
+        name.push(format!(".tmp-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        let temporary = PathBuf::from(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary) {
+            Ok(file) => { allocated = Some((temporary, file)); break; },
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("创建临时文件 {} 失败：{error}", temporary.display())),
+        }
     }
-    if let Err(e) = replace_file(&tmp, p) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("替换 {} 失败：{e}", p.display()));
+    let (temporary, mut file) = allocated.ok_or("无法创建唯一临时文件")?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = written.map_err(|error| format!("写临时文件 {} 失败：{error}", temporary.display()))
+        .and_then(|()| replace_file(&temporary, p).map_err(|error| format!("替换 {} 失败：{error}", p.display())));
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
     }
-    Ok(())
+    result
 }
 
 /// 把用户给的路径解析成绝对路径。
@@ -339,6 +351,44 @@ mod tests {
         assert_eq!(cached, Some(None));
         assert!(!pointer.exists());
         assert_eq!(std::fs::read(default).unwrap(), b"updated");
+    }
+
+    #[test]
+    fn concurrent_atomic_writers_never_share_or_truncate_each_others_temporary_files() {
+        let scratch = Scratch::new();
+        let target = scratch.0.join("settings.ini");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        std::thread::scope(|scope| {
+            for writer in 1..=8u8 {
+                let target = &target;
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    let payload = vec![writer; 65536];
+                    barrier.wait();
+                    for _ in 0..4 { write_atomic(target, &payload).unwrap(); }
+                });
+            }
+        });
+        let contents = std::fs::read(&target).unwrap();
+        assert_eq!(contents.len(), 65536);
+        assert!((1..=8).contains(&contents[0]));
+        assert!(contents.iter().all(|byte| *byte == contents[0]));
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_atomic_write_preserves_existing_data_and_removes_only_its_own_temporary_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let scratch = Scratch::new();
+        let target = scratch.0.join("settings.ini");
+        std::fs::write(&target, b"original").unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(winapi::um::winnt::FILE_SHARE_READ).open(&target).unwrap();
+        assert!(write_atomic(&target, b"replacement").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+        drop(held);
+        write_atomic(&target, b"replacement").unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"replacement");
     }
 
 }
