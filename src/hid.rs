@@ -282,30 +282,24 @@ fn probe_interface(hid: &HidApi, path: &str) -> Result<HidInterface, String> {
 }
 
 fn read_hid_string(hid: &HidApi, h: Handle, which: u8) -> String {
-    let mut buf = vec![0u16; 256];
-    let cap = (buf.len() * 2) as u32;
-    let ok = unsafe {
+    read_hid_string_with(which, |which, buf, cap| unsafe {
         if which == 0 {
             (hid.get_product_string)(h, buf.as_mut_ptr(), cap)
         } else {
             (hid.get_serial_number_string)(h, buf.as_mut_ptr(), cap)
         }
-    };
+    })
+}
+
+fn read_hid_string_with(which: u8, read: impl FnOnce(u8, &mut [u16], u32) -> u8) -> String {
+    let mut buf = vec![0u16; 256];
+    let cap = (buf.len() * 2) as u32;
+    let ok = read(which, &mut buf, cap);
     if ok == 0 {
         return String::new();
     }
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    let s = String::from_utf16_lossy(&buf[..end]).trim().to_string();
-
-    // 只对序列号做清洗（产品名没观察到这个问题，不动它）
-    if which == 1 {
-        let leading: String = s
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric())
-            .collect();
-        return leading;
-    }
-    s
+    String::from_utf16_lossy(&buf[..end]).trim().to_string()
 }
 
 // ---------------- 打开的设备 ----------------
@@ -976,6 +970,57 @@ fn protocol_input(mut frame: Vec<u8>, report_id: Option<u8>, capacity: usize) ->
         frame.remove(0);
     }
     Some(frame)
+}
+
+#[cfg(test)]
+mod string_tests {
+    use super::*;
+    use crate::backends::{BackendId, Target};
+
+    fn read(value: &str, which: u8) -> String {
+        read_hid_string_with(which, |selected, buffer, capacity| {
+            assert_eq!(selected, which);
+            assert_eq!(capacity, 512);
+            let value = to_wide(value);
+            buffer[..value.len()].copy_from_slice(&value);
+            1
+        })
+    }
+
+    #[test]
+    fn distinct_serial_suffixes_produce_distinct_standard_hid_keys() {
+        let mut interface = HidInterface {
+            path: "first".into(), vendor_id: 1, product_id: 2,
+            usage_page: 1, usage: 2, input_len: 64, output_len: 0, feature_len: 0,
+            product: String::new(), serial: read("ABC-1", 1),
+        };
+        let first = Target::new(BackendId::StandardHid, &interface, 0);
+        interface.path = "second".into();
+        interface.serial = read("ABC-2", 1);
+        let second = Target::new(BackendId::StandardHid, &interface, 0);
+        assert_ne!(first.key, second.key);
+        assert_eq!(first.hid().unwrap().serial, "ABC-1");
+        assert_eq!(second.hid().unwrap().serial, "ABC-2");
+    }
+
+    #[test]
+    fn descriptor_strings_preserve_punctuation_and_unicode() {
+        for which in [0, 1] {
+            for value in ["ABC-1", "ABC_2", "ABC.3", "SN:42/7", "设备-四"] {
+                assert_eq!(read(&format!("  {value}  "), which), value);
+            }
+        }
+    }
+
+    #[test]
+    fn descriptor_strings_stop_at_nul_and_ignore_failed_reads() {
+        assert_eq!(read("ABC\0discarded", 1), "ABC");
+        assert_eq!(read("", 1), "");
+        assert_eq!(read_hid_string_with(1, |_, buffer, _| {
+            buffer[0] = b'A' as u16;
+            0
+        }), "");
+    }
 }
 
 #[cfg(test)]
