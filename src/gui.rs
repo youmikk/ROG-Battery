@@ -2023,6 +2023,8 @@ struct UiEnv<'a> {
     name_dialog: &'a crate::ui::device_name::Dialog,
     feedback_dialog: &'a crate::ui::feedback::Dialog,
     store: &'a StoreUpdates,
+    save_settings: &'a dyn Fn(&Settings) -> Result<(), String>,
+    notifications_supported: fn() -> bool,
 }
 
 impl<'a> UiEnv<'a> {
@@ -2052,24 +2054,28 @@ impl<'a> UiEnv<'a> {
         lock_shared(self.shared).cfg.clone()
     }
 
-    /// 改一项本地设置并立刻落盘，同时让界面用上新值。
-    fn set_cfg(&self, f: impl FnOnce(&mut Settings)) {
+    fn set_cfg(&self, f: impl FnOnce(&mut Settings)) -> Result<(), String> {
         let mut shared = lock_shared(self.shared);
         if shared.store_update_pending {
             drop(shared);
-            self.say(crate::ui::feedback::text("更新准备期间暂时不能修改设置。", "Settings cannot be changed while preparing an update."));
-            return;
+            let error = crate::ui::feedback::text("更新准备期间暂时不能修改设置。", "Settings cannot be changed while preparing an update.").to_string();
+            self.say(error.clone());
+            return Err(error);
         }
         let mut snapshot = shared.cfg.clone();
         f(&mut snapshot);
-        if let Err(e) = settings::save(&snapshot) {
+        if let Err(error) = (self.save_settings)(&snapshot) {
             drop(shared);
-            self.say(crate::trf!("✘ 保存设置失败：{e}", e = e));
-        } else {
-            shared.cfg = snapshot;
-            shared.sort_readings();
-            crate::i18n::apply(shared.cfg.language);
+            let error = crate::trf!("✘ 保存设置失败：{e}", e = error);
+            self.say(error.clone());
+            return Err(error);
         }
+        shared.cfg = snapshot;
+        shared.sort_readings();
+        let language = shared.cfg.language;
+        drop(shared);
+        crate::i18n::apply(language);
+        Ok(())
     }
 
     fn submit(&self, cmd: Cmd) -> bool {
@@ -2159,11 +2165,11 @@ fn handle_act(a: Act, env: &UiEnv) {
                     .find(|r| r.key == key)
                     .cloned();
                 if let Some(reading) = reading {
-                    env.set_cfg(|c| {
+                    if env.set_cfg(|c| {
                         c.tray_device = Some(key);
                         c.tray_device_name = reading.name;
                         c.tray_enabled = true;
-                    });
+                    }).is_err() { return; }
                     env.canvas.repaint_now();
                 }
             }
@@ -2210,17 +2216,16 @@ fn handle_act(a: Act, env: &UiEnv) {
 
         Act::ConfirmCloseDialog => {
             let (choice, remember) = env.canvas.with_ui(|u| (u.close_choice, u.close_remember));
-            env.canvas.with_ui_mut(|u| u.show_close_dialog = false);
-            env.canvas.repaint_now();
-
             if remember {
                 let mode = if choice == crate::ui::widget::CloseChoice::Minimize {
                     "minimize"
                 } else {
                     "quit"
                 };
-                env.set_cfg(|c| c.close_mode = mode.to_string());
+                if env.set_cfg(|c| c.close_mode = mode.to_string()).is_err() { return; }
             }
+            env.canvas.with_ui_mut(|u| u.show_close_dialog = false);
+            env.canvas.repaint_now();
 
             if choice == crate::ui::widget::CloseChoice::Minimize {
                 let cfg = env.cfg();
@@ -2531,12 +2536,9 @@ fn handle_act(a: Act, env: &UiEnv) {
     }
 }
 
-/// 换配色偏好：改 `Ui`、改 `settings.ini`、改标题栏，三处必须同时改。
-///
-/// `pref` 是 `system` / `light` / `dark`。`system` 时按系统深浅色实时换算。
-/// 只改 `Ui` → 重启后配色回到默认；只改 `Settings` → 当次切换不生效。
 fn apply_theme_pref(env: &UiEnv, pref: &str) {
     let pref = crate::ui::theme::normalize_pref(pref);
+    if env.set_cfg(|c| c.theme = pref.to_string()).is_err() { return; }
     let m = crate::ui::theme::resolve(pref);
     let idx = match pref {
         crate::ui::theme::PREF_LIGHT => 1u8,
@@ -2547,11 +2549,7 @@ fn apply_theme_pref(env: &UiEnv, pref: &str) {
         u.mode = m;
         u.theme_pref = idx;
     });
-    env.set_cfg(|c| c.theme = pref.to_string());
     if let Some(h) = env.window.handle.hwnd() {
-        // 必须走 `refresh_titlebar`：DWM 只在非客户区重算时才重新合成标题栏，
-        // 光调 `DwmSetWindowAttribute` 在 Win11 上要等用户拖窗口颜色才出现
-        // （用户看到的正是「点了开关没反应，于是再点第二次」）。
         crate::dwm::refresh_titlebar(h as crate::win32::Handle, m == crate::ui::theme::Mode::Dark);
     }
     env.canvas.repaint_now();
@@ -2645,10 +2643,10 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
                 .cloned()
         });
         if let Some(reading) = reading {
-            env.set_cfg(|cfg| {
+            if env.set_cfg(|cfg| {
                 cfg.tray_device = Some(reading.key);
                 cfg.tray_device_name = reading.name;
-            });
+            }).is_err() { return; }
             env.canvas.repaint_now();
         }
         return;
@@ -2661,7 +2659,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
     match d {
         Drop::Language => {
             if let Some(language) = crate::i18n::Language::ALL.get(code) {
-                env.set_cfg(|cfg| cfg.language = *language);
+                if env.set_cfg(|cfg| cfg.language = *language).is_err() { return; }
                 env.canvas.with_ui_mut(|ui| ui.clear_status());
                 env.canvas.repaint_now();
             }
@@ -2670,7 +2668,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
         Drop::TrayKind => {
             if let Some(key) = env.canvas.with_ui(|u| u.selected_device.clone()) {
                 if let Some(kind) = crate::tray_prefs::TrayKind::ALL.get(code) {
-                    env.set_cfg(|c| c.device_tray.entry(key).or_default().kind = *kind);
+                    if env.set_cfg(|c| c.device_tray.entry(key).or_default().kind = *kind).is_err() { return; }
                     env.canvas.repaint_now();
                 }
             }
@@ -2709,7 +2707,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
             });
         }
         Drop::Refresh => {
-            env.set_cfg(|c| c.refresh_interval_sec = code as u64);
+            if env.set_cfg(|c| c.refresh_interval_sec = code as u64).is_err() { return; }
             env.signal
                 .interval_ms
                 .store((code as u64).saturating_mul(1000), Ordering::Relaxed);
@@ -2717,7 +2715,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
             env.say(crate::trf!("✔ 刷新间隔改为 {code} 秒", code = code));
         }
         Drop::CacheTtl => {
-            env.set_cfg(|c| c.cache_ttl_sec = code as u64);
+            if env.set_cfg(|c| c.cache_ttl_sec = code as u64).is_err() { return; }
             env.say(crate::trf!(
                 "✔ 缓存有效期改为 {}",
                 if code == 0 {
@@ -2759,7 +2757,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
                 2 => "quit",
                 _ => "ask",
             };
-            env.set_cfg(|c| c.close_mode = mode.to_string());
+            if env.set_cfg(|c| c.close_mode = mode.to_string()).is_err() { return; }
         }
     }
 }
@@ -2979,7 +2977,7 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
     match p {
         Pref::TrayEnabled => {
             let on = !env.cfg().tray_enabled;
-            env.set_cfg(|c| c.tray_enabled = on);
+            if env.set_cfg(|c| c.tray_enabled = on).is_err() { return; }
             env.tray.set_visibility(on);
             // 关掉托盘时如果窗口是隐藏的，用户就再也找不到程序了。
             if !on && !env.cfg().taskbar_widget_enabled {
@@ -2996,7 +2994,7 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
         }
         Pref::TaskbarWidget => {
             let on = !env.cfg().taskbar_widget_enabled;
-            env.set_cfg(|c| c.taskbar_widget_enabled = on);
+            if env.set_cfg(|c| c.taskbar_widget_enabled = on).is_err() { return; }
             if !on && !env.cfg().tray_enabled {
                 env.window.set_visible(true);
             }
@@ -3010,11 +3008,11 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
             ));
         }
         Pref::LowBatteryNotify => {
-            if !crate::notifications::supported() {
+            if !(env.notifications_supported)() {
                 return;
             }
             let on = !env.cfg().notify_low_battery;
-            env.set_cfg(|c| c.notify_low_battery = on);
+            if env.set_cfg(|c| c.notify_low_battery = on).is_err() { return; }
             env.say(crate::trf!(
                 "✔ 低电量系统通知已{}",
                 if on {
@@ -4355,6 +4353,8 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         name_dialog: &name_dialog,
                         feedback_dialog: &feedback_dialog,
                         store: &store_e,
+                        save_settings: &settings::save,
+                        notifications_supported: crate::notifications::supported,
                     };
                     for a in acts {
                         handle_act(a, &env);
@@ -4717,6 +4717,280 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // （GUID 或退回的编号）删除，也会释放图标句柄。
     tray_exit.set_visibility(false);
     Ok(())
+}
+
+#[cfg(test)]
+mod config_action_tests {
+    use super::*;
+
+    const SAVE_ERROR: &str = "injected settings save failure";
+    const FIRST_DEVICE: &str = "1111111111111111";
+    const SECOND_DEVICE: &str = "2222222222222222";
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct Fixture {
+        canvas: Canvas,
+        audio: crate::audio::Controls,
+        shared: Arc<Mutex<Shared>>,
+        signal: Signal,
+        tray: TrayCtl,
+        taskbar: crate::taskbar_widget::TaskbarWidget,
+        name_dialog: crate::ui::device_name::Dialog,
+        feedback_dialog: crate::ui::feedback::Dialog,
+        store: StoreUpdates,
+        _notice: nwg::Notice,
+        window: nwg::Window,
+        original_language: crate::i18n::Language,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            nwg::init().unwrap();
+            let mut window = nwg::Window::default();
+            nwg::Window::builder().title("Configuration regression")
+                .flags(nwg::WindowFlags::POPUP).ex_flags(0x0800_0080)
+                .position((-32000, -32000)).size((800, 600)).build(&mut window).unwrap();
+            let mut notice = nwg::Notice::default();
+            nwg::Notice::builder().parent(&window).build(&mut notice).unwrap();
+            let hwnd = window.handle.hwnd().unwrap() as win32::Handle;
+            let canvas = Canvas::create(hwnd, 0, 0, 800, 600, 1.0, Rc::new(|| {})).unwrap();
+            let language = crate::i18n::current();
+            let cfg = Settings {
+                theme: "light".into(), language,
+                tray_device: Some(FIRST_DEVICE.into()), tray_device_name: "First mouse".into(),
+                ..Settings::default()
+            };
+            let signal = Signal::new(cfg.refresh_interval_sec);
+            let tray = TrayCtl::new(hwnd);
+            tray.set_visibility(cfg.tray_enabled);
+            let mut shared = Shared::new(cfg);
+            shared.readings = [(SECOND_DEVICE, "Second mouse"), (FIRST_DEVICE, "First mouse")]
+                .into_iter().map(|(key, name)| crate::device::DeviceReading {
+                    key: key.into(), name: name.into(), family: crate::device::DeviceFamily::Mouse,
+                    ..Default::default()
+                }).collect();
+            canvas.with_ui_mut(|ui| {
+                ui.sync_devices(&shared.readings);
+                ui.selected_device = Some(SECOND_DEVICE.into());
+                ui.tray_device_keys = vec![FIRST_DEVICE.into(), SECOND_DEVICE.into()];
+                ui.mode = crate::ui::theme::Mode::Light;
+                ui.theme_pref = 1;
+                ui.close_remember = true;
+            });
+            Self {
+                canvas, audio: crate::audio::Controls::new(|| {}),
+                shared: Arc::new(Mutex::new(shared)), signal, tray,
+                taskbar: crate::taskbar_widget::TaskbarWidget::new(hwnd, 0),
+                name_dialog: crate::ui::device_name::Dialog::new(&window, notice.sender()).unwrap(),
+                feedback_dialog: crate::ui::feedback::Dialog::new(&window, notice.sender()).unwrap(),
+                store: StoreUpdates {
+                    controller: crate::store::Controller::for_test(),
+                    preparation: RefCell::new(None), writes_blocked: Cell::new(false),
+                    ticking: Cell::new(false),
+                },
+                _notice: notice, window, original_language: language,
+            }
+        }
+
+        fn env<'a>(&'a self, save: &'a dyn Fn(&Settings) -> Result<(), String>) -> UiEnv<'a> {
+            UiEnv {
+                audio: &self.audio, canvas: &self.canvas, shared: &self.shared,
+                signal: &self.signal, window: &self.window, tray: &self.tray,
+                taskbar: &self.taskbar, name_dialog: &self.name_dialog,
+                feedback_dialog: &self.feedback_dialog, store: &self.store,
+                save_settings: save, notifications_supported: || true,
+            }
+        }
+
+        fn snapshot(&self) -> RuntimeSnapshot {
+            let state = lock_shared(&self.shared);
+            let (theme, theme_pref, close_dialog) = self.canvas.with_ui(|ui|
+                (ui.mode, ui.theme_pref, ui.show_close_dialog));
+            RuntimeSnapshot {
+                config: state.cfg.to_text(),
+                devices: state.readings.iter().map(|reading| reading.key.clone()).collect(),
+                theme, theme_pref, close_dialog, tray_enabled: self.tray.enabled.get(),
+                language: crate::i18n::current(),
+                interval_ms: self.signal.interval_ms.load(Ordering::Relaxed),
+                request: self.signal.current_request(),
+                shutdown: self.signal.shutdown.load(Ordering::Relaxed),
+                visible: self.window.visible(),
+            }
+        }
+
+        fn status(&self) -> String {
+            self.canvas.with_ui(|ui| ui.status.clone())
+        }
+    }
+
+    impl std::ops::Drop for Fixture {
+        fn drop(&mut self) {
+            crate::i18n::apply(self.original_language);
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct RuntimeSnapshot {
+        config: String,
+        devices: Vec<String>,
+        theme: crate::ui::theme::Mode,
+        theme_pref: u8,
+        close_dialog: bool,
+        tray_enabled: bool,
+        language: crate::i18n::Language,
+        interval_ms: u64,
+        request: u64,
+        shutdown: bool,
+        visible: bool,
+    }
+
+    fn config_actions() -> Vec<Act> {
+        let language = if crate::i18n::english() { 1 } else { 2 };
+        vec![
+            Act::ToggleDeviceTray, Act::SetTheme(2), Act::SetTheme(0),
+            Act::PickDrop(Drop::Language, language), Act::PickDrop(Drop::TrayDevice, 1),
+            Act::PickDrop(Drop::TrayKind, 2), Act::PickDrop(Drop::Refresh, 0),
+            Act::PickDrop(Drop::CacheTtl, 0), Act::PickDrop(Drop::CloseMode, 2),
+            Act::Toggle(Pref::TrayEnabled), Act::Toggle(Pref::TaskbarWidget),
+            Act::Toggle(Pref::LowBatteryNotify),
+        ]
+    }
+
+    #[test]
+    fn set_cfg_returns_the_save_error_without_publishing_the_candidate() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let fixture = Fixture::new();
+        let before = fixture.snapshot();
+        let attempts = RefCell::new(Vec::new());
+        let save = |cfg: &Settings| {
+            attempts.borrow_mut().push(cfg.to_text());
+            Err(SAVE_ERROR.into())
+        };
+        let error = fixture.env(&save).set_cfg(|cfg| cfg.theme = "dark".into()).unwrap_err();
+        assert_eq!(error, crate::trf!("✘ 保存设置失败：{e}", e = SAVE_ERROR));
+        assert_eq!(fixture.status(), error);
+        assert_eq!(fixture.snapshot(), before);
+        assert_eq!(attempts.borrow().len(), 1);
+        assert_ne!(attempts.borrow()[0], before.config);
+    }
+
+    #[test]
+    fn config_actions_preserve_runtime_and_failure_message_when_saving_fails() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for action in config_actions() {
+            let fixture = Fixture::new();
+            let before = fixture.snapshot();
+            let attempts = RefCell::new(Vec::new());
+            let save = |cfg: &Settings| {
+                attempts.borrow_mut().push(cfg.to_text());
+                Err(SAVE_ERROR.into())
+            };
+            handle_act(action, &fixture.env(&save));
+            assert_eq!(attempts.borrow().len(), 1, "{action:?}");
+            assert_ne!(attempts.borrow()[0], before.config, "{action:?}");
+            assert_eq!(fixture.snapshot(), before, "{action:?}");
+            assert_eq!(fixture.status(), crate::trf!("✘ 保存设置失败：{e}", e = SAVE_ERROR), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn update_preparation_blocks_config_actions_without_calling_the_saver() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for action in config_actions().into_iter().chain([Act::ConfirmCloseDialog]) {
+            let fixture = Fixture::new();
+            lock_shared(&fixture.shared).store_update_pending = true;
+            fixture.canvas.with_ui_mut(|ui| ui.show_close_dialog = action == Act::ConfirmCloseDialog);
+            let before = fixture.snapshot();
+            let save = |_: &Settings| -> Result<(), String> { panic!("blocked action reached saver: {action:?}") };
+            handle_act(action, &fixture.env(&save));
+            assert_eq!(fixture.snapshot(), before, "{action:?}");
+            assert_eq!(fixture.status(), crate::ui::feedback::text(
+                "更新准备期间暂时不能修改设置。", "Settings cannot be changed while preparing an update."), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn config_actions_publish_runtime_only_after_a_successful_save() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for action in config_actions().into_iter().filter(|action| *action != Act::SetTheme(0)) {
+            let fixture = Fixture::new();
+            let before = fixture.snapshot();
+            let saved = RefCell::new(Vec::new());
+            let save = |cfg: &Settings| {
+                assert_eq!(fixture.canvas.with_ui(|ui| (ui.mode, ui.theme_pref)),
+                    (before.theme, before.theme_pref), "{action:?}");
+                assert_eq!(fixture.tray.enabled.get(), before.tray_enabled, "{action:?}");
+                assert_eq!(crate::i18n::current(), before.language, "{action:?}");
+                assert_eq!(fixture.signal.interval_ms.load(Ordering::Relaxed), before.interval_ms, "{action:?}");
+                saved.borrow_mut().push(cfg.clone());
+                Ok(())
+            };
+            handle_act(action, &fixture.env(&save));
+            assert_eq!(saved.borrow().len(), 1, "{action:?}");
+            let saved = saved.borrow();
+            let cfg = &saved[0];
+            assert_eq!(lock_shared(&fixture.shared).cfg.to_text(), cfg.to_text(), "{action:?}");
+            assert!(!fixture.status().contains(SAVE_ERROR), "{action:?}");
+            match action {
+                Act::SetTheme(2) => assert_eq!(fixture.canvas.with_ui(|ui| (ui.mode, ui.theme_pref)),
+                    (crate::ui::theme::Mode::Dark, 2)),
+                Act::PickDrop(Drop::Language, _) => assert_eq!(crate::i18n::current(), cfg.language),
+                Act::PickDrop(Drop::Refresh, _) => {
+                    assert_eq!(fixture.signal.interval_ms.load(Ordering::Relaxed), cfg.refresh_interval_sec * 1000);
+                    assert_eq!(fixture.signal.current_request(), before.request + 1);
+                    assert!(fixture.status().starts_with('✔'));
+                }
+                Act::Toggle(Pref::TrayEnabled) => {
+                    assert_eq!(fixture.tray.enabled.get(), cfg.tray_enabled);
+                    assert!(fixture.status().starts_with('✔'));
+                }
+                Act::PickDrop(Drop::CacheTtl, _) | Act::Toggle(Pref::TaskbarWidget | Pref::LowBatteryNotify) => {
+                    assert!(fixture.status().starts_with('✔'));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn remembering_close_mode_must_save_before_hiding_or_quitting() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        use crate::ui::widget::CloseChoice;
+        for choice in [CloseChoice::Minimize, CloseChoice::Quit] {
+            let fixture = Fixture::new();
+            unsafe { winapi::um::winuser::ShowWindow(fixture.window.handle.hwnd().unwrap(),
+                winapi::um::winuser::SW_SHOWNOACTIVATE); }
+            fixture.canvas.with_ui_mut(|ui| {
+                ui.show_close_dialog = true;
+                ui.close_choice = choice;
+            });
+            let before = fixture.snapshot();
+            let save = |_: &Settings| Err(SAVE_ERROR.into());
+            handle_act(Act::ConfirmCloseDialog, &fixture.env(&save));
+            assert_eq!(fixture.snapshot(), before);
+            assert_eq!(fixture.status(), crate::trf!("✘ 保存设置失败：{e}", e = SAVE_ERROR));
+        }
+    }
+
+    #[test]
+    fn failed_last_entry_toggle_keeps_the_hidden_window_hidden() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for preference in [Pref::TrayEnabled, Pref::TaskbarWidget] {
+            let fixture = Fixture::new();
+            {
+                let mut shared = lock_shared(&fixture.shared);
+                shared.cfg.tray_enabled = preference == Pref::TrayEnabled;
+                shared.cfg.taskbar_widget_enabled = preference == Pref::TaskbarWidget;
+                fixture.tray.set_visibility(shared.cfg.tray_enabled);
+            }
+            let before = fixture.snapshot();
+            assert!(!before.visible);
+            let save = |_: &Settings| Err(SAVE_ERROR.into());
+            handle_act(Act::Toggle(preference), &fixture.env(&save));
+            assert_eq!(fixture.snapshot(), before);
+            assert_eq!(fixture.status(), crate::trf!("✘ 保存设置失败：{e}", e = SAVE_ERROR));
+        }
+    }
 }
 
 #[cfg(test)]
