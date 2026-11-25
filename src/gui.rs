@@ -723,9 +723,8 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
                 if shared.promote_device_key(&previous.key, &snapshot.target.key) { shared.device_keys_dirty = true; }
                 shared.devices.remove(&previous.key);
             } else if !snapshot.target.verified_identity {
-                // 身份查询暂时失败仍沿用原卡片，但不能沿用之前的写入授权。
+                if had_identity { continue; }
                 snapshot.target.key = previous.key;
-                if had_identity { snapshot.disable_writes(); }
                 if snapshot.target.family == crate::device::DeviceFamily::Unknown { snapshot.target.family = previous.family; }
                 if snapshot.target.hid().is_ok_and(|i| snapshot.target.name == i.product) { snapshot.target.name = previous.name; }
             } else if let Some(device) = shared.devices.get_mut(&previous.key) {
@@ -5789,7 +5788,7 @@ mod backend_tests {
         merge_additional_at(&mut shared, BackendId::Razer, vec![first].into(), now + Duration::from_secs(3));
         assert_eq!(shared.devices.len(), 2);
         assert!(!shared.devices["a-first-serial"].reading.connected);
-        assert!(shared.devices["z-replacement-serial"].reading.connected);
+        assert_ne!(shared.devices["z-replacement-serial"].reading.quality, crate::device::ReadingQuality::Live);
         assert!(!shared.devices["z-replacement-serial"].basic.as_ref().unwrap().dpi.writable);
         assert!(!shared.cfg.device_names.contains_key("z-replacement-serial"));
     }
@@ -6188,6 +6187,35 @@ mod backend_tests {
         assert_eq!(shared.cfg.dpi_presets[&old].values,vec![800]);
         assert_eq!(shared.cfg.device_names[&old], "Custom first device");
         assert!(!shared.device_keys_dirty);
+    }
+
+    #[test]
+    fn missing_identity_never_attributes_a_new_measurement_to_the_previous_device() {
+        for backend in [BackendId::Logitech, BackendId::Razer] {
+            let mut shared = Shared::new(Settings::default());
+            let now = std::time::Instant::now();
+            let mut sample = snapshot(backend, "receiver", 75);
+            sample.target.key = "confirmed-first".into();
+            sample.target.verified_identity = true;
+            sample.battery_at = Some(now);
+            merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+            shared.history_tracker.take_pending();
+            sample.target.key = sample.target.unverified_key();
+            sample.target.verified_identity = false;
+            sample.battery.as_mut().unwrap().percent = Some(12);
+            sample.battery_at = Some(now + Duration::from_secs(1));
+            merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now + Duration::from_secs(1));
+            let previous = &shared.devices["confirmed-first"];
+            assert_eq!(previous.reading.percent(), Some(75));
+            assert_eq!(previous.reading.quality, crate::device::ReadingQuality::Cached);
+            assert_eq!(previous.battery_at, Some(now));
+            assert!(shared.history_tracker.take_pending().0.is_empty());
+            sample.target.key = "confirmed-replacement".into();
+            sample.target.verified_identity = true;
+            merge_additional_at(&mut shared, backend, vec![sample].into(), now + Duration::from_secs(2));
+            assert!(!shared.devices["confirmed-first"].reading.connected);
+            assert_eq!(shared.devices["confirmed-replacement"].reading.percent(), Some(12));
+        }
     }
 
     #[test]
