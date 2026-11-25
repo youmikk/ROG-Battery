@@ -91,7 +91,7 @@ jobs:
           Write-Host "MSIX 版本 = $four（来源：$src）"
 
       - name: 回归测试
-        run: cargo test --release --locked
+        run: cargo test --release --locked -- --test-threads=1
 
       - name: cargo build --release
         env:

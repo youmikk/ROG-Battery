@@ -13,7 +13,7 @@ if ($Offline) { $arguments += '--offline' }
 
 Push-Location $repo
 try {
-    & $cargo test @arguments
+    & $cargo test @arguments -- --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw 'Release regression tests failed.' }
     & $cargo build @arguments
     if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }

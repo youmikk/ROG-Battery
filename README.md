@@ -170,6 +170,8 @@ cargo +stable-x86_64-pc-windows-gnu build --release --locked
 powershell -File tools/build-release.ps1
 ```
 
+原生界面回归会切换进程级语言等状态；本地构建脚本和 CI 均以 `--test-threads=1` 执行测试。
+
 产物集中在 `dist/版本号/`。日常开发使用 `main`；推送源码和对应版本标签后，GitHub Actions 构建并发布绿色版。仅验证构建时，可手动运行绿色版工作流并将 tag 留空。
 
 MSIX 打包与 Microsoft Store 提交由独立手动工作流处理，默认不提交商店。`Cargo.toml`、`msix/package.props.psd1`、发布标签和程序自报版本必须一致。稳定性验收后，再按需开启商店提交并配置所需凭据与产品 ID。

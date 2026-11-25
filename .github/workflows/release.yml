@@ -62,7 +62,7 @@ jobs:
           Write-Host "版本号 = $ver；标签 = $tag"
 
       - name: 回归测试
-        run: cargo test --release --locked
+        run: cargo test --release --locked -- --test-threads=1
 
       - name: cargo build --release
         env:
