@@ -334,23 +334,14 @@ impl Target {
     }
 
     pub fn new(backend: BackendId, interface: &HidInterface, address: u8) -> Self {
-        let identity = if backend == BackendId::Razer {
-            razer::collection_group(interface)
-        } else if interface.serial.is_empty() || matches!(backend, BackendId::MchoseK99 | BackendId::Moondrop | BackendId::RapooLegacy | BackendId::Rapoo | BackendId::CompX
-            | BackendId::RapooOffice | BackendId::AulaHfd | BackendId::MchoseMc
-            | BackendId::AulaF99 | BackendId::AtkNano | BackendId::EweadnX23 | BackendId::EweadnX87 | BackendId::Xiberia
-            | BackendId::AtkHoltek | BackendId::FifineHt6 | BackendId::MchoseK87s
-            | BackendId::Lingbao | BackendId::AulaF108 | BackendId::RapooMt560
-            | BackendId::MchoseR9 | BackendId::AulaV9Pro | BackendId::DareuEm901
-            | BackendId::AulaHfdMechanical
-            | BackendId::PageCommand | BackendId::Headset | BackendId::Keyboard20 | BackendId::Cherry | BackendId::Lofree | BackendId::Nova | BackendId::Inzone | BackendId::HyperX
-            | BackendId::DualSense | BackendId::VgnBeiying | BackendId::VgnDragonfly3 | BackendId::VgnRy | BackendId::VgnKeyboard | BackendId::MchoseQhw | BackendId::MchoseMouse | BackendId::MchoseModern | BackendId::MchoseGlw | BackendId::Edifier | BackendId::EweadnS9 | BackendId::EweadnS9Pro | BackendId::Dareu | BackendId::EightBitDo | BackendId::Flydigi | BackendId::GameSir | BackendId::GearHub | BackendId::G3m | BackendId::AjazzAk980 | BackendId::VeekosShine60 | BackendId::LogitechHeadset | BackendId::Aula) {
-            interface.path.to_ascii_lowercase()
-        } else {
-            format!(
+        let identity = match backend {
+            BackendId::Razer => razer::collection_group(interface),
+            BackendId::StandardHid | BackendId::Bluetooth | BackendId::Rog
+                if !interface.serial.is_empty() => format!(
                 "{:04x}:{:04x}:{}",
                 interface.vendor_id, interface.product_id, interface.serial
-            )
+            ),
+            _ => interface.path.to_ascii_lowercase(),
         };
         // Backend display names may expand; existing device preferences keep their key.
         let key_prefix = if backend == BackendId::VgnDragonfly3 { "VGN Dragonfly3 SE" } else { backend.name() };
@@ -767,6 +758,47 @@ mod tests {
             (BackendId::StandardHid, Err("unavailable".into()))
         ])
         .is_err());
+    }
+
+    #[test]
+    fn unverified_receiver_serials_cannot_merge_independent_devices() {
+        for backend in [BackendId::Logitech, BackendId::Vgn] {
+            let mut first = reading(backend);
+            first.target.hid_mut().serial = "shared-descriptor-serial".into();
+            first.target.hid_mut().path = "receiver-a".into();
+            first.target = Target::new(backend, first.target.hid().unwrap(), 1);
+            let mut second = first.clone();
+            second.target.hid_mut().path = "receiver-b".into();
+            second.target = Target::new(backend, second.target.hid().unwrap(), 1);
+            second.battery.as_mut().unwrap().percent = Some(25);
+            assert_ne!(first.target.key, second.target.key);
+            let snapshots = read_targets(vec![first.target.clone(), second.target.clone()], |target| {
+                Ok(if target.same_channel(&first.target) { first.clone() } else { second.clone() })
+            });
+            assert_eq!(snapshots.len(), 2);
+            assert_eq!(snapshots[0].battery.as_ref().unwrap().percent, Some(75));
+            assert_eq!(snapshots[1].battery.as_ref().unwrap().percent, Some(25));
+            let fallback = first.target.key.clone();
+            first.target.key = "protocol-verified-device".into();
+            first.target.verified_identity = true;
+            assert_eq!(first.target.unverified_key(), fallback);
+            let other_slot = Target::new(backend, first.target.hid().unwrap(), 2);
+            assert_ne!(fallback, other_slot.key);
+            first.target.hid_mut().path = "RECEIVER-A".into();
+            assert_eq!(first.target.unverified_key(), fallback);
+        }
+    }
+
+    #[test]
+    fn bluetooth_and_standard_serial_identity_keys_remain_compatible() {
+        for backend in [BackendId::Bluetooth, BackendId::StandardHid, BackendId::Rog] {
+            let mut target = reading(backend).target;
+            target.hid_mut().serial = "serial-with-punctuation".into();
+            let interface = target.hid().unwrap();
+            let expected = crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",
+                backend.name(), interface.vendor_id, interface.product_id, interface.serial, target.address));
+            assert_eq!(target.unverified_key(), expected);
+        }
     }
 
     #[test]
