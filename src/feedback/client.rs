@@ -16,7 +16,7 @@ use winapi::{
     shared::bcrypt::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG},
     um::{
         dpapi::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN},
-        winbase::{LocalFree, MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH},
+        winbase::LocalFree,
         wincrypt::DATA_BLOB,
         winhttp::*,
     },
@@ -50,8 +50,22 @@ fn damaged() -> String {
 }
 
 fn storage_error() -> String {
-    message("无法安全保存反馈记录，本次操作尚未确认。请检查存储空间后重试。",
-        "Feedback could not be saved securely. This operation is not confirmed. Check available storage and retry.")
+    message("无法安全保存反馈记录，本次操作尚未确认。内容已保留，请检查存储空间和目录权限后重试。",
+        "Feedback could not be saved securely. This operation is not confirmed. Your draft is preserved; check storage and directory permissions, then retry.")
+}
+
+pub(super) fn storage_event(operation: &str, error: &std::io::Error) -> String {
+    let code = error.raw_os_error().map(|code| code.to_string()).unwrap_or_else(|| "none".into());
+    format!("step={operation} os_error={code}")
+}
+
+fn storage_io_error(operation: (&str, &str), error: std::io::Error) -> String {
+    let event = storage_event(operation.1, &error);
+    #[cfg(not(test))]
+    crate::diagnostics::event_once("feedback_storage_failed", &event);
+    #[cfg(test)]
+    let _ = event;
+    format!("{}\n{}: {error}", storage_error(), message(operation.0, operation.1))
 }
 
 fn service_error() -> String {
@@ -571,6 +585,9 @@ fn crypt(bytes: &[u8], protect: bool) -> Result<Vec<u8>, String> {
                 CRYPTPROTECT_UI_FORBIDDEN, &mut output.0)
         }
     };
+    if ok == 0 && protect {
+        return Err(storage_io_error(("加密本地记录", "Encrypt local history"), std::io::Error::last_os_error()));
+    }
     if ok == 0 || output.0.pbData.is_null() || output.0.cbData as usize > MAX_HISTORY {
         return Err(if protect { storage_error() } else { damaged() });
     }
@@ -601,19 +618,16 @@ fn save_history(path: &Path, history: &History) -> Result<(), String> {
     if plain.len() > MAX_HISTORY - 65536 { return Err(storage_error()); }
     let encrypted = crypt(&plain, true)?;
     let parent = path.parent().ok_or_else(storage_error)?;
-    fs::create_dir_all(parent).map_err(|_| storage_error())?;
+    fs::create_dir_all(parent).map_err(|error| storage_io_error(("创建保存目录", "Create history directory"), error))?;
     let temp = parent.join(format!("feedback-history-{}.tmp", new_uuid()?));
     let result = (|| {
-        let mut file = OpenOptions::new().create_new(true).write(true).open(&temp).map_err(|_| storage_error())?;
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&temp)
+            .map_err(|error| storage_io_error(("创建临时记录", "Create temporary history"), error))?;
         file.write_all(HISTORY_MAGIC).and_then(|_| file.write_all(&encrypted)).and_then(|_| file.sync_all())
-            .map_err(|_| storage_error())?;
+            .map_err(|error| storage_io_error(("写入本地记录", "Write local history"), error))?;
         drop(file);
-        use std::os::windows::ffi::OsStrExt;
-        let old: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
-        let new: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        if unsafe { MoveFileExW(old.as_ptr(), new.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
-            return Err(storage_error());
-        }
+        crate::paths::replace_file(&temp, path)
+            .map_err(|error| storage_io_error(("安全替换本地记录", "Replace local history"), error))?;
         Ok(())
     })();
     if result.is_err() { let _ = fs::remove_file(&temp); }
@@ -623,21 +637,15 @@ fn save_history(path: &Path, history: &History) -> Result<(), String> {
 fn lock_history(path: &Path) -> Result<File, String> {
     use std::os::windows::fs::OpenOptionsExt;
     let parent = path.parent().ok_or_else(storage_error)?;
-    fs::create_dir_all(parent).map_err(|_| storage_error())?;
+    fs::create_dir_all(parent).map_err(|error| storage_io_error(("创建保存目录", "Create history directory"), error))?;
     let lock = parent.join("feedback-history.lock");
     let started = Instant::now();
     loop {
-        // Exclusive Windows handle; the lock file disappears when the process
-        // closes it or exits. No stale create-new lock survives a crash.
-        match OpenOptions::new().read(true).write(true).create(true).share_mode(0)
-            .access_mode(winapi::um::winnt::GENERIC_READ | winapi::um::winnt::GENERIC_WRITE | winapi::um::winnt::DELETE)
-            .custom_flags(winapi::um::winbase::FILE_FLAG_DELETE_ON_CLOSE)
-            .open(&lock) {
+        match OpenOptions::new().read(true).write(true).create(true).share_mode(0).open(&lock) {
             Ok(file) => return Ok(file),
-            Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) && started.elapsed() < Duration::from_secs(2) => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return Err(storage_error()),
+            Err(error) if matches!(error.raw_os_error(), Some(32 | 33))
+                && started.elapsed() < Duration::from_secs(2) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => return Err(storage_io_error(("锁定本地记录", "Lock local history"), error)),
         }
     }
 }
@@ -645,7 +653,7 @@ fn lock_history(path: &Path) -> Result<File, String> {
 fn with_history<T>(write: bool, action: impl FnOnce(&mut History) -> Result<T, String>) -> Result<T, String> {
     let _guard = HISTORY_LOCK.get_or_init(Default::default).lock().map_err(|_| damaged())?;
     let path = history_path();
-    let _file_lock = if write { Some(lock_history(&path)?) } else { None };
+    let _history_lock = if write { Some(lock_history(&path)?) } else { None };
     let mut history = read_history(&path)?;
     let result = action(&mut history)?;
     if write { save_history(&path, &history)?; }
@@ -1366,26 +1374,69 @@ mod tests {
         assert!(save_history(&path, &history).is_err());
         assert_eq!(fs::read(&path).unwrap(), good_bytes);
         drop(lock);
-        let files: Vec<_> = fs::read_dir(&scratch.0).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(files, [std::ffi::OsString::from("feedback-history.dat")]);
+        let mut files: Vec<_> = fs::read_dir(&scratch.0).unwrap().map(|e| e.unwrap().file_name()).collect();
+        files.sort();
+        assert_eq!(files, [std::ffi::OsString::from("feedback-history.dat"), std::ffi::OsString::from("feedback-history.lock")]);
     }
 
     #[test]
-    fn windows_history_lock_excludes_competing_handles_and_releases_after_close() {
+    fn history_lock_excludes_competing_threads_and_reopens_after_release() {
         use std::os::windows::fs::OpenOptionsExt;
         let scratch = Scratch::new();
         let path = scratch.history();
         let first = lock_history(&path).unwrap();
-        let lock_path = scratch.0.join("feedback-history.lock");
-        let concurrent = OpenOptions::new().read(true).write(true).share_mode(0).open(&lock_path);
-        assert!(concurrent.is_err());
+        let lock = scratch.0.join("feedback-history.lock");
+        let concurrent = std::thread::spawn(move || {
+            OpenOptions::new().read(true).write(true).create(true).share_mode(0).open(lock)
+                .unwrap_err().raw_os_error()
+        }).join().unwrap();
+        assert_eq!(concurrent, Some(32));
         drop(first);
-        assert!(!lock_path.exists());
-        let second = lock_history(&path).unwrap();
-        assert!(lock_path.exists());
-        drop(second);
-        assert!(!lock_path.exists());
+        let second_path = path.clone();
+        assert!(std::thread::spawn(move || lock_history(&second_path).is_ok()).join().unwrap());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn history_lock_remains_compatible_with_the_previous_delete_on_close_lock() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let scratch = Scratch::new();
+        let path = scratch.history();
+        let lock = scratch.0.join("feedback-history.lock");
+        let legacy = || OpenOptions::new().read(true).write(true).create(true).share_mode(0)
+            .access_mode(winapi::um::winnt::GENERIC_READ | winapi::um::winnt::GENERIC_WRITE | winapi::um::winnt::DELETE)
+            .custom_flags(winapi::um::winbase::FILE_FLAG_DELETE_ON_CLOSE).open(&lock);
+        let first = lock_history(&path).unwrap();
+        assert_eq!(legacy().unwrap_err().raw_os_error(), Some(32));
+        drop(first);
+        let old = legacy().unwrap();
+        assert_eq!(OpenOptions::new().read(true).write(true).create(true).share_mode(0)
+            .open(&lock).unwrap_err().raw_os_error(), Some(32));
+        drop(old);
+        assert!(!lock.exists());
+        let reopened = lock_history(&path).unwrap();
+        drop(reopened);
+        assert!(lock.exists());
+    }
+
+    #[test]
+    fn encrypted_history_creates_missing_directories_without_a_delete_on_close_lock() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("new").join("nested").join("feedback-history.dat");
+        let _lock = lock_history(&path).unwrap();
+        assert!(path.parent().unwrap().exists());
+        let history = History { schema: 1, entries: vec![stored()] };
+        save_history(&path, &history).unwrap();
+        assert_eq!(read_history(&path).unwrap().entries[0].request_id, REQUEST);
+        assert!(fs::read(&path).unwrap().starts_with(HISTORY_MAGIC));
+        assert!(path.parent().unwrap().join("feedback-history.lock").exists());
+    }
+
+    #[test]
+    fn storage_errors_identify_the_failed_stage_and_windows_error() {
+        let error = storage_io_error(("安全替换本地记录", "Replace local history"), std::io::Error::from_raw_os_error(32));
+        assert!(error.contains(&message("安全替换本地记录", "Replace local history")));
+        assert!(error.contains("32"));
     }
 
     #[test]
