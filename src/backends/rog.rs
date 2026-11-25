@@ -79,8 +79,8 @@ fn fetch_bound_with<Channel>(
     let mut outcome = read_sample(channel);
     let after = read_identity(channel);
     let middle = &outcome.snapshot.identity;
-    if identity_conflicts(&before, &after) || identity_conflicts(&before, middle)
-        || identity_conflicts(middle, &after) {
+    if before.conflicts_with(&after) || before.conflicts_with(middle)
+        || middle.conflicts_with(&after) {
         return Err("读取期间设备身份发生变化，已丢弃本轮数据".into());
     }
     let mut verified = crate::proto::Identity::default();
@@ -109,14 +109,6 @@ fn fetch_bound_with<Channel>(
 fn valid_mac(identity: &crate::proto::Identity) -> Option<&str> {
     let mac = crate::proto::Identity { mouse_mac: identity.mouse_mac.clone(), ..Default::default() };
     mac.device_id().map(|_| identity.mouse_mac.trim())
-}
-
-fn identity_conflicts(first: &crate::proto::Identity, second: &crate::proto::Identity) -> bool {
-    let serial = first.mouse_sn.trim();
-    let other = second.mouse_sn.trim();
-    (!serial.is_empty() && !other.is_empty() && serial != other)
-        || matches!((valid_mac(first), valid_mac(second)), (Some(first), Some(second))
-            if !first.eq_ignore_ascii_case(second))
 }
 
 impl DeviceBackend for Rog {

@@ -435,8 +435,7 @@ fn rog_record(link: &hid::Link, outcome: &FetchOutcome, previous: Option<&Device
     if current.wireless_pid != 0 { ident.wireless_pid = current.wireless_pid; }
     if outcome.snapshot.frames.contains_key("7D:20:02") { ident.booster = current.booster; }
     if ident.model_name.is_empty() { ident.model_name = link.iface.product.clone(); }
-    let key = same.map(|device| device.reading.key.clone())
-        .unwrap_or_else(|| crate::backends::rog::identity_key(link, &ident));
+    let key = crate::backends::rog::identity_key(link, &ident);
     let name = ident.display_name();
     let family = crate::device::family_of(&name);
     let configuration = outcome.snapshot.configuration().ok();
@@ -471,6 +470,20 @@ fn mark_rog_unread(device: &mut DeviceSnapshot, present: Option<&std::collection
         Some(_) => crate::device::ReadingQuality::Stale,
         None => crate::device::ReadingQuality::Unknown,
     };
+}
+
+fn reconcile_rog_identity(records: &mut BTreeMap<String, DeviceSnapshot>, link: &hid::Link,
+    identity: &proto::Identity) -> Option<DeviceSnapshot> {
+    let link_key = link.device_key();
+    for previous in records.values_mut().filter(|previous|
+        previous.link.as_ref().is_some_and(|previous| previous.device_key() == link_key)
+            && previous.ident.conflicts_with(identity)) {
+        previous.reading.connected = false;
+        previous.reading.quality = crate::device::ReadingQuality::Stale;
+        previous.state = None;
+    }
+    records.values().filter(|previous| previous.ident.same_device(identity))
+        .max_by_key(|previous| previous.battery_at).cloned()
 }
 
 fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
@@ -535,6 +548,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                 continue;
             }
         };
+        let previous = reconcile_rog_identity(&mut records, &link, &out.snapshot.identity).or(previous);
         let Some(record) = rog_record(&link, &out, previous.as_ref()) else { continue; };
         let key = record.reading.key.clone();
         if previous.is_none() && key != link_key {
@@ -546,7 +560,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         }
         if let Some(old) = previous.as_ref().filter(|old| {
             old.reading.key != key
-                && old.ident.device_id().is_none()
+                && (old.ident.device_id().is_none() || old.ident.same_device(&record.ident))
         }) {
             let mut s = lock_shared(shared);
             if outcome_is_stale(generation, s.write_gen) {
@@ -554,9 +568,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             }
             records.remove(&old.reading.key);
             if s.promote_device_key(&old.reading.key, &key) {
-                if settings::save(&s.cfg).is_err() {
-                    tray_log("device identity preferences save failed");
-                }
+                s.device_keys_dirty = true;
             }
             primary = s.primary_key.clone();
         }
@@ -589,11 +601,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             if primary.as_ref().is_none_or(|k| k == &key)
                 && (s.primary_key.is_none() || s.primary_key.as_ref() == Some(&key))
             {
-                s.primary_key = Some(key.clone());
-                s.full = record.state.clone();
-                sample = apply_outcome(&out, &mut s, generation);
-                s.ident = Some(record.ident.clone());
-                s.device_family = family;
+                sample = apply_rog_outcome(&out, &record, &mut s, generation);
             }
         }
         records.insert(key, record);
@@ -3311,6 +3319,17 @@ fn write_diagnostics(
     let _ = crate::diagnostics::append(&crate::diagnostics::log_path(), &facts);
 }
 
+fn apply_rog_outcome(outcome: &FetchOutcome, record: &DeviceSnapshot, shared: &mut Shared,
+    generation: u64) -> Option<Quick> {
+    if outcome_is_stale(generation, shared.write_gen) { return None; }
+    let sample = apply_outcome(outcome, shared, generation);
+    shared.primary_key = Some(record.reading.key.clone());
+    shared.full = record.state.clone();
+    shared.ident = Some(record.ident.clone());
+    shared.device_family = record.reading.family;
+    sample
+}
+
 fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option<Quick> {
     // `elapsed` 为零 = 缓存命中（`SnapshotCache` 的约定）
     let snap = &out.snapshot;
@@ -5259,8 +5278,9 @@ mod backend_tests {
             assert!(!unknown.same_device(&unknown));
         }
         let previous = history_owner_device("receiver", DeviceFamily::Mouse, true, None);
-        let record = rog_record(previous.link.as_ref().unwrap(), &rog_energy_outcome(), Some(&previous)).unwrap();
-        assert_eq!(record.reading.key, previous.reading.key);
+        let link = previous.link.as_ref().unwrap();
+        let record = rog_record(link, &rog_energy_outcome(), Some(&previous)).unwrap();
+        assert_eq!(record.reading.key, link.device_key());
         assert!(record.ident.device_id().is_none());
     }
 
@@ -5295,15 +5315,79 @@ mod backend_tests {
         previous.link.as_mut().unwrap().read_only = true;
         let mut outcome = rog_energy_outcome();
         Arc::make_mut(&mut outcome.snapshot).identity = previous.ident.clone();
+        for (key, sub) in [("12:04:00", 4), ("12:04:02", 4), ("12:04:03", 4),
+            ("12:00:00", 0), ("12:06:00", 6), ("12:03:00", 3), ("12:05:00", 5)] {
+            let mut frame = vec![0; 64];
+            frame[..3].copy_from_slice(&[3, 0x12, sub]);
+            let snapshot = Arc::make_mut(&mut outcome.snapshot);
+            snapshot.frames.insert(key.into(), frame);
+            snapshot.failed.remove(key);
+        }
+        assert!(outcome.snapshot.configuration().is_ok());
         let record = rog_record(previous.link.as_ref().unwrap(), &outcome, Some(&previous)).unwrap();
         assert_eq!(record.reading.percent(), Some(47));
         assert!(record.state.is_none());
+        let mut shared = Shared::new(Settings::default());
+        apply_rog_outcome(&outcome, &record, &mut shared, 0);
+        assert!(shared.full.is_none());
+        assert!(shared.ui_state().is_none());
         let target = record.command_target();
         for result in [crate::commands::run_cmd(&Cmd::Stage(1), target.as_ref()),
             crate::commands::run_file_cmd(&Cmd::Restore("nonexistent-backup".into()), target.as_ref())] {
             assert!(result.ok.is_none());
             assert!(result.err.as_ref().unwrap().contains("配对信息未确认"));
         }
+    }
+
+    #[test]
+    fn rog_replacement_identity_retires_the_old_device_even_without_a_battery_reply() {
+        let mut old = history_owner_device("receiver-a", DeviceFamily::Mouse, true, None);
+        old.ident.mouse_sn = "first-mouse".into();
+        old.reading.battery = snapshot(BackendId::Rog, "receiver-a", 47).battery;
+        old.battery_at = Some(std::time::Instant::now());
+        old.state = Some(proto::State::default());
+        let independent = history_owner_device("receiver-b", DeviceFamily::Mouse, true, None);
+        let link = old.link.clone().unwrap();
+        let mut records = BTreeMap::from([("first".into(), old), ("other".into(), independent)]);
+        let mut outcome = rog_energy_outcome();
+        let snapshot = Arc::make_mut(&mut outcome.snapshot);
+        snapshot.identity.mouse_sn = "replacement-mouse".into();
+        snapshot.frames.remove("12:07:00");
+        assert!(reconcile_rog_identity(&mut records, &link, &snapshot.identity).is_none());
+        assert!(rog_record(&link, &outcome, None).is_none());
+        assert!(!records["first"].reading.connected);
+        assert!(records["first"].state.is_none());
+        assert_eq!(records["first"].reading.quality, crate::device::ReadingQuality::Stale);
+        assert!(records["other"].reading.connected);
+    }
+
+    #[test]
+    fn rog_serial_promotion_and_path_change_preserve_one_identity_and_preferences() {
+        let mut previous = history_owner_device("receiver-a", DeviceFamily::Mouse, true, None);
+        previous.ident.mouse_mac = "12:34:56:78:9A:BC".into();
+        let mut link = previous.link.clone().unwrap();
+        previous.reading.key = crate::backends::rog::identity_key(&link, &previous.ident);
+        let old_key = previous.reading.key.clone();
+        let mut outcome = rog_energy_outcome();
+        let identity = &mut Arc::make_mut(&mut outcome.snapshot).identity;
+        identity.mouse_mac = previous.ident.mouse_mac.clone();
+        identity.mouse_sn = "confirmed-serial".into();
+        let promoted = rog_record(&link, &outcome, Some(&previous)).unwrap();
+        assert_ne!(promoted.reading.key, old_key);
+        let mut shared = Shared::new(Settings::default());
+        shared.active_key = Some(old_key.clone());
+        shared.cfg.device_names.insert(old_key.clone(), "My device".into());
+        shared.promote_device_key(&old_key, &promoted.reading.key);
+        assert_eq!(shared.active_key.as_ref(), Some(&promoted.reading.key));
+        assert_eq!(shared.cfg.device_names[&promoted.reading.key], "My device");
+        let mut records = BTreeMap::from([(promoted.reading.key.clone(), promoted)]);
+        link.iface.path = "receiver-c".into();
+        let previous = reconcile_rog_identity(&mut records, &link, &outcome.snapshot.identity).unwrap();
+        let reconnected = rog_record(&link, &outcome, Some(&previous)).unwrap();
+        records.insert(reconnected.reading.key.clone(), reconnected);
+        assert_eq!(records.len(), 1);
+        assert_eq!(shared.active_key.as_ref(), records.keys().next());
+        assert_eq!(records.values().next().unwrap().link.as_ref().unwrap().iface.path, "receiver-c");
     }
 
     #[test]

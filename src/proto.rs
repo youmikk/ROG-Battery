@@ -387,6 +387,7 @@ impl Identity {
     }
 
     pub fn same_device(&self, other: &Self) -> bool {
+        if self.conflicts_with(other) { return false; }
         let serial = self.mouse_sn.trim();
         let other_serial = other.mouse_sn.trim();
         if !serial.is_empty() && !other_serial.is_empty() { return serial == other_serial; }
@@ -394,6 +395,14 @@ impl Identity {
             (Some(mac), Some(other)) => mac.eq_ignore_ascii_case(other),
             _ => false,
         }
+    }
+
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        let serial = self.mouse_sn.trim();
+        let other_serial = other.mouse_sn.trim();
+        (!serial.is_empty() && !other_serial.is_empty() && serial != other_serial)
+            || matches!((self.device_mac(), other.device_mac()), (Some(mac), Some(other))
+                if !mac.eq_ignore_ascii_case(other))
     }
 
     /// 界面上显示的型号名：PID 对照表优先，其次固件自报名（见 [`crate::devices`]）。
