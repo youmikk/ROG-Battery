@@ -20,7 +20,7 @@ X-Battery 是用于读取外设电量并调整支持的鼠标参数的 Windows �
 - 由您主动保存的设备配置备份，以及自定义存储位置的路径记录。
 - 通过应用提交的反馈历史、待确认的请求和回复密钥，使用 Windows DPAPI 加密保存在设置目录的 `feedback-history.dat`，由当前 Windows 用户保护。回复密钥不写入日志、诊断或公开议题。
 
-诊断日志入口继续保留。独立设备报告窗口已移除，`device-report` 等命令行报告仍可使用；导出的报告不会自动上传。
+软件问题可通过应用内反馈提交，并自行选择是否附带脱敏诊断摘要。`device-report` 等命令行报告仍可使用；本地日志和导出的报告不会自动上传。
 
 ### 微软商店更新与评价
 
@@ -70,7 +70,7 @@ The following data stays on your computer:
 - Device configuration backups you explicitly save, and records of custom storage locations.
 - In-app feedback history, requests awaiting confirmation, and reply keys, encrypted with Windows DPAPI in `feedback-history.dat` in the settings directory and protected for the current Windows user. Reply keys are not written to logs, diagnostics, or public issues.
 
-The diagnostic log entry remains available. The separate device report window is removed; command-line reports such as `device-report` remain available and are not uploaded automatically.
+Software issues can be submitted through in-app feedback, with an optional privacy-safe diagnostic summary. Command-line reports such as `device-report` remain available; local logs and exported reports are not uploaded automatically.
 
 ### Microsoft Store updates and reviews
 

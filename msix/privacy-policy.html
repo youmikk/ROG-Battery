@@ -24,7 +24,7 @@
 <li>由您主动保存的设备配置备份，以及自定义存储位置的路径记录。</li>
 <li>通过应用提交的反馈历史、待确认的请求和回复密钥，使用 Windows DPAPI 加密保存在设置目录的 <code>feedback-history.dat</code>，由当前 Windows 用户保护。回复密钥不写入日志、诊断或公开议题。</li>
 </ul>
-<p>诊断日志入口继续保留。独立设备报告窗口已移除，<code>device-report</code> 等命令行报告仍可使用；导出的报告不会自动上传。</p>
+<p>软件问题可通过应用内反馈提交，并自行选择是否附带脱敏诊断摘要。<code>device-report</code> 等命令行报告仍可使用；本地日志和导出的报告不会自动上传。</p>
 <h3>微软商店更新与评价</h3>
 <p>商店安装版每日第一次启动时通过 Windows <code>StoreContext</code> 官方接口查询可用更新；网络或商店服务暂不可用时进行有限的延迟重试。查询不会自动下载或安装。更新提示只在应用首页显示，下载和安装均需您主动确认；安装前保存本地设置和电量历史。绿色版与模拟设备模式不会自动检查。</p>
 <p>更新查询、下载和安装由 Windows 与微软商店处理必要的应用身份、包版本、授权及连接信息，遵循<a href="https://privacy.microsoft.com/privacystatement">微软隐私声明</a>。应用不会向更新服务附加外设诊断、外设唯一标识、个人设置或电量历史，不接入第三方自动更新服务。更新说明通过商店产品页查看。</p>
@@ -56,7 +56,7 @@
 <li>Device configuration backups you explicitly save, and records of custom storage locations.</li>
 <li>In-app feedback history, requests awaiting confirmation, and reply keys, encrypted with Windows DPAPI in <code>feedback-history.dat</code> in the settings directory and protected for the current Windows user. Reply keys are not written to logs, diagnostics, or public issues.</li>
 </ul>
-<p>The diagnostic log entry remains available. The separate device report window is removed; command-line reports such as <code>device-report</code> remain available and are not uploaded automatically.</p>
+<p>Software issues can be submitted through in-app feedback, with an optional privacy-safe diagnostic summary. Command-line reports such as <code>device-report</code> remain available; local logs and exported reports are not uploaded automatically.</p>
 <h3>Microsoft Store updates and reviews</h3>
 <p>Store installations query available updates through the official Windows <code>StoreContext</code> API on the first launch each day. Temporary network or Store failures receive a limited number of delayed retries. Queries do not automatically download or install anything. Update reminders appear only on Home; downloading and installing require your confirmation, and local settings and battery history are saved before installation. Portable and simulated-device modes do not check automatically.</p>
 <p>Windows and Microsoft Store process the app identity, package version, licensing and connection information needed to check, download and install updates, under the <a href="https://privacy.microsoft.com/privacystatement">Microsoft Privacy Statement</a>. The app does not attach peripheral diagnostics, peripheral unique identifiers, personal settings or battery history, and uses no third-party automatic update service. Release information opens the Store product page.</p>

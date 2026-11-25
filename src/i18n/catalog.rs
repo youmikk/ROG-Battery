@@ -191,7 +191,6 @@ macro_rules! tr {
     ("开源仓库") => { if $crate::i18n::english() { "Source code" } else { "开源仓库" } };
     ("打开") => { if $crate::i18n::english() { "Open" } else { "打开" } };
     ("诊断") => { if $crate::i18n::english() { "Diagnostics" } else { "诊断" } };
-    ("诊断日志") => { if $crate::i18n::english() { "Diagnostic logs" } else { "诊断日志" } };
     ("关闭应用") => { if $crate::i18n::english() { "Close application" } else { "关闭应用" } };
     ("请选择点击关闭按钮时的操作：") => { if $crate::i18n::english() { "Choose what happens when you close the window:" } else { "请选择点击关闭按钮时的操作：" } };
     ("最小化到系统托盘（在后台继续运行）") => { if $crate::i18n::english() { "Minimize to tray (keep running in the background)" } else { "最小化到系统托盘（在后台继续运行）" } };
@@ -676,7 +675,6 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "开源仓库" => "Source code",
         "打开" => "Open",
         "诊断" => "Diagnostics",
-        "诊断日志" => "Diagnostic logs",
         "关闭应用" => "Close application",
         "请选择点击关闭按钮时的操作：" => "Choose what happens when you close the window:",
         "最小化到系统托盘（在后台继续运行）" => "Minimize to tray (keep running in the background)",

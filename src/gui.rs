@@ -2416,13 +2416,6 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::ChangeSettingsPath => pick_save_path(env, SavePathKind::Settings),
         Act::ResetHistoryPath => reset_custom_path(env, SavePathKind::History),
         Act::ResetSettingsPath => reset_custom_path(env, SavePathKind::Settings),
-        Act::OpenLogFolder => {
-            let dir = crate::diagnostics::log_path()
-                .parent()
-                .map(|d| d.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
-            open_in_explorer(env, &dir);
-        }
 
         Act::OpenLightingSettings => {
             if let Err(e) = crate::dynlight::open_settings() {
