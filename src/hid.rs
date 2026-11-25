@@ -161,21 +161,6 @@ fn enumerate_interfaces_with(
     })
 }
 
-/// 一个可用接口都没有时该报什么。
-///
-/// 有跳过记录说明设备在、但打开失败（Armoury Crate 抢占 / 权限），这时
-/// 报「没有找到设备」会把人带偏，必须把第一条原因原样带出来。
-fn empty_reason(skipped: &[Skipped]) -> String {
-    match skipped.first() {
-        None => "没有找到任何 ASUS HID 接口（VID 0x0B05）".to_string(),
-        Some(first) => format!(
-            "找到 {} 个 HID 接口但一个都打不开（最常见是 Armoury Crate 占着设备，其次是权限）：{}",
-            skipped.len(),
-            first.reason
-        ),
-    }
-}
-
 /// `SetupDiGetDeviceInterfaceDetailW` 需要两次调用：先问长度，再取内容。
 fn interface_path(
     dev_info: Handle,
@@ -698,12 +683,16 @@ impl HidDevice {
 
     /// 等一次读完成。超时返回 None（并取消掉这次读）。
     fn finish_read(&mut self, timeout_ms: u32) -> Option<Vec<u8>> {
+        self.finish_read_checked(timeout_ms).ok().flatten()
+    }
+
+    fn finish_read_checked(&mut self, timeout_ms: u32) -> Result<Option<Vec<u8>>, ()> {
         if self.read_completed_sync {
             let n = self.sync_read_len as usize;
             if n == 0 || n > self.read_buf.len() {
-                return None;
+                return Err(());
             }
-            return Some(self.read_buf[..n].to_vec());
+            return Ok(Some(self.read_buf[..n].to_vec()));
         }
 
         let wait = unsafe { WaitForSingleObject(self.read_event, timeout_ms) };
@@ -713,14 +702,14 @@ impl HidDevice {
                 let mut xfer: u32 = 0;
                 GetOverlappedResult(self.read_handle, &mut self.read_ov, &mut xfer, 1);
             }
-            return None;
+            return if wait == WAIT_TIMEOUT { Ok(None) } else { Err(()) };
         }
         let mut xfer: u32 = 0;
         let ok = unsafe { GetOverlappedResult(self.read_handle, &mut self.read_ov, &mut xfer, 0) };
-        if ok == 0 || xfer == 0 {
-            return None;
+        if ok == 0 || xfer == 0 || xfer as usize > self.read_buf.len() {
+            return Err(());
         }
-        Some(self.read_buf[..xfer as usize].to_vec())
+        Ok(Some(self.read_buf[..xfer as usize].to_vec()))
     }
 
     /// 收尾一次写：同步完成直接成功；挂起则等到 `timeout_ms`，超时取消并判失败。
@@ -764,8 +753,19 @@ impl HidDevice {
         tail: &[u8],
         timeout_ms: u32,
     ) -> Option<Vec<u8>> {
+        self.xfer_checked(report_id, cmd, sub, tail, timeout_ms).ok().flatten()
+    }
+
+    fn xfer_checked(
+        &mut self,
+        report_id: u8,
+        cmd: u8,
+        sub: u8,
+        tail: &[u8],
+        timeout_ms: u32,
+    ) -> Result<Option<Vec<u8>>, ()> {
         if !self.writable {
-            return None;
+            return Err(());
         }
         self.drain();
 
@@ -795,7 +795,7 @@ impl HidDevice {
             )
         };
         if !self.finish_write(ok, written, timeout_ms) {
-            return None;
+            return Err(());
         }
 
         let want = self.in_len.max(1) as usize;
@@ -804,22 +804,21 @@ impl HidDevice {
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
-                return None;
+                return Ok(None);
             }
             let left = (deadline - now).as_millis().max(1) as u32;
             if !self.start_read(want) {
-                break;
+                return Err(());
             }
-            let Some(r) = self.finish_read(left) else {
+            let Some(r) = self.finish_read_checked(left)? else {
                 continue;
             };
 
             if let Some(m) = align_reply(report_id, cmd, sub, &r) {
-                return Some(m);
+                return Ok(Some(m));
             }
             // 其它帧（例如主动推送的电量帧）丢掉，继续等
         }
-        None
     }
 }
 
@@ -878,19 +877,20 @@ pub struct Link {
     /// 人类可读的模式：Wired / Wireless24G
     pub mode: String,
     pub report_id: u8,
+    pub read_only: bool,
     pub iface: HidInterface,
     /// 同一物理设备的接口；无法确认分组时仅保留当前接口。
     pub all_interfaces: Vec<HidInterface>,
 }
 
+pub struct LinkScan {
+    pub links: Vec<Link>,
+    pub present_channels: std::collections::BTreeSet<String>,
+}
+
 impl Link {
     pub fn device_key(&self) -> String {
-        let identity = if self.iface.serial.trim().is_empty() {
-            self.iface.path.to_ascii_lowercase()
-        } else {
-            format!("{:04x}:{}", self.iface.vendor_id, self.iface.serial.trim())
-        };
-        crate::device::stable_key(&format!("{identity}:{}", self.report_id))
+        crate::device::stable_key(&format!("{}:{}", self.iface.path.to_ascii_lowercase(), self.report_id))
     }
 }
 
@@ -922,12 +922,16 @@ fn is_command_page(page: u16) -> bool {
 /// 优先有线（PID != 接收器 && usage page == 0xFF01），
 /// 否则走接收器：用 `A0 00` 读配对表，从里面找出鼠标的 report id。
 pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
+    Ok(scan_links(hid)?.links)
+}
+
+pub fn scan_links(hid: &HidApi) -> Result<LinkScan, String> {
     let mut instances = std::collections::BTreeMap::new();
     let mut report = enumerate_all_report_with(hid, |path, instance| {
         instances.insert(path.to_string(), instance);
     })?;
     report.interfaces.retain(|interface| interface.vendor_id == VID_ASUS);
-    open_links_with(
+    scan_links_with(
         report,
         |interface| usb_physical_group(*instances.get(&interface.path)?, interface),
         |iface| {
@@ -937,28 +941,50 @@ pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
                     .is_some_and(|reply| !is_nak(&reply) && reply.len() >= 12)
             })
         },
-        |iface| HidDevice::open(iface).ok()?.xfer(1, 0xA0, 0x00, &[], 2500),
+        |iface| {
+            let mut device = HidDevice::open(iface).map_err(|_| ())?;
+            device.xfer_checked(1, 0xA0, 0x00, &[], 2500)
+        },
     )
 }
 
+fn scan_links_with(
+    report: EnumerateReport,
+    physical_group: impl FnMut(&HidInterface) -> Option<String>,
+    wired_report_id: impl FnMut(&HidInterface) -> Option<u8>,
+    pairing_table: impl FnMut(&HidInterface) -> Result<Option<Vec<u8>>, ()>,
+) -> Result<LinkScan, String> {
+    let present_channels = report.interfaces.iter().map(|interface| interface.path.to_ascii_lowercase())
+        .chain(report.skipped.iter().map(|skipped| skipped.path.to_ascii_lowercase())).collect();
+    let links = discover_links_with(report, physical_group, wired_report_id, pairing_table)?;
+    Ok(LinkScan { links, present_channels })
+}
+
+#[cfg(test)]
 fn open_links_with(
+    report: EnumerateReport,
+    physical_group: impl FnMut(&HidInterface) -> Option<String>,
+    wired_report_id: impl FnMut(&HidInterface) -> Option<u8>,
+    mut pairing_table: impl FnMut(&HidInterface) -> Option<Vec<u8>>,
+) -> Result<Vec<Link>, String> {
+    discover_links_with(report, physical_group, wired_report_id, |interface| Ok(pairing_table(interface)))
+}
+
+fn discover_links_with(
     report: EnumerateReport,
     mut physical_group: impl FnMut(&HidInterface) -> Option<String>,
     mut wired_report_id: impl FnMut(&HidInterface) -> Option<u8>,
-    mut pairing_table: impl FnMut(&HidInterface) -> Option<Vec<u8>>,
+    mut pairing_table: impl FnMut(&HidInterface) -> Result<Option<Vec<u8>>, ()>,
 ) -> Result<Vec<Link>, String> {
     let all = report.interfaces;
-    if all.is_empty() {
-        if report.skipped.is_empty() { return Ok(Vec::new()); }
-        return Err(empty_reason(&report.skipped));
-    }
+    if all.is_empty() { return Ok(Vec::new()); }
 
-    let mut groups = std::collections::BTreeMap::<String, Vec<HidInterface>>::new();
+    let mut groups = std::collections::BTreeMap::<(u16, u16, bool, String), Vec<HidInterface>>::new();
     for iface in &all {
-        let group = physical_group(iface).filter(|group| !group.is_empty())
-            .map(|group| format!("physical:{}", group.to_ascii_lowercase()))
-            .unwrap_or_else(|| format!("interface:{}", iface.path.to_ascii_lowercase()));
-        groups.entry(format!("{:04x}:{:04x}:{group}", iface.vendor_id, iface.product_id))
+        let physical = physical_group(iface).filter(|group| !group.is_empty());
+        let trusted = physical.is_some();
+        let group = physical.unwrap_or_else(|| iface.path.clone()).to_ascii_lowercase();
+        groups.entry((iface.vendor_id, iface.product_id, trusted, group))
             .or_default().push(iface.clone());
     }
     let mut links = Vec::new();
@@ -968,13 +994,13 @@ fn open_links_with(
                 || !is_command_page(iface.usage_page) { continue; }
             if let Some(report_id) = wired_report_id(iface) {
                 links.push(Link {
-                    mode: "Wired".into(), report_id, iface: iface.clone(),
+                    mode: "Wired".into(), report_id, read_only: false, iface: iface.clone(),
                     all_interfaces: interfaces.clone(),
                 });
             }
         }
     }
-    for interfaces in groups.values() {
+    for (group, interfaces) in &groups {
         let controls: Vec<_> = interfaces.iter().filter(|iface| iface.product_id == PID_DONGLE
             && iface.usage_page == USAGE_PAGE_DONGLE_CTRL && iface.is_command_channel()).collect();
         let mice: Vec<_> = interfaces.iter().filter(|iface| iface.product_id == PID_DONGLE
@@ -985,17 +1011,21 @@ fn open_links_with(
             [mouse] => *mouse,
             _ => continue,
         };
-        let Some(scan) = pairing_table(control) else { continue; };
-        if scan.get(..3) != Some(&[1, 0xA0, 0][..]) { continue; }
-        let Some(report_id) = parse_pairing_table(&scan, &[PID_MOUSE_WIRELESS, PID_MOUSE_WIRED])
-            .filter(|report_id| *report_id != 0) else { continue; };
+        let (report_id, read_only) = match pairing_table(control) {
+            Ok(Some(scan)) => {
+                if scan.get(..3) != Some(&[1, 0xA0, 0][..]) { continue; }
+                let Some(report_id) = parse_pairing_table(&scan, &[PID_MOUSE_WIRELESS, PID_MOUSE_WIRED])
+                    else { continue; };
+                (report_id, false)
+            }
+            Ok(None) if group.2 && control.vendor_id == VID_ASUS
+                && control.product_id == PID_DONGLE && mice.len() == 1 => (3, true),
+            _ => continue,
+        };
         links.push(Link {
-            mode: "Wireless24G".into(), report_id, iface: iface.clone(),
+            mode: "Wireless24G".into(), report_id, read_only, iface: iface.clone(),
             all_interfaces: interfaces.clone(),
         });
-    }
-    if links.is_empty() && all.iter().any(HidInterface::is_command_channel) {
-        return Err("没有找到可确认的设备命令通道或接收器配对信息".into());
     }
     Ok(links)
 }
@@ -1081,7 +1111,7 @@ mod link_tests {
             Some(vec![1, 0xA0, 0, 0, 1, 0, 1, 2, 7, 0])] {
             let links = open_links_with(report(vec![interface("control", USAGE_PAGE_DONGLE_CTRL)]),
                 |_| Some("receiver".into()), |_| None, |_| scan.clone());
-            assert!(links.is_err());
+            assert!(links.unwrap().is_empty());
         }
     }
 
@@ -1103,7 +1133,7 @@ mod link_tests {
             interface("control-b", USAGE_PAGE_DONGLE_CTRL),
             interface("mouse", USAGE_PAGE_MOUSE_CTRL),
         ]), |_| Some("receiver".into()), |_| None, |_| Some(pairing(3)));
-        assert!(result.is_err());
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]
@@ -1111,7 +1141,7 @@ mod link_tests {
         assert!(open_links_with(report(Vec::new()), |_| None, |_| None, |_| None).unwrap().is_empty());
         let report = EnumerateReport { interfaces: Vec::new(),
             skipped: vec![Skipped { path: "occupied".into(), reason: "sharing violation".into() }] };
-        assert!(open_links_with(report, |_| None, |_| None, |_| None).is_err());
+        assert!(open_links_with(report, |_| None, |_| None, |_| None).unwrap().is_empty());
         let mut standard = interface("standard", 1);
         standard.usage = 2;
         assert!(open_links_with(self::report(vec![standard]), |_| None, |_| None, |_| None).unwrap().is_empty());
@@ -1159,6 +1189,73 @@ mod link_tests {
         assert_eq!(usb_physical_group_with(1, VID_ASUS, PID_DONGLE,
             |_| { calls += 1; Some("ROOT\\unknown\\node".into()) }, |node| Some(node + 1)), None);
         assert_eq!(calls, 32);
+    }
+
+    #[test]
+    fn link_scan_keeps_present_channels_when_one_receiver_cannot_answer() {
+        let report = EnumerateReport { interfaces: vec![
+            interface("A-control", USAGE_PAGE_DONGLE_CTRL),
+            interface("B-control", USAGE_PAGE_DONGLE_CTRL),
+        ], skipped: vec![Skipped { path: "C-Occupied".into(), reason: "busy".into() }] };
+        let scan = scan_links_with(report, |interface| Some(interface.path.clone()), |_| None,
+            |interface| if interface.path.starts_with('A') { Ok(Some(pairing(7))) } else { Err(()) }).unwrap();
+        assert_eq!(scan.links.len(), 1);
+        assert_eq!(scan.present_channels, ["a-control", "b-control", "c-occupied"]
+            .into_iter().map(str::to_string).collect());
+    }
+
+    #[test]
+    fn complete_unreadable_scan_still_returns_presence_evidence() {
+        let scan = scan_links_with(EnumerateReport { interfaces: Vec::new(),
+            skipped: vec![Skipped { path: "Occupied".into(), reason: "busy".into() }] },
+            |_| None, |_| None, |_| panic!("unreadable interface")).unwrap();
+        assert!(scan.links.is_empty());
+        assert!(scan.present_channels.contains("occupied"));
+    }
+
+    #[test]
+    fn verified_omni_group_keeps_the_read_only_default_on_pairing_timeout() {
+        let scan = scan_links_with(report(vec![
+            interface("control", USAGE_PAGE_DONGLE_CTRL),
+            interface("mouse", USAGE_PAGE_MOUSE_CTRL),
+        ]), |_| Some("physical".into()), |_| None, |_| Ok(None)).unwrap();
+        assert_eq!(scan.links.len(), 1);
+        assert_eq!(scan.links[0].report_id, 3);
+        assert_eq!(scan.links[0].iface.path, "mouse");
+        assert!(scan.links[0].read_only);
+    }
+
+    #[test]
+    fn duplicate_receiver_serials_keep_distinct_unverified_link_keys() {
+        let mut first = Link { mode: "Wireless24G".into(), report_id: 3, read_only: false,
+            iface: interface("receiver-a", USAGE_PAGE_MOUSE_CTRL), all_interfaces: Vec::new() };
+        first.iface.serial = "DUPLICATE".into();
+        let mut second = first.clone();
+        second.iface.path = "receiver-b".into();
+        assert_ne!(first.device_key(), second.device_key());
+        let key = first.device_key();
+        first.iface.serial = "DUPLICATED+".into();
+        assert_eq!(key, first.device_key());
+        first.iface.path = "RECEIVER-A".into();
+        assert_eq!(key, first.device_key());
+        first.report_id = 7;
+        assert_ne!(key, first.device_key());
+    }
+
+    #[test]
+    fn pairing_default_does_not_apply_to_failed_unknown_or_ambiguous_groups() {
+        let interfaces = vec![interface("control", USAGE_PAGE_DONGLE_CTRL),
+            interface("mouse", USAGE_PAGE_MOUSE_CTRL)];
+        let unknown = scan_links_with(report(interfaces.clone()), |_| None, |_| None, |_| Ok(None)).unwrap();
+        assert!(unknown.links.is_empty());
+        let failed = scan_links_with(report(interfaces.clone()), |_| Some("physical".into()), |_| None, |_| Err(())).unwrap();
+        assert!(failed.links.is_empty());
+        for frame in [vec![1, 0xA0, 0, 0, 0, 0], vec![1, 0xFF, 0xAA],
+            vec![1, 0xA0, 0, 0, 2, 0, 0x65, 0x1B, 3, 0, 0x63, 0x1B, 7, 0]] {
+            let scan = scan_links_with(report(interfaces.clone()), |_| Some("physical".into()),
+                |_| None, |_| Ok(Some(frame.clone()))).unwrap();
+            assert!(scan.links.is_empty());
+        }
     }
 }
 

@@ -86,7 +86,7 @@ impl DeviceBackend for Rog {
                     .step_by(crate::proto::DPI_STEP as usize)
                     .map(|dpi| dpi as u16)
                     .collect(),
-                writable: target.verified_identity || link.mode == "Wired",
+                writable: !link.read_only && (target.verified_identity || link.mode == "Wired"),
                 ..Default::default()
             }
         } else {
@@ -114,6 +114,7 @@ impl DeviceBackend for Rog {
                 target.hid().is_ok_and(|i| link.iface.path == i.path) && link.report_id == target.address
             })
             .ok_or("ROG 设备已断开")?;
+        if link.read_only { return Err("接收器配对信息未确认，当前链路只允许读取".into()); }
         let current = fetch(&link, true)?;
         if target.verified_identity && identity_key(&link, &current.snapshot.identity) != target.key
         {
