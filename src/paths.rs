@@ -133,7 +133,7 @@ fn physical_location(path: &std::path::Path) -> std::io::Result<PathBuf> {
     }
 }
 
-/// 快照缓存文件（跨进程复用，省掉 690ms 的全量读取）
+/// 跨进程展示缓存；配置写入不使用缓存。
 pub fn snapshot_cache_file() -> PathBuf {
     cache_dir().join("snapshot.cache")
 }
