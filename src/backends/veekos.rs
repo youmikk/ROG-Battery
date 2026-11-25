@@ -43,8 +43,8 @@ fn candidates(api: &HidApi, interfaces: &[HidInterface]) -> Vec<(Target, u8)> {
 }
 
 fn decode(frame: &[u8], id: u8) -> Option<u8> {
-    (frame.len() == usize::from(REPORT_BYTES)
-        && frame[0] == id
+    if frame.len() != usize::from(REPORT_BYTES) { return None; }
+    (frame[0] == id
         && frame[1] == 0
         && frame[2] <= 100
         && frame[3] == 100)
@@ -157,6 +157,18 @@ mod tests {
             wrong[3] = 99;
             assert!(decode(&wrong, id).is_none());
             assert!(decode(&frame(id, 48)[..64], id).is_none());
+        }
+    }
+
+    #[test]
+    fn every_truncated_or_oversized_status_page_is_rejected_without_panicking() {
+        for report_id in [0, 0x83] {
+            for length in 0..=usize::from(REPORT_BYTES) + 1 {
+                let mut reply = frame(report_id, 48);
+                reply.resize(length, 0);
+                assert_eq!(decode(&reply, report_id),
+                    (length == usize::from(REPORT_BYTES)).then_some(48));
+            }
         }
     }
 
