@@ -588,7 +588,7 @@ impl<C: Channel> Session<C> {
 
     fn identify(&mut self, target: &mut Target) {
         if self.legacy {
-            self.identify_legacy(target);
+            self.identify_legacy(target, true);
             return;
         }
         let Ok(Some(index)) = self.feature(0x0005) else {
@@ -676,32 +676,37 @@ impl<C: Channel> Session<C> {
         }
     }
 
-    fn identify_legacy(&mut self, target: &mut Target) {
+    fn read_legacy_identity(&mut self) -> (Option<String>, Option<DeviceFamily>) {
         if !(1..=6).contains(&self.address)
             || !(0xc500..=0xc5ff).contains(&self.interface.product_id)
         {
-            return;
+            return (None, None);
         }
         let slot = self.address - 1;
-        // 接收器信息由 0xFF 地址返回，子寄存器的回显用于排除其他槽位的迟到回帧。
         let pairing = self.read_register(0xff, 0x2b5, &[0x20 + slot]).ok();
-        if let Some(kind) = pairing.as_ref().and_then(|reply| reply.get(7)) {
-            target.family = match kind & 0x0f {
-                1 | 3 => DeviceFamily::Keyboard,
-                2 | 8 | 9 => DeviceFamily::Mouse,
-                0x0b | 0x0c => DeviceFamily::Gamepad,
-                _ => target.family,
-            };
+        let family = pairing.as_ref().and_then(|reply| reply.get(7)).and_then(|kind|
+            match kind & 0x0f {
+                1 | 3 => Some(DeviceFamily::Keyboard),
+                2 | 8 | 9 => Some(DeviceFamily::Mouse),
+                0x0b | 0x0c => Some(DeviceFamily::Gamepad),
+                _ => None,
+            });
+        let extended = self.read_register(0xff, 0x2b5, &[0x30 + slot]).ok();
+        let key = pairing.as_ref().zip(extended.as_ref())
+            .and_then(|(pairing, extended)| legacy_identity_key(pairing, extended));
+        (key, family)
+    }
+
+    fn identify_legacy(&mut self, target: &mut Target, query_name: bool) {
+        let (key, family) = self.read_legacy_identity();
+        if let Some(family) = family { target.family = family; }
+        if let Some(key) = key {
+            target.key = key;
+            target.verified_identity = true;
         }
-        if let Ok(extended) = self.read_register(0xff, 0x2b5, &[0x30 + slot]) {
-            if let Some(key) = pairing
-                .as_ref()
-                .and_then(|pairing| legacy_identity_key(pairing, &extended))
-            {
-                target.key = key;
-                target.verified_identity = true;
-            }
-        }
+        if !query_name || !(1..=6).contains(&self.address)
+            || !(0xc500..=0xc5ff).contains(&self.interface.product_id) { return; }
+        let slot = self.address - 1;
         if let Ok(reply) = self.read_register(0xff, 0x2b5, &[0x40 + slot]) {
             if let Some(name) = decode_receiver_name(&reply) {
                 target.name = name;
@@ -714,9 +719,8 @@ impl<C: Channel> Session<C> {
         target.key = target.unverified_key();
         target.verified_identity = false;
         if self.legacy {
-            if detail || target.family == DeviceFamily::Unknown {
-                self.identify_legacy(&mut target);
-            }
+            let query_name = detail || target.family == DeviceFamily::Unknown;
+            self.identify_legacy(&mut target, query_name);
         } else if let Ok(Some(key)) = self.identity_key() {
             target.key = key;
             target.verified_identity = true;
@@ -742,10 +746,7 @@ impl<C: Channel> Session<C> {
         };
         if target.verified_identity {
             let current = if self.legacy {
-                let slot = self.address - 1;
-                let pairing = self.read_register(0xff, 0x2b5, &[0x20 + slot])?;
-                let extended = self.read_register(0xff, 0x2b5, &[0x30 + slot])?;
-                legacy_identity_key(&pairing, &extended)
+                self.read_legacy_identity().0
             } else {
                 self.identity_key()?
             };
@@ -2144,6 +2145,34 @@ mod tests {
         let mut session = Session::from_channel(channel, &target).unwrap();
         assert!(session.read_snapshot(&target, true).is_err());
         assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_lightweight_polls_verify_known_mouse_and_keyboard_without_querying_names() {
+        for (family, kind) in [(DeviceFamily::Mouse, 2), (DeviceFamily::Keyboard, 1)] {
+            let mut target = target();
+            target.address = 2;
+            target.hid_mut().product_id = 0xc52b;
+            target.family = family;
+            target.name = "Known device".into();
+            let (channel, steps) = channel(vec![
+                Step { address: Some(2), feature: 0, function: 1,
+                    parameters: vec![0, 0, 0x5a], reply: Reply::Error(0x8f, 1) },
+                data(0x83, 0xb5, &[0x21], &[0x21, 0, 0, 0x40, 0x08, 0, 0, kind]),
+                data(0x83, 0xb5, &[0x31], &[0x31, 1, 2, 3, 4]),
+                data(0x81, 0x0d, &[], &[42, 0, 0x30]),
+                data(0x83, 0xb5, &[0x21], &[0x21, 0, 0, 0x40, 0x08, 0, 0, kind]),
+                data(0x83, 0xb5, &[0x31], &[0x31, 1, 2, 3, 4]),
+            ]);
+            let snapshot = Session::from_channel(channel, &target).unwrap()
+                .read_snapshot(&target, false).unwrap();
+            assert!(snapshot.target.verified_identity);
+            assert_eq!(snapshot.target.key, crate::device::stable_key("logitech-legacy:4008:01020304"));
+            assert_eq!(snapshot.target.family, family);
+            assert_eq!(snapshot.target.name, target.name);
+            assert_eq!(snapshot.battery.unwrap().percent, Some(42));
+            assert!(steps.lock().unwrap().is_empty());
+        }
     }
 
     #[test]
