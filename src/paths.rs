@@ -49,21 +49,10 @@ fn custom_settings_pointer() -> PathBuf {
     config_dir().join("custom_settings_path.txt")
 }
 
-/// 读取用户自定义的配置文件路径（若已配置且非空）。
-///
-/// 结果缓存：设置页每帧都会问一次「是不是自定义」，不缓存就是每帧一次磁盘读，
-/// 而且读在 UI 线程上。`set_custom_settings_file` 负责失效。
+/// 缓存配置重定向，避免绘制时反复读盘。
 pub fn custom_settings_file() -> Option<PathBuf> {
-    if let Ok(guard) = custom_settings_cell().lock() {
-        if let Some(cached) = guard.as_ref() {
-            return cached.clone();
-        }
-    }
-    let read = read_custom_settings_pointer();
-    if let Ok(mut guard) = custom_settings_cell().lock() {
-        *guard = Some(read.clone());
-    }
-    read
+    let mut guard = custom_settings_cell().lock().unwrap_or_else(|error| error.into_inner());
+    guard.get_or_insert_with(read_custom_settings_pointer).clone()
 }
 
 fn custom_settings_cell() -> &'static std::sync::Mutex<Option<Option<PathBuf>>> {
@@ -82,27 +71,42 @@ fn read_custom_settings_pointer() -> Option<PathBuf> {
     None
 }
 
-/// 设定或重置自定义配置文件路径。
-pub fn set_custom_settings_file(new_path: Option<PathBuf>) -> Result<(), String> {
-    let pointer = custom_settings_pointer();
-    match new_path {
-        Some(p) => {
-            let _ = ensure_dir(&config_dir());
-            std::fs::write(&pointer, p.to_string_lossy().as_bytes())
-                .map_err(|e| format!("写入配置文件重定向记录失败：{e}"))?;
-            if let Ok(mut guard) = custom_settings_cell().lock() {
-                *guard = Some(Some(p));
-            }
-            Ok(())
-        }
-        None => {
-            let _ = std::fs::remove_file(&pointer);
-            if let Ok(mut guard) = custom_settings_cell().lock() {
-                *guard = Some(None);
-            }
-            Ok(())
+pub fn with_settings_file<T>(action: impl FnOnce(&std::path::Path) -> Result<T, String>) -> Result<T, String> {
+    let mut guard = custom_settings_cell().lock().map_err(|_| "配置路径锁不可用".to_string())?;
+    let path = guard.get_or_insert_with(read_custom_settings_pointer).clone()
+        .unwrap_or_else(|| config_dir().join("settings.ini"));
+    action(&path)
+}
+
+pub fn set_custom_settings_file(new_path: Option<PathBuf>, contents: &[u8]) -> Result<(), String> {
+    let mut guard = custom_settings_cell().lock().map_err(|_| "配置路径锁不可用".to_string())?;
+    relocate_settings(&custom_settings_pointer(), &config_dir().join("settings.ini"), new_path, contents, &mut guard)
+}
+
+fn relocate_settings(
+    pointer: &std::path::Path,
+    default: &std::path::Path,
+    new_path: Option<PathBuf>,
+    contents: &[u8],
+    cached: &mut Option<Option<PathBuf>>,
+) -> Result<(), String> {
+    let destination = new_path.as_deref().unwrap_or(default);
+    let text = destination.to_str().ok_or("配置保存路径必须是有效文本")?;
+    if destination == pointer || text.trim().is_empty() {
+        return Err("配置保存位置无效".into());
+    }
+    write_atomic(destination, contents)?;
+    if new_path.is_some() {
+        write_atomic(pointer, text.as_bytes())?;
+    } else {
+        match std::fs::remove_file(pointer) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(format!("清除配置文件重定向记录失败：{error}")),
         }
     }
+    *cached = Some(new_path);
+    Ok(())
 }
 
 /// 快照缓存文件（跨进程复用，省掉 690ms 的全量读取）
@@ -163,10 +167,7 @@ pub fn replace_file(source: &std::path::Path, target: &std::path::Path) -> std::
     Ok(())
 }
 
-/// 原子写文件：先写同目录的临时文件，再整份改名覆盖。
-///
-/// 直接 `fs::write` 中途崩溃/断电会留下截断文件；备份和设置都是「唯一的
-/// 恢复手段」，截断等于把用户的后路烧掉。改名在同一卷上是原子的。
+/// 写入同目录临时文件后原子替换，失败时保留目标。
 pub fn write_atomic(p: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = p.parent() {
         if !parent.as_os_str().is_empty() {
@@ -290,6 +291,54 @@ mod tests {
         assert_eq!(replace_file(&source, &target).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
         assert_eq!(std::fs::read(&source).unwrap(), b"new");
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
+    }
+
+    #[test]
+    fn failed_settings_destination_preserves_the_active_pointer_and_cache() {
+        let scratch = Scratch::new();
+        let pointer = scratch.0.join("pointer");
+        let original = scratch.0.join("old.ini");
+        let destination = scratch.0.join("directory");
+        std::fs::write(&original, b"old settings").unwrap();
+        std::fs::write(&pointer, original.to_str().unwrap()).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        let mut cached = Some(Some(original.clone()));
+        assert!(relocate_settings(&pointer, &scratch.0.join("default.ini"), Some(destination), b"new settings", &mut cached).is_err());
+        assert_eq!(cached, Some(Some(original.clone())));
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), original.to_str().unwrap());
+        assert_eq!(std::fs::read(original).unwrap(), b"old settings");
+    }
+
+    #[test]
+    fn failed_pointer_reset_does_not_change_the_cached_settings_path() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let scratch = Scratch::new();
+        let pointer = scratch.0.join("pointer");
+        let original = scratch.0.join("old.ini");
+        std::fs::write(&pointer, original.to_str().unwrap()).unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(winapi::um::winnt::FILE_SHARE_READ).open(&pointer).unwrap();
+        let mut cached = Some(Some(original.clone()));
+        assert!(relocate_settings(&pointer, &scratch.0.join("default.ini"), None, b"settings", &mut cached).is_err());
+        assert_eq!(cached, Some(Some(original.clone())));
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), original.to_str().unwrap());
+        drop(held);
+    }
+
+    #[test]
+    fn successful_relocation_and_reset_preserve_current_settings() {
+        let scratch = Scratch::new();
+        let pointer = scratch.0.join("pointer");
+        let default = scratch.0.join("default.ini");
+        let custom = scratch.0.join("custom").join("settings.ini");
+        let mut cached = Some(None);
+        relocate_settings(&pointer, &default, Some(custom.clone()), b"first", &mut cached).unwrap();
+        assert_eq!(cached, Some(Some(custom.clone())));
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), custom.to_str().unwrap());
+        assert_eq!(std::fs::read(&custom).unwrap(), b"first");
+        relocate_settings(&pointer, &default, None, b"updated", &mut cached).unwrap();
+        assert_eq!(cached, Some(None));
+        assert!(!pointer.exists());
+        assert_eq!(std::fs::read(default).unwrap(), b"updated");
     }
 
 }

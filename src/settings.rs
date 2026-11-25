@@ -351,11 +351,6 @@ impl Settings {
         true
     }
 
-    /// 把设置渲染成 ini 文本（供「更改设置文件位置」时把当前配置写到新位置）。
-    pub fn render(s: &Settings) -> String {
-        s.to_text()
-    }
-
     /// 写出默认配置文件。GUI 首次启动 / `cache` 子命令会用到。
     pub fn write_default_if_missing() {
         if paths::settings_file().exists() {
@@ -460,13 +455,16 @@ pub fn load() -> Settings {
 ///
 /// 走原子写：中途崩溃留下半份 settings.ini，下次启动会把整份配置读成默认值。
 pub fn save(s: &Settings) -> Result<(), String> {
-    let p = paths::settings_file();
-    let result = paths::write_atomic(&p, s.to_text().as_bytes());
+    let result = paths::with_settings_file(|path| paths::write_atomic(path, s.to_text().as_bytes()));
     #[cfg(not(test))]
     if let Err(error) = &result {
         crate::diagnostics::event_once("settings_save_failed", error);
     }
     result
+}
+
+pub fn relocate(s: &Settings, path: Option<std::path::PathBuf>) -> Result<(), String> {
+    paths::set_custom_settings_file(path, s.to_text().as_bytes())
 }
 
 /// 用于备份文件名的**本地**时间戳 `YYYYMMDD-HHMMSS`。

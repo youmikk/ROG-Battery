@@ -3141,24 +3141,13 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
         env.say(crate::tr!("位置没变"));
         return;
     }
-    // 旧文件有内容、新位置还是空的 → 搬过去，别让用户丢历史/配置。
-    let old_has = std::fs::metadata(&old).map(|m| m.len() > 0).unwrap_or(false);
-    let new_empty = std::fs::metadata(&new_path).map(|m| m.len() == 0).unwrap_or(true);
-    if let Some(parent) = new_path.parent() {
-        let _ = crate::paths::ensure_dir(parent);
-    }
-    if kind == SavePathKind::Settings && old_has && new_empty {
-        let _ = std::fs::copy(&old, &new_path);
-    }
     let gate = lock_shared(env.shared).history_gate.clone();
     let _guard = (kind == SavePathKind::History).then(|| gate.lock().unwrap_or_else(|e| e.into_inner()));
     let res = match kind {
         SavePathKind::History => crate::history::set_custom_history_path(Some(new_path.clone())),
         SavePathKind::Settings => {
-            // 先把当前配置写到新位置，再切换指针，避免切换后读到空文件。
-            let cur = crate::settings::load();
-            let _ = std::fs::write(&new_path, crate::settings::Settings::render(&cur));
-            crate::paths::set_custom_settings_file(Some(new_path.clone()))
+            let current = lock_shared(env.shared).cfg.clone();
+            crate::settings::relocate(&current, Some(new_path.clone()))
         }
     };
     match res {
@@ -3182,7 +3171,10 @@ fn reset_custom_path(env: &UiEnv, kind: SavePathKind) {
     let _guard = (kind == SavePathKind::History).then(|| gate.lock().unwrap_or_else(|e| e.into_inner()));
     let res = match kind {
         SavePathKind::History => crate::history::set_custom_history_path(None),
-        SavePathKind::Settings => crate::paths::set_custom_settings_file(None),
+        SavePathKind::Settings => {
+            let current = lock_shared(env.shared).cfg.clone();
+            crate::settings::relocate(&current, None)
+        }
     };
     match res {
         Ok(()) => {
