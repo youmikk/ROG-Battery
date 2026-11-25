@@ -895,9 +895,9 @@ impl Link {
 }
 
 fn parse_pairing_table(scan: &[u8], wanted: &[u16]) -> Option<u8> {
-    if scan.len() < 6 { return None; }
-    let count = u16::from_le_bytes([scan[4], scan[5]]) as usize;
-    let entries = scan.get(6..6 + count * 4)?;
+    if scan.len() < 5 || !scan.starts_with(&[1, 0xA0, 0]) { return None; }
+    let count = u16::from_le_bytes([scan[3], scan[4]]) as usize;
+    let entries = scan.get(5..5 + count * 4)?;
     let mut report_id = None;
     for entry in entries.chunks_exact(4) {
         let pid = u16::from_le_bytes([entry[0], entry[1]]);
@@ -1013,7 +1013,6 @@ fn discover_links_with(
         };
         let (report_id, read_only) = match pairing_table(control) {
             Ok(Some(scan)) => {
-                if scan.get(..3) != Some(&[1, 0xA0, 0][..]) { continue; }
                 let Some(report_id) = parse_pairing_table(&scan, &[PID_MOUSE_WIRELESS, PID_MOUSE_WIRED])
                     else { continue; };
                 (report_id, false)
@@ -1059,11 +1058,53 @@ mod link_tests {
     }
 
     fn pairing(report_id: u8) -> Vec<u8> {
-        vec![1, 0xA0, 0, 0, 1, 0, 0x65, 0x1B, report_id, 0]
+        vec![1, 0xA0, 0, 1, 0, 0x65, 0x1B, report_id, 0]
     }
 
     fn report(interfaces: Vec<HidInterface>) -> EnumerateReport {
         EnumerateReport { interfaces, skipped: Vec::new() }
+    }
+
+    fn captured_omni_pairing() -> Vec<u8> {
+        let mut frame = vec![0x01, 0xA0, 0x00, 0x01, 0x00, 0x65, 0x1B, 0x03, 0x05];
+        frame.resize(64, 0);
+        frame
+    }
+
+    #[test]
+    fn omni_firmware_80007_pairing_reply_uses_the_report_id_before_notify_id() {
+        let frame = captured_omni_pairing();
+        assert_eq!(parse_pairing_table(&frame, &[PID_MOUSE_WIRELESS, PID_MOUSE_WIRED]), Some(3));
+        for length in 0..9 {
+            assert_eq!(parse_pairing_table(&frame[..length], &[PID_MOUSE_WIRELESS]), None);
+        }
+    }
+
+    #[test]
+    fn omni_firmware_80007_reply_establishes_the_paired_mouse_channel() {
+        let scan = scan_links_with(report(vec![
+            interface("control", USAGE_PAGE_DONGLE_CTRL),
+            interface("mouse", USAGE_PAGE_MOUSE_CTRL),
+        ]), |_| Some("physical".into()), |_| None, |_| Ok(Some(captured_omni_pairing()))).unwrap();
+        assert_eq!(scan.links.len(), 1);
+        assert_eq!(scan.links[0].report_id, 3);
+        assert_eq!(scan.links[0].iface.path, "mouse");
+        assert!(!scan.links[0].read_only);
+    }
+
+    #[test]
+    fn pairing_table_requires_a_valid_header_and_all_counted_entries() {
+        let frame = vec![1, 0xA0, 0, 2, 0, 0x34, 0x12, 5, 6, 0x65, 0x1B, 7, 8];
+        assert_eq!(parse_pairing_table(&frame, &[PID_MOUSE_WIRELESS]), Some(7));
+        assert_eq!(parse_pairing_table(&frame[..12], &[0x1234]), None);
+        for header_index in 0..3 {
+            let mut invalid = frame.clone();
+            invalid[header_index] ^= 1;
+            assert_eq!(parse_pairing_table(&invalid, &[PID_MOUSE_WIRELESS]), None);
+        }
+        let mut high_count = frame;
+        high_count[4] = 1;
+        assert_eq!(parse_pairing_table(&high_count, &[PID_MOUSE_WIRELESS]), None);
     }
 
     #[test]
@@ -1107,8 +1148,8 @@ mod link_tests {
 
     #[test]
     fn unconfirmed_pairing_never_invents_a_default_report_id() {
-        for scan in [None, Some(vec![1, 0xFF, 0xAA]), Some(vec![1, 0xA0, 0, 0, 0, 0]),
-            Some(vec![1, 0xA0, 0, 0, 1, 0, 1, 2, 7, 0])] {
+        for scan in [None, Some(vec![1, 0xFF, 0xAA]), Some(vec![1, 0xA0, 0, 0, 0]),
+            Some(vec![1, 0xA0, 0, 1, 0, 1, 2, 7, 0])] {
             let links = open_links_with(report(vec![interface("control", USAGE_PAGE_DONGLE_CTRL)]),
                 |_| Some("receiver".into()), |_| None, |_| scan.clone());
             assert!(links.unwrap().is_empty());
@@ -1150,7 +1191,7 @@ mod link_tests {
     #[test]
     fn incomplete_or_ambiguous_pairing_table_does_not_select_a_slot() {
         let mut truncated = pairing(3);
-        truncated[4] = 2;
+        truncated[3] = 2;
         let mut ambiguous = truncated.clone();
         ambiguous.extend_from_slice(&[0x63, 0x1B, 7, 0]);
         for scan in [truncated, ambiguous, pairing(0)] {
@@ -1250,8 +1291,8 @@ mod link_tests {
         assert!(unknown.links.is_empty());
         let failed = scan_links_with(report(interfaces.clone()), |_| Some("physical".into()), |_| None, |_| Err(())).unwrap();
         assert!(failed.links.is_empty());
-        for frame in [vec![1, 0xA0, 0, 0, 0, 0], vec![1, 0xFF, 0xAA],
-            vec![1, 0xA0, 0, 0, 2, 0, 0x65, 0x1B, 3, 0, 0x63, 0x1B, 7, 0]] {
+        for frame in [vec![1, 0xA0, 0, 0, 0], vec![1, 0xFF, 0xAA],
+            vec![1, 0xA0, 0, 2, 0, 0x65, 0x1B, 3, 0, 0x63, 0x1B, 7, 0]] {
             let scan = scan_links_with(report(interfaces.clone()), |_| Some("physical".into()),
                 |_| None, |_| Ok(Some(frame.clone()))).unwrap();
             assert!(scan.links.is_empty());
