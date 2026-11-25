@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：Arctis 7+ 系列（未发布）
+
+固定核对 [HeadsetControl `bd56cf875b736ff91f69ebf17b519a79d0270564`](https://github.com/Sapd/HeadsetControl/blob/bd56cf875b736ff91f69ebf17b519a79d0270564/lib/devices/steelseries_arctis_7_plus.hpp) 的型号、接口 3、`FFC0:0001` 与五档电量，以及同提交的 `protocols/steelseries_protocol.hpp` 的 `00 B0` 查询。所查源码为 GPL-3.0，新增路径复用本项目既有 B0 通信和状态模型，未移植上游实现。
+
+[Linux-Arctis-Manager `684f07c96bd93416d4f1dc22c67b089f2a08d2a0`](https://github.com/elegos/Linux-Arctis-Manager/blob/684f07c96bd93416d4f1dc22c67b089f2a08d2a0/src/linux_arctis_manager/devices/arctis_7_plus.yaml)（GPL-3.0）交叉核对去除 Windows ID 槽后的字段：byte 1 为 1 时离线，0/2/3 在线；byte 2 为电量档 0～4；byte 3 的 0/1 为未充电/充电。未知状态拒绝，未知充电值保留为空，不能套用 Nova 7 的充电字节语义。查询回显与全部零值歧义保持未知。
+
+[OpenChatMix `2413361931f2a4e28389b2a818af646df30c5487`](https://github.com/Swiftlyx/OpenChatMix/blob/2413361931f2a4e28389b2a818af646df30c5487/src/chatmix_device.cpp)（MIT）提供 Windows 零 Report ID 槽及输入/输出长度分别处理的交叉依据。当前新增路径要求实际描述符证明唯一 `00/65`，不把其他长度猜成兼容；本项目没有三款接收器的实测描述符或回包。
+
 ## 2026-11-26：迈从接收器增量（未发布）
 
 核对 MyFinder `a763adb5a0c44076f9331ab8fad63a899b5326c7` 的 [mchose.py](https://github.com/wushuai0802/myfinder-device-battery/blob/a763adb5a0c44076f9331ab8fad63a899b5326c7/engine/providers/mchose.py) 与 [test_mchose_v3.py](https://github.com/wushuai0802/myfinder-device-battery/blob/a763adb5a0c44076f9331ab8fad63a899b5326c7/engine/tests/test_mchose_v3.py)。所查仓库为 AGPL-3.0；本次使用协议和型号事实，复用本项目已有实现，没有引入上游代码或运行时依赖。

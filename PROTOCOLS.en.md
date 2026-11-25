@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: Arctis 7+ family (unreleased)
+
+Pinned [HeadsetControl `bd56cf875b736ff91f69ebf17b519a79d0270564`](https://github.com/Sapd/HeadsetControl/blob/bd56cf875b736ff91f69ebf17b519a79d0270564/lib/devices/steelseries_arctis_7_plus.hpp) supplies the model/PID list, interface 3, `FFC0:0001` and five battery levels; its `protocols/steelseries_protocol.hpp` supplies the `00 B0` query. Reviewed sources are GPL-3.0. The addition reuses this project's existing communication and state implementation, without porting upstream code.
+
+[Linux-Arctis-Manager `684f07c96bd93416d4f1dc22c67b089f2a08d2a0`](https://github.com/elegos/Linux-Arctis-Manager/blob/684f07c96bd93416d4f1dc22c67b089f2a08d2a0/src/linux_arctis_manager/devices/arctis_7_plus.yaml), GPL-3.0, independently documents body byte 1: offline=1, online=0/2/3; byte 2: battery level 0–4; byte 3: charging 0/1. Unknown charging remains unset. These are not Nova 7 charging semantics. Echo/all-zero ambiguity remains unknown.
+
+[OpenChatMix `2413361931f2a4e28389b2a818af646df30c5487`](https://github.com/Swiftlyx/OpenChatMix/blob/2413361931f2a4e28389b2a818af646df30c5487/src/chatmix_device.cpp), MIT, cross-checks Windows' zero report-ID slot and separate input/output lengths. This implementation requires descriptor-proven unique `00/65` reports. Other sizes are not assumed compatible, and this project has no captures from these receivers.
+
 ## 2026-11-26: MCHOSE receiver additions (unreleased)
 
 Reviewed MyFinder revision `a763adb5a0c44076f9331ab8fad63a899b5326c7`: [mchose.py](https://github.com/wushuai0802/myfinder-device-battery/blob/a763adb5a0c44076f9331ab8fad63a899b5326c7/engine/providers/mchose.py) and [test_mchose_v3.py](https://github.com/wushuai0802/myfinder-device-battery/blob/a763adb5a0c44076f9331ab8fad63a899b5326c7/engine/tests/test_mchose_v3.py), under AGPL-3.0. Protocol facts extend our existing implementation; no upstream implementation or runtime dependency is bundled.

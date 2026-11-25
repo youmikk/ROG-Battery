@@ -44,7 +44,7 @@ X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能
 | --- | --- |
 | 鼠标 | ASUS / ROG、Logitech 罗技、Rapoo 雷柏、VGN、VXE、ATK、Razer 雷蛇、MCHOSE 迈从、AULA 狼蛛、AJAZZ 黑爵、Dareu 达尔优、EWEADN 前行者、DELUX 多彩、灵豹、HECATE、Lamzu、WLMouse |
 | 键盘 | ASUS / ROG、Logitech HID++、VGN / VXE、MCHOSE 迈从、AULA 狼蛛、AJAZZ 黑爵、EWEADN 前行者、Veekos、CHERRY、Lofree 洛斐 |
-| 耳机 | ATK、MCHOSE 迈从、EDIFIER 漫步者、MOONDROP 水月雨、XIBERIA 西伯利亚、FIFINE、Logitech 罗技、Sony INZONE、HyperX、SteelSeries Arctis Nova |
+| 耳机 | ATK、MCHOSE 迈从、EDIFIER 漫步者、MOONDROP 水月雨、XIBERIA 西伯利亚、FIFINE、Logitech 罗技、Sony INZONE、HyperX、SteelSeries Arctis |
 | 手柄 | ASUS / ROG、Sony DualSense / DualSense Edge、8BitDo 八位堂、Flydigi 飞智、GameSir 盖世小鸡，以及能通过 Windows XInput 返回电池信息的手柄 |
 | 标准 HID | 描述符提供标准 Battery Strength 电量能力的设备；标准电量协议不提供通用 DPI 设置 |
 | 蓝牙（通用） | Windows 设置中已显示电量的经典蓝牙 / 双模设备；读取系统缓存，不向设备发送命令，也不提供通用 DPI 设置 |

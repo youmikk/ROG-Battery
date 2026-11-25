@@ -202,7 +202,7 @@ impl BackendId {
             Self::Lingbao => "Lingbao M1 Pro",
             Self::Cherry => "CHERRY keyboard",
             Self::Lofree => "Lofree HYZEN",
-            Self::Nova => "Arctis Nova",
+            Self::Nova => "SteelSeries Arctis",
             Self::Inzone => "Sony INZONE",
             Self::HyperX => "HyperX Alpha 2",
             Self::DualSense => "Sony DualSense",
@@ -344,7 +344,11 @@ impl Target {
             _ => interface.path.to_ascii_lowercase(),
         };
         // Backend display names may expand; existing device preferences keep their key.
-        let key_prefix = if backend == BackendId::VgnDragonfly3 { "VGN Dragonfly3 SE" } else { backend.name() };
+        let key_prefix = match backend {
+            BackendId::VgnDragonfly3 => "VGN Dragonfly3 SE",
+            BackendId::Nova => "Arctis Nova",
+            _ => backend.name(),
+        };
         Self {
             key: crate::device::stable_key(&format!("{key_prefix}:{identity}:{address}")),
             name: interface.product.clone(),
@@ -832,6 +836,24 @@ mod tests {
             let expected = crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",
                 backend.name(), interface.vendor_id, interface.product_id, interface.serial, target.address));
             assert_eq!(target.unverified_key(), expected);
+        }
+    }
+
+    #[test]
+    fn expanded_provider_names_preserve_device_preferences_and_history_keys() {
+        for (backend, prefix) in [
+            (BackendId::Nova, "Arctis Nova"),
+            (BackendId::VgnDragonfly3, "VGN Dragonfly3 SE"),
+        ] {
+            let mut target = reading(backend).target;
+            target.hid_mut().path = "HID#Existing-Receiver".into();
+            target.hid_mut().serial = "shared-receiver-serial".into();
+            let expected = crate::device::stable_key(&format!(
+                "{prefix}:hid#existing-receiver:{}", target.address));
+            assert_eq!(target.unverified_key(), expected);
+            assert_eq!(Target::new(backend, target.hid().unwrap(), target.address).key, expected);
+            target.hid_mut().path = "HID#Another-Receiver".into();
+            assert_ne!(target.unverified_key(), expected);
         }
     }
 

@@ -2,6 +2,14 @@
 
 [简体中文](COMPATIBILITY.md)
 
+## Unreleased: SteelSeries Arctis 7+ family
+
+Adds Arctis 7+ `1038:220E`, 7P+ `1038:2212` and 7X+ `1038:2216`, restricted to `MI_03 / FFC0:0001`. Descriptors must prove one unnumbered input/output report, with both Windows report lengths equal to 65 bytes including the zero ID slot. The existing read-only `00 B0` query is reused; no audio or configuration writes are sent.
+
+Battery reports contain five levels, displayed as `≈0/25/50/75/100%` rather than exact percentages. Only explicit charging values 0/1 are interpreted; other values remain unknown. Offline, echoed, malformed or timed-out replies do not create or renew measurements. Identical receivers stay separate, and existing Nova preference/history keys remain compatible.
+
+All 10 headset module tests and one persistent-key compatibility test passed. This project has not hardware-verified these models. Upstream code establishes protocol evidence; synthetic vectors only validate implementation behavior. Windows descriptors, level transitions, charging, power/wake and two-receiver coexistence still require hardware checks. See [protocol research](PROTOCOLS.en.md).
+
 ## Unreleased: MCHOSE V7 Pro and A7 V3 Ultra+ receiver additions
 
 This section covers development after 1.4.10 and is not released yet.
