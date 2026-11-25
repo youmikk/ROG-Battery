@@ -116,6 +116,50 @@ function request(path, data, { key, ip = IP, method = data === undefined ? "GET"
     body: data === undefined ? undefined : JSON.stringify(data) });
 }
 
+async function promptly(operation) {
+  let timer;
+  try {
+    return await Promise.race([operation, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Independent operation was blocked")), 2000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+function gate(context) {
+  const entered = Promise.withResolvers();
+  const released = Promise.withResolvers();
+  context.after(() => released.resolve());
+  return { entered: entered.promise, release: released.resolve,
+    wait: async () => { entered.resolve(); await released.promise; } };
+}
+
+function slowBody(context, ip = IP) {
+  const reading = Promise.withResolvers();
+  let controller;
+  let closed = false;
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(value) { controller = value; },
+    pull() { reading.resolve(); },
+    cancel() { closed = true; cancelled = true; },
+  }, { highWaterMark: 0 });
+  const abort = () => {
+    if (!closed) { closed = true; controller.error(new Error("Test upload stopped")); }
+  };
+  context.after(abort);
+  return { request: new Request("https://feedback.example.org/feedback", { method: "POST",
+    headers: { "Content-Type": "application/json", "X-Relay-Ip": ip }, body: stream, duplex: "half" }),
+    reading: reading.promise, enqueue: bytes => controller.enqueue(bytes), abort,
+    get cancelled() { return cancelled; } };
+}
+
+function assertIdle(coordinator) {
+  assert.equal(coordinator.activeRequests, 0);
+  assert.equal(coordinator.activeByIp.size, 0);
+  assert.equal(coordinator.bodyBytes, 0);
+  assert.equal(coordinator.queues.size, 0);
+}
+
 test("binds platform fetch to the global receiver for submissions and replies", async () => {
   const state = setup();
   const platformFetch = async function (input, init) {
@@ -447,5 +491,327 @@ test("a stalled body has a deadline so it cannot block the singleton indefinitel
   const stream = new ReadableStream({ start() {}, cancel() { cancelled = true; } });
   const stalled = new Request("https://example.org", { method: "POST", headers: { "Content-Type": "application/json" }, body: stream, duplex: "half" });
   await assert.rejects(readJson(stalled, 1000, 5), error => error.status === 408 && error.retryable);
+  assert.equal(cancelled, true);
+});
+
+test("a stalled upload does not block another IP's submission, authentication or thread", async context => {
+  const state = setup();
+  const slow = slowBody(context);
+  const uploading = state.coordinator.fetch(slow.request);
+  await promptly(slow.reading);
+  const otherIp = "cd".repeat(32);
+  const created = await promptly(state.coordinator.fetch(request("/feedback", body(), { ip: otherIp })));
+  assert.equal(created.status, 201);
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback/123", undefined,
+    { key: "ff".repeat(32), ip: otherIp })))).status, 403);
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback/123", undefined,
+    { key: KEY, ip: otherIp })))).status, 200);
+  slow.abort();
+  assert.equal((await promptly(uploading)).status, 400);
+  assertIdle(state.coordinator);
+});
+
+test("slow R2 upload isolates other feedback and alarm cannot delete active attachments", async context => {
+  const state = setup();
+  const upload = gate(context);
+  const put = state.bucket.put.bind(state.bucket);
+  state.bucket.put = async (...args) => { await put(...args); await upload.wait(); };
+  const value = body({ images: [{ name: "capture.png", mimeType: "image/png", dataBase64: PNG }] });
+  const sending = state.coordinator.fetch(request("/feedback", value));
+  await promptly(upload.entered);
+  state.advance(25 * 3600000);
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback",
+    body({ requestId: "45a526bf-b747-4d42-81e8-d1036d01f984" }), { ip: "cd".repeat(32) })))).status, 201);
+  await promptly(state.coordinator.alarm());
+  assert.equal((await state.storage.get(`request:${UUID}`)).state, "uploading");
+  assert.equal(state.bucket.data.size, 1);
+  upload.release();
+  assert.equal((await promptly(sending)).status, 201);
+  assert.equal((await state.storage.get(`request:${UUID}`)).state, "complete");
+  assert.equal(state.bucket.puts, 1);
+  assertIdle(state.coordinator);
+});
+
+test("slow issue POST preserves concurrent idempotency without blocking other issues or alarm", async context => {
+  const state = setup();
+  const posted = gate(context);
+  const fetch = state.coordinator.github.fetch;
+  state.coordinator.github.fetch = async (input, init) => {
+    const result = await fetch(input, init);
+    if (init.method === "POST" && JSON.parse(init.body).body.includes("等待响应")) await posted.wait();
+    return result;
+  };
+  const value = body({ description: "等待响应期间的重复提交测试。" });
+  const first = state.coordinator.fetch(request("/feedback", value));
+  await promptly(posted.entered);
+  const duplicate = state.coordinator.fetch(request("/feedback", value, { ip: "cd".repeat(32) }));
+  const conflict = state.coordinator.fetch(request("/feedback", { ...value, replyKey: "ff".repeat(32) },
+    { ip: "ef".repeat(32) }));
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback",
+    body({ requestId: "45a526bf-b747-4d42-81e8-d1036d01f984" }), { ip: "12".repeat(32) })))).status, 201);
+  state.advance(6000);
+  await promptly(state.coordinator.alarm());
+  assert.equal((await state.storage.get(`request:${UUID}`)).state, "sending");
+  assert.equal(state.github.calls.filter(call => call.method === "GET").length, 0);
+  posted.release();
+  const results = await promptly(Promise.all([first, duplicate, conflict]));
+  assert.deepEqual(results.map(result => result.status), [201, 200, 409]);
+  assert.deepEqual(await results[0].json(), await results[1].json());
+  assert.equal(state.github.calls.filter(call => call.method === "POST").length, 2);
+  assert.equal((await state.storage.get(`request:${UUID}`)).state, "complete");
+  assertIdle(state.coordinator);
+});
+
+test("slow thread reads isolate other issues and queued reads reuse the fresh cache", async context => {
+  const state = setup();
+  await state.coordinator.fetch(request("/feedback", body()));
+  await state.coordinator.fetch(request("/feedback", body({ requestId: "45a526bf-b747-4d42-81e8-d1036d01f984" })));
+  const reading = gate(context);
+  const fetch = state.coordinator.github.fetch;
+  state.coordinator.github.fetch = async (input, init) => {
+    if (new URL(input).pathname.endsWith("/issues/123")) await reading.wait();
+    return fetch(input, init);
+  };
+  const first = state.coordinator.fetch(request("/feedback/123", undefined, { key: KEY }));
+  await promptly(reading.entered);
+  const second = state.coordinator.fetch(request("/feedback/123", undefined, { key: KEY, ip: "cd".repeat(32) }));
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback/124", undefined,
+    { key: KEY, ip: "ef".repeat(32) })))).status, 200);
+  reading.release();
+  const results = await promptly(Promise.all([first, second]));
+  assert.deepEqual(results.map(result => result.status), [200, 200]);
+  assert.deepEqual(await results[0].json(), await results[1].json());
+  assert.equal(state.github.calls.filter(call => new URL(call.url).pathname.endsWith("/issues/123")).length, 1);
+  assertIdle(state.coordinator);
+});
+
+test("concurrent replies keep one POST and refresh a queued thread after invalidating its cache", async context => {
+  const state = setup();
+  await state.coordinator.fetch(request("/feedback", body()));
+  await state.coordinator.fetch(request("/feedback", body({ requestId: "45a526bf-b747-4d42-81e8-d1036d01f984" })));
+  await state.coordinator.fetch(request("/feedback/123", undefined, { key: KEY }));
+  const posted = gate(context);
+  const fetch = state.coordinator.github.fetch;
+  state.coordinator.github.fetch = async (input, init) => {
+    const result = await fetch(input, init);
+    if (init.method === "POST" && new URL(input).pathname.endsWith("/issues/123/comments")) await posted.wait();
+    return result;
+  };
+  const message = { schema: 1, requestId: UUID, body: "补充测试结果。" };
+  const first = state.coordinator.fetch(request("/feedback/123/replies", message, { key: KEY }));
+  await promptly(posted.entered);
+  const duplicate = state.coordinator.fetch(request("/feedback/123/replies", message,
+    { key: KEY, ip: "cd".repeat(32) }));
+  const updates = state.coordinator.fetch(request("/feedback/123", undefined, { key: KEY, ip: "ef".repeat(32) }));
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback/124/replies", message,
+    { key: KEY, ip: "12".repeat(32) })))).status, 201);
+  state.advance(6000);
+  await promptly(state.coordinator.alarm());
+  assert.equal((await state.storage.get(`reply:123:${UUID}`)).state, "sending");
+  posted.release();
+  const results = await promptly(Promise.all([first, duplicate, updates]));
+  assert.deepEqual(results.map(result => result.status), [201, 200, 200]);
+  assert.deepEqual(await results[0].json(), await results[1].json());
+  assert.equal(state.github.calls.filter(call => call.method === "POST" && call.url.endsWith("/issues/123/comments")).length, 1);
+  assert.equal(state.github.calls.filter(call => call.method === "GET" && call.url.endsWith("/issues/123")).length, 2);
+  assert.equal((await state.coordinator.fetch(request("/feedback/123/replies", { ...message, body: "不同补充" },
+    { key: KEY }))).status, 409);
+  assertIdle(state.coordinator);
+});
+
+test("concurrent IPs cannot lose quota increments or exceed the final global issue slot", async () => {
+  const state = setup();
+  const bucket = Math.floor(BASE_TIME / 86400000);
+  await state.storage.put(`rate:new:global:${bucket}`, { count: 199, expiresAt: (bucket + 2) * 86400000 });
+  const results = await Promise.all(Array.from({ length: 8 }, (_, index) => state.coordinator.fetch(request("/feedback",
+    body({ requestId: `45a526bf-b747-4d42-81e8-d1036d01f98${index}` }), { ip: index.toString(16).repeat(64) }))));
+  assert.equal(results.filter(result => result.status === 201).length, 1);
+  assert.equal(results.filter(result => result.status === 429).length, 7);
+  assert.equal((await state.storage.get(`rate:new:global:${bucket}`)).count, 200);
+  assert.equal((await state.storage.get(`rate:requests:global:${bucket}`)).count, 8);
+  assert.equal(state.github.issues.length, 1);
+  assertIdle(state.coordinator);
+});
+
+test("admission caps per-IP and total in-flight requests and releases slots after failure", async context => {
+  const state = setup();
+  const uploads = [];
+  const responses = [];
+  for (let index = 0; index < 16; index++) {
+    const upload = slowBody(context, Math.floor(index / 2).toString(16).repeat(64));
+    uploads.push(upload);
+    responses.push(state.coordinator.fetch(upload.request));
+    await promptly(upload.reading);
+  }
+  const sameIp = slowBody(context, "0".repeat(64));
+  const limited = await promptly(state.coordinator.fetch(sameIp.request));
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("Retry-After"), "5");
+  assert.equal(sameIp.cancelled, true);
+  const otherIp = slowBody(context, IP);
+  const busy = await promptly(state.coordinator.fetch(otherIp.request));
+  assert.equal(busy.status, 503);
+  assert.deepEqual((await busy.json()).error.code, "service_busy");
+  assert.equal(busy.headers.get("Retry-After"), "5");
+  assert.equal(otherIp.cancelled, true);
+  for (const upload of uploads) upload.abort();
+  assert.ok((await promptly(Promise.all(responses))).every(response => response.status === 400));
+  assertIdle(state.coordinator);
+  assert.equal((await state.coordinator.fetch(request("/feedback", body()))).status, 201);
+  assertIdle(state.coordinator);
+});
+
+test("aggregate body budget cancels excess uploads and releases their partial reservation", async context => {
+  const state = setup();
+  const half = MAX_REQUEST_BYTES / 2;
+  const first = slowBody(context);
+  first.enqueue(Buffer.alloc(half + 1, 32));
+  const uploading = state.coordinator.fetch(first.request);
+  await promptly(first.reading);
+  assert.equal(state.coordinator.bodyBytes, half + 1);
+  const second = slowBody(context, "cd".repeat(32));
+  second.enqueue(Buffer.alloc(half - 1, 32));
+  const rejected = state.coordinator.fetch(second.request);
+  await promptly(second.reading);
+  assert.equal(state.coordinator.bodyBytes, MAX_REQUEST_BYTES);
+  second.enqueue(new Uint8Array([32]));
+  const result = await promptly(rejected);
+  assert.equal(result.status, 503);
+  assert.equal((await result.json()).error.code, "service_busy");
+  assert.equal(second.cancelled, true);
+  assert.equal(state.coordinator.bodyBytes, half + 1);
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback", body(),
+    { ip: "ef".repeat(32) })))).status, 201);
+  first.abort();
+  await promptly(uploading);
+  assertIdle(state.coordinator);
+});
+
+test("body reservations remain held after parsing until attachment processing ends", async context => {
+  const state = setup();
+  const upload = gate(context);
+  const put = state.bucket.put.bind(state.bucket);
+  state.bucket.put = async (...args) => { await put(...args); await upload.wait(); };
+  const value = body({ images: [{ name: "capture.png", mimeType: "image/png", dataBase64: PNG }] });
+  const padded = data => JSON.stringify(data).padEnd(MAX_REQUEST_BYTES / 2 + 1, " ");
+  const send = (data, ip) => state.coordinator.fetch(new Request("https://feedback.example.org/feedback", {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Relay-Ip": ip }, body: padded(data),
+  }));
+  const first = send(value, IP);
+  await promptly(upload.entered);
+  const reserved = state.coordinator.bodyBytes;
+  assert.equal(reserved, Buffer.byteLength(padded(value)));
+  const other = body({ requestId: "45a526bf-b747-4d42-81e8-d1036d01f984" });
+  assert.equal((await promptly(send(other, "cd".repeat(32)))).status, 503);
+  assert.equal(state.coordinator.bodyBytes, reserved);
+  upload.release();
+  assert.equal((await promptly(first)).status, 201);
+  assertIdle(state.coordinator);
+  assert.equal((await promptly(send(other, "cd".repeat(32)))).status, 201);
+  assertIdle(state.coordinator);
+});
+
+test("failed quota storage, validation and upstream calls release all admission state", async () => {
+  const state = setup();
+  const put = state.storage.put.bind(state.storage);
+  state.storage.put = async () => { throw new Error("Test storage unavailable"); };
+  assert.equal((await state.coordinator.fetch(request("/feedback", body()))).status, 503);
+  assertIdle(state.coordinator);
+  state.storage.put = put;
+  assert.equal((await state.coordinator.fetch(request("/feedback", body({ description: "bad" })))).status, 400);
+  assertIdle(state.coordinator);
+  state.github.noIssueCreated = true;
+  assert.equal((await state.coordinator.fetch(request("/feedback", body()))).status, 202);
+  assertIdle(state.coordinator);
+  state.github.noIssueCreated = false;
+  assert.equal((await state.coordinator.fetch(request("/feedback",
+    body({ requestId: "45a526bf-b747-4d42-81e8-d1036d01f984" })))).status, 201);
+  assertIdle(state.coordinator);
+});
+
+test("alarm recovery and client retry share the journal lock while other feedback progresses", async context => {
+  const state = setup();
+  state.github.loseIssueResponse = true;
+  assert.equal((await state.coordinator.fetch(request("/feedback", body()))).status, 202);
+  state.advance(6000);
+  const recovering = gate(context);
+  const fetch = state.coordinator.github.fetch;
+  state.coordinator.github.fetch = async (input, init) => {
+    if (init.method === "GET" && new URL(input).pathname.endsWith("/issues")) await recovering.wait();
+    return fetch(input, init);
+  };
+  const alarm = state.coordinator.alarm();
+  await promptly(recovering.entered);
+  const retry = state.coordinator.fetch(request("/feedback", body()));
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback",
+    body({ requestId: "45a526bf-b747-4d42-81e8-d1036d01f984" }), { ip: "cd".repeat(32) })))).status, 201);
+  recovering.release();
+  await promptly(alarm);
+  assert.equal((await promptly(retry)).status, 200);
+  assert.equal((await state.storage.get(`request:${UUID}`)).state, "complete");
+  assert.equal(state.github.calls.filter(call => call.method === "POST").length, 2);
+  assert.equal(state.github.calls.filter(call => call.method === "GET").length, 1);
+  assertIdle(state.coordinator);
+});
+
+test("alarm rereads a stale scan after the client has completed recovery", async context => {
+  const state = setup();
+  state.github.loseIssueResponse = true;
+  await state.coordinator.fetch(request("/feedback", body()));
+  state.advance(6000);
+  const scanned = gate(context);
+  const list = state.storage.list.bind(state.storage);
+  state.storage.list = async options => {
+    const rows = await list(options);
+    if (options.prefix === "request:") await scanned.wait();
+    return rows;
+  };
+  const alarm = state.coordinator.alarm();
+  await promptly(scanned.entered);
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback", body())))).status, 200);
+  const calls = state.github.calls.length;
+  scanned.release();
+  await promptly(alarm);
+  assert.equal(state.github.calls.length, calls);
+  assert.equal((await state.storage.get(`request:${UUID}`)).state, "complete");
+  assertIdle(state.coordinator);
+});
+
+test("alarm reply recovery and concurrent replay produce no second comment POST", async context => {
+  const state = setup();
+  await state.coordinator.fetch(request("/feedback", body()));
+  state.github.loseCommentResponse = true;
+  const message = { schema: 1, requestId: UUID, body: "补充测试结果。" };
+  assert.equal((await state.coordinator.fetch(request("/feedback/123/replies", message, { key: KEY }))).status, 202);
+  state.advance(6000);
+  const recovering = gate(context);
+  const fetch = state.coordinator.github.fetch;
+  state.coordinator.github.fetch = async (input, init) => {
+    if (init.method === "GET" && new URL(input).pathname.endsWith("/issues/123/comments")) await recovering.wait();
+    return fetch(input, init);
+  };
+  const alarm = state.coordinator.alarm();
+  await promptly(recovering.entered);
+  const retry = state.coordinator.fetch(request("/feedback/123/replies", message, { key: KEY }));
+  assert.equal((await promptly(state.coordinator.fetch(request("/feedback",
+    body({ requestId: "45a526bf-b747-4d42-81e8-d1036d01f984" }), { ip: "cd".repeat(32) })))).status, 201);
+  recovering.release();
+  await promptly(alarm);
+  assert.equal((await promptly(retry)).status, 200);
+  assert.equal((await state.storage.get(`reply:123:${UUID}`)).state, "complete");
+  assert.equal(state.github.calls.filter(call => call.method === "POST" && call.url.endsWith("/comments")).length, 1);
+  assert.equal(state.github.calls.filter(call => call.method === "GET" && new URL(call.url).pathname.endsWith("/comments")).length, 1);
+  assertIdle(state.coordinator);
+});
+
+test("oversized input returns promptly even if stream cancellation never resolves", async () => {
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(6)); },
+    cancel() { cancelled = true; return new Promise(() => {}); },
+  });
+  const oversized = new Request("https://example.org", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: stream, duplex: "half" });
+  await assert.rejects(promptly(readJson(oversized, 5)), error => error.status === 413);
   assert.equal(cancelled, true);
 });

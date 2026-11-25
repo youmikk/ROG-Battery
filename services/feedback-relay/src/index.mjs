@@ -7,6 +7,8 @@ const PREFIX = { device: "设备适配", battery: "电量显示", dpi: "DPI 设�
 const PENDING = { status: "pending", retryAfter: 5 };
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
+const MAX_ACTIVE_REQUESTS = 16;
+const MAX_ACTIVE_PER_IP = 2;
 
 export default {
   async fetch(request, env) {
@@ -54,66 +56,113 @@ export class FeedbackCoordinator {
     this.env = env;
     this.now = dependencies.now ?? Date.now;
     this.github = new Github(env.GITHUB_TOKEN, env.GITHUB_AUTHOR_LOGIN, dependencies.fetch ?? fetch);
-    // Keep one mutation in flight. Durable storage journals the request before
-    // any GitHub POST so a new instance after a restart cannot repeat it.
-    this.queue = Promise.resolve();
+    this.queues = new Map();
+    this.activeByIp = new Map();
+    this.activeRequests = 0;
+    this.bodyBytes = 0;
   }
 
-  exclusive(action) {
-    const result = this.queue.then(action, action);
-    this.queue = result.catch(() => {});
+  exclusive(scope, action) {
+    const result = (this.queues.get(scope) ?? Promise.resolve()).then(action, action);
+    const settled = result.then(() => {}, () => {});
+    this.queues.set(scope, settled);
+    void settled.then(() => {
+      if (this.queues.get(scope) === settled) this.queues.delete(scope);
+    });
     return result;
   }
 
-  fetch(request) {
-    return this.exclusive(async () => {
-      try {
-        configuration(this.env);
-        const ip = request.headers.get("X-Relay-Ip");
-        if (!/^[a-f0-9]{64}$/.test(ip ?? "")) throw new HttpError(403, "forbidden", "Invalid relay route.");
-        await this.limits([
-          [`requests:${ip}`, 60, 10 * 60 * 1000],
-          ["requests:global", 5000, DAY],
-        ]);
-        const url = new URL(request.url);
-        if (request.method === "POST" && url.pathname === "/feedback") {
-          return await this.submit(await feedback(await readJson(request)), ip);
+  admit(ip) {
+    const count = this.activeByIp.get(ip) ?? 0;
+    if (count >= MAX_ACTIVE_PER_IP) {
+      throw new HttpError(429, "rate_limited", "Too many concurrent requests. Try again later.", true, 5);
+    }
+    if (this.activeRequests >= MAX_ACTIVE_REQUESTS) {
+      throw new HttpError(503, "service_busy", "Feedback service is busy. Try again later.", true, 5);
+    }
+    this.activeRequests++;
+    this.activeByIp.set(ip, count + 1);
+    let bytes = 0;
+    return {
+      reserve: size => {
+        if (this.bodyBytes + size > MAX_REQUEST_BYTES) {
+          throw new HttpError(503, "service_busy", "Feedback service is busy. Try again later.", true, 5);
         }
-        const match = /^\/feedback\/([1-9][0-9]{0,9})(\/replies)?$/.exec(url.pathname);
-        if (!match) throw new HttpError(404, "not_found", "Endpoint not found.");
-        const number = Number(match[1]);
-        const key = bearer(request);
-        const owner = await digestSecret(this.env.FEEDBACK_SECRET, "reply-key", key);
-        const stored = await this.storage.get(`issue:${number}`);
-        if (!stored || !constantEqual(stored.owner, owner)) throw new HttpError(403, "forbidden", "This reply key does not match the feedback.");
-        if (request.method === "POST" && match[2]) {
-          return await this.submitReply(number, await reply(await readJson(request, 20_000)), key, owner, ip);
-        }
-        if (request.method === "GET" && !match[2]) return await this.thread(number, stored);
-        throw new HttpError(404, "not_found", "Endpoint not found.");
-      } catch (error) { return errorResponse(error); }
+        bytes += size;
+        this.bodyBytes += size;
+      },
+      release: () => {
+        this.bodyBytes -= bytes;
+        this.activeRequests--;
+        const remaining = this.activeByIp.get(ip) - 1;
+        if (remaining) this.activeByIp.set(ip, remaining);
+        else this.activeByIp.delete(ip);
+      },
+    };
+  }
+
+  async fetch(request) {
+    let admission;
+    try {
+      configuration(this.env);
+      const ip = request.headers.get("X-Relay-Ip");
+      if (!/^[a-f0-9]{64}$/.test(ip ?? "")) throw new HttpError(403, "forbidden", "Invalid relay route.");
+      admission = this.admit(ip);
+      await this.limits([
+        [`requests:${ip}`, 60, 10 * 60 * 1000],
+        ["requests:global", 5000, DAY],
+      ]);
+      const url = new URL(request.url);
+      if (request.method === "POST" && url.pathname === "/feedback") {
+        const data = await feedback(await readJson(request, MAX_REQUEST_BYTES, 30_000, admission.reserve));
+        return await this.exclusive(`request:${data.requestId}`, () => this.submit(data, ip));
+      }
+      const match = /^\/feedback\/([1-9][0-9]{0,9})(\/replies)?$/.exec(url.pathname);
+      if (!match) throw new HttpError(404, "not_found", "Endpoint not found.");
+      const number = Number(match[1]);
+      const key = bearer(request);
+      const owner = await digestSecret(this.env.FEEDBACK_SECRET, "reply-key", key);
+      const stored = await this.storage.get(`issue:${number}`);
+      if (!stored || !constantEqual(stored.owner, owner)) throw new HttpError(403, "forbidden", "This reply key does not match the feedback.");
+      if (request.method === "POST" && match[2]) {
+        const data = await reply(await readJson(request, 20_000, 30_000, admission.reserve));
+        return await this.exclusive(`issue:${number}`, () => this.submitReply(number, data, key, owner, ip));
+      }
+      if (request.method === "GET" && !match[2]) {
+        return await this.exclusive(`issue:${number}`, async () => this.thread(number, await this.storage.get(`issue:${number}`)));
+      }
+      throw new HttpError(404, "not_found", "Endpoint not found.");
+    } catch (error) {
+      if (request.body && !request.body.locked) void request.body.cancel().catch(() => {});
+      return errorResponse(error);
+    } finally {
+      admission?.release();
+    }
+  }
+
+  limits(rules) {
+    return this.exclusive("rates", async () => {
+      const now = this.now();
+      const updates = [];
+      for (const [scope, maximum, period] of rules) {
+        const bucket = Math.floor(now / period);
+        const key = `rate:${scope}:${bucket}`;
+        const previous = await this.storage.get(key);
+        const count = previous?.count ?? 0;
+        if (count >= maximum) throw new HttpError(429, "rate_limited", "Too many requests. Try again later.", true,
+          Math.max(1, Math.ceil(((bucket + 1) * period - now) / 1000)));
+        updates.push([key, { count: count + 1, expiresAt: (bucket + 2) * period }]);
+      }
+      for (const [key, value] of updates) await this.storage.put(key, value);
+      await this.schedule();
     });
   }
 
-  async limits(rules) {
-    const now = this.now();
-    const updates = [];
-    for (const [scope, maximum, period] of rules) {
-      const bucket = Math.floor(now / period);
-      const key = `rate:${scope}:${bucket}`;
-      const previous = await this.storage.get(key);
-      const count = previous?.count ?? 0;
-      if (count >= maximum) throw new HttpError(429, "rate_limited", "Too many requests. Try again later.", true,
-        Math.max(1, Math.ceil(((bucket + 1) * period - now) / 1000)));
-      updates.push([key, { count: count + 1, expiresAt: (bucket + 2) * period }]);
-    }
-    for (const [key, value] of updates) await this.storage.put(key, value);
-    await this.schedule();
-  }
-
-  async schedule(when = this.now() + HOUR) {
-    const current = await this.storage.getAlarm();
-    if (current === null || current > when) await this.storage.setAlarm(when);
+  schedule(when = this.now() + HOUR) {
+    return this.exclusive("alarm-time", async () => {
+      const current = await this.storage.getAlarm();
+      if (current === null || current > when) await this.storage.setAlarm(when);
+    });
   }
 
   async submit(data, ip) {
@@ -215,9 +264,11 @@ export class FeedbackCoordinator {
 
   async complete(recordKey, record, receipt) {
     if (record.kind === "issue") {
-      const existing = await this.storage.get(`issue:${receipt.number}`);
-      if (existing && !constantEqual(existing.owner, record.owner)) throw new Error("Issue ownership conflict.");
-      await this.storage.put(`issue:${receipt.number}`, { owner: record.owner, createdAt: record.createdAt });
+      await this.exclusive(`issue:${receipt.number}`, async () => {
+        const existing = await this.storage.get(`issue:${receipt.number}`);
+        if (existing && !constantEqual(existing.owner, record.owner)) throw new Error("Issue ownership conflict.");
+        await this.storage.put(`issue:${receipt.number}`, { owner: record.owner, createdAt: record.createdAt });
+      });
     } else {
       const issue = await this.storage.get(`issue:${record.number}`);
       if (issue) await this.storage.put(`issue:${record.number}`, { owner: issue.owner, createdAt: issue.createdAt });
@@ -266,18 +317,21 @@ export class FeedbackCoordinator {
   }
 
   alarm() {
-    return this.exclusive(async () => {
+    return this.exclusive("maintenance", async () => {
       const now = this.now();
-      const rateCursor = await this.storage.get("scan:rate");
-      const expiredRates = await this.storage.list({ prefix: "rate:", limit: 1000,
-        ...(rateCursor ? { startAfter: rateCursor } : {}) });
-      if (expiredRates.size === 1000) await this.storage.put("scan:rate", [...expiredRates.keys()].at(-1));
-      else await this.storage.delete("scan:rate");
-      for (const [key, value] of expiredRates) {
-        if (value.expiresAt < now) await this.storage.delete(key);
-      }
+      const ratePageFull = await this.exclusive("rates", async () => {
+        const rateCursor = await this.storage.get("scan:rate");
+        const expiredRates = await this.storage.list({ prefix: "rate:", limit: 1000,
+          ...(rateCursor ? { startAfter: rateCursor } : {}) });
+        if (expiredRates.size === 1000) await this.storage.put("scan:rate", [...expiredRates.keys()].at(-1));
+        else await this.storage.delete("scan:rate");
+        for (const [key, value] of expiredRates) {
+          if (value.expiresAt < now) await this.storage.delete(key);
+        }
+        return expiredRates.size === 1000;
+      });
       let checked = 0;
-      let next = now + (expiredRates.size === 1000 ? 60_000 : HOUR);
+      let next = now + (ratePageFull ? 60_000 : HOUR);
       for (const prefix of ["request:", "reply:"]) {
         const cursor = await this.storage.get(`scan:${prefix}`);
         const rows = await this.storage.list({ prefix, limit: 250, ...(cursor ? { startAfter: cursor } : {}) });
@@ -285,23 +339,36 @@ export class FeedbackCoordinator {
           await this.storage.put(`scan:${prefix}`, [...rows.keys()].at(-1));
           next = Math.min(next, now + 60_000);
         } else await this.storage.delete(`scan:${prefix}`);
-        for (const [key, record] of rows) {
-          if (["sending", "pending"].includes(record.state)) {
-            if (record.nextCheckAt <= now && checked++ < 3) await this.reconcile(key, record);
-            else next = Math.min(next, Math.max(now + 5_000, record.nextCheckAt));
+        for (const [key, snapshot] of rows) {
+          const scope = snapshot.kind === "reply" ? `issue:${snapshot.number}` : key;
+          if (this.queues.has(scope)) {
+            next = Math.min(next, now + 5_000);
+            continue;
           }
-          if (["uploading", "prepared", "rejected"].includes(record.state) && record.createdAt + DAY < now
-            && (record.state !== "rejected" || record.attachments?.length)) {
-            for (const image of record.attachments ?? []) await this.env.ATTACHMENTS.delete(`attachments/${image.id}`);
-            const { title, body, ...minimal } = record;
-            await this.storage.put(key, { ...minimal, state: "rejected", attachments: [] });
-          }
+          await this.exclusive(scope, async () => {
+            const record = await this.storage.get(key);
+            if (!record) return;
+            if (["sending", "pending"].includes(record.state)) {
+              if (record.nextCheckAt <= now && checked < 3) {
+                checked++;
+                await this.reconcile(key, record);
+              } else next = Math.min(next, Math.max(now + 5_000, record.nextCheckAt));
+            }
+            if (["uploading", "prepared", "rejected"].includes(record.state) && record.createdAt + DAY < now
+              && (record.state !== "rejected" || record.attachments?.length)) {
+              for (const image of record.attachments ?? []) await this.env.ATTACHMENTS.delete(`attachments/${image.id}`);
+              const { title, body, ...minimal } = record;
+              await this.storage.put(key, { ...minimal, state: "rejected", attachments: [] });
+            }
+          });
         }
       }
       // Alarm callbacks replace their own due time; retaining the fired value
       // would cause scheduled cleanup/reconciliation to stop after one run.
-      const scheduled = await this.storage.getAlarm();
-      await this.storage.setAlarm(scheduled > now ? Math.min(scheduled, next) : next);
+      await this.exclusive("alarm-time", async () => {
+        const scheduled = await this.storage.getAlarm();
+        await this.storage.setAlarm(scheduled > now ? Math.min(scheduled, next) : next);
+      });
     });
   }
 }

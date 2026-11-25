@@ -101,7 +101,7 @@ export function checkGithubUrl(value, number, commentId) {
   return `${issueUrl(number)}${hash}`;
 }
 
-export async function readJson(request, maximum = MAX_REQUEST_BYTES, timeoutMs = 30_000) {
+export async function readJson(request, maximum = MAX_REQUEST_BYTES, timeoutMs = 30_000, reserve = () => {}) {
   if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get("Content-Type") ?? "")) {
     throw new HttpError(415, "content_type", "Content-Type must be application/json.");
   }
@@ -127,9 +127,9 @@ export async function readJson(request, maximum = MAX_REQUEST_BYTES, timeoutMs =
       if (done) break;
       size += value.byteLength;
       if (size > maximum) {
-        await reader.cancel();
         throw new HttpError(413, "request_too_large", "Request is too large.");
       }
+      reserve(value.byteLength);
       parts.push(decoder.decode(value, { stream: true }));
     }
     parts.push(decoder.decode());
