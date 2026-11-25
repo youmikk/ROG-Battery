@@ -11,6 +11,8 @@ use crate::proto::{self, BUTTON_NAME, BUTTON_SLOTS, DPI_STAGES, LIGHT_ZONE};
 use crate::report;
 use crate::snapshot::{FetchOutcome, SnapshotCache};
 
+mod quick;
+
 // ==================== 上下文 ====================
 
 /// 一次命令执行的上下文：链路信息 + 快照缓存。
@@ -172,37 +174,7 @@ pub fn cmd_quick(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
             return Ok(());
         }
     };
-    let st = &out.snapshot.state;
-    let snap = &out.snapshot;
-
-    println!("state=ok");
-    if snap.frames.contains_key("12:07:00") {
-        println!("level={}", st.power);
-        println!("voltage_mv={}", st.voltage_mv);
-        println!("charging={}", st.charging);
-        println!("sleep_mode={}", st.sleep_mode);
-        println!("low_warn={}", st.low_warn);
-        println!("full_effect={}", st.full_effect);
-    }
-    if snap.frames.contains_key("12:04:00") {
-        println!("poll={}", proto::poll_name(st.poll_code));
-        println!("poll_code={}", st.poll_code);
-        println!("debounce_code={}", st.debounce_code);
-        println!("angle_snap={}", st.angle_snap);
-        println!("angle_tuning={}", st.angle_tuning);
-    }
-    if snap.frames.contains_key("12:00:00") {
-        println!("active_stage={}", st.active_stage);
-        println!("profile={}", st.profile);
-    }
-    println!("frames={}", out.frames_read);
-    if out.elapsed.is_zero() {
-        println!("cached=yes");
-        println!("cache_age_sec={}", snap.wall_age_sec());
-    } else {
-        println!("cached=no");
-        println!("elapsed_ms={}", out.elapsed.as_millis());
-    }
+    print!("{}", quick::render(&out, out.snapshot.wall_age_sec()));
     Ok(())
 }
 

@@ -151,6 +151,8 @@ x-battery.exe estimate
 
 这些命令沿用 ROG 协议，并非多品牌通用设置命令。`setdpi` 等操作会修改设备配置，保留与保存参数见 `--help`；其他品牌的快捷 DPI 使用应用内对应设备的控制项。
 
+`quick` 输出 `key=value`：`state=ok` 表示三组查询均解析成功；`state=partial` 表示有缺失、无效帧或电量超范围，仅输出可用字段；`state=asleep` 表示未收到有效回帧。脚本应检查状态和所需字段，缺失电量不等于 0%。缓存命中仍会查询当前设备身份。
+
 ## 从源码构建
 
 安装 Rust GNU 工具链和 MinGW-w64 GCC，并确保 GCC 可在 PATH 中找到。
