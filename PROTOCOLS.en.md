@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: Razer receiver battery interfaces (unreleased)
+
+Pinned OpenRazer `ea55c1b5bda0b4112fcef91dd38395675151af33`: [razermouse_driver.h](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razermouse_driver.h), [razermouse_driver.c](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razermouse_driver.c), and [razerchromacommon.c](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razerchromacommon.c), GPL-2.0-or-later. Model and packet facts extend the existing local Feature transport and codec; upstream implementation code is not bundled.
+
+Receivers `00B4/00B9/00C5/00CD` use transaction `1F`, battery command `07:80`, two data bytes and a 0–255 scale. `00C5/00CD` separately query `07:84`, accepting charging 0/1 only. The other two omit that query and leave charging unknown.
+
+Protocol facts are separate from interface mode: only `Feature=0` mouse collections on `MI_00` use the new battery-only path. Existing `Feature=91` discovery and reading capabilities remain intact, with no additional write permissions. Tests cover protocol validation, busy/rejected/malformed replies, independent receivers and old-path compatibility. These are protocol regressions, not local Windows hardware captures.
+
 ## 2026-11-26: Arctis 7+ family (unreleased)
 
 Pinned [HeadsetControl `bd56cf875b736ff91f69ebf17b519a79d0270564`](https://github.com/Sapd/HeadsetControl/blob/bd56cf875b736ff91f69ebf17b519a79d0270564/lib/devices/steelseries_arctis_7_plus.hpp) supplies the model/PID list, interface 3, `FFC0:0001` and five battery levels; its `protocols/steelseries_protocol.hpp` supplies the `00 B0` query. Reviewed sources are GPL-3.0. The addition reuses this project's existing communication and state implementation, without porting upstream code.

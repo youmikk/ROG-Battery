@@ -2,6 +2,21 @@
 
 [简体中文](COMPATIBILITY.md)
 
+## Unreleased: battery interface additions for four Razer receivers
+
+Adds a read-only battery path when Windows advertises no Feature report length:
+
+| Model | VID:PID | Charging |
+| --- | --- | --- |
+| Naga V2 HyperSpeed | `1532:00B4` | Not queried; unknown |
+| Basilisk V3 X HyperSpeed | `1532:00B9` | Not queried; unknown |
+| DeathAdder V3 HyperSpeed | `1532:00C5` | Separate query; explicit states only |
+| Basilisk V3 Pro 35K | `1532:00CD` | Separate query; explicit states only |
+
+The new path requires `Feature=0 / MI_00 / 0001:0002`, uses transaction `1F` with battery command `07:80` and optional charging query `07:84`, and transfers 91 bytes including Windows' report-ID slot. It does not query DPI, identity or polling rates, and grants no settings writes. Existing `Feature=91` interfaces retain their identity, DPI, stage and polling-rate queries and write gates; these models were not necessarily unsupported on every previous connection.
+
+Raw battery values scale from 0–255, with zero remaining valid. Failure, mismatched echoes/transactions and timeout do not create measurements. All 34 Razer targeted tests passed, including both interface paths, malformed replies, unknown charging and independent identical receivers. Pinned OpenRazer code provides protocol evidence; this project has not hardware-verified these four receivers. See [protocol research](PROTOCOLS.en.md).
+
 ## Unreleased: SteelSeries Arctis 7+ family
 
 Adds Arctis 7+ `1038:220E`, 7P+ `1038:2212` and 7X+ `1038:2216`, restricted to `MI_03 / FFC0:0001`. Descriptors must prove one unnumbered input/output report, with both Windows report lengths equal to 65 bytes including the zero ID slot. The existing read-only `00 B0` query is reused; no audio or configuration writes are sent.

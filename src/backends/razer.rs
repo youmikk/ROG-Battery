@@ -12,9 +12,21 @@ pub struct Razer;
 const LENGTH: usize = 91;
 const TRANSACTIONS: [u8; 3] = [0xff, 0x1f, 0x3f];
 
+fn battery_only_interface(interface: &HidInterface) -> bool {
+    interface.vendor_id == 0x1532
+        && razer_capabilities::battery_protocol(interface.product_id).is_some()
+        && interface.feature_len == 0
+        && interface.usage_page == 1
+        && interface.usage == 2
+        && interface.path.split('#').nth(1).is_some_and(|hardware_id| {
+            hardware_id.split('&').any(|part| part.eq_ignore_ascii_case("mi_00"))
+        })
+}
+
 fn control(i: &HidInterface) -> bool {
     i.vendor_id == 0x1532
         && (i.feature_len == LENGTH as u16
+            || battery_only_interface(i)
             || i.feature_len == 0
                 && i.usage_page == 1
                 && i.usage == 2
@@ -105,6 +117,7 @@ impl<C: Channel> Session<C> {
     }
     fn exchange(&mut self, p: &[u8], minimum: usize) -> Result<Vec<u8>, Failure> {
         let started = Instant::now();
+        let exact_payload = battery_only_interface(&self.interface);
         let result = (|| {
             self.channel.send(p, 150).map_err(|_| Failure::NoReply)?;
             // Poll a pending response before resending. Some receivers return the previous
@@ -122,7 +135,9 @@ impl<C: Channel> Session<C> {
                     Err(_) => continue,
                 };
                 match parse(&response, p, minimum) {
-                    Some(Reply::Data(data)) => return Ok(data),
+                    Some(Reply::Data(data)) if !exact_payload || data.len() == minimum => {
+                        return Ok(data);
+                    }
                     Some(Reply::Rejected(status)) => return Err(Failure::Rejected(status)),
                     _ => {}
                 }
@@ -173,16 +188,19 @@ impl<C: Channel> Session<C> {
         Err(Failure::NoReply)
     }
     fn battery(&mut self) -> Option<(Battery, Instant)> {
-        let data = self.query(7, 0x80, 2, &[], 2).ok()?;
+        let data = self.battery_query(0x80).ok()?;
         let measured = Instant::now();
-        let charging = self
-            .query(7, 0x84, 2, &[], 2)
-            .ok()
-            .and_then(|r| match r[1] {
+        let charging = if razer_capabilities::battery_protocol(self.interface.product_id)
+            .is_some_and(|profile| !profile.charging_query)
+        {
+            None
+        } else {
+            self.battery_query(0x84).ok().and_then(|data| match data[1] {
                 0 => Some(false),
                 1 => Some(true),
                 _ => None,
-            });
+            })
+        };
         Some((
             Battery {
                 estimated_percent: None,
@@ -194,6 +212,13 @@ impl<C: Channel> Session<C> {
             },
             measured,
         ))
+    }
+    fn battery_query(&mut self, command: u8) -> Result<Vec<u8>, Failure> {
+        if let Some(profile) = razer_capabilities::battery_protocol(self.interface.product_id) {
+            self.exchange(&packet(profile.transaction_id, 7, command, 2, &[]), 2)
+        } else {
+            self.query(7, command, 2, &[], 2)
+        }
     }
     fn dpi(&mut self) -> Dpi {
         let mut dpi = Dpi::default();
@@ -291,6 +316,20 @@ impl<C: Channel> Session<C> {
         let mut target = target.clone();
         target.key = target.unverified_key();
         target.verified_identity = false;
+        if battery_only_interface(&self.interface) {
+            let (battery, battery_at) = self.battery()
+                .ok_or_else(|| crate::i18n::translate("Razer 设备无有效应答").to_owned())?;
+            target.family = DeviceFamily::Mouse;
+            return Ok(Snapshot {
+                target,
+                battery: Some(battery),
+                battery_unavailable: false,
+                battery_at: Some(battery_at),
+                dpi: Dpi::default(),
+                polling_rate: PollingRate::default(),
+                connected: true,
+            });
+        }
         if let Some(key) = self.identity() {
             target.key = key;
             target.verified_identity = true;
@@ -600,21 +639,32 @@ impl StageTable {
     }
 }
 
-impl DeviceBackend for Razer {
-    fn discover(&self, _: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
-        // Probe all matching collections; a silent collection cannot permanently hide its sibling.
-        Ok(interfaces
-            .iter()
-            .filter(|i| control(i))
-            .map(|i| {
-                let mut target = Target::new(BackendId::Razer, i, 0);
+fn discover_targets(interfaces: &[HidInterface]) -> Vec<Target> {
+    // Probe all matching collections; a silent collection cannot permanently hide its sibling.
+    interfaces
+        .iter()
+        .filter(|i| control(i))
+        .map(|i| {
+            let mut target = Target::new(BackendId::Razer, i, 0);
+            if battery_only_interface(i) {
+                target.family = DeviceFamily::Mouse;
+                if target.name.is_empty() {
+                    target.name = razer_capabilities::battery_protocol(i.product_id).unwrap().name.into();
+                }
+            } else {
                 target.family = crate::device::family_of(&i.product);
                 if target.name.is_empty() {
                     target.name = "Razer".into();
                 }
-                target
-            })
-            .collect())
+            }
+            target
+        })
+        .collect()
+}
+
+impl DeviceBackend for Razer {
+    fn discover(&self, _: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
+        Ok(discover_targets(interfaces))
     }
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         if !control(target.hid()?) {
@@ -737,6 +787,270 @@ mod tests {
             self.frames.pop_front().ok_or("empty".into())
         }
     }
+
+    fn battery_interface(pid: u16, instance: &str) -> HidInterface {
+        let mut device = interface(&format!(
+            "hid#vid_1532&pid_{pid:04x}&mi_00&col01#7&{instance}&0&0001#{{hid}}"
+        ));
+        device.product_id = pid;
+        device.feature_len = 0;
+        device.product.clear();
+        device
+    }
+
+    fn battery_session(device: &HidInterface, raw: u8) -> Session<Stream> {
+        let mut frames = VecDeque::from([reply(&packet(0x1f, 7, 0x80, 2, &[]), 2, &[0, raw])]);
+        if razer_capabilities::battery_protocol(device.product_id).unwrap().charging_query {
+            frames.push_back(reply(&packet(0x1f, 7, 0x84, 2, &[]), 2, &[0, 1]));
+        }
+        Session::new(Stream { frames, sent: Vec::new() }, device)
+    }
+
+    #[test]
+    fn battery_only_discovery_requires_known_unadvertised_mouse_control_interface() {
+        for pid in [0x00b4, 0x00b9, 0x00c5, 0x00cd] {
+            let mut device = battery_interface(pid, "aaaa");
+            device.path = device.path.to_ascii_uppercase();
+            let targets = discover_targets(&[device.clone()]);
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].family, DeviceFamily::Mouse);
+            assert_eq!(targets[0].name, razer_capabilities::battery_protocol(pid).unwrap().name);
+            assert!(!targets[0].verified_identity);
+            for part in ["mi_01", "mi_03", "mi_000", ""] {
+                let mut wrong = device.clone();
+                wrong.path = wrong.path.replace("MI_00", part);
+                assert!(discover_targets(&[wrong]).is_empty());
+            }
+            let mut wrong = device.clone();
+            wrong.vendor_id = 0x046d;
+            assert!(discover_targets(&[wrong]).is_empty());
+            for wrong_length in [1, 8, 64, 90, 92] {
+                let mut wrong = device.clone();
+                wrong.feature_len = wrong_length;
+                assert!(discover_targets(&[wrong]).is_empty());
+            }
+            let mut wrong = battery_interface(pid, "aaaa");
+            wrong.feature_len = 0;
+            wrong.usage = 6;
+            assert!(!control(&wrong));
+            wrong.usage = 2;
+            wrong.usage_page = 0xff00;
+            assert!(!control(&wrong));
+        }
+        let mut unknown = battery_interface(0x00ce, "aaaa");
+        unknown.feature_len = 0;
+        assert!(!control(&unknown));
+    }
+
+    #[test]
+    fn advertised_battery_models_preserve_generic_discovery_on_other_collections() {
+        for pid in [0x00b4, 0x00b9, 0x00c5, 0x00cd] {
+            for part in ["mi_00", "mi_01", "mi_03", ""] {
+                for (usage_page, usage) in [(1, 2), (1, 6), (0xff00, 1)] {
+                    let mut device = battery_interface(pid, "aaaa");
+                    device.feature_len = 91;
+                    device.path = device.path.replace("mi_00", part);
+                    device.usage_page = usage_page;
+                    device.usage = usage;
+                    device.product = "Razer Mouse".into();
+                    assert!(!battery_only_interface(&device));
+                    let targets = discover_targets(&[device.clone()]);
+                    assert_eq!(targets.len(), 1);
+                    assert_eq!(targets[0].family, DeviceFamily::Mouse);
+                    assert_eq!(targets[0].name, device.product);
+                    assert_eq!(targets[0].key, Target::new(BackendId::Razer, &device, 0).key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn advertised_battery_models_keep_identity_dpi_stages_and_rate_reads_without_new_writes() {
+        for pid in [0x00b4, 0x00b9, 0x00c5, 0x00cd] {
+            for part in ["mi_00", "mi_01"] {
+                let mut device = battery_interface(pid, "aaaa");
+                device.feature_len = 91;
+                device.path = device.path.replace("mi_00", part);
+                let target = discover_targets(&[device.clone()]).remove(0);
+                let mut session = Session::new(Mouse::new(), &device);
+                let snapshot = session.read_snapshot(&target).unwrap();
+                assert!(snapshot.target.verified_identity);
+                assert_ne!(snapshot.target.key, target.key);
+                assert_eq!(session.channel.identity_reads, 2);
+                assert_eq!(snapshot.battery.as_ref().unwrap().percent, Some(50));
+                assert_eq!(snapshot.battery.unwrap().charging,
+                    matches!(pid, 0x00c5 | 0x00cd).then_some(false));
+                assert_eq!(snapshot.dpi.current, Some(800));
+                assert_eq!(snapshot.dpi.current_y, Some(1600));
+                assert_eq!(snapshot.dpi.stages.len(), 2);
+                assert_eq!(snapshot.dpi.active_stage, Some(0));
+                assert_eq!(session.channel.table_reads, 1);
+                assert_eq!(snapshot.polling_rate.current, Some(1000));
+                assert!(!snapshot.dpi.writable && !snapshot.dpi.stage_writable
+                    && !snapshot.dpi.stage_editable && !snapshot.polling_rate.writable);
+                assert!(snapshot.dpi.values.is_empty() && snapshot.polling_rate.values.is_empty());
+                assert!(session.numeric(&snapshot.target, 1600).is_err());
+                assert!(session.set_rate(&snapshot.target, 500).is_err());
+                assert!(session.change_stage(&snapshot.target, snapshot.dpi.stages[0],
+                    StageContext::Configuration(snapshot.dpi.configuration_token.unwrap()), None).is_err());
+                assert!(session.channel.writes.is_empty());
+                session.channel.replace_after_battery = true;
+                assert!(session.read_snapshot(&snapshot.target).is_err());
+                assert!(session.channel.writes.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn battery_only_snapshots_use_documented_transaction_and_never_probe_settings() {
+        for pid in [0x00b4, 0x00b9, 0x00c5, 0x00cd] {
+            let device = battery_interface(pid, "aaaa");
+            let mut session = battery_session(&device, 128);
+            let mut target = discover_targets(&[device]).remove(0);
+            let expected_key = target.key.clone();
+            target.key = "previously-verified".into();
+            target.verified_identity = true;
+            let snapshot = session.read_snapshot(&target).unwrap();
+            assert_eq!(snapshot.target.key, expected_key);
+            assert!(!snapshot.target.verified_identity);
+            assert_eq!(snapshot.target.family, DeviceFamily::Mouse);
+            assert_eq!(snapshot.battery.as_ref().unwrap().percent, Some(50));
+            let charging = matches!(pid, 0x00c5 | 0x00cd);
+            assert_eq!(snapshot.battery.unwrap().charging, charging.then_some(true));
+            assert!(snapshot.battery_at.is_some());
+            assert!(snapshot.connected && !snapshot.battery_unavailable);
+            assert!(snapshot.dpi.current.is_none() && snapshot.dpi.stages.is_empty());
+            assert!(!snapshot.dpi.writable && !snapshot.dpi.stage_writable
+                && !snapshot.dpi.stage_editable && !snapshot.polling_rate.writable);
+            assert!(snapshot.polling_rate.current.is_none() && snapshot.polling_rate.values.is_empty());
+            assert_eq!(session.channel.sent.len(), if charging { 2 } else { 1 });
+            let request = &session.channel.sent[0];
+            assert_eq!(request.len(), 91);
+            assert_eq!(request[..11], [0, 0, 0x1f, 0, 0, 0, 2, 7, 0x80, 0, 0]);
+            assert!(request[11..89].iter().all(|byte| *byte == 0));
+            assert_eq!(request[89..], [0x85, 0]);
+            if charging {
+                let request = &session.channel.sent[1];
+                assert_eq!(request[..11], [0, 0, 0x1f, 0, 0, 0, 2, 7, 0x84, 0, 0]);
+                assert_eq!(request[89..], [0x81, 0]);
+            }
+            let sent = session.channel.sent.len();
+            assert!(session.numeric(&target, 800).is_err());
+            assert!(session.set_rate(&target, 500).is_err());
+            assert!(session.change_stage(&target, DpiStage { index: 0, value: 800 },
+                StageContext::Configuration(0), None).is_err());
+            assert_eq!(session.channel.sent.len(), sent);
+        }
+    }
+
+    #[test]
+    fn battery_only_errors_cannot_fabricate_or_renew_a_measurement() {
+        let request = packet(0x1f, 7, 0x80, 2, &[]);
+        let good = reply(&request, 2, &[0, 0]);
+        let mut invalid = Vec::new();
+        for offset in [0, 2, 3, 4, 5, 7, 8, 10, 89, 90] {
+            let mut frame = good.clone();
+            frame[offset] ^= 1;
+            invalid.push(frame);
+        }
+        invalid.push(good[..90].to_vec());
+        for data in [vec![], vec![0], vec![0, 128, 0]] {
+            invalid.push(reply(&request, 2, &data));
+        }
+        for status in [0, 1, 3, 4, 5, 6] {
+            invalid.push(reply(&request, status, &[0, 128]));
+        }
+        for pid in [0x00b4, 0x00b9, 0x00c5, 0x00cd] {
+            let device = battery_interface(pid, "aaaa");
+            let target = discover_targets(&[device.clone()]).remove(0);
+            let mut session = battery_session(&device, 128);
+            assert_eq!(session.read_snapshot(&target).unwrap().battery.unwrap().percent, Some(50));
+            assert!(session.read_snapshot(&target).is_err());
+            for frame in &invalid {
+                session.channel.frames = VecDeque::from([frame.clone()]);
+                session.channel.sent.clear();
+                assert_eq!(session.read_snapshot(&target).unwrap_err(),
+                    crate::i18n::translate("Razer 设备无有效应答"));
+                assert_eq!(session.channel.sent, [request.to_vec()]);
+            }
+            for status in [3, 4, 5] {
+                session.channel.frames = VecDeque::from([reply(&request, status, &[])]);
+                assert_eq!(session.battery_query(0x80), Err(Failure::Rejected(status)));
+            }
+            session.channel.frames = battery_session(&device, 0).channel.frames;
+            assert_eq!(session.read_snapshot(&target).unwrap().battery.unwrap().percent, Some(0));
+        }
+    }
+
+    #[test]
+    fn battery_only_polls_busy_echo_and_stale_replies_without_changing_transaction() {
+        for pid in [0x00b4, 0x00b9, 0x00c5, 0x00cd] {
+            let device = battery_interface(pid, "aaaa");
+            let target = discover_targets(&[device.clone()]).remove(0);
+            let request = packet(0x1f, 7, 0x80, 2, &[]);
+            let mut session = battery_session(&device, 255);
+            let mut frames = VecDeque::from([
+                reply(&packet(0xff, 7, 0x80, 2, &[]), 2, &[0, 0]),
+                reply(&packet(0x1f, 7, 0x84, 2, &[]), 2, &[0, 1]),
+                reply(&request, 1, &[]),
+                request.to_vec(),
+            ]);
+            frames.append(&mut session.channel.frames);
+            session.channel.frames = frames;
+            let snapshot = session.read_snapshot(&target).unwrap();
+            assert_eq!(snapshot.battery.unwrap().percent, Some(100));
+            assert_eq!(session.channel.sent.iter().filter(|frame| frame[8] == 0x80).count(), 1);
+            assert!(session.channel.frames.is_empty());
+        }
+    }
+
+    #[test]
+    fn battery_only_charging_failure_preserves_valid_battery_without_inventing_a_state() {
+        let request = packet(0x1f, 7, 0x84, 2, &[]);
+        for pid in [0x00c5, 0x00cd] {
+            for (raw, percent) in [(0, 0), (100, 39), (101, 40), (255, 100)] {
+                for frame in [vec![], reply(&request, 5, &[]), reply(&request, 2, &[0]),
+                    reply(&request, 2, &[0, 2]), reply(&request, 2, &[0, 1, 0])] {
+                    let device = battery_interface(pid, "aaaa");
+                    let target = discover_targets(&[device.clone()]).remove(0);
+                    let mut session = battery_session(&device, raw);
+                    session.channel.frames.pop_back();
+                    session.channel.frames.push_back(frame);
+                    let snapshot = session.read_snapshot(&target).unwrap();
+                    let battery = snapshot.battery.unwrap();
+                    assert_eq!(battery.percent, Some(percent));
+                    assert_eq!(battery.charging, None);
+                    assert!(snapshot.battery_at.is_some());
+                    assert_eq!(session.channel.sent.len(), 2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn battery_only_same_model_receivers_keep_independent_readings_and_failures() {
+        for pid in [0x00b4, 0x00b9, 0x00c5, 0x00cd] {
+            let first = battery_interface(pid, "aaaa");
+            let second = battery_interface(pid, "bbbb");
+            let mut sibling = first.clone();
+            sibling.path = sibling.path.replace("col01", "col02").replace("0001", "0002");
+            let targets = discover_targets(&[first.clone(), sibling, second.clone()]);
+            assert_eq!(targets.len(), 3);
+            assert_eq!(targets[0].key, targets[1].key);
+            assert!(targets[0].same_channel(&targets[1]));
+            assert_ne!(targets[0].key, targets[2].key);
+            assert!(!targets[0].same_channel(&targets[2]));
+            let mut first_session = battery_session(&first, 128);
+            let mut second_session = battery_session(&second, 255);
+            let first_snapshot = first_session.read_snapshot(&targets[0]).unwrap();
+            assert!(first_session.read_snapshot(&targets[0]).is_err());
+            let second_snapshot = second_session.read_snapshot(&targets[2]).unwrap();
+            assert_eq!(first_snapshot.battery.unwrap().percent, Some(50));
+            assert_eq!(second_snapshot.battery.unwrap().percent, Some(100));
+            assert_ne!(first_snapshot.target.key, second_snapshot.target.key);
+        }
+    }
+
     #[test]
     fn old_busy_and_echo_reports_are_polled_without_resending() {
         let request = packet(0xff, 7, 0x80, 2, &[]);

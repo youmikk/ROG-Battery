@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：雷蛇接收器电量接口（未发布）
+
+核对 OpenRazer `ea55c1b5bda0b4112fcef91dd38395675151af33` 的 [razermouse_driver.h](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razermouse_driver.h)、[razermouse_driver.c](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razermouse_driver.c) 与 [razerchromacommon.c](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razerchromacommon.c)。所查文件为 GPL-2.0-or-later；本次仅使用型号、命令和字段事实，复用项目现有 Feature 传输及解析器，未引入第三方实现。
+
+四款接收器 `00B4/00B9/00C5/00CD` 的电量事务为 `1F`，命令类 `07`、电量命令 `80`，数据长度 2；百分比由第二数据字节按 0～255 换算。`00C5/00CD` 另查命令 `84`，充电值仅接受 0/1；`00B4/00B9` 不发送充电查询，不把未查询状态伪装为未充电。
+
+型号协议事实与接口模式分开保存：仅 `Feature=0` 的 `MI_00` 鼠标集合进入新增的纯电量路径。已有 `Feature=91` 通用路径保持原有读取能力；型号表不授予额外写入权限。测试覆盖命令、CRC、事务、回显、忙状态、拒绝、短帧、同型号双接收器及旧路径兼容。本项目没有这些接收器的 Windows 实帧，不能由 Linux 上游支持推定本项目实机验证完成。
+
 ## 2026-11-26：Arctis 7+ 系列（未发布）
 
 固定核对 [HeadsetControl `bd56cf875b736ff91f69ebf17b519a79d0270564`](https://github.com/Sapd/HeadsetControl/blob/bd56cf875b736ff91f69ebf17b519a79d0270564/lib/devices/steelseries_arctis_7_plus.hpp) 的型号、接口 3、`FFC0:0001` 与五档电量，以及同提交的 `protocols/steelseries_protocol.hpp` 的 `00 B0` 查询。所查源码为 GPL-3.0，新增路径复用本项目既有 B0 通信和状态模型，未移植上游实现。
