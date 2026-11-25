@@ -50,6 +50,9 @@ pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&RogTarget>) -> CmdResult {
             crate::ops::OpsError::other(crate::tr!("所选设备已断开，请重新连接").to_string())
         })?;
         let link = &target.link;
+        if link.read_only {
+            return Err(crate::ops::OpsError::other("接收器配对信息未确认，当前通道仅支持读取电量"));
+        }
         let identity = target.identity.as_deref()
             .ok_or_else(|| crate::ops::OpsError::other("无法确认所选设备身份，请刷新后重试"))?;
         let mut dev = HidDevice::open(&link.iface).map_err(crate::ops::OpsError::other)?;
@@ -218,6 +221,9 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&RogTarget>) -> CmdResult {
         );
     };
     let link = &target.link;
+    if link.read_only && !save {
+        return fail("接收器配对信息未确认，当前通道仅支持读取电量".into(), "");
+    }
     let Some(identity) = target.identity.as_deref() else {
         return fail("无法确认所选设备身份，请刷新后重试".into(), "");
     };

@@ -753,7 +753,7 @@ mod configuration_tests {
 
     fn link(path: &str) -> Link {
         Link {
-            mode: "Wireless24G".into(), report_id: 3, all_interfaces: Vec::new(),
+            mode: "Wireless24G".into(), report_id: 3, read_only: false, all_interfaces: Vec::new(),
             iface: crate::hid::HidInterface {
                 path: path.into(), vendor_id: 0x0b05, product_id: 0x1ace,
                 usage_page: 0xff01, usage: 1, input_len: 64, output_len: 64,

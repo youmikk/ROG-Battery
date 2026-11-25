@@ -410,19 +410,81 @@ fn diagnostic_facts<'a>(
     }
 }
 
+fn rog_record(link: &hid::Link, outcome: &FetchOutcome, previous: Option<&DeviceSnapshot>) -> Option<DeviceSnapshot> {
+    let current = &outcome.snapshot.identity;
+    if current.device_id().is_none() && previous.is_some_and(|device| device.ident.device_id().is_some()) {
+        return None;
+    }
+    let battery = outcome.snapshot.battery()?;
+    let same = previous.filter(|device| device.ident.same_device(current)
+        || (device.ident.device_id().is_none() && current.device_id().is_none()));
+    let mut ident = same.map(|device| device.ident.clone()).unwrap_or_default();
+    for (stored, observed) in [
+        (&mut ident.model_name, &current.model_name),
+        (&mut ident.mouse_sn, &current.mouse_sn),
+        (&mut ident.dongle_sn, &current.dongle_sn),
+        (&mut ident.dongle_mac, &current.dongle_mac),
+        (&mut ident.dongle_firmware, &current.dongle_firmware),
+    ] {
+        if !observed.is_empty() { stored.clone_from(observed); }
+    }
+    if (proto::Identity { mouse_mac: current.mouse_mac.clone(), ..Default::default() }).device_id().is_some() {
+        ident.mouse_mac.clone_from(&current.mouse_mac);
+    }
+    if current.wired_pid != 0 { ident.wired_pid = current.wired_pid; }
+    if current.wireless_pid != 0 { ident.wireless_pid = current.wireless_pid; }
+    if outcome.snapshot.frames.contains_key("7D:20:02") { ident.booster = current.booster; }
+    if ident.model_name.is_empty() { ident.model_name = link.iface.product.clone(); }
+    let key = same.map(|device| device.reading.key.clone())
+        .unwrap_or_else(|| crate::backends::rog::identity_key(link, &ident));
+    let name = ident.display_name();
+    let family = crate::device::family_of(&name);
+    let configuration = outcome.snapshot.configuration().ok();
+    let mut state = configuration.as_ref().map(|configuration| configuration.state().clone())
+        .or_else(|| same.and_then(|device| device.state.clone()));
+    if let (Some(state), Some(quick)) = (&mut state, Quick::from_snapshot(&outcome.snapshot)) {
+        quick.apply_to(state);
+    }
+    if link.read_only { state = None; }
+    Some(DeviceSnapshot {
+        reading: crate::device::DeviceReading {
+            key, name: if name.is_empty() { family.noun().into() } else { name }, family,
+            battery: Some(battery), connected: true, quality: crate::device::ReadingQuality::Live,
+        },
+        state, ident, link: Some(link.clone()), basic: None, basic_status: None,
+        battery_at: outcome.snapshot.taken,
+        full_at: if configuration.is_some() { std::time::Instant::now() }
+            else { same.map(|device| device.full_at).unwrap_or_else(std::time::Instant::now) },
+    })
+}
+
+fn mark_rog_unread(device: &mut DeviceSnapshot, present: Option<&std::collections::BTreeSet<String>>,
+    now: std::time::Instant, lifetime: Duration) {
+    if present.is_some_and(|paths| device.link.as_ref().is_some_and(|link|
+        !paths.iter().any(|path| path.eq_ignore_ascii_case(&link.iface.path)))) {
+        device.reading.connected = false;
+    }
+    device.state = None;
+    device.reading.quality = match device.battery_at {
+        Some(measured) if device.reading.connected && now.saturating_duration_since(measured) < lifetime =>
+            crate::device::ReadingQuality::Cached,
+        Some(_) => crate::device::ReadingQuality::Stale,
+        None => crate::device::ReadingQuality::Unknown,
+    };
+}
+
 fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
-    let links = crate::win32::HidApi::load().and_then(|api| hid::open_links(&api));
-    let links = match links {
-        Ok(links) => links,
+    let scan = crate::win32::HidApi::load().and_then(|api| hid::scan_links(&api));
+    let scan = match scan {
+        Ok(scan) => scan,
         Err(e) => {
             crate::diagnostics::event_once("link_enumeration_failed", &e);
             let mut s = lock_shared(shared);
             if outcome_is_stale(generation, s.write_gen) { return None; }
+            let lifetime = rog_sample_lifetime(&s.cfg);
             for device in s.devices.values_mut() {
                 if device.basic.is_some() { continue; }
-                device.reading.connected = false;
-                device.state = None;
-                if let Some(basic) = &mut device.basic { basic.connected = false; }
+                mark_rog_unread(device, None, std::time::Instant::now(), lifetime);
             }
             s.rebuild_readings();
             s.quick = None;
@@ -440,17 +502,14 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
             Duration::from_secs(s.cfg.cache_ttl_sec),
         )
     };
-    for record in records.values_mut() {
-        record.reading.connected = false;
-        if let Some(basic) = &mut record.basic { basic.connected = false; }
-    }
     let mut sample = None;
     let mut seen = std::collections::BTreeSet::new();
-    for link in links {
+    for link in scan.links {
         let link_key = link.device_key();
         let previous = records
             .values()
-            .find(|d| d.link.as_ref().is_some_and(|l| l.device_key() == link_key))
+            .filter(|d| d.link.as_ref().is_some_and(|l| l.device_key() == link_key))
+            .max_by_key(|device| (device.reading.connected, device.battery_at))
             .cloned();
         let needs_full = previous.as_ref().is_none_or(|d| d.state.is_none())
             || (full
@@ -476,27 +535,8 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                 continue;
             }
         };
-        let battery = out.snapshot.battery();
-        let is_connected = battery.is_some();
-        let mut ident = if needs_full {
-            out.snapshot.identity.clone()
-        } else {
-            previous
-                .as_ref()
-                .map(|d| d.ident.clone())
-                .unwrap_or_default()
-        };
-        if ident.model_name.is_empty() {
-            ident.model_name = link.iface.product.clone();
-        }
-        let key = if ident.device_id().is_some() {
-            crate::backends::rog::identity_key(&link, &ident)
-        } else {
-            previous
-                .as_ref()
-                .map(|d| d.reading.key.clone())
-                .unwrap_or(link_key.clone())
-        };
+        let Some(record) = rog_record(&link, &out, previous.as_ref()) else { continue; };
+        let key = record.reading.key.clone();
         if previous.is_none() && key != link_key {
             let mut s = lock_shared(shared);
             if outcome_is_stale(generation, s.write_gen) { return None; }
@@ -523,43 +563,12 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         if !seen.insert(key.clone()) {
             continue;
         }
-        let name = ident.display_name();
-        let family = crate::device::family_of(&name);
-        let configuration = out.snapshot.configuration().ok();
-        let mut state = configuration.as_ref().map(|config| config.state().clone())
-            .or_else(|| previous.as_ref().and_then(|device| device.state.clone()));
-        if let (Some(state), Some(quick)) = (&mut state, Quick::from_snapshot(&out.snapshot)) {
-            quick.apply_to(state);
+        let family = record.reading.family;
+        if let Some(previous) = previous.as_ref().filter(|previous| previous.reading.key != key) {
+            if let Some(old) = records.get_mut(&previous.reading.key) {
+                old.reading.connected = false;
+            }
         }
-        let battery = battery.or_else(|| previous.as_ref().and_then(|d| d.reading.battery.clone()));
-        let record = DeviceSnapshot {
-            basic: None,
-            basic_status: None,
-            battery_at: is_connected.then_some(out.snapshot.taken).flatten(),
-            reading: crate::device::DeviceReading {
-                key: key.clone(),
-                name: if name.is_empty() {
-                    family.noun().to_string()
-                } else {
-                    name
-                },
-                family,
-                battery,
-                connected: is_connected,
-                quality: crate::device::ReadingQuality::Live,
-            },
-            state: if is_connected { state } else { None },
-            ident,
-            link: Some(link),
-            full_at: if configuration.is_some() {
-                std::time::Instant::now()
-            } else {
-                previous
-                    .as_ref()
-                    .map(|d| d.full_at)
-                    .unwrap_or_else(std::time::Instant::now)
-            },
-        };
         if needs_full && !record.ident.model_name.trim().is_empty() {
             let device = diagnostic_device(&record);
             let facts = diagnostic_facts(
@@ -581,6 +590,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
                 && (s.primary_key.is_none() || s.primary_key.as_ref() == Some(&key))
             {
                 s.primary_key = Some(key.clone());
+                s.full = record.state.clone();
                 sample = apply_outcome(&out, &mut s, generation);
                 s.ident = Some(record.ident.clone());
                 s.device_family = family;
@@ -590,11 +600,19 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
     }
     let mut s = lock_shared(shared);
     if !outcome_is_stale(generation, s.write_gen) {
-        for d in records.values_mut() {
-            if !d.reading.connected {
-                d.state = None;
-                if let Some(basic) = &mut d.basic { basic.connected = false; }
-            }
+        let lifetime = rog_sample_lifetime(&s.cfg);
+        for device in records.values_mut().filter(|device| !seen.contains(&device.reading.key)) {
+            mark_rog_unread(device, Some(&scan.present_channels), std::time::Instant::now(), lifetime);
+        }
+        if s.primary_key.as_ref().is_some_and(|key| !seen.contains(key)) {
+            s.full = None;
+            s.quick = None;
+            s.status = if s.primary_key.as_ref().and_then(|key| records.get(key))
+                .is_some_and(|device| device.reading.connected) {
+                Status::Asleep
+            } else {
+                Status::Error(crate::tr!("所选设备已断开，请重新连接").into())
+            };
         }
         s.replace_rog_records(records);
     }
@@ -766,6 +784,7 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
             .map(|iface| hid::Link {
                 mode: "Bluetooth".into(),
                 report_id: 0,
+                read_only: true,
                 iface,
                 all_interfaces: Vec::new(),
             });
@@ -5205,6 +5224,94 @@ mod backend_tests {
     }
 
     #[test]
+    fn rog_light_samples_require_current_identity_before_reusing_settings() {
+        let mut previous = history_owner_device("receiver", DeviceFamily::Mouse, true, None);
+        previous.ident.mouse_sn = "first-mouse".into();
+        previous.ident.mouse_mac = "12:34:56:78:9A:BC".into();
+        previous.ident.model_name = "Previous model".into();
+        previous.state = Some(proto::State { poll_code: 3, active_stage: 2, ..Default::default() });
+        let link = previous.link.as_ref().unwrap();
+        previous.reading.key = crate::backends::rog::identity_key(link, &previous.ident);
+        let mut outcome = rog_energy_outcome();
+        assert!(rog_record(link, &outcome, Some(&previous)).is_none());
+        Arc::make_mut(&mut outcome.snapshot).identity.mouse_sn = "first-mouse".into();
+        let same = rog_record(link, &outcome, Some(&previous)).unwrap();
+        assert_eq!(same.reading.key, previous.reading.key);
+        assert_eq!(same.state.as_ref().unwrap().poll_code, 3);
+        assert_eq!(same.reading.percent(), Some(47));
+        Arc::make_mut(&mut outcome.snapshot).identity = proto::Identity {
+            mouse_mac: "12:34:56:78:9a:bc".into(), ..Default::default()
+        };
+        let same = rog_record(link, &outcome, Some(&previous)).unwrap();
+        assert_eq!(same.reading.key, previous.reading.key);
+        assert_eq!(same.ident.mouse_sn, "first-mouse");
+        assert!(same.state.is_some());
+        Arc::make_mut(&mut outcome.snapshot).identity.mouse_sn = "replacement-mouse".into();
+        let replacement = rog_record(link, &outcome, Some(&previous)).unwrap();
+        assert_ne!(replacement.reading.key, previous.reading.key);
+        assert_ne!(replacement.ident.model_name, "Previous model");
+        assert!(replacement.state.is_none());
+        assert_eq!(replacement.reading.percent(), Some(47));
+    }
+
+    #[test]
+    fn rog_unrelated_identity_kinds_and_placeholder_macs_do_not_prove_continuity() {
+        let serial = proto::Identity { mouse_sn: "first".into(), ..Default::default() };
+        let mac = proto::Identity { mouse_mac: "12:34:56:78:9A:BC".into(), ..Default::default() };
+        assert!(!serial.same_device(&mac));
+        for value in ["", "00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"] {
+            let unknown = proto::Identity { mouse_mac: value.into(), ..Default::default() };
+            assert!(!unknown.same_device(&unknown));
+        }
+        let previous = history_owner_device("receiver", DeviceFamily::Mouse, true, None);
+        let record = rog_record(previous.link.as_ref().unwrap(), &rog_energy_outcome(), Some(&previous)).unwrap();
+        assert_eq!(record.reading.key, previous.reading.key);
+        assert!(record.ident.device_id().is_none());
+    }
+
+    #[test]
+    fn rog_failed_reads_preserve_measurement_age_and_require_presence_evidence_to_disconnect() {
+        let mut device = history_owner_device("receiver", DeviceFamily::Mouse, true, None);
+        let measured = std::time::Instant::now();
+        let lifetime = Duration::from_secs(180);
+        device.battery_at = Some(measured);
+        device.reading.battery = snapshot(BackendId::Rog, "receiver", 75).battery;
+        device.state = Some(proto::State::default());
+        mark_rog_unread(&mut device, None, measured + Duration::from_secs(1), lifetime);
+        assert!(device.reading.connected);
+        assert_eq!(device.reading.quality, crate::device::ReadingQuality::Cached);
+        assert_eq!(device.battery_at, Some(measured));
+        assert!(device.state.is_none());
+        let present = ["RECEIVER".into(), "independent-receiver".into()].into();
+        mark_rog_unread(&mut device, Some(&present), measured + lifetime, lifetime);
+        assert!(device.reading.connected);
+        assert_eq!(device.reading.quality, crate::device::ReadingQuality::Stale);
+        assert_eq!(device.reading.percent(), None);
+        let present = ["independent-receiver".into()].into();
+        mark_rog_unread(&mut device, Some(&present), measured + lifetime, lifetime);
+        assert!(!device.reading.connected);
+    }
+
+    #[test]
+    fn rog_fallback_channels_never_expose_or_execute_configuration_writes() {
+        let mut previous = history_owner_device("nonexistent-test-path", DeviceFamily::Mouse, true, None);
+        previous.ident.mouse_sn = "first-mouse".into();
+        previous.state = Some(proto::State::default());
+        previous.link.as_mut().unwrap().read_only = true;
+        let mut outcome = rog_energy_outcome();
+        Arc::make_mut(&mut outcome.snapshot).identity = previous.ident.clone();
+        let record = rog_record(previous.link.as_ref().unwrap(), &outcome, Some(&previous)).unwrap();
+        assert_eq!(record.reading.percent(), Some(47));
+        assert!(record.state.is_none());
+        let target = record.command_target();
+        for result in [crate::commands::run_cmd(&Cmd::Stage(1), target.as_ref()),
+            crate::commands::run_file_cmd(&Cmd::Restore("nonexistent-backup".into()), target.as_ref())] {
+            assert!(result.ok.is_none());
+            assert!(result.err.as_ref().unwrap().contains("配对信息未确认"));
+        }
+    }
+
+    #[test]
     fn rog_stalled_reader_expires_battery_without_disconnecting_other_devices() {
         let mut shared = Shared::new(Settings::default());
         let now = std::time::Instant::now();
@@ -5463,7 +5570,7 @@ mod backend_tests {
             ident: Default::default(),
             state: None,
             link: linked.then(|| hid::Link {
-                mode: "Wireless24G".into(), report_id: 0, iface,
+                mode: "Wireless24G".into(), report_id: 0, read_only: false, iface,
                 all_interfaces: Vec::new(),
             }),
             battery_at: None,

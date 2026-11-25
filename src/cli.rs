@@ -54,6 +54,9 @@ impl<'a> Ctx<'a> {
 
 impl StateReader for Ctx<'_> {
     fn read(&mut self, dev: &mut HidDevice, rid: u8) -> Result<crate::snapshot::Configuration, OpsError> {
+        if self.link.read_only {
+            return Err(OpsError::other("接收器配对信息未确认，当前通道仅支持读取电量"));
+        }
         if rid != self.rid() {
             return Err(OpsError::other("配置读取的 report ID 与所选设备不匹配"));
         }
@@ -215,7 +218,7 @@ pub fn cmd_restore(ctx: &mut Ctx, dev: &mut HidDevice, path: &str, save: bool) -
 
     println!("== 还原 {path} ==");
     println!("识别到 {} / {} 个键", backup.keys_found, backup::BACKUP_KEYS.len());
-    let result = ops::restore_backup(dev, ctx.rid(), &backup, save, &mut ops::DirectReader,
+    let result = ops::restore_backup(dev, ctx.rid(), &backup, save, ctx,
         &mut |line| println!("  {line}"));
     ctx.invalidate();
     let report = result.map_err(|error| error.message)?;
