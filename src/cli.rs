@@ -215,7 +215,8 @@ pub fn cmd_restore(ctx: &mut Ctx, dev: &mut HidDevice, path: &str, save: bool) -
 
     println!("== 还原 {path} ==");
     println!("识别到 {} / {} 个键", backup.keys_found, backup::BACKUP_KEYS.len());
-    let result = ops::restore_backup(dev, ctx.rid(), &backup, save, &mut |line| println!("  {line}"));
+    let result = ops::restore_backup(dev, ctx.rid(), &backup, save, &mut ops::DirectReader,
+        &mut |line| println!("  {line}"));
     ctx.invalidate();
     let report = result.map_err(|error| error.message)?;
     print_report(&report);

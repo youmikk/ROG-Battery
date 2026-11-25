@@ -131,8 +131,10 @@ impl DeviceBackend for Rog {
         if current.snapshot.state.dpi(stage - 1) == value {
             return Ok(());
         }
+        let identity = crate::snapshot::device_identity(&current.snapshot.identity)
+            .ok_or("无法确认所选设备身份，请刷新后重试")?;
         let mut device = crate::hid::HidDevice::open(&link.iface)?;
-        let mut reader = crate::ops::DirectReader;
+        let mut reader = crate::ops::BoundReader::new(&identity);
         let mut log = |_: &str| {};
         crate::ops::set_dpi(
             &mut device,

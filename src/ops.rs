@@ -118,6 +118,7 @@ pub type Logger<'a> = &'a mut dyn FnMut(&str);
 /// 每次从设备新读完整配置，写入基准和读回验证均不使用展示缓存。
 pub trait StateReader {
     fn read(&mut self, dev: &mut HidDevice, rid: u8) -> Result<crate::snapshot::Configuration, OpsError>;
+    fn expected_identity(&self) -> Option<&str> { None }
 }
 
 pub struct DirectReader;
@@ -126,6 +127,22 @@ impl StateReader for DirectReader {
     fn read(&mut self, dev: &mut HidDevice, rid: u8) -> Result<crate::snapshot::Configuration, OpsError> {
         crate::snapshot::read_configuration(dev, rid).map_err(map_read_error)
     }
+}
+
+pub struct BoundReader<'a> {
+    identity: &'a str,
+}
+
+impl<'a> BoundReader<'a> {
+    pub fn new(identity: &'a str) -> Self { Self { identity } }
+}
+
+impl StateReader for BoundReader<'_> {
+    fn read(&mut self, dev: &mut HidDevice, rid: u8) -> Result<crate::snapshot::Configuration, OpsError> {
+        DirectReader.read(dev, rid)
+    }
+
+    fn expected_identity(&self) -> Option<&str> { Some(self.identity) }
 }
 
 /// 把配置读取的字符串错误归类成 [`OpsError`]。
@@ -267,6 +284,7 @@ impl Setting {
 }
 
 trait TransactionDevice {
+    fn expected_identity(&self) -> Option<&str> { None }
     fn identity(&mut self) -> Result<String, OpsError>;
     fn read(&mut self) -> Result<crate::snapshot::Configuration, OpsError>;
     fn write(&mut self, setting: Setting, state: &State) -> Option<Vec<u8>>;
@@ -282,6 +300,8 @@ struct HidTransaction<'a> {
 }
 
 impl TransactionDevice for HidTransaction<'_> {
+    fn expected_identity(&self) -> Option<&str> { self.reader.expected_identity() }
+
     fn identity(&mut self) -> Result<String, OpsError> {
         crate::snapshot::read_device_identity(self.dev, self.rid)
             .ok_or_else(|| OpsError::other("无法确认设备身份"))
@@ -313,6 +333,9 @@ fn read_bound(
     target: Option<&TransactionTarget>,
 ) -> Result<(crate::snapshot::Configuration, TransactionTarget), OpsError> {
     let identity = device.identity()?;
+    if device.expected_identity().is_some_and(|expected| expected != identity) {
+        return Err(OpsError::other("所选设备身份已变化，请刷新后重试"));
+    }
     if target.is_some_and(|target| target.identity != identity) {
         return Err(OpsError::other("设备身份已变化"));
     }
@@ -520,9 +543,16 @@ pub fn restore_backup(
     rid: u8,
     backup: &crate::backup::Backup,
     save: bool,
+    reader: &mut dyn StateReader,
     log: Logger,
 ) -> Result<ApplyReport, OpsError> {
-    restore_with(&mut HidTransaction { dev, rid, reader: &mut DirectReader }, backup, save, log)
+    restore_with(&mut HidTransaction { dev, rid, reader }, backup, save, log)
+}
+
+pub fn read_bound_configuration(
+    dev: &mut HidDevice, rid: u8, reader: &mut dyn StateReader,
+) -> Result<crate::snapshot::Configuration, OpsError> {
+    read_bound(&mut HidTransaction { dev, rid, reader }, None).map(|(configuration, _)| configuration)
 }
 
 fn restore_with(
@@ -1195,6 +1225,7 @@ mod transaction_tests {
     }
 
     struct FakeDevice {
+        expected_identity: Option<String>,
         reads: VecDeque<Result<State, OpsError>>,
         identities: VecDeque<Result<String, OpsError>>,
         replies: VecDeque<Option<Vec<u8>>>,
@@ -1206,6 +1237,7 @@ mod transaction_tests {
     impl FakeDevice {
         fn new(reads: Vec<Result<State, OpsError>>) -> Self {
             Self {
+                expected_identity: None,
                 reads: reads.into(), identities: VecDeque::new(), replies: VecDeque::new(),
                 commit_reply: Some(vec![0; 64]), events: Vec::new(), writes: Vec::new(),
             }
@@ -1217,6 +1249,8 @@ mod transaction_tests {
     }
 
     impl TransactionDevice for FakeDevice {
+        fn expected_identity(&self) -> Option<&str> { self.expected_identity.as_deref() }
+
         fn identity(&mut self) -> Result<String, OpsError> {
             self.events.push("identity");
             self.identities.pop_front().unwrap_or_else(|| Ok("synthetic-mouse".into()))
@@ -1255,6 +1289,31 @@ mod transaction_tests {
 
     fn changed() -> State {
         State { sleep_mode: 3, ..baseline() }
+    }
+
+    #[test]
+    fn queued_command_rejects_replacement_before_reading_or_writing_configuration() {
+        let mut device = FakeDevice::new(Vec::new());
+        device.expected_identity = Some("selected-mouse".into());
+        device.identities.push_back(Ok("replacement-mouse".into()));
+        assert!(change_sleep(&mut device, true, true).unwrap_err().message.contains("身份已变化"));
+        assert!(device.operations().is_empty());
+    }
+
+    #[test]
+    fn queued_restore_rejects_replacement_before_any_write() {
+        let mut device = FakeDevice::new(Vec::new());
+        device.expected_identity = Some("selected-mouse".into());
+        assert!(restore(&mut device, "low_warn=35", true).unwrap_err().message.contains("身份已变化"));
+        assert!(device.operations().is_empty());
+    }
+
+    #[test]
+    fn queued_command_with_matching_identity_keeps_the_normal_transaction() {
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(changed())]);
+        device.expected_identity = Some("synthetic-mouse".into());
+        assert!(change_sleep(&mut device, true, true).unwrap().committed);
+        assert_eq!(device.operations(), ["read", "write", "read", "commit"]);
     }
 
     fn restore(device: &mut FakeDevice, text: &str, save: bool) -> Result<ApplyReport, OpsError> {

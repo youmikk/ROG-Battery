@@ -337,6 +337,15 @@ fn rog_sample_lifetime(settings: &Settings) -> Duration {
     Duration::from_secs(settings.refresh_interval_sec.saturating_mul(3).max(180))
 }
 
+impl DeviceSnapshot {
+    fn command_target(&self) -> Option<crate::commands::RogTarget> {
+        Some(crate::commands::RogTarget {
+            link: self.link.clone()?,
+            identity: snapshot::device_identity(&self.ident),
+        })
+    }
+}
+
 fn diagnostic_link(link: &hid::Link) -> crate::diagnostics::DeviceInfo {
     let receiver = (link.mode == "Wireless24G").then(|| {
         link.all_interfaces
@@ -829,7 +838,7 @@ struct Shared {
     ///
     /// 改成队列后连点几下都会依次执行。上限 [`MAX_PENDING`] 防止用户
     /// 疯狂拖滑块时堆几百条命令、松手后设备还在慢慢追。
-    pending: VecDeque<(Cmd, Option<hid::Link>)>,
+    pending: VecDeque<(Cmd, Option<crate::commands::RogTarget>)>,
     /// 最近一条命令的结果，GUI 线程取走一次就清空。
     results: VecDeque<CmdResult>,
     /// 下一轮要不要读全量。
@@ -3408,10 +3417,10 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
             return false;
         }
         let target = match cmd.basic_target() {
-            Some(target) => s.devices.values().find_map(|device|
-                device.link.as_ref().filter(|link| target.hid().is_ok_and(|i| link.iface.path == i.path)
-                    && link.report_id == target.address).cloned()),
-            None => s.active_key.as_ref().and_then(|k| s.devices.get(k)).and_then(|d| d.link.clone()),
+            Some(target) => s.devices.values().find(|device|
+                device.link.as_ref().is_some_and(|link| target.hid().is_ok_and(|i| link.iface.path == i.path)
+                    && link.report_id == target.address)).and_then(DeviceSnapshot::command_target),
+            None => s.active_key.as_ref().and_then(|key| s.devices.get(key)).and_then(DeviceSnapshot::command_target),
         };
         s.pending.push_back((cmd, target));
         s.status = Status::Busy;
@@ -3998,7 +4007,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                     state.replace_mock_readings(readings);
                     let mut ran = 0usize;
                     while let Some((cmd, target)) = state.pending.pop_front() {
-                        apply_mock_cmd(&mut state, &cmd, target.as_ref());
+                        apply_mock_cmd(&mut state, &cmd, target.as_ref().map(|target| &target.link));
                         ran += 1;
                         if ran >= MAX_PENDING * 2 {
                             break;
@@ -4041,7 +4050,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         Cmd::Backup(_) | Cmd::Restore(_) => run_file_cmd(&cmd, target.as_ref()),
                         _ => run_cmd(&cmd, target.as_ref()),
                     };
-                    complete_rog_command(&shared_t, &cmd, target.as_ref(), res, crate::autostart::state);
+                    complete_rog_command(&shared_t, &cmd, target.as_ref().map(|target| &target.link), res, crate::autostart::state);
                     sender_t.notice();
                     ran += 1;
                     if ran >= MAX_PENDING * 2 {
@@ -6180,6 +6189,25 @@ mod backend_tests {
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.write_gen, 1);
         assert!(state.source_pending.is_empty());
+    }
+
+    #[test]
+    fn rog_queue_keeps_selected_identity_when_receiver_record_changes() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let mut selected = history_owner_device("selected", DeviceFamily::Mouse, true, None);
+        selected.ident.mouse_sn = "first-mouse".into();
+        {
+            let mut state = lock_shared(&shared);
+            state.devices.insert("selected".into(), selected);
+            state.active_key = Some("selected".into());
+        }
+        assert!(submit(&shared, &signal, Cmd::Stage(2)));
+        let mut state = lock_shared(&shared);
+        state.devices.get_mut("selected").unwrap().ident.mouse_sn = "replacement-mouse".into();
+        let (_, target) = state.pending.front().unwrap();
+        assert_eq!(target.as_ref().unwrap().identity.as_deref(), Some("serial:first-mouse"));
+        assert_eq!(target.as_ref().unwrap().link.iface.path, "selected");
     }
 
     #[test]

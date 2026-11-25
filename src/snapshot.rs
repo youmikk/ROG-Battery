@@ -560,7 +560,7 @@ fn cache_matches(snapshot: &Snapshot, ttl: Duration, key: Option<&str>, link: &L
         && snapshot.is_fresh(ttl)
 }
 
-fn device_identity(identity: &Identity) -> Option<String> {
+pub(crate) fn device_identity(identity: &Identity) -> Option<String> {
     let value = identity.device_id()?;
     let kind = if identity.mouse_sn.trim().is_empty() { "mac" } else { "serial" };
     Some(format!("{kind}:{value}"))

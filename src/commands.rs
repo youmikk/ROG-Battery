@@ -2,7 +2,7 @@
 
 use crate::gui::{autostart_hint, Cmd, CmdResult};
 use crate::hid::{self, HidDevice};
-use crate::{settings, snapshot};
+use crate::settings;
 
 /// GUI 保留验证通过的新值并提交；失败仍由核心尝试恢复原配置。
 pub(crate) const KEEP_AFTER_WRITE: bool = true;
@@ -12,8 +12,14 @@ pub(crate) const SAVE_TO_FLASH: bool = true;
 pub(crate) const KEEP: bool = KEEP_AFTER_WRITE;
 pub(crate) const SAVE: bool = SAVE_TO_FLASH;
 
+#[derive(Clone)]
+pub(crate) struct RogTarget {
+    pub link: hid::Link,
+    pub identity: Option<String>,
+}
+
 /// 后台执行设备命令，成功结果必须通过核心的完整读回确认。
-pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
+pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&RogTarget>) -> CmdResult {
     let label = cmd.label();
     let basic_result = match cmd {
         Cmd::BasicDpi { target, dpi } => Some(crate::backends::set_dpi(target, *dpi)),
@@ -40,12 +46,15 @@ pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
     let mut log = |_line: &str| {};
 
     let result = (|| -> Result<crate::ops::ApplyReport, crate::ops::OpsError> {
-        let link = target.ok_or_else(|| {
+        let target = target.ok_or_else(|| {
             crate::ops::OpsError::other(crate::tr!("所选设备已断开，请重新连接").to_string())
         })?;
+        let link = &target.link;
+        let identity = target.identity.as_deref()
+            .ok_or_else(|| crate::ops::OpsError::other("无法确认所选设备身份，请刷新后重试"))?;
         let mut dev = HidDevice::open(&link.iface).map_err(crate::ops::OpsError::other)?;
         let rid = link.report_id;
-        let mut reader = crate::ops::DirectReader;
+        let mut reader = crate::ops::BoundReader::new(identity);
 
         match cmd {
             Cmd::Poll(hz) => {
@@ -187,7 +196,7 @@ pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
 }
 
 /// 备份 / 还原。需要文件系统，也需要设备。
-pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
+pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&RogTarget>) -> CmdResult {
     let label = cmd.label();
     let (path, save) = match cmd {
         Cmd::Backup(p) => (p, true),
@@ -202,21 +211,26 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
         hint,
     };
 
-    let Some(link) = target else {
+    let Some(target) = target else {
         return fail(
             crate::tr!("所选设备已断开").to_string(),
             crate::tr!("请重新连接设备"),
         );
     };
+    let link = &target.link;
+    let Some(identity) = target.identity.as_deref() else {
+        return fail("无法确认所选设备身份，请刷新后重试".into(), "");
+    };
+    let mut reader = crate::ops::BoundReader::new(identity);
     let mut dev = match HidDevice::open(&link.iface) {
         Ok(d) => d,
         Err(e) => return fail(e, crate::tr!("设备被别的程序占用了？")),
     };
 
     if save {
-        let configuration = match snapshot::read_configuration(&mut dev, link.report_id) {
+        let configuration = match crate::ops::read_bound_configuration(&mut dev, link.report_id, &mut reader) {
             Ok(configuration) => configuration,
-            Err(error) => return fail(error, ""),
+            Err(error) => return fail(error.message, ""),
         };
         let text = crate::backup::render(
             &configuration,
@@ -246,7 +260,7 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
             Ok(b) => b,
             Err(e) => return fail(crate::trf!("备份文件解析失败：{e}", e = e), ""),
         };
-        match crate::ops::restore_backup(&mut dev, link.report_id, &b, true, &mut |_| {}) {
+        match crate::ops::restore_backup(&mut dev, link.report_id, &b, true, &mut reader, &mut |_| {}) {
             Ok(report) => CmdResult {
                 label,
                 ok: Some(match report.warning {
