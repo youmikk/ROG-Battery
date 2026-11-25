@@ -898,6 +898,17 @@ unsafe impl Sync for HidApi {}
 /// 加载失败（比如 hid.dll 被临时挡住）不能变成永久失败，要允许下次重试。
 static HID_API: std::sync::Mutex<Option<HidApi>> = std::sync::Mutex::new(None);
 
+struct PendingHidModule<Release: FnMut(Handle)> {
+    module: Option<Handle>,
+    release: Release,
+}
+
+impl<Release: FnMut(Handle)> Drop for PendingHidModule<Release> {
+    fn drop(&mut self) {
+        if let Some(module) = self.module.take() { (self.release)(module); }
+    }
+}
+
 impl HidApi {
     /// 取 hid.dll 函数表。首次调用加载并缓存，之后只复制一份。
     pub fn load() -> Result<HidApi, String> {
@@ -911,20 +922,30 @@ impl HidApi {
     }
 
     unsafe fn load_uncached() -> Result<HidApi, String> {
-        unsafe {
-            let name = to_wide("hid.dll");
-            let module = LoadLibraryW(name.as_ptr());
-            if module.is_null() || module == INVALID_HANDLE_VALUE {
-                return Err(format!("无法加载 hid.dll（GetLastError={}）", GetLastError()));
-            }
+        Self::load_with(
+            || {
+                let name = to_wide("hid.dll");
+                let module = LoadLibraryW(name.as_ptr());
+                if module.is_null() || module == INVALID_HANDLE_VALUE { Err(GetLastError()) }
+                else { Ok(module) }
+            },
+            |module, name| GetProcAddress(module, name.as_ptr()),
+            |module| { FreeLibrary(module); },
+        )
+    }
 
-            fn sym(module: Handle, name: &[u8]) -> *mut c_void {
-                unsafe { GetProcAddress(module, name.as_ptr()) }
-            }
+    unsafe fn load_with(
+        load: impl FnOnce() -> Result<Handle, u32>,
+        mut symbol: impl FnMut(Handle, &[u8]) -> *mut c_void,
+        release: impl FnMut(Handle),
+    ) -> Result<HidApi, String> {
+        unsafe {
+            let module = load().map_err(|error| format!("无法加载 hid.dll（GetLastError={error}）"))?;
+            let mut pending = PendingHidModule { module: Some(module), release };
 
             macro_rules! take {
                 ($name:literal, $ty:ty) => {{
-                    let p = sym(module, concat!($name, "\0").as_bytes());
+                    let p = symbol(module, concat!($name, "\0").as_bytes());
                     if p.is_null() {
                         return Err(format!("hid.dll 缺少导出函数 {}", $name));
                     }
@@ -932,7 +953,7 @@ impl HidApi {
                 }};
             }
 
-            Ok(HidApi {
+            let api = HidApi {
                 _module: module,
                 get_hid_guid: take!("HidD_GetHidGuid", FnHidDGetHidGuid),
                 get_attributes: take!("HidD_GetAttributes", FnHidDGetAttributes),
@@ -949,8 +970,81 @@ impl HidApi {
                 get_button_caps: take!("HidP_GetButtonCaps", FnHidPGetButtonCaps),
                 get_usage_value: take!("HidP_GetUsageValue", FnHidPGetUsageValue),
                 initialize_report_for_id: take!("HidP_InitializeReportForID", FnHidPInitializeReportForID),
-            })
+            };
+            pending.module = None;
+            Ok(api)
         }
+    }
+}
+
+#[cfg(test)]
+mod hid_loader_tests {
+    use super::*;
+
+    const SYMBOLS: &[&str] = &[
+        "HidD_GetHidGuid", "HidD_GetAttributes", "HidD_GetPreparsedData", "HidD_FreePreparsedData",
+        "HidP_GetCaps", "HidD_GetProductString", "HidD_GetSerialNumberString", "HidD_GetFeature",
+        "HidP_GetValueCaps", "HidP_GetButtonCaps", "HidP_GetUsageValue", "HidP_InitializeReportForID",
+    ];
+
+    unsafe extern "system" fn unused_symbol() {}
+
+    #[test]
+    fn missing_hid_exports_release_each_load_exactly_once() {
+        for missing in SYMBOLS {
+            let mut released = Vec::new();
+            let result = unsafe { HidApi::load_with(
+                || Ok(1usize as Handle),
+                |module, name| {
+                    assert_eq!(module, 1usize as Handle);
+                    let name = std::str::from_utf8(&name[..name.len() - 1]).unwrap();
+                    if name == *missing { core::ptr::null_mut() } else { unused_symbol as *mut c_void }
+                },
+                |module| released.push(module as usize),
+            ) };
+            assert!(result.err().unwrap().contains(missing));
+            assert_eq!(released, [1], "missing export {missing}");
+        }
+    }
+
+    #[test]
+    fn complete_hid_table_retains_its_module() {
+        let mut released = Vec::new();
+        let mut resolved = Vec::new();
+        let api = unsafe { HidApi::load_with(
+            || Ok(1usize as Handle),
+            |_, name| {
+                resolved.push(std::str::from_utf8(&name[..name.len() - 1]).unwrap().to_string());
+                unused_symbol as *mut c_void
+            },
+            |module| released.push(module as usize),
+        ) }.unwrap();
+        assert_eq!(api._module, 1usize as Handle);
+        assert_eq!(resolved, SYMBOLS);
+        assert!(released.is_empty());
+    }
+
+    #[test]
+    fn failed_hid_load_does_not_resolve_or_release_a_module() {
+        let result = unsafe { HidApi::load_with(
+            || Err(126),
+            |_, _| panic!("module did not load"),
+            |_| panic!("no module to release"),
+        ) };
+        assert!(result.err().unwrap().contains("126"));
+    }
+
+    #[test]
+    fn failed_retries_release_every_acquired_reference() {
+        let mut released = Vec::new();
+        for attempt in 1..=3 {
+            assert!(unsafe { HidApi::load_with(
+                || Ok(attempt as Handle),
+                |_, _| core::ptr::null_mut(),
+                |module| released.push(module as usize),
+            ) }.is_err());
+        }
+        assert_eq!(released, [1, 2, 3]);
     }
 }
 
