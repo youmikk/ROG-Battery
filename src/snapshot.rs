@@ -588,22 +588,35 @@ fn live_cache_key(dev: &mut HidDevice, link: &Link) -> Option<String> {
 
 fn live_cache_key_with(
     link: &Link,
+    ask: impl FnMut(u8, u8, u8, &[u8]) -> Option<Vec<u8>>,
+) -> Option<String> {
+    read_device_identity_with(link.report_id, ask).map(|identity| cache_key(link, &identity))
+}
+
+pub(crate) fn read_device_identity(dev: &mut HidDevice, report_id: u8) -> Option<String> {
+    read_device_identity_with(report_id, |rid, cmd, sub, tail| {
+        dev.xfer(rid, cmd, sub, tail, crate::hid::DEFAULT_TIMEOUT_MS)
+    })
+}
+
+fn read_device_identity_with(
+    report_id: u8,
     mut ask: impl FnMut(u8, u8, u8, &[u8]) -> Option<Vec<u8>>,
 ) -> Option<String> {
     let mut identity = Identity::default();
-    if let Some(frame) = ask(link.report_id, 0x12, 0x12, &[2, 0]) {
-        if frame.starts_with(&[link.report_id, 0x12, 0x12]) {
+    if let Some(frame) = ask(report_id, 0x12, 0x12, &[2, 0]) {
+        if frame.starts_with(&[report_id, 0x12, 0x12]) {
             identity.mouse_sn = proto::parse_sn(&frame);
         }
     }
     if device_identity(&identity).is_none() {
-        if let Some(frame) = ask(link.report_id, 0xFB, 0x02, &[0, 0]) {
-            if frame.starts_with(&[link.report_id, 0xFB, 0x02]) {
+        if let Some(frame) = ask(report_id, 0xFB, 0x02, &[0, 0]) {
+            if frame.starts_with(&[report_id, 0xFB, 0x02]) {
                 identity.mouse_mac = proto::parse_mac(&frame);
             }
         }
     }
-    device_identity(&identity).map(|identity| cache_key(link, &identity))
+    device_identity(&identity)
 }
 
 impl SnapshotCache {

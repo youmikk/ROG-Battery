@@ -1,7 +1,6 @@
 //! 命令行子命令实现。
 //!
-//! 所有**写**操作都转调 [`crate::ops`]：六步安全循环只有那一份实现，
-//! 这里只负责「把结构化报告打到终端」和「文件/参数这类外壳工作」。
+//! 设置操作转调 [`crate::ops`] 的验证与提交事务；这里处理参数、文件和终端输出。
 //!
 //! 展示读取可使用 [`SnapshotCache`]；备份、写入基准和读回验证均新读完整配置。
 
@@ -446,7 +445,7 @@ pub fn cmd_restore(ctx: &mut Ctx, dev: &mut HidDevice, path: &str, save: bool) -
 // ==================== setter ====================
 //
 // 每个 setter 只做三件事：解析参数 → 调 ops::* → 打报告。
-// 六步循环、错误分类、读回断言全部在 ops 里，这里不许重复实现。
+// 设置事务与错误分类由 ops 统一处理。
 
 /// setter 的统一收尾：打报告，再把「读回不一致」升级成非零退出码。
 ///
@@ -634,23 +633,12 @@ pub fn cmd_setfulleffect(
 
 /// `save` —— 单独提交当前 RAM 里的设置进 flash。
 pub fn cmd_save(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
-    println!("== save（提交进 flash）==");
-    // 提交前先把当前状态打印出来，让用户知道到底把什么写进去了
-    let configuration = ctx.state(dev)?;
-    report::print_state(configuration.state());
-
     let rid = ctx.rid();
-    // 归类规则只有一份：无应答 → Asleep、NAK → Rejected、回全零 → Ok。
-    let r = match ops::commit_or_fail(dev, rid) {
-        Ok(()) => {
-            println!("\n已提交（0x50 0x03）。回全零属正常。");
-            println!("VERIFY       commit=OK");
-            Ok(())
-        }
-        Err(e) => Err(e.to_string()),
-    };
+    let result = ops::save_configuration(dev, rid, ctx, &mut |line| println!("{line}"));
     ctx.invalidate();
-    r
+    let report = result.map_err(|error| error.to_string())?;
+    print_report(&report);
+    Ok(())
 }
 
 /// `estimate` —— 读当前电量 + 历史，打印续航/充满估算。
@@ -740,7 +728,7 @@ fn fmt_ts(unix: i64) -> String {
 /// `raw` —— 原始帧调试口：发一帧命令，把完整应答字节打出来。
 ///
 /// 只用于**只读**核对（协议逆向、偏移验证）。写命令不要走这里：
-/// 写有六步安全循环，绕过去就没有自动还原保护了。
+/// 设置命令通过共享事务验证和恢复。
 pub fn cmd_raw(ctx: &mut Ctx, dev: &mut HidDevice, cmd: u8, sub: u8, tail: &[u8], timeout_ms: u32) -> Result<(), String> {
     let rid = ctx.rid();
     cmd_raw_on(dev, rid, cmd, sub, tail, timeout_ms)

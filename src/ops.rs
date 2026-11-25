@@ -1,21 +1,5 @@
-//! 设备操作层 —— CLI 与 GUI 共用的唯一一份写实现。
-//!
-//! # 为什么要有这一层
-//!
-//! 六步安全循环（读原值 → 写新值 → 读回 → 自动写回原值 → 再读回断言 → 只有显式
-//! `save` 才 commit）必须**只有一份实现**。两套必然漂移，而漂移的那次就是用户设备
-//! 被改坏的那次。所以 GUI 和 CLI 都不能自己写循环，只能调这里。
-//!
-//! # 约定
-//!
-//! * **本模块不打印任何东西**。日志通过 [`Logger`] 回调交给调用方，
-//!   由它决定打到 stdout、日志文件还是 GUI 的文本框。
-//! * 错误用 [`OpsError`] 分类，调用方能区分「设备休眠」（等一下或动一下鼠标）
-//!   和「参数非法」（让用户改输入）。这两种在 GUI 上要给完全不同的提示。
-//! * 所有参数校验都在**碰设备之前**做完，参数错了不该付 27ms 的帧代价。
-//! * 每一步的「新旧值」都从**同一次读**里取：`cycle` 只读一次原值，
-//!   然后把这份 [`State`] 交给构建闭包去生成「写新值」和「写回原值」两个动作。
-//!   这样既不会读两遍，也不会出现「写回的值来自另一次读」的错位。
+//! CLI 与 GUI 共用的配置事务：新读基准、写入、完整读回确认，再按需提交。
+//! 失败时仅在设备身份与配置号仍匹配时恢复 RAM，并报告恢复和持久化状态。
 
 use crate::hid::is_nak;
 use crate::hid::HidDevice;
@@ -153,18 +137,17 @@ pub fn map_read_error(msg: String) -> OpsError {
     }
 }
 
-// ==================== 六步循环 ====================
+// ==================== 配置事务 ====================
 
 /// 一次 setter 的完整报告。GUI 直接拿去渲染，不用再解析字符串。
 #[derive(Debug, Clone, Default)]
 pub struct ApplyReport {
     /// 新值是否真的被设备接受（读回与期望一致）
     pub applied: bool,
-    /// 原值是否被成功写回并读回确认。`keep = true` 时恒为 `false`。
+    /// 原配置已完整读回确认。
     pub restored: bool,
-    /// 还原流程是否跑过。`keep = true` 时为 `false`（没尝试还原，
-    /// 不是因为还原失败 —— 用这个字段区分两种情况）
     pub revert_attempted: bool,
+    pub committed: bool,
 
     /// 写之前的读数（人类可读，如 `1000Hz (code 3)`）
     pub old_value: String,
@@ -180,32 +163,22 @@ pub struct ApplyReport {
 }
 
 impl ApplyReport {
-    /// 一句话结论，给日志尾巴和 GUI 状态栏用。
-    ///
-    /// [`crate::cli::print_report`] 里的「已还原」文案也走这里，
-    /// 免得终端和界面两套说法各写一遍、早晚漂移。
+    /// 写入、恢复和提交分别报告。
     pub fn summary(&self) -> String {
         format!(
-            "写入生效={}  已还原={}",
+            "写入生效={}  已还原={}  已提交={}",
             if self.applied { "是" } else { "否" },
             if !self.revert_attempted {
-                "没有（--keep）"
+                "未执行"
             } else if self.restored {
                 "是"
             } else {
                 "**否**"
-            }
+            },
+            if self.committed { "是" } else { "否" }
         )
     }
 
-    /// 把「读回不对」升级成错误。
-    ///
-    /// [`cycle`] 本身把「写了但读回不一致」当作**结果**而不是错误返回，
-    /// 因为 GUI 需要拿到报告去渲染。命令行/自动化则通常希望非零退出码，
-    /// 所以由调用方决定要不要调这个方法。
-    ///
-    /// 注意 `--keep` 时 `restored = false` 是**预期行为**，不会报错
-    /// —— 靠 `revert_attempted` 区分「没尝试还原」和「还原失败」。
     pub fn into_result(self) -> Result<ApplyReport, OpsError> {
         if !self.applied {
             return Err(OpsError::mismatch(format!(
@@ -223,16 +196,13 @@ impl ApplyReport {
     }
 }
 
-/// 写动作：给设备句柄和 report id，返回应答帧（`None` = 无应答）。
-pub type WriteFn = Box<dyn Fn(&mut HidDevice, u8) -> Option<Vec<u8>>>;
-
 /// 一次 setter 的静态参数（与设备当前状态无关的那部分）。
 pub struct CycleSpec {
     /// 标题，日志第一行用
     pub title: String,
     /// 保留新值不还原
     pub keep: bool,
-    /// 写入后 commit 进 flash
+    /// 最终配置读回确认后 commit 进 flash
     pub save: bool,
     /// 调用方预先知道要注意的事（会原样进 [`ApplyReport::warning`]）
     pub warning: Option<String>,
@@ -264,151 +234,289 @@ impl CycleSpec {
     }
 }
 
-/// 六步安全循环，对应 `rw-hid.cs` 的 `Cycle()`。
-///
-/// 1. 新读完整配置，作为本次写入和还原的共同基准
-/// 2. 写新值（`save` 时顺带 commit）
-/// 3. 读回并断言 `applied`
-/// 4. 自动写回原值（`keep` 时跳过）
-/// 5. 再读回并断言 `restored`
-/// 6. 只有 `save` 才真正落 flash —— 默认跑完设备状态与跑之前一模一样
-///
-/// `mutate` 和 `build` 都拿着**同一次**读到的原值 [`State`]：
-/// `mutate` 在克隆上应用目标改动，`build` 造出「写新值」和「写回原值」两个动作。
-///
-/// 期望值不用调用方再手写一份格式：`cycle` 把克隆交给 `mutate`，再拿**同一个**
-/// `probe` 格式化出来。两侧共用一个格式化器，改格式不会悄悄让判据失效。
-///
-/// 返回 `Ok(report)` 表示流程走完了，**`applied` / `restored` 要看字段**：
-/// 读了但不一致不是致命错误，是个结果。只有无应答、NAK、读失败才返回 `Err`。
-/// 期望值：把目标改动应用到原值克隆上，再用**同一个** `probe` 格式化。
-///
-/// 抽成函数是为了给「两侧共用一个格式化器」这条不变量留可测的接缝 ——
-/// 判据不再依赖调用方手写的第二份格式，改格式不会悄悄让断言失效。
-fn expected_text<S, M, P>(probe: &P, before: &S, mutate: M) -> String
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Setting {
+    Poll,
+    Dpi(usize),
+    Stage,
+    Debounce,
+    Snap,
+    Tuning,
+    Lod,
+    Light,
+    Energy,
+    Button(usize),
+}
+
+impl Setting {
+    fn write(self, dev: &mut HidDevice, rid: u8, state: &State) -> Option<Vec<u8>> {
+        match self {
+            Self::Poll => proto::write_reg(dev, rid, 0x04, &[state.poll_code]),
+            Self::Dpi(stage) => proto::write_dpi(dev, rid, stage, state.dpi(stage), state.rgb[stage]),
+            Self::Stage => proto::write_reg(dev, rid, 0x09, &[state.active_stage]),
+            Self::Debounce => proto::write_reg(dev, rid, 0x05, &[state.debounce_code]),
+            Self::Snap => proto::write_reg(dev, rid, 0x06, &[state.angle_snap]),
+            Self::Tuning => proto::write_reg(dev, rid, 0x0B, &state.angle_tuning.to_le_bytes()),
+            Self::Lod => proto::write_lod(dev, rid, state.lod),
+            Self::Light => proto::write_light(dev, rid, state.light_mode, state.light_bright,
+                state.light_rgb, state.light_dir, state.light_random, state.light_speed),
+            Self::Energy => proto::write_energy(dev, rid, state.sleep_mode, state.low_warn, state.full_effect),
+            Self::Button(slot) => proto::write_button(dev, rid, slot, state.buttons[slot]),
+        }
+    }
+}
+
+trait TransactionDevice {
+    fn identity(&mut self) -> Result<String, OpsError>;
+    fn read(&mut self) -> Result<crate::snapshot::Configuration, OpsError>;
+    fn write(&mut self, setting: Setting, state: &State) -> Option<Vec<u8>>;
+    fn commit(&mut self) -> Option<Vec<u8>>;
+    fn settle(&mut self);
+    fn invalidate(&mut self);
+}
+
+struct HidTransaction<'a> {
+    dev: &'a mut HidDevice,
+    rid: u8,
+    reader: &'a mut dyn StateReader,
+}
+
+impl TransactionDevice for HidTransaction<'_> {
+    fn identity(&mut self) -> Result<String, OpsError> {
+        crate::snapshot::read_device_identity(self.dev, self.rid)
+            .ok_or_else(|| OpsError::other("无法确认设备身份"))
+    }
+
+    fn read(&mut self) -> Result<crate::snapshot::Configuration, OpsError> {
+        self.reader.read(self.dev, self.rid)
+    }
+
+    fn write(&mut self, setting: Setting, state: &State) -> Option<Vec<u8>> {
+        setting.write(self.dev, self.rid, state)
+    }
+
+    fn commit(&mut self) -> Option<Vec<u8>> {
+        proto::commit(self.dev, self.rid)
+    }
+
+    fn settle(&mut self) { sleep_ms(SETTLE_MS); }
+    fn invalidate(&mut self) { crate::snapshot::invalidate_disk_cache(); }
+}
+
+struct TransactionTarget {
+    identity: String,
+    profile: u8,
+}
+
+fn read_bound(
+    device: &mut impl TransactionDevice,
+    target: Option<&TransactionTarget>,
+) -> Result<(crate::snapshot::Configuration, TransactionTarget), OpsError> {
+    let identity = device.identity()?;
+    if target.is_some_and(|target| target.identity != identity) {
+        return Err(OpsError::other("设备身份已变化"));
+    }
+    let configuration = device.read()?;
+    if device.identity()? != identity {
+        return Err(OpsError::other("读取期间设备身份已变化"));
+    }
+    let profile = configuration.state().profile;
+    if target.is_some_and(|target| target.profile != profile) {
+        return Err(OpsError::other("设备配置号已变化"));
+    }
+    Ok((configuration, TransactionTarget { identity, profile }))
+}
+
+fn configuration_mismatch(expected: &State, actual: &State, allow_calibration_reset: bool) -> Option<&'static str> {
+    let groups = [
+        ("性能", (expected.poll_code, expected.debounce_code, expected.angle_snap, expected.angle_tuning)
+            == (actual.poll_code, actual.debounce_code, actual.angle_snap, actual.angle_tuning)),
+        ("DPI 数值", expected.enc == actual.enc),
+        ("DPI 颜色", expected.rgb == actual.rgb),
+        ("配置号/当前档位", (expected.profile, expected.active_stage) == (actual.profile, actual.active_stage)),
+        ("能量块", (expected.sleep_mode, expected.low_warn, expected.full_effect)
+            == (actual.sleep_mode, actual.low_warn, actual.full_effect)),
+        ("LOD", expected.lod == actual.lod),
+        ("灯光", (expected.light_mode, expected.light_bright, expected.light_rgb, expected.light_dir, expected.light_random, expected.light_speed)
+            == (actual.light_mode, actual.light_bright, actual.light_rgb, actual.light_dir, actual.light_random, actual.light_speed)),
+        ("按键", expected.buttons == actual.buttons),
+        ("表面标定", allow_calibration_reset || (expected.surface_type, expected.material, expected.surface_extra, expected.calib)
+            == (actual.surface_type, actual.material, actual.surface_extra, actual.calib)),
+    ];
+    groups.into_iter().find_map(|(name, matches)| (!matches).then_some(name))
+}
+
+fn check_reply(reply: Option<Vec<u8>>, action: &str) -> Result<(), OpsError> {
+    match reply {
+        Some(frame) if is_nak(&frame) => Err(OpsError::rejected(format!("{action}被设备 NAK"))),
+        Some(_) => Ok(()),
+        None => Err(OpsError::asleep(format!("{action}无应答"))),
+    }
+}
+
+fn recover(
+    device: &mut impl TransactionDevice,
+    target: &TransactionTarget,
+    before: &State,
+    attempted: &[Setting],
+    log: Logger,
+) -> Result<crate::snapshot::Configuration, OpsError> {
+    let (current, _) = read_bound(device, Some(target))
+        .map_err(|error| OpsError::other(format!("恢复前无法确认原设备及配置，未再次写入：{}", error.message)))?;
+    if configuration_mismatch(before, current.state(), false).is_none() {
+        log("RESTORE      原配置已读回确认，无需回写");
+        return Ok(current);
+    }
+    for &setting in attempted.iter().rev() {
+        if let Err(error) = check_reply(device.write(setting, before), "恢复写入") {
+            log(&error.message);
+        }
+    }
+    device.settle();
+    let (restored, _) = read_bound(device, Some(target))?;
+    if let Some(group) = configuration_mismatch(before, restored.state(), false) {
+        return Err(OpsError::mismatch(format!("{group}未恢复到原值")));
+    }
+    log("VERIFY       restored=YES（完整配置已读回确认）");
+    Ok(restored)
+}
+
+fn transaction_failure(
+    device: &mut impl TransactionDevice,
+    target: &TransactionTarget,
+    before: &State,
+    attempted: &[Setting],
+    cause: OpsError,
+    commit_attempted: bool,
+    log: Logger,
+) -> OpsError {
+    let recovery = match recover(device, target, before, attempted, log) {
+        Ok(_) => "原配置已读回确认".to_string(),
+        Err(error) => format!("恢复未确认：{}", error.message),
+    };
+    let persistence = if commit_attempted {
+        "提交未确认，flash 状态未知，未再次提交"
+    } else {
+        "未发送 commit"
+    };
+    let calibration = if attempted.contains(&Setting::Lod) {
+        "；LOD 写入可能重置表面标定，无法通过 LOD 命令恢复"
+    } else { "" };
+    let kind = if cause.kind == ErrorKind::Asleep { ErrorKind::Other } else { cause.kind };
+    OpsError::new(kind, format!("{}；{recovery}；{persistence}{calibration}", cause.message))
+}
+
+fn transact<D, P, F>(
+    device: &mut D,
+    spec: &CycleSpec,
+    probe: P,
+    plan: F,
+    log: Logger,
+) -> Result<ApplyReport, OpsError>
 where
-    S: Clone,
-    M: FnOnce(&mut S),
-    P: Fn(&S) -> String,
+    D: TransactionDevice,
+    P: Fn(&State) -> String,
+    F: FnOnce(&State) -> Result<(State, Vec<Setting>), OpsError>,
 {
-    let mut want = before.clone();
-    mutate(&mut want);
-    probe(&want)
+    log(&format!("== {} ==", spec.title));
+    let (configuration, target) = read_bound(device, None)?;
+    let before = configuration.state();
+    let (expected, mut settings) = plan(before)?;
+    let old_value = probe(before);
+    let new_value = probe(&expected);
+    log(&format!("BEFORE       {old_value}"));
+    if configuration_mismatch(before, &expected, false).is_none() {
+        settings.clear();
+        log("目标配置未变，跳过写入");
+    }
+    device.invalidate();
+    let result = (|| {
+        let mut attempted = Vec::new();
+        for &setting in &settings {
+            attempted.push(setting);
+            if let Err(error) = check_reply(device.write(setting, &expected), "写入") {
+                return Err(transaction_failure(device, &target, before, &attempted, error, false, log));
+            }
+        }
+        if !attempted.is_empty() { device.settle(); }
+        let verified = read_bound(device, Some(&target)).and_then(|(after, _)| {
+            if let Some(group) = configuration_mismatch(&expected, after.state(), settings.contains(&Setting::Lod)) {
+                Err(OpsError::mismatch(format!("{group}读回与目标配置不一致")))
+            } else {
+                Ok(after)
+            }
+        });
+        let after = match verified {
+            Ok(after) => after,
+            Err(error) => return Err(transaction_failure(device, &target, before, &attempted, error, false, log)),
+        };
+        let readback_value = probe(after.state());
+        log(&format!("AFTER WRITE  {readback_value}"));
+        log("VERIFY       applied=YES（完整配置已读回确认）");
+        let mut report = ApplyReport {
+            applied: true, old_value, new_value, readback_value,
+            warning: spec.warning.clone(), ..Default::default()
+        };
+        if !spec.keep && !attempted.is_empty() {
+            report.revert_attempted = true;
+            let restored = recover(device, &target, before, &attempted, log)
+                .map_err(|error| OpsError::other(format!(
+                    "试写已确认，但恢复未确认：{}；未发送 commit{}",
+                    error.message,
+                    if attempted.contains(&Setting::Lod) { "；表面标定无法通过 LOD 命令恢复" } else { "" }
+                )))?;
+            report.restored = true;
+            report.restored_value = probe(restored.state());
+        }
+        if spec.save {
+            if let Err(error) = check_reply(device.commit(), "commit ") {
+                return Err(transaction_failure(device, &target, before, &attempted, error, true, log));
+            }
+            report.committed = true;
+            log("COMMIT       已确认");
+        }
+        Ok(report)
+    })();
+    device.invalidate();
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn cycle<P, E, B>(
+fn cycle<P, E>(
     dev: &mut HidDevice,
     rid: u8,
     spec: &CycleSpec,
     probe: P,
     mutate: E,
-    build: B,
+    setting: Setting,
     reader: &mut dyn StateReader,
     log: Logger,
 ) -> Result<ApplyReport, OpsError>
 where
     P: Fn(&State) -> String,
     E: FnOnce(&mut State),
-    B: FnOnce(&State) -> (WriteFn, WriteFn),
 {
-    log(&format!("== {} ==", spec.title));
-
-    // ---- 步骤 1：读原值（唯一的一次）----
-    let before = reader.read(dev, rid)?;
-    let before = before.state();
-    let old_value = probe(before);
-    log(&format!("BEFORE       {old_value}"));
-
-    let expected = expected_text(&probe, before, mutate);
-    let (apply, revert) = build(before);
-
-    if expected == old_value {
-        log("提示：目标值与当前值相同，本次写入实际是空操作。");
-    }
-
-    // ---- 步骤 2：写新值 ----
-    crate::snapshot::invalidate_disk_cache();
-    let reply = apply(dev, rid).ok_or_else(|| OpsError::asleep("写入无应答"))?;
-    if is_nak(&reply) {
-        return Err(OpsError::rejected(format!(
-            "设备拒绝写入（NAK 03 FF AA）：{}",
-            spec.title
-        )));
-    }
-    if spec.save {
-        commit_or_fail(dev, rid)?;
-    }
-    sleep_ms(SETTLE_MS);
-
-    // ---- 步骤 3：读回断言 ----
-    let after = reader.read(dev, rid)?;
-    let readback_value = probe(after.state());
-    log(&format!("AFTER WRITE  {readback_value}"));
-    let applied = readback_value == expected;
-    log(&format!(
-        "VERIFY       applied={}",
-        if applied { "YES" } else { "NO" }
-    ));
-    if !applied {
-        log(&format!("             期望 {expected}"));
-    }
-
-    let mut report = ApplyReport {
-        applied,
-        restored: false,
-        revert_attempted: false,
-        old_value,
-        new_value: expected,
-        readback_value,
-        restored_value: String::new(),
-        warning: spec.warning.clone(),
-    };
-
-    if spec.keep {
-        log("（--keep：保留新值不还原。未 commit 的值重连后会丢失）");
-        return Ok(report);
-    }
-
-    // ---- 步骤 4：自动写回原值 ----
-    log("RESTORE      写回原值…");
-    let reply = revert(dev, rid).ok_or_else(|| OpsError::asleep("写回原值时无应答"))?;
-    if is_nak(&reply) {
-        return Err(OpsError::rejected("设备拒绝写回原值（NAK）"));
-    }
-    if spec.save {
-        commit_or_fail(dev, rid)?;
-    }
-    sleep_ms(SETTLE_MS);
-
-    // ---- 步骤 5：再读回断言 ----
-    let back = reader.read(dev, rid)?;
-    let restored_value = probe(back.state());
-    log(&format!("AFTER RESTORE {restored_value}"));
-    report.restored = restored_value == report.old_value;
-    report.restored_value = restored_value;
-    report.revert_attempted = true;
-    log(&format!(
-        "VERIFY       restored={}",
-        if report.restored { "YES" } else { "NO" }
-    ));
-    if !report.restored {
-        log(&format!("             期望回到 {}", report.old_value));
-        log("             还原失败：请用 backup 文件 restore");
-    }
-
-    Ok(report)
+    transact(&mut HidTransaction { dev, rid, reader }, spec, probe, |before| {
+        let mut expected = before.clone();
+        mutate(&mut expected);
+        Ok((expected, vec![setting]))
+    }, log)
 }
 
-/// commit，并把「无应答」归类成 `Asleep`、NAK 归类成 `Rejected`。
-///
-/// 提交命令回**全零是正常的**（不是 NAK），不要误判。
 pub(crate) fn commit_or_fail(dev: &mut HidDevice, rid: u8) -> Result<(), OpsError> {
-    match proto::commit(dev, rid) {
-        Some(m) if is_nak(&m) => Err(OpsError::rejected("commit 被设备 NAK")),
-        Some(_) => Ok(()),
-        None => Err(OpsError::asleep("commit 无应答")),
-    }
+    check_reply(proto::commit(dev, rid), "commit ")
+}
+
+pub fn save_configuration(
+    dev: &mut HidDevice,
+    rid: u8,
+    reader: &mut dyn StateReader,
+    log: Logger,
+) -> Result<ApplyReport, OpsError> {
+    transact(&mut HidTransaction { dev, rid, reader },
+        &CycleSpec::new("save").keep(true).save(true),
+        |state| format!("配置 {}，DPI 档位 {}，回报率 {}", state.profile, state.active_stage, proto::poll_name(state.poll_code)),
+        |before| Ok((before.clone(), Vec::new())), log)
 }
 
 pub(crate) fn sleep_ms(ms: u64) {
@@ -446,13 +554,7 @@ pub fn set_poll(
             )
         },
         |st: &mut State| st.poll_code = code,
-        move |before: &State| {
-            let orig = before.poll_code;
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_reg(d, r, 0x04, &[code])),
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_reg(d, r, 0x04, &[orig])),
-            )
-        },
+        Setting::Poll,
         reader,
         log,
     )
@@ -522,19 +624,7 @@ pub fn set_dpi(
             st.enc[idx] = proto::encode_dpi(applied_dpi);
             st.rgb[idx] = rgb.unwrap_or(st.rgb[idx]);
         },
-        move |before: &State| {
-            let color = rgb.unwrap_or(before.rgb[idx]);
-            let orig_dpi = before.dpi(idx);
-            let orig_color = before.rgb[idx];
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_dpi(d, r, idx, applied_dpi, color)
-                }),
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_dpi(d, r, idx, orig_dpi, orig_color)
-                }),
-            )
-        },
+        Setting::Dpi(idx),
         reader,
         log,
     )
@@ -564,13 +654,7 @@ pub fn set_stage(
         &spec,
         |st: &State| st.active_stage.to_string(),
         |st: &mut State| st.active_stage = stage,
-        move |before: &State| {
-            let orig = before.active_stage;
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_reg(d, r, 0x09, &[stage])),
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_reg(d, r, 0x09, &[orig])),
-            )
-        },
+        Setting::Stage,
         reader,
         log,
     )
@@ -605,13 +689,7 @@ pub fn set_debounce(
         &spec,
         |st: &State| st.debounce_code.to_string(),
         |st: &mut State| st.debounce_code = code,
-        move |before: &State| {
-            let orig = before.debounce_code;
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_reg(d, r, 0x05, &[code])),
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_reg(d, r, 0x05, &[orig])),
-            )
-        },
+        Setting::Debounce,
         reader,
         log,
     )
@@ -645,13 +723,7 @@ pub fn set_snap(
         &spec,
         |st: &State| st.angle_snap.to_string(),
         |st: &mut State| st.angle_snap = snap,
-        move |before: &State| {
-            let orig = before.angle_snap;
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_reg(d, r, 0x06, &[snap])),
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_reg(d, r, 0x06, &[orig])),
-            )
-        },
+        Setting::Snap,
         reader,
         log,
     )
@@ -682,37 +754,19 @@ pub fn set_tuning(
         .keep(keep)
         .save(save);
 
-    let bytes = |v: i16| vec![(v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8];
-
     cycle(
         dev,
         rid,
         &spec,
         |st: &State| st.angle_tuning.to_string(),
         |st: &mut State| st.angle_tuning = value,
-        move |before: &State| {
-            let orig = before.angle_tuning;
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    let b = bytes(value);
-                    proto::write_reg(d, r, 0x0B, &b)
-                }),
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    let b = bytes(orig);
-                    proto::write_reg(d, r, 0x0B, &b)
-                }),
-            )
-        },
+        Setting::Tuning,
         reader,
         log,
     )
 }
 
-/// `setlod` —— 抬起距离。独立命令族 `0x51 0x35`。
-///
-/// **写它会把表面标定重置为默认值**，厂商源码承认没有只设 LOD 的命令
-/// （`_ghelper\AsusMouse.cs:1626`）。所以这里强制带 `warning`，
-/// 并且写前写后各读一次标定字节，把变化打进日志。
+/// LOD 写入会重置表面标定；事务允许此副作用，但不宣称标定可回滚。
 pub fn set_lod(
     dev: &mut HidDevice,
     rid: u8,
@@ -728,14 +782,6 @@ pub fn set_lod(
         )));
     }
 
-    // 写之前的标定值，事后对比给用户看
-    let before_lod = proto::read_lod_only(dev, rid).map_err(map_read_error)?;
-    log("⚠️  警告：写 LOD 会把**表面标定**重置为默认值（厂商源码承认，没有只设 LOD 的命令）。");
-    log(&format!(
-        "   写之前的标定：k = {:02X} {:02X} {:02X}",
-        before_lod.calib[0], before_lod.calib[1], before_lod.calib[2]
-    ));
-
     let spec = CycleSpec::new(format!(
         "setlod -> {} (code {code})",
         proto::lod_name(code)
@@ -746,49 +792,19 @@ pub fn set_lod(
         "写 LOD 会重置表面标定（厂商确认无恢复命令）。".to_string(),
     ));
 
-    let result = cycle(
+    cycle(
         dev,
         rid,
         &spec,
         |st: &State| st.lod.to_string(),
         |st: &mut State| st.lod = code,
-        move |before: &State| {
-            let orig = before.lod;
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_lod(d, r, code)),
-                Box::new(move |d: &mut HidDevice, r: u8| proto::write_lod(d, r, orig)),
-            )
-        },
+        Setting::Lod,
         reader,
         log,
-    );
-
-    if let Ok(after_lod) = proto::read_lod_only(dev, rid) {
-        log(&format!(
-            "   写之后的标定：k = {:02X} {:02X} {:02X}{}",
-            after_lod.calib[0],
-            after_lod.calib[1],
-            after_lod.calib[2],
-            if after_lod.calib == before_lod.calib {
-                "（未变）"
-            } else {
-                "（已被重置，无法恢复）"
-            }
-        ));
-    }
-    result
+    )
 }
 
-/// `setlight` —— 灯光。独立命令族 `0x51 0x28`，本型号 zone = 0。
-///
-/// mode 3（Rainbow）与 5（Comet）本型号**不支持**：设备会静默回落到 ColorCycle。
-/// 这里在碰设备之前就拒绝，避免用户以为设置成功了。
-///
-/// `dir` / `random` / `speed` 是 `Option`：**不传就沿用设备当前值**，不是写 0。
-/// 早先这里恒写 0，有三个后果：① 界面上这三个控件改了等于没改；
-/// ② 设备如果本来就存着非 0 值（GearLink 或别的工具设过），我们的写入会
-/// 把它悄悄清零；③ `expect` 里写死的 `0 0 0` 与 `probe` 读到的真实值永远
-/// 不相等 → `applied=NO`，明明写成功却报失败。
+/// 未指定的灯光字段沿用完整基准，整块读回确认。
 #[allow(clippy::too_many_arguments)]
 pub fn set_light(
     dev: &mut HidDevice,
@@ -861,8 +877,6 @@ pub fn set_light(
                 st.light_speed
             )
         },
-        // 「没传就沿用原值」的字段留在克隆上不动 —— 这里只把真要写下去的
-        // 那几个字段改成目标值，期望值就来自和设备那一帧完全相同的状态。
         move |st: &mut State| {
             st.light_mode = mode;
             st.light_bright = bright.unwrap_or(st.light_bright);
@@ -871,33 +885,7 @@ pub fn set_light(
             st.light_random = random.unwrap_or(st.light_random);
             st.light_speed = speed.unwrap_or(st.light_speed);
         },
-        move |before: &State| {
-            let b = bright.unwrap_or(before.light_bright);
-            let c = rgb.unwrap_or(before.light_rgb);
-            let d = dir.unwrap_or(before.light_dir);
-            let r = random.unwrap_or(before.light_random);
-            let s = speed.unwrap_or(before.light_speed);
-            let orig = (
-                before.light_mode,
-                before.light_bright,
-                before.light_rgb,
-                before.light_dir,
-                before.light_random,
-                before.light_speed,
-            );
-            (
-                // 形参不能叫 `d` —— 上面 `let d = dir.unwrap_or(...)` 是方向值，
-                // 同名会被闭包形参遮蔽，`write_light(dev, rid, mode, b, c, d, ...)`
-                // 就会把 `&mut HidDevice` 当成方向传进去（编译期报 E0308 是好事，
-                // 若两者类型恰好相同就会静默写错值）。
-                Box::new(move |dev: &mut HidDevice, rid: u8| {
-                    proto::write_light(dev, rid, mode, b, c, d, r, s)
-                }),
-                Box::new(move |dev: &mut HidDevice, rid: u8| {
-                    proto::write_light(dev, rid, orig.0, orig.1, orig.2, orig.3, orig.4, orig.5)
-                }),
-            )
-        },
+        Setting::Light,
         reader,
         log,
     )
@@ -952,19 +940,7 @@ pub fn set_sleep(
             )
         },
         |st: &mut State| st.sleep_mode = code,
-        move |before: &State| {
-            // 能量块是一整帧写的：只改休眠档，其余两个字段必须用原值补上，
-            // 否则会被这一帧覆盖成 0（正是文档第 5 节事故的成因）。
-            let orig = (before.sleep_mode, before.low_warn, before.full_effect);
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_energy(d, r, code, orig.1, orig.2)
-                }),
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_energy(d, r, orig.0, orig.1, orig.2)
-                }),
-            )
-        },
+        Setting::Energy,
         reader,
         log,
     )
@@ -999,17 +975,7 @@ pub fn set_low_batt(
         &spec,
         |st: &State| format!("{}%", st.low_warn),
         |st: &mut State| st.low_warn = percent,
-        move |before: &State| {
-            let orig = (before.sleep_mode, before.low_warn, before.full_effect);
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_energy(d, r, orig.0, percent, orig.2)
-                }),
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_energy(d, r, orig.0, orig.1, orig.2)
-                }),
-            )
-        },
+        Setting::Energy,
         reader,
         log,
     )
@@ -1045,17 +1011,7 @@ pub fn set_full_effect(
         &spec,
         |st: &State| format!("{}", st.full_effect),
         |st: &mut State| st.full_effect = on,
-        move |before: &State| {
-            let orig = (before.sleep_mode, before.low_warn, before.full_effect);
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_energy(d, r, orig.0, orig.1, on)
-                }),
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_energy(d, r, orig.0, orig.1, orig.2)
-                }),
-            )
-        },
+        Setting::Energy,
         reader,
         log,
     )
@@ -1114,18 +1070,309 @@ pub fn set_button(
         &spec,
         move |st: &State| format!("{:04X}", st.buttons[slot]),
         move |st: &mut State| st.buttons[slot] = dst,
-        move |before: &State| {
-            let orig = before.buttons[slot];
-            (
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_button(d, r, slot, dst)
-                }),
-                Box::new(move |d: &mut HidDevice, r: u8| {
-                    proto::write_button(d, r, slot, orig)
-                }),
-            )
-        },
+        Setting::Button(slot),
         reader,
         log,
     )
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn baseline() -> State {
+        State {
+            poll_code: 3, debounce_code: 1, active_stage: 1,
+            enc: [15; DPI_STAGES], rgb: [[10, 20, 30]; DPI_STAGES],
+            power: 70, sleep_mode: 2, low_warn: 20, full_effect: 1,
+            surface_type: 1, material: 2, calib: [10, 20, 30],
+            light_mode: 2, light_bright: 50, light_rgb: [20, 30, 40],
+            buttons: proto::BUTTON_SRC, ..Default::default()
+        }
+    }
+
+    fn configuration(state: &State) -> crate::snapshot::Configuration {
+        crate::snapshot::read_configuration_with(3, |rid, cmd, sub, tail| {
+            let mut frame = vec![0; 64];
+            frame[..5].copy_from_slice(&[rid, cmd, sub, tail[0], tail[1]]);
+            match (sub, tail[0]) {
+                (0x04, 0) => {
+                    frame[13] = state.poll_code;
+                    frame[15] = state.debounce_code;
+                    frame[17] = state.angle_snap;
+                    frame[19..21].copy_from_slice(&state.angle_tuning.to_le_bytes());
+                }
+                (0x04, 2) => {
+                    for (index, encoded) in state.enc.iter().enumerate() {
+                        frame[5 + index * 4..7 + index * 4].copy_from_slice(&(*encoded as u16).to_le_bytes());
+                    }
+                }
+                (0x04, 3) => {
+                    for (index, color) in state.rgb.iter().enumerate() {
+                        frame[5 + index * 3..8 + index * 3].copy_from_slice(color);
+                    }
+                }
+                (0x00, 0) => { frame[11] = state.profile; frame[12] = state.active_stage; }
+                (0x07, 0) => {
+                    frame[5] = state.power; frame[6] = state.sleep_mode; frame[7] = state.low_warn;
+                    frame[8..10].copy_from_slice(&state.voltage_mv.to_le_bytes());
+                    frame[10] = state.charging; frame[11] = state.battery_type; frame[12] = state.full_effect;
+                }
+                (0x06, 0) => {
+                    frame[5..9].copy_from_slice(&[state.surface_type, state.material, state.surface_extra, state.lod]);
+                    frame[9..12].copy_from_slice(&state.calib);
+                }
+                (0x03, 0) => {
+                    frame[5] = state.light_mode; frame[6] = state.light_bright;
+                    frame[7..10].copy_from_slice(&state.light_rgb);
+                    frame[11..14].copy_from_slice(&[state.light_dir, state.light_random, state.light_speed]);
+                }
+                (0x05, 0) => {
+                    for (index, button) in state.buttons.iter().enumerate() {
+                        frame[5 + index * 2..7 + index * 2].copy_from_slice(&button.to_le_bytes());
+                    }
+                }
+                _ => panic!("unexpected configuration request"),
+            }
+            Some(frame)
+        }).unwrap()
+    }
+
+    struct FakeDevice {
+        reads: VecDeque<Result<State, OpsError>>,
+        identities: VecDeque<Result<String, OpsError>>,
+        replies: VecDeque<Option<Vec<u8>>>,
+        commit_reply: Option<Vec<u8>>,
+        events: Vec<&'static str>,
+        writes: Vec<(Setting, State)>,
+    }
+
+    impl FakeDevice {
+        fn new(reads: Vec<Result<State, OpsError>>) -> Self {
+            Self {
+                reads: reads.into(), identities: VecDeque::new(), replies: VecDeque::new(),
+                commit_reply: Some(vec![0; 64]), events: Vec::new(), writes: Vec::new(),
+            }
+        }
+
+        fn operations(&self) -> Vec<&'static str> {
+            self.events.iter().copied().filter(|event| matches!(*event, "read" | "write" | "commit")).collect()
+        }
+    }
+
+    impl TransactionDevice for FakeDevice {
+        fn identity(&mut self) -> Result<String, OpsError> {
+            self.events.push("identity");
+            self.identities.pop_front().unwrap_or_else(|| Ok("synthetic-mouse".into()))
+        }
+
+        fn read(&mut self) -> Result<crate::snapshot::Configuration, OpsError> {
+            self.events.push("read");
+            self.reads.pop_front().expect("unexpected configuration read").map(|state| configuration(&state))
+        }
+
+        fn write(&mut self, setting: Setting, state: &State) -> Option<Vec<u8>> {
+            self.events.push("write");
+            self.writes.push((setting, state.clone()));
+            self.replies.pop_front().unwrap_or_else(|| Some(vec![3, 0x51, 0x37]))
+        }
+
+        fn commit(&mut self) -> Option<Vec<u8>> {
+            self.events.push("commit");
+            self.commit_reply.clone()
+        }
+
+        fn settle(&mut self) { self.events.push("settle"); }
+        fn invalidate(&mut self) { self.events.push("invalidate"); }
+    }
+
+    fn change_sleep(device: &mut FakeDevice, keep: bool, save: bool) -> Result<ApplyReport, OpsError> {
+        transact(device, &CycleSpec::new("sleep").keep(keep).save(save),
+            |state| state.sleep_mode.to_string(),
+            |before| {
+                let mut expected = before.clone();
+                expected.sleep_mode = 3;
+                Ok((expected, vec![Setting::Energy]))
+            },
+            &mut |_| {})
+    }
+
+    fn changed() -> State {
+        State { sleep_mode: 3, ..baseline() }
+    }
+
+    #[test]
+    fn retained_setting_commits_only_after_complete_readback() {
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(changed())]);
+        let report = change_sleep(&mut device, true, true).unwrap();
+        assert!(report.applied && report.committed && !report.revert_attempted);
+        assert_eq!(device.operations(), ["read", "write", "read", "commit"]);
+        assert_eq!(device.events.first(), Some(&"identity"));
+        assert_eq!(device.events.last(), Some(&"invalidate"));
+        assert_eq!(device.writes[0].1.low_warn, 20);
+        assert_eq!(device.writes[0].1.full_effect, 1);
+    }
+
+    #[test]
+    fn temporary_setting_is_restored_and_verified_before_saving_original() {
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(changed()), Ok(changed()), Ok(baseline())]);
+        let report = change_sleep(&mut device, false, true).unwrap();
+        assert!(report.applied && report.restored && report.revert_attempted && report.committed);
+        assert_eq!(device.operations(), ["read", "write", "read", "read", "write", "read", "commit"]);
+        assert_eq!(device.writes[1].1.sleep_mode, 2);
+    }
+
+    #[test]
+    fn successful_ram_only_write_never_commits() {
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(changed())]);
+        let report = change_sleep(&mut device, true, false).unwrap();
+        assert!(report.applied && !report.committed);
+        assert_eq!(device.operations(), ["read", "write", "read"]);
+    }
+
+    #[test]
+    fn missing_baseline_configuration_sends_no_write_or_commit() {
+        let mut device = FakeDevice::new(vec![Err(OpsError::other("缺少配置帧 12:05:00"))]);
+        assert!(change_sleep(&mut device, true, true).is_err());
+        assert_eq!(device.operations(), ["read"]);
+    }
+
+    #[test]
+    fn readback_failure_attempts_verified_recovery_without_commit() {
+        let mut device = FakeDevice::new(vec![
+            Ok(baseline()), Err(OpsError::other("缺少配置帧 12:07:00")),
+            Ok(changed()), Ok(baseline()),
+        ]);
+        let error = change_sleep(&mut device, true, true).unwrap_err();
+        assert!(error.message.contains("缺少配置帧"));
+        assert!(error.message.contains("原配置已读回确认"));
+        assert!(error.message.contains("未发送 commit"));
+        assert_eq!(device.operations(), ["read", "write", "read", "read", "write", "read"]);
+    }
+
+    #[test]
+    fn collateral_energy_change_blocks_commit_even_when_requested_value_matches() {
+        let corrupt = State { low_warn: 0, ..changed() };
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(corrupt.clone()), Ok(corrupt), Ok(baseline())]);
+        let error = change_sleep(&mut device, true, true).unwrap_err();
+        assert!(error.message.contains("能量块读回"));
+        assert!(error.message.contains("原配置已读回确认"));
+        assert_eq!(device.writes[1].1.low_warn, 20);
+        assert!(!device.events.contains(&"commit"));
+    }
+
+    #[test]
+    fn nak_or_lost_ack_with_applied_write_still_recovers_ram() {
+        for reply in [Some(vec![3, 0xff, 0xaa]), None] {
+            let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(changed()), Ok(baseline())]);
+            device.replies.push_back(reply);
+            let error = change_sleep(&mut device, true, true).unwrap_err();
+            assert!(error.message.contains("原配置已读回确认"));
+            assert_eq!(device.operations(), ["read", "write", "read", "write", "read"]);
+        }
+    }
+
+    #[test]
+    fn rejected_write_with_unchanged_state_needs_no_recovery_write() {
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(baseline())]);
+        device.replies.push_back(Some(vec![3, 0xff, 0xaa]));
+        let error = change_sleep(&mut device, true, true).unwrap_err();
+        assert!(error.message.contains("NAK"));
+        assert!(error.message.contains("原配置已读回确认"));
+        assert_eq!(device.operations(), ["read", "write", "read"]);
+    }
+
+    #[test]
+    fn recovery_failure_is_not_reported_as_restored() {
+        let mut device = FakeDevice::new(vec![
+            Ok(baseline()), Err(OpsError::asleep("读回无应答")),
+            Ok(changed()), Ok(changed()),
+        ]);
+        device.replies.extend([Some(vec![3, 0x51, 0x37]), Some(vec![3, 0xff, 0xaa])]);
+        let error = change_sleep(&mut device, true, true).unwrap_err();
+        assert!(error.message.contains("恢复未确认"));
+        assert!(!error.message.contains("原配置已读回确认"));
+        assert!(!device.events.contains(&"commit"));
+    }
+
+    #[test]
+    fn unavailable_recovery_preflight_does_not_write_blindly() {
+        let mut device = FakeDevice::new(vec![
+            Ok(baseline()), Err(OpsError::asleep("读回无应答")), Err(OpsError::asleep("设备无应答")),
+        ]);
+        let error = change_sleep(&mut device, true, true).unwrap_err();
+        assert!(error.message.contains("未再次写入"));
+        assert_eq!(device.writes.len(), 1);
+        assert!(!device.events.contains(&"commit"));
+    }
+
+    #[test]
+    fn changed_device_or_profile_blocks_recovery_and_commit() {
+        let mut device = FakeDevice::new(vec![Ok(baseline())]);
+        device.identities.extend([
+            Ok("synthetic-mouse".into()), Ok("synthetic-mouse".into()),
+            Ok("other-mouse".into()), Ok("other-mouse".into()),
+        ]);
+        let error = change_sleep(&mut device, true, true).unwrap_err();
+        assert!(error.message.contains("设备身份已变化"));
+        assert_eq!(device.operations(), ["read", "write"]);
+        let switched = State { profile: 1, ..changed() };
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(switched.clone()), Ok(switched)]);
+        let error = change_sleep(&mut device, true, true).unwrap_err();
+        assert!(error.message.contains("配置号已变化"));
+        assert_eq!(device.operations(), ["read", "write", "read", "read"]);
+    }
+
+    #[test]
+    fn identity_change_while_reading_baseline_prevents_any_write() {
+        let mut device = FakeDevice::new(vec![Ok(baseline())]);
+        device.identities.extend([Ok("first".into()), Ok("second".into())]);
+        assert!(change_sleep(&mut device, true, true).unwrap_err().message.contains("读取期间设备身份已变化"));
+        assert_eq!(device.operations(), ["read"]);
+    }
+
+    #[test]
+    fn failed_commit_reports_unknown_flash_and_does_not_commit_recovery() {
+        for reply in [None, Some(vec![3, 0xff, 0xaa])] {
+            let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(changed()), Ok(changed()), Ok(baseline())]);
+            device.commit_reply = reply;
+            let error = change_sleep(&mut device, true, true).unwrap_err();
+            assert!(error.message.contains("flash 状态未知"));
+            assert!(error.message.contains("原配置已读回确认"));
+            assert_eq!(device.operations(), ["read", "write", "read", "commit", "read", "write", "read"]);
+        }
+    }
+
+    #[test]
+    fn battery_telemetry_changes_do_not_fail_configuration_verification() {
+        let mut after = changed();
+        after.power = 69; after.charging = 1; after.voltage_mv = 4000;
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(after)]);
+        assert!(change_sleep(&mut device, true, true).unwrap().committed);
+    }
+
+    #[test]
+    fn unchanged_target_skips_device_writes_but_can_save_verified_state() {
+        let mut device = FakeDevice::new(vec![Ok(changed()), Ok(changed())]);
+        let report = change_sleep(&mut device, true, true).unwrap();
+        assert!(report.applied && report.committed);
+        assert_eq!(device.operations(), ["read", "read", "commit"]);
+    }
+
+    #[test]
+    fn lod_calibration_reset_cannot_be_reported_as_successful_rollback() {
+        let mut applied = baseline();
+        applied.lod = 1; applied.calib = [0; 3];
+        let restored_lod = State { lod: 0, ..applied.clone() };
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(applied.clone()), Ok(applied), Ok(restored_lod)]);
+        let error = transact(&mut device, &CycleSpec::new("LOD").save(true),
+            |state| state.lod.to_string(), |before| {
+                let mut expected = before.clone(); expected.lod = 1;
+                Ok((expected, vec![Setting::Lod]))
+            }, &mut |_| {}).unwrap_err();
+        assert!(error.message.contains("表面标定"));
+        assert!(error.message.contains("恢复未确认"));
+        assert!(!device.events.contains(&"commit"));
+    }
 }

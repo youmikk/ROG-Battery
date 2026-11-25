@@ -377,21 +377,10 @@ fn read_energy(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), Strin
     read_frame(dev, rid, 0x12, 0x07, &[0x00, 0x00], parse_energy, st)
 }
 
-fn read_lod(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
-    read_frame(dev, rid, 0x12, 0x06, &[0x00, 0x00], parse_lod, st)
-}
-
 /// 只读能量块。`restore` 结尾要用它做「能量块是否真的写进去了」的断言。
 pub fn read_energy_only(dev: &mut HidDevice, rid: u8) -> Result<State, String> {
     let mut st = State::default();
     read_energy(dev, rid, &mut st)?;
-    Ok(st)
-}
-
-/// 只读 LOD 块（含标定值）。
-pub fn read_lod_only(dev: &mut HidDevice, rid: u8) -> Result<State, String> {
-    let mut st = State::default();
-    read_lod(dev, rid, &mut st)?;
     Ok(st)
 }
 

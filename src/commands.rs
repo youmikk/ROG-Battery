@@ -1,20 +1,10 @@
-//! 命令执行层：把界面上的一次操作变成一次设备/文件动作。
-//!
-//! 这里**不重复任何校验或写入逻辑**，全部转调 `crate::ops` —— 界面一旦自己
-//! 写一遍写入代码，它就必然和 CLI 那份漂移。
-//!
-//! 从 `gui.rs` 搬出来的原因：这层只依赖 `ops` / `hid` / `backup` / `settings`，
-//! 不碰任何窗口、绘制或消息循环，却原来寄生在 2800 行的 GUI 文件里。
+//! GUI 命令入口；ROG 设置通过共享核心验证、恢复并按需提交。
 
 use crate::gui::{autostart_hint, Cmd, CmdResult};
 use crate::hid::{self, HidDevice};
 use crate::{settings, snapshot};
 
-/// 散在 12 个调用点各写一次字面量 `false`，看不出来哪处错了；
-/// 起名 `KEEP_AFTER_WRITE` 之后，读代码的人不用回去翻 `ops.rs` 就能判断。
-///
-/// - [`KEEP_AFTER_WRITE`] = `true`：保留新值（这是 GUI 唯一正确的取值）
-/// - [`SAVE_TO_FLASH`] = `true`：提交到 flash，重启后仍在
+/// GUI 保留验证通过的新值并提交；失败仍由核心尝试恢复原配置。
 pub(crate) const KEEP_AFTER_WRITE: bool = true;
 pub(crate) const SAVE_TO_FLASH: bool = true;
 
@@ -22,25 +12,7 @@ pub(crate) const SAVE_TO_FLASH: bool = true;
 pub(crate) const KEEP: bool = KEEP_AFTER_WRITE;
 pub(crate) const SAVE: bool = SAVE_TO_FLASH;
 
-/// 后台线程执行一条命令。
-///
-/// 这里**不重复任何校验或写入逻辑** —— 全部转调 [`crate::ops`]。
-/// GUI 一旦自己写一遍写入代码，它就必然和 CLI 那份漂移，
-/// 而漂移的那次就是用户设备被改坏的那次。
-///
-/// `--keep` 恒为 `true`：GUI 的写是「用户要这个值」，不是「试一下再还原」。
-/// `--save` 恒为 `true`：界面上改完点应用，用户预期是重启后还记得。
-///
-/// **这两个参数的语义见 `ops::cycle` 六步**，别望文生义：
-/// - `keep = false` → 步骤 4 会**把旧值写回去**（CLI 的默认行为，
-///   用来试一个值、看完读回断言就撤销，跑完不留痕迹）；
-/// - `keep = true`  → 立刻 return，保留新值。
-///
-/// 这里原来写的是 `false, true`，注释还写着「不是试一下再还原」——
-/// 恰好把结论和取值写反了。后果是**界面上每一个设置都被程序自己撤销**：
-/// 用户拖完亮度，滑块弹回原位、灯效不变，而底部浮层还诚实地报
-/// 「已还原=是」。这个 bug 在 CLI 上永远看不出来（CLI 本来就要 `--keep`），
-/// 只有真机点一遍才会暴露。
+/// 后台执行设备命令，成功结果必须通过核心的完整读回确认。
 pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
     let label = cmd.label();
     let basic_result = match cmd {
