@@ -1,16 +1,15 @@
-1.4.9
+1.4.10
 
-New
-- Store installations check for official updates silently on the first launch each day, with Home-only reminders, manual checks and a Later today option.
-- Downloads and installation require separate confirmation. Settings and battery histories are saved before installation, retaining startup preferences.
-- About includes an official Microsoft Store review link. Reviews are optional and never affect features.
-- Submit in-app device feedback and screenshots without a GitHub account, read maintainer replies and send follow-ups. Submitted content is public.
-- Add generic Bluetooth battery-cache readings and support for selected VGN, DELUX, EWEADN, AJAZZ, Veekos and Logitech devices.
+Feedback and diagnostics
+- Rebuild feedback sessions for repeat reports, fix scrolling artifacts and reduce redraws while typing.
+- Report software problems in the app without an account or manual log uploads.
+- Optional diagnostics include current HID interface VID/PID values, including unsupported devices. Unrecognized-device forms request the brand and full model.
+- Add error timestamps, sample ages and battery state changes. Separate identical-model interfaces and devices sharing a Logitech receiver. Preview or disable diagnostics; raw logs, serials and full local paths are excluded.
 
-Improvements and fixes
-- Rename the app and executable to X-Battery while retaining the Store identity, settings, battery histories and startup preferences.
-- Fix taskbar battery strip flicker when opening quick view, switching windows and entering or leaving full screen.
-- Improve compact device cards, DPI controls, settings groups, paths and drawing-cache memory use; fix stale drag-ordering indicators.
-- Fix duplicate Bluetooth samples and devices, and feedback relay submission failures.
+Stability fixes
+- Fix Store settings, feedback storage and log-directory errors. Preserve existing settings and show errors when saving fails.
+- Improve device identity isolation, reconnection and stale-battery handling; fix detection regressions affecting ROG OMNI, standard HID and Veekos devices.
+- Improve Logitech DPI range detection and validation of device changes and backup restoration.
+- Improve background shutdown, animation timers and drawing resource management.
 
-Support depends on model, firmware and connection. Bluetooth battery readings require data already provided by Windows; unknown charging states remain unknown. Update availability is determined by Microsoft Store.
+Support depends on model, firmware and connection. Feedback and selected attachments are public.

@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "x-battery"
-version = "1.4.9"
+version = "1.4.10"
 dependencies = [
  "base64",
  "native-windows-gui",
