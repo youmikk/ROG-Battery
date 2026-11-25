@@ -333,6 +333,10 @@ struct DeviceSnapshot {
     battery_at: Option<std::time::Instant>,
 }
 
+fn rog_sample_lifetime(settings: &Settings) -> Duration {
+    Duration::from_secs(settings.refresh_interval_sec.saturating_mul(3).max(180))
+}
+
 fn diagnostic_link(link: &hid::Link) -> crate::diagnostics::DeviceInfo {
     let receiver = (link.mode == "Wireless24G").then(|| {
         link.all_interfaces
@@ -833,12 +837,13 @@ struct Shared {
 }
 
 impl Shared {
-    fn expire_additional(&mut self) {
-        self.expire_additional_at(std::time::Instant::now());
+    fn expire_readings(&mut self) {
+        self.expire_readings_at(std::time::Instant::now());
     }
 
-    fn expire_additional_at(&mut self, now: std::time::Instant) {
+    fn expire_readings_at(&mut self, now: std::time::Instant) {
         let mut changed = false;
+        let rog_lifetime = rog_sample_lifetime(&self.cfg);
         for device in self.devices.values_mut() {
             if let (Some(basic), Some(status)) = (&mut device.basic, &mut device.basic_status) {
                 if status.expire(now, basic.target.backend.sample_lifetime()) {
@@ -846,6 +851,16 @@ impl Shared {
                     basic.disable_writes();
                     changed = true;
                 }
+            } else if device.basic.is_none()
+                && device.battery_at.is_some_and(|at| now.saturating_duration_since(at) >= rog_lifetime)
+                && device.reading.quality != crate::device::ReadingQuality::Stale {
+                device.reading.quality = crate::device::ReadingQuality::Stale;
+                device.state = None;
+                if self.primary_key.as_ref() == Some(&device.reading.key) {
+                    self.full = None;
+                    self.quick = None;
+                }
+                changed = true;
             }
         }
         if changed { self.rebuild_readings(); }
@@ -931,7 +946,7 @@ impl Shared {
                 Some("Wired") => 1, Some("Wireless24G") => 2, Some("Bluetooth") => 3, _ => 0,
             };
             let lifetime = device.basic.as_ref().map(|basic| basic.target.backend.sample_lifetime())
-                .unwrap_or_else(|| Duration::from_secs(self.cfg.refresh_interval_sec.saturating_mul(3).max(180)));
+                .unwrap_or_else(|| rog_sample_lifetime(&self.cfg));
             self.history_tracker.observe(&device.reading, device.battery_at, mode, now, unix, lifetime);
             if !device.reading.connected || device.reading.display_percent().is_none() {
                 if let Some(view) = self.histories.get_mut(key) { view.estimate = Default::default(); }
@@ -4211,7 +4226,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
 
             E::OnNotice => {
                 feedback_dialog.poll();
-                lock_shared(&shared_e).expire_additional();
+                lock_shared(&shared_e).expire_readings();
                 for request in name_dialog.take_requests() {
                     crate::diagnostics::event(
                         "device_rename_requested",
@@ -5155,6 +5170,36 @@ mod backend_tests {
             crate::device::stable_key("device:synthetic-serial"));
     }
 
+    #[test]
+    fn rog_stalled_reader_expires_battery_without_disconnecting_other_devices() {
+        let mut shared = Shared::new(Settings::default());
+        let now = std::time::Instant::now();
+        let mut device = history_owner_device("rog", DeviceFamily::Mouse, true, None);
+        device.reading.battery = snapshot(BackendId::Rog, "rog", 70).battery;
+        device.battery_at = Some(now);
+        device.state = Some(proto::State::default());
+        shared.full = device.state.clone();
+        shared.primary_key = Some("rog".into());
+        shared.devices.insert("rog".into(), device.clone());
+        shared.expire_readings_at(now + rog_sample_lifetime(&shared.cfg) - Duration::from_secs(1));
+        assert_eq!(shared.devices["rog"].reading.percent(), Some(70));
+        let expired = now + rog_sample_lifetime(&shared.cfg);
+        let mut other = snapshot(BackendId::Logitech, "other", 80);
+        other.battery_at = Some(expired);
+        merge_additional_at(&mut shared, BackendId::Logitech, vec![other].into(), expired);
+        shared.expire_readings_at(expired);
+        assert!(shared.devices["rog"].reading.connected);
+        assert_eq!(shared.devices["rog"].reading.quality, crate::device::ReadingQuality::Stale);
+        assert_eq!(shared.devices["rog"].reading.percent(), None);
+        assert!(shared.devices["rog"].state.is_none());
+        assert!(shared.full.is_none());
+        assert_eq!(shared.devices["other"].reading.percent(), Some(80));
+        device.battery_at = Some(expired + Duration::from_secs(1));
+        shared.replace_rog_records(BTreeMap::from([("rog".into(), device)]));
+        assert_eq!(shared.devices["rog"].reading.percent(), Some(70));
+        assert_eq!(shared.devices["other"].reading.percent(), Some(80));
+    }
+
     fn dormant_store_updates() -> StoreUpdates {
         StoreUpdates {
             controller: crate::store::Controller::for_test(),
@@ -5803,7 +5848,7 @@ mod backend_tests {
                 merge_additional_at(&mut shared, BackendId::Rapoo, crate::backends::Poll { snapshots,
                     present_channels: Some(["rapoo".into()].into_iter().collect()) }, tick);
             }
-            shared.expire_additional_at(tick);
+            shared.expire_readings_at(tick);
             let device = &shared.devices["rapoo"];
             assert!(device.reading.connected);
             if second <= 90 || second >= 112 {
@@ -5839,7 +5884,7 @@ mod backend_tests {
             present_channels: Some(["controller".into()].into_iter().collect()) };
         merge_additional_at(&mut shared, backend, poll, now + Duration::from_secs(3));
         assert_eq!(shared.readings[0].battery_text(false), "≈55");
-        shared.expire_additional_at(now + backend.sample_lifetime());
+        shared.expire_readings_at(now + backend.sample_lifetime());
         assert_eq!(shared.readings[0].battery_text(true), "—");
         sample.battery_at = Some(now + Duration::from_secs(9));
         sample.battery.as_mut().unwrap().estimated_percent = Some(45);
@@ -5870,7 +5915,7 @@ mod backend_tests {
         assert!(shared.devices["headset"].reading.connected);
         assert_eq!(shared.devices["headset"].reading.quality, crate::device::ReadingQuality::Cached);
         assert_eq!(shared.devices["headset"].basic_status.as_ref().unwrap().measured_at, Some(now));
-        shared.expire_additional_at(now + backend.sample_lifetime());
+        shared.expire_readings_at(now + backend.sample_lifetime());
         assert_eq!(shared.devices["headset"].reading.battery_text(true), "—");
         let mut offline = sample.clone();
         offline.connected = false; offline.battery = None; offline.battery_at = None;
@@ -5943,7 +5988,7 @@ mod backend_tests {
             let sleeping = crate::backends::Poll { snapshots: Vec::new(),
                 present_channels: Some(["keyboard".into()].into_iter().collect()) };
             merge_additional_at(&mut shared, backend, sleeping, time);
-            shared.expire_additional_at(time);
+            shared.expire_readings_at(time);
             let device = &shared.devices["keyboard"];
             assert!(device.reading.connected);
             assert_eq!(device.basic_status.as_ref().unwrap().measured_at, Some(now));
