@@ -4,7 +4,7 @@ use super::*;
 use crate::hid::HidDevice;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -90,7 +90,12 @@ fn x9_unique(i: &HidInterface, interfaces: &[HidInterface]) -> bool {
 #[derive(Default)]
 struct ProCache {
     firmware: BTreeMap<String, HidInterface>,
-    versions: BTreeMap<String, Option<u16>>,
+    versions: BTreeMap<String, Arc<ProVersion>>,
+}
+
+#[derive(Default)]
+struct ProVersion {
+    value: Mutex<Option<Option<u16>>>,
 }
 
 fn pro_cache() -> &'static Mutex<ProCache> {
@@ -266,42 +271,55 @@ fn cache_firmware_candidates(
         .filter(|i| model(i) == Some(Model::MchoseV9Pro))
         .map(|i| channel::collection_group(i))
         .collect::<BTreeSet<_>>();
-    let mut cache = pro_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.firmware.clear();
-    cache.versions.retain(|group, _| groups.contains(group));
-    for group in groups {
-        if let Some(interface) = firmware_candidate(api, interfaces, &group) {
-            cache.firmware.insert(group, interface);
-        }
-    }
+    let firmware = groups.iter().filter_map(|group|
+        firmware_candidate(api, interfaces, group).map(|interface| (group.clone(), interface)))
+        .collect();
+    cache_firmware_with(pro_cache(), &groups, firmware);
 }
 
-fn pro_version(interface: &HidInterface) -> Option<u16> {
-    let group = channel::collection_group(interface);
-    let firmware = {
-        let mut cache = pro_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(version) = cache.versions.get(&group) {
-            return *version;
-        }
-        let firmware = cache.firmware.get(&group).cloned();
-        if firmware.is_none() {
-            cache.versions.insert(group.clone(), None);
-            return None;
-        }
-        firmware
-    }?;
-    let started = Instant::now();
-    let result = (|| {
-        let mut channel =
-            feature::FeatureChannel::open_with_length(&firmware, 64)?;
-        channel.send(&firmware_request(), 600)?;
+fn cache_firmware_with(cache: &Mutex<ProCache>, groups: &BTreeSet<String>,
+    firmware: BTreeMap<String, HidInterface>) {
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.firmware = firmware;
+    cache.versions.retain(|group, _| groups.contains(group));
+    for group in groups { cache.versions.entry(group.clone()).or_default(); }
+}
+
+fn pro_version(interface: &HidInterface) -> Result<Option<u16>, String> {
+    pro_version_with(pro_cache(), interface, |firmware, request| {
+        let mut channel = feature::FeatureChannel::open_with_length(firmware, 64)?;
+        channel.send(request, 600)?;
         std::thread::sleep(Duration::from_millis(300));
         channel.receive(0xaa, 600)
-    })();
+    })
+}
+
+fn pro_version_with(cache: &Mutex<ProCache>, interface: &HidInterface,
+    query: impl FnOnce(&HidInterface, &[u8]) -> Result<Vec<u8>, String>) -> Result<Option<u16>, String> {
+    let group = channel::collection_group(interface);
+    let entry = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        .versions.get(&group).cloned().ok_or("接收器枚举已变化，请刷新后重试")?;
+    let mut cached = entry.value.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let firmware = {
+        let cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !cache.versions.get(&group).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
+            return Err("接收器枚举已变化，请刷新后重试".into());
+        }
+        if let Some(version) = *cached {
+            return Ok(version);
+        }
+        cache.firmware.get(&group).cloned()
+    };
+    let Some(firmware) = firmware else {
+        *cached = Some(None);
+        return Ok(None);
+    };
+    let started = Instant::now();
+    let result = query(&firmware, &firmware_request());
     let version = result
         .as_ref()
         .ok()
@@ -321,12 +339,12 @@ fn pro_version(interface: &HidInterface) -> Option<u16> {
             trace::Outcome::InvalidData
         },
     );
-    pro_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .versions
-        .insert(group, version);
-    version
+    let cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !cache.versions.get(&group).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
+        return Err("接收器枚举已变化，请刷新后重试".into());
+    }
+    *cached = Some(version);
+    Ok(version)
 }
 
 impl DeviceBackend for Headset {
@@ -350,13 +368,13 @@ impl DeviceBackend for Headset {
         if target.backend != BackendId::Headset || !proven(api, target.hid()?) {
             return Err(crate::i18n::translate("设备无有效状态回报").into());
         }
+        let lock = channel::lock(&channel::collection_group(target.hid()?));
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if selected == Model::MchoseV9Pro
-            && pro_version(target.hid()?).is_some_and(|version| version < 8)
+            && pro_version(target.hid()?)?.is_some_and(|version| version < 8)
         {
             return Err(crate::i18n::translate("接收器固件低于 0008").into());
         }
-        let lock = channel::lock(&target.hid()?.path);
-        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(target.hid()?)?;
         let started = Instant::now();
         let response = device.transact(&query(), 1200, |r| reading(selected, r).is_some());
@@ -622,5 +640,119 @@ mod tests {
         assert!(receiver_version(&short).is_none());
         reply[1] = 2;
         assert!(receiver_version(&reply).is_none());
+    }
+
+    fn firmware_reply(version: u8) -> Vec<u8> {
+        let mut reply = vec![0; 64];
+        reply[..6].copy_from_slice(&[0xaa, 1, 0, 0, 0, version]);
+        reply
+    }
+
+    fn firmware_fixture(path: &str) -> (HidInterface, BTreeSet<String>, BTreeMap<String, HidInterface>) {
+        let mut control = interface(0x291d, 0x385d, 64);
+        control.path = path.into();
+        let group = channel::collection_group(&control);
+        let mut firmware = control.clone();
+        firmware.usage_page = 0xff22;
+        firmware.feature_len = 64;
+        (control, [group.clone()].into(), [(group, firmware)].into())
+    }
+
+    #[test]
+    fn stale_firmware_reply_cannot_authorize_a_rediscovered_receiver() {
+        let cache = Mutex::new(ProCache::default());
+        let (control, groups, firmware) = firmware_fixture("pro-receiver-one");
+        cache_firmware_with(&cache, &groups, firmware.clone());
+        let stale = pro_version_with(&cache, &control, |_, request| {
+            assert_eq!(request.len(), 64);
+            assert_eq!(&request[..3], &[0xaa, 1, 1]);
+            assert!(request[3..].iter().all(|byte| *byte == 0));
+            cache_firmware_with(&cache, &BTreeSet::new(), BTreeMap::new());
+            cache_firmware_with(&cache, &groups, firmware);
+            Ok(firmware_reply(8))
+        });
+        assert!(stale.is_err());
+        assert_eq!(pro_version_with(&cache, &control, |_, _| Ok(firmware_reply(7))), Ok(Some(7)));
+    }
+
+    #[test]
+    fn unchanged_firmware_epoch_queries_once_and_keeps_unknown_results_cached() {
+        for version in [None, Some(7), Some(8)] {
+            let cache = Mutex::new(ProCache::default());
+            let (control, groups, firmware) = firmware_fixture("pro-receiver-one");
+            cache_firmware_with(&cache, &groups, firmware.clone());
+            assert_eq!(pro_version_with(&cache, &control, |_, _| match version {
+                Some(version) => Ok(firmware_reply(version)),
+                None => Err("scripted timeout".into()),
+            }), Ok(version.map(u16::from)));
+            cache_firmware_with(&cache, &groups, firmware);
+            assert_eq!(pro_version_with(&cache, &control, |_, _| panic!("repeated firmware query")),
+                Ok(version.map(u16::from)));
+        }
+    }
+
+    #[test]
+    fn missing_firmware_collection_keeps_the_documented_no_retry_policy() {
+        let cache = Mutex::new(ProCache::default());
+        let (control, groups, firmware) = firmware_fixture("pro-receiver-one");
+        cache_firmware_with(&cache, &groups, BTreeMap::new());
+        assert_eq!(pro_version_with(&cache, &control, |_, _| panic!("no proven firmware collection")), Ok(None));
+        cache_firmware_with(&cache, &groups, firmware.clone());
+        assert_eq!(pro_version_with(&cache, &control, |_, _| panic!("unexpected retry")), Ok(None));
+        cache_firmware_with(&cache, &BTreeSet::new(), BTreeMap::new());
+        cache_firmware_with(&cache, &groups, firmware);
+        assert_eq!(pro_version_with(&cache, &control, |_, _| Ok(firmware_reply(8))), Ok(Some(8)));
+    }
+
+    #[test]
+    fn removal_of_another_receiver_does_not_invalidate_an_in_flight_version() {
+        let cache = Mutex::new(ProCache::default());
+        let (first, groups, firmware) = firmware_fixture("pro-receiver-one");
+        let (second, second_groups, second_firmware) = firmware_fixture("pro-receiver-two");
+        let all_groups = groups.union(&second_groups).cloned().collect();
+        let mut all_firmware = firmware.clone();
+        all_firmware.extend(second_firmware);
+        cache_firmware_with(&cache, &all_groups, all_firmware);
+        assert_eq!(pro_version_with(&cache, &first, |_, _| {
+            assert_eq!(pro_version_with(&cache, &second, |_, _| Ok(firmware_reply(7))), Ok(Some(7)));
+            cache_firmware_with(&cache, &groups, firmware);
+            Ok(firmware_reply(8))
+        }), Ok(Some(8)));
+        assert!(pro_version_with(&cache, &second, |_, _| panic!("removed receiver queried")).is_err());
+    }
+
+    #[test]
+    fn concurrent_first_reads_share_one_firmware_query() {
+        let cache = Mutex::new(ProCache::default());
+        let (control, groups, firmware) = firmware_fixture("pro-receiver-one");
+        cache_firmware_with(&cache, &groups, firmware);
+        let (entered_send, entered_receive) = std::sync::mpsc::channel();
+        let (release_send, release_receive) = std::sync::mpsc::channel();
+        let (second_send, second_receive) = std::sync::mpsc::channel();
+        let queries = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let cache = &cache;
+            let control = &control;
+            let queries = &queries;
+            let first = scope.spawn(move || pro_version_with(cache, control, |_, _| {
+                queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                entered_send.send(()).unwrap();
+                release_receive.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok(firmware_reply(8))
+            }));
+            entered_receive.recv_timeout(Duration::from_secs(2)).unwrap();
+            let second = scope.spawn(move || {
+                second_send.send(()).unwrap();
+                pro_version_with(cache, control, |_, _| {
+                    queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(firmware_reply(7))
+                })
+            });
+            second_receive.recv_timeout(Duration::from_secs(2)).unwrap();
+            release_send.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), Ok(Some(8)));
+            assert_eq!(second.join().unwrap(), Ok(Some(8)));
+        });
+        assert_eq!(queries.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
