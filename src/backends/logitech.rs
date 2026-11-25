@@ -108,21 +108,32 @@ impl<C: Channel> Session<C> {
         let current = if connection.is_some() {
             [125,250,500,1000,2000,4000,8000].get(usize::from(raw)).copied()
         } else { Some((1000 + u16::from(raw)/2) / u16::from(raw)) };
-        let (mode_feature,host_control) = match self.feature(ONBOARD_PROFILES) {
-            Ok(Some(feature)) => (Some(feature),self.request(feature,2,&[]).ok()
-                .is_some_and(|reply|reply.first() == Some(&2))),
-            Ok(None) => (None,true),
-            Err(_) => (None,false),
+        let (mode_feature,host_control,onboard_mode) = match self.feature(ONBOARD_PROFILES) {
+            Ok(Some(feature)) => {
+                let mode = self.request(feature,2,&[]).ok().and_then(|reply| reply.first().copied());
+                (Some(feature),mode == Some(2),mode == Some(1))
+            }
+            Ok(None) => (None,true,false),
+            Err(_) => (None,false,false),
         };
         let identity = !((0xc500..=0xc5ff).contains(&target.hid()?.product_id) && !target.verified_identity);
         let rate = crate::device::PollingRate { current,values:choices.iter().map(|(_,hz)| *hz).collect(),
-            writable: identity && host_control && current.is_some() && choices.iter().any(|(v,_)| *v == raw) };
+            writable: identity && host_control && current.is_some() && choices.iter().any(|(v,_)| *v == raw),
+            connection: match connection {
+                Some(0) => Some(crate::device::PollingRateConnection::Wired),
+                Some(1) => Some(crate::device::PollingRateConnection::Wireless),
+                _ => None,
+            }, onboard_mode };
         Ok(Some(RateInfo { rate,feature,connection,raw,choices,mode_feature }))
     }
     fn set_rate(&mut self,target:&Target,hz:u16) -> Result<(),String> {
         self.check_identity(target)?;
         let info = self.rate_info(target)?.ok_or("设备不支持回报率设置")?;
-        if !info.rate.writable { return Err("当前模式不允许回报率写入".into()); }
+        if !info.rate.writable {
+            return Err(if info.rate.onboard_mode {
+                "当前处于板载内存模式，请在 G HUB 中关闭板载内存模式后刷新设备，再修改回报率。"
+            } else { "当前模式不允许回报率写入" }.into());
+        }
         let raw = info.choices.iter().find(|(_,v)| *v == hz).ok_or("回报率不在此连接的可用范围内")?.0;
         if raw == info.raw { return Ok(()); }
         self.check_identity(target)?;
@@ -1307,7 +1318,35 @@ mod tests {
         let (channel,steps)=channel(extended_rate_queries());
         let info=Session::from_channel(channel,&target()).unwrap().rate_info(&target()).unwrap().unwrap();
         assert_eq!(info.connection,Some(0));assert_eq!(info.rate.current,Some(1000));
+        assert_eq!(info.rate.connection, Some(crate::device::PollingRateConnection::Wired));
         assert_eq!(info.rate.values,vec![125,250,500,1000,2000,4000,8000]);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dex_receiver_rate_uses_wireless_capabilities_without_borrowing_wired_rates() {
+        let mut target = target();
+        target.hid_mut().product_id = 0xc54d;
+        target.address = 1;
+        target.verified_identity = true;
+        let script = vec![ping(), data(0, 0, &[0x80, 0x61], &[2]),
+            data(2, 1, &[1], &[0, 0x7f]), data(2, 2, &[1], &[6]),
+            data(0, 0, &[0x81, 0], &[0])];
+        let (channel, steps) = channel(script);
+        let info = Session::from_channel(channel, &target).unwrap().rate_info(&target).unwrap().unwrap();
+        assert_eq!(info.rate.connection, Some(crate::device::PollingRateConnection::Wireless));
+        assert_eq!(info.rate.current, Some(8000));
+        assert!(info.rate.values.contains(&8000));
+        assert!(info.rate.writable);
+        assert!(steps.lock().unwrap().is_empty());
+        let mut script = extended_rate_queries();
+        script[4] = data(2, 1, &[0], &[0, 0x0f]);
+        let (channel, steps) = self::channel(script);
+        let wired = self::target();
+        let info = Session::from_channel(channel, &wired).unwrap().rate_info(&wired).unwrap().unwrap();
+        assert_eq!(info.rate.connection, Some(crate::device::PollingRateConnection::Wired));
+        assert_eq!(info.rate.values, vec![125, 250, 500, 1000]);
+        assert!(!info.rate.values.contains(&8000));
         assert!(steps.lock().unwrap().is_empty());
     }
     #[test]
@@ -1331,6 +1370,7 @@ mod tests {
         let (channel,steps)=channel(script);
         let info=Session::from_channel(channel,&target()).unwrap().rate_info(&target()).unwrap().unwrap();
         assert_eq!(info.rate.current,Some(333));assert!(!info.rate.writable);
+        assert!(info.rate.onboard_mode);
         assert!(steps.lock().unwrap().is_empty());
     }
     #[test]
@@ -1340,6 +1380,18 @@ mod tests {
         let (channel,steps)=channel(script);
         let info=Session::from_channel(channel,&target()).unwrap().rate_info(&target()).unwrap().unwrap();
         assert_eq!(info.rate.current,Some(333));assert!(!info.rate.writable);
+        assert!(!info.rate.onboard_mode);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn onboard_rate_write_explains_the_required_mode_without_changing_device_mode() {
+        let mut script = rate_queries();
+        script.pop();
+        script.extend([data(0, 0, &[0x81, 0], &[4]), data(4, 2, &[], &[1])]);
+        let (channel, steps) = channel(script);
+        let error = Session::from_channel(channel, &target()).unwrap().set_rate(&target(), 125).unwrap_err();
+        assert!(error.contains("G HUB"));
         assert!(steps.lock().unwrap().is_empty());
     }
     fn dpi_queries() -> Vec<Step> {

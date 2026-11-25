@@ -2464,10 +2464,15 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             let labels: Vec<&str> = value_strings.iter().map(String::as_str).collect();
             let selected = rate.current.and_then(|current| rate.values.iter().position(|&value| value == current)).unwrap_or(usize::MAX);
             let segment_width = (labels.len() as f32 * 64.0).clamp(160.0, 320.0);
+            let frequency_label = match rate.connection {
+                Some(crate::device::PollingRateConnection::Wired) => crate::tr!("有线轮询频率"),
+                Some(crate::device::PollingRateConnection::Wireless) => crate::tr!("无线轮询频率"),
+                None => crate::tr!("轮询频率"),
+            };
             let control = row_label(
                 p,
                 area,
-                crate::tr!("轮询频率"),
+                frequency_label,
                 Some(crate::tr!("越高越跟手，也越耗电")),
                 segment_width + 40.0,
             );
@@ -2494,6 +2499,12 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
                 p.text(&text, control, font::BODY, true, p.t.text, Align::Right);
             }
             c.y = card.bottom();
+            if basic.connected && rate.onboard_mode {
+                let top = c.y + 10.0;
+                let height = note(p, R::new(c.x, top, c.w, 0.0),
+                    crate::tr!("当前处于板载内存模式，请在 G HUB 中关闭板载内存模式后刷新设备，再修改回报率。"), false);
+                c.y = top + height;
+            }
         }
         return;
     }

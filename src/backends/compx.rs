@@ -320,7 +320,8 @@ impl<C: Channel> Session<C> {
         let profile_stable = profile.is_some() && self.profile() == profile;
         PollingRate { current, values: if current.is_some() && !self.live_r1() {
             RATES.iter().filter_map(|(_,hz)| (*hz <= ceiling).then_some(*hz)).collect()
-        } else { Vec::new() }, writable: self.write_supported() && profile_stable && current.is_some() && !self.live_r1() }
+        } else { Vec::new() }, writable: self.write_supported() && profile_stable && current.is_some() && !self.live_r1(),
+            ..Default::default() }
     }
     fn battery(&mut self) -> Option<Battery> {
         let r = self.query(4,0,&[],0).ok()?;

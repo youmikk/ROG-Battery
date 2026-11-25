@@ -1180,6 +1180,7 @@ fn mock_basic_snapshot(reading: &crate::device::DeviceReading) -> crate::backend
             current: Some(1000),
             values: vec![125, 250, 500, 1000, 2000, 4000, 8000],
             writable: true,
+            ..Default::default()
         },
         connected: reading.connected,
         battery_at: Some(std::time::Instant::now()),
@@ -5301,7 +5302,7 @@ mod backend_tests {
         let mut shared=Shared::new(Settings::default());
         let mut first=snapshot(BackendId::CompX,"compx",75);
         first.dpi.current=Some(800);first.dpi.stage_editable=true;
-        first.polling_rate=crate::device::PollingRate {current:Some(1000),values:vec![500,1000],writable:true};
+        first.polling_rate=crate::device::PollingRate {current:Some(1000),values:vec![500,1000],writable:true,..Default::default()};
         shared.publish_additional(BackendId::CompX,vec![first.clone()],0,1);
         first.dpi=Dpi::default();first.polling_rate.current=Some(500);
         shared.publish_additional(BackendId::CompX,vec![first],0,2);

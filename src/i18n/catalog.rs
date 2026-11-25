@@ -117,6 +117,9 @@ macro_rules! tr {
     ("范围 100–42000 DPI，步进 50。颜色是该档位在设备上的指示灯颜色。") => { if $crate::i18n::english() { "100–42000 DPI, in steps of 50. Colors match each stage's indicator LED." } else { "范围 100–42000 DPI，步进 50。颜色是该档位在设备上的指示灯颜色。" } };
     ("回报率") => { if $crate::i18n::english() { "Polling rate" } else { "回报率" } };
     ("轮询频率") => { if $crate::i18n::english() { "Polling frequency" } else { "轮询频率" } };
+    ("有线轮询频率") => { if $crate::i18n::english() { "Wired polling frequency" } else { "有线轮询频率" } };
+    ("无线轮询频率") => { if $crate::i18n::english() { "Wireless polling frequency" } else { "无线轮询频率" } };
+    ("当前处于板载内存模式，请在 G HUB 中关闭板载内存模式后刷新设备，再修改回报率。") => { if $crate::i18n::english() { "On-board memory mode is active. Turn it off in G HUB, then refresh the device before changing the polling rate." } else { "当前处于板载内存模式，请在 G HUB 中关闭板载内存模式后刷新设备，再修改回报率。" } };
     ("越高越跟手，也越耗电") => { if $crate::i18n::english() { "Higher rates improve response and use more power" } else { "越高越跟手，也越耗电" } };
     ("当前档位") => { if $crate::i18n::english() { "Active stage" } else { "当前档位" } };
     ("同时决定设备的 DPI 和档位指示灯") => { if $crate::i18n::english() { "Sets the DPI and stage indicator color" } else { "同时决定设备的 DPI 和档位指示灯" } };
@@ -566,6 +569,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "设备返回的回报率列表无效" => "Invalid polling rate list returned by the device",
         "无法读取当前回报率" => "Could not read the current polling rate",
         "当前模式不允许回报率写入" => "Polling rate writes are not available in the current mode",
+        "当前处于板载内存模式，请在 G HUB 中关闭板载内存模式后刷新设备，再修改回报率。" => "On-board memory mode is active. Turn it off in G HUB, then refresh the device before changing the polling rate.",
         "设备连接已变化，请刷新后重试" => "Device connection changed; refresh and try again",
         "CompX 请求长度无效" => "Invalid CompX request length",
         "CompX 设备无有效应答" => "No valid response from the CompX device",
@@ -599,6 +603,8 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "范围 100–42000 DPI，步进 50。颜色是该档位在设备上的指示灯颜色。" => "100–42000 DPI, in steps of 50. Colors match each stage's indicator LED.",
         "回报率" => "Polling rate",
         "轮询频率" => "Polling frequency",
+        "有线轮询频率" => "Wired polling frequency",
+        "无线轮询频率" => "Wireless polling frequency",
         "越高越跟手，也越耗电" => "Higher rates improve response and use more power",
         "当前档位" => "Active stage",
         "同时决定设备的 DPI 和档位指示灯" => "Sets the DPI and stage indicator color",

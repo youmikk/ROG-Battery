@@ -247,6 +247,14 @@ pub struct PollingRate {
     pub current: Option<u16>,
     pub values: Vec<u16>,
     pub writable: bool,
+    pub connection: Option<PollingRateConnection>,
+    pub onboard_mode: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PollingRateConnection {
+    Wired,
+    Wireless,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
