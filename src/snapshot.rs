@@ -561,15 +561,9 @@ fn cache_matches(snapshot: &Snapshot, ttl: Duration, key: Option<&str>, link: &L
 }
 
 fn device_identity(identity: &Identity) -> Option<String> {
-    let serial = identity.mouse_sn.trim();
-    if !serial.is_empty() {
-        return Some(format!("serial:{serial}"));
-    }
-    let mac = identity.mouse_mac.trim();
-    if !mac.is_empty() && mac != "00:00:00:00:00:00" && mac != "FF:FF:FF:FF:FF:FF" {
-        return Some(format!("mac:{mac}"));
-    }
-    None
+    let value = identity.device_id()?;
+    let kind = if identity.mouse_sn.trim().is_empty() { "mac" } else { "serial" };
+    Some(format!("{kind}:{value}"))
 }
 
 fn cache_key(link: &Link, identity: &str) -> String {

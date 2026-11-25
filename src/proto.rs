@@ -374,6 +374,14 @@ pub struct Identity {
 }
 
 impl Identity {
+    pub fn device_id(&self) -> Option<&str> {
+        let serial = self.mouse_sn.trim();
+        if !serial.is_empty() { return Some(serial); }
+        let mac = self.mouse_mac.trim();
+        (!mac.is_empty() && mac != "00:00:00:00:00:00"
+            && !mac.eq_ignore_ascii_case("FF:FF:FF:FF:FF:FF")).then_some(mac)
+    }
+
     /// 界面上显示的型号名：PID 对照表优先，其次固件自报名（见 [`crate::devices`]）。
     pub fn display_name(&self) -> String {
         crate::devices::display_name(&self.model_name, self.wired_pid, self.wireless_pid)

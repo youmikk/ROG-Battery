@@ -3,14 +3,9 @@ use super::*;
 
 pub struct Rog;
 
-fn identity_key(link: &crate::hid::Link, identity: &crate::proto::Identity) -> String {
-    if !identity.mouse_sn.trim().is_empty() {
-        crate::device::stable_key(&format!("device:{}", identity.mouse_sn.trim()))
-    } else if !identity.mouse_mac.trim().is_empty() {
-        crate::device::stable_key(&format!("device:{}", identity.mouse_mac.trim()))
-    } else {
-        link.device_key()
-    }
+pub(crate) fn identity_key(link: &crate::hid::Link, identity: &crate::proto::Identity) -> String {
+    identity.device_id().map(|id| crate::device::stable_key(&format!("device:{id}")))
+        .unwrap_or_else(|| link.device_key())
 }
 
 pub fn fetch(
@@ -78,8 +73,7 @@ impl DeviceBackend for Rog {
             target.family = crate::device::family_of(&target.name);
         }
         target.key = identity_key(&link, &outcome.snapshot.identity);
-        target.verified_identity = !outcome.snapshot.identity.mouse_sn.trim().is_empty()
-            || !outcome.snapshot.identity.mouse_mac.trim().is_empty();
+        target.verified_identity = outcome.snapshot.identity.device_id().is_some();
         let dpi = if target.family == DeviceFamily::Mouse
             && outcome.snapshot.parsed_frame("12:04:02")
             && (1..=4).contains(&state.active_stage)

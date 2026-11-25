@@ -476,10 +476,8 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         if ident.model_name.is_empty() {
             ident.model_name = link.iface.product.clone();
         }
-        let key = if !ident.mouse_sn.trim().is_empty() {
-            crate::device::stable_key(&format!("device:{}", ident.mouse_sn.trim()))
-        } else if !ident.mouse_mac.trim().is_empty() {
-            crate::device::stable_key(&format!("device:{}", ident.mouse_mac.trim()))
+        let key = if ident.device_id().is_some() {
+            crate::backends::rog::identity_key(&link, &ident)
         } else {
             previous
                 .as_ref()
@@ -495,8 +493,7 @@ fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> 
         }
         if let Some(old) = previous.as_ref().filter(|old| {
             old.reading.key != key
-                && old.ident.mouse_sn.trim().is_empty()
-                && old.ident.mouse_mac.trim().is_empty()
+                && old.ident.device_id().is_none()
         }) {
             let mut s = lock_shared(shared);
             if outcome_is_stale(generation, s.write_gen) {
@@ -5134,6 +5131,28 @@ mod backend_tests {
         assert_eq!(state.power, 47);
         assert_eq!(state.poll_code, 3);
         assert_eq!(state.active_stage, 2);
+    }
+
+    #[test]
+    fn rog_unknown_mac_keeps_distinct_devices_and_cannot_verify_identity() {
+        let first = history_owner_device("receiver-a", DeviceFamily::Mouse, true, None);
+        let second = history_owner_device("receiver-b", DeviceFamily::Mouse, true, None);
+        for mac in ["", "00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF", "ff:ff:ff:ff:ff:ff"] {
+            let identity = proto::Identity { mouse_mac: mac.into(), ..Default::default() };
+            assert!(identity.device_id().is_none());
+            let first_key = crate::backends::rog::identity_key(first.link.as_ref().unwrap(), &identity);
+            let second_key = crate::backends::rog::identity_key(second.link.as_ref().unwrap(), &identity);
+            assert_ne!(first_key, second_key);
+        }
+        let mut identity = proto::Identity { mouse_mac: "12:34:56:78:9A:BC".into(), ..Default::default() };
+        let first_key = crate::backends::rog::identity_key(first.link.as_ref().unwrap(), &identity);
+        let second_key = crate::backends::rog::identity_key(second.link.as_ref().unwrap(), &identity);
+        assert_eq!(first_key, second_key);
+        assert_eq!(first_key, crate::device::stable_key("device:12:34:56:78:9A:BC"));
+        identity.mouse_sn = " synthetic-serial ".into();
+        assert_eq!(identity.device_id(), Some("synthetic-serial"));
+        assert_eq!(crate::backends::rog::identity_key(first.link.as_ref().unwrap(), &identity),
+            crate::device::stable_key("device:synthetic-serial"));
     }
 
     fn dormant_store_updates() -> StoreUpdates {
