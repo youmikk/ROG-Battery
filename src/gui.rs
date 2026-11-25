@@ -1539,6 +1539,27 @@ fn lock_shared(s: &Arc<Mutex<Shared>>) -> std::sync::MutexGuard<'_, Shared> {
     }
 }
 
+fn complete_rog_command(
+    shared: &Arc<Mutex<Shared>>, cmd: &Cmd, target: Option<&hid::Link>, result: CmdResult,
+    read_autostart: impl FnOnce() -> (crate::autostart::AutoStartState, crate::autostart::AutoStartPath),
+) {
+    let autostart = matches!(cmd, Cmd::AutoStart(_)).then(read_autostart);
+    let mut state = lock_shared(shared);
+    state.rog_write_active = false;
+    if let Some(target) = target {
+        for device in state.devices.values_mut() {
+            if device.link.as_ref().is_some_and(|link| link.device_key() == target.device_key()) {
+                device.state = None;
+            }
+        }
+    }
+    if let Some(autostart) = autostart {
+        state.autostart = autostart;
+    }
+    state.results.push_back(result);
+    state.want_full = true;
+}
+
 // ==================== 界面动作的执行 ====================
 
 /// 等一个后台线程收尾，最多 `budget`。
@@ -4028,29 +4049,7 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         Cmd::Backup(_) | Cmd::Restore(_) => run_file_cmd(&cmd, target.as_ref()),
                         _ => run_cmd(&cmd, target.as_ref()),
                     };
-                    let mut s = lock_shared(&shared_t);
-                    s.rog_write_active = false;
-                    if let Some(target) = &target {
-                        for device in s.devices.values_mut() {
-                            if device
-                                .link
-                                .as_ref()
-                                .is_some_and(|link| link.device_key() == target.device_key())
-                            {
-                                device.state = None;
-                            }
-                        }
-                    }
-                    // 自启命令改的就是「系统里那个开关」，改完必须把新状态
-                    // 抄回 `Shared`，否则设置页那一行还停在旧文案上。
-                    // 放在这里而不是 `run_autostart` 里：那个函数不持锁、也不该持。
-                    if matches!(cmd, Cmd::AutoStart(_)) {
-                        s.autostart = crate::autostart::state();
-                    }
-                    s.results.push_back(res);
-                    // 写完必须读一次全量：DPI / 灯光 / 按键都可能变了。
-                    s.want_full = true;
-                    drop(s);
+                    complete_rog_command(&shared_t, &cmd, target.as_ref(), res, crate::autostart::state);
                     sender_t.notice();
                     ran += 1;
                     if ran >= MAX_PENDING * 2 {
@@ -4735,6 +4734,62 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     // （GUID 或退回的编号）删除，也会释放图标句柄。
     tray_exit.set_visibility(false);
     Ok(())
+}
+
+#[cfg(test)]
+mod autostart_publication_tests {
+    use super::*;
+    use crate::autostart::{AutoStartPath, AutoStartState};
+
+    fn command_result() -> CmdResult {
+        CmdResult { label: "test".into(), ok: Some("applied".into()), err: None, hint: "" }
+    }
+
+    #[test]
+    fn slow_autostart_query_keeps_shared_available_until_atomic_publication() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        {
+            let mut state = lock_shared(&shared);
+            state.rog_write_active = true;
+            state.want_full = false;
+        }
+        let worker_shared = Arc::clone(&shared);
+        let (started, entered) = std::sync::mpsc::channel();
+        let (resume, paused) = std::sync::mpsc::channel();
+        let expected = (AutoStartState::Enabled, AutoStartPath::WinRt);
+        let worker = std::thread::spawn(move || {
+            complete_rog_command(&worker_shared, &Cmd::AutoStart(true), None, command_result(), || {
+                started.send(()).unwrap();
+                paused.recv_timeout(Duration::from_secs(3)).unwrap();
+                expected
+            });
+        });
+        entered.recv_timeout(Duration::from_secs(3)).unwrap();
+        let during_query = shared.try_lock().ok().map(|state|
+            (state.rog_write_active, state.results.is_empty(), state.want_full, state.autostart));
+        resume.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(during_query, Some((true, true, false,
+            (AutoStartState::Unknown, AutoStartPath::Unknown))));
+        let state = lock_shared(&shared);
+        assert_eq!(state.autostart, expected);
+        assert!(!state.rog_write_active);
+        assert!(state.want_full);
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(state.results[0].ok.as_deref(), Some("applied"));
+    }
+
+    #[test]
+    fn device_command_completion_does_not_query_autostart() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let expected = (AutoStartState::Disabled, AutoStartPath::WinRt);
+        lock_shared(&shared).autostart = expected;
+        complete_rog_command(&shared, &Cmd::Stage(0), None, command_result(),
+            || panic!("Device commands must not query autostart"));
+        let state = lock_shared(&shared);
+        assert_eq!(state.autostart, expected);
+        assert_eq!(state.results.len(), 1);
+    }
 }
 
 #[cfg(test)]
