@@ -41,6 +41,7 @@ mod tray_icon;
 mod tray_prefs;
 mod ui;
 mod win32;
+mod winrt;
 
 use std::process::ExitCode;
 
