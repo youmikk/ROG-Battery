@@ -457,6 +457,26 @@ impl DeviceBackend for StandardHid {
 }
 
 #[cfg(test)]
+pub(crate) fn snapshot_for_test(
+    interface: &HidInterface,
+    physical_group: Option<&str>,
+    percent: u8,
+    now: Instant,
+) -> Snapshot {
+    let target = target_for(interface, physical_group);
+    let mut cache = Cache::default();
+    let presence = cache.observe(&crate::hid::EnumerateReport {
+        interfaces: vec![interface.clone()], skipped: Vec::new(),
+    });
+    assert!(cache.register(&target, &presence[&interface.path.to_ascii_lowercase()]));
+    let lease = cache.lease(&target).expect("test target must be registered");
+    let percent = normalize_percent(u32::from(percent), 0, 100)
+        .expect("test battery percentage must be within 0..=100");
+    complete_read(&mut cache, &lease, &target, Some(percent), now)
+        .expect("test read must produce a fresh snapshot")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

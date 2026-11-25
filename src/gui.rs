@@ -732,8 +732,8 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
                 other.target.backend == crate::backends::BackendId::StandardHid && other.target.same_hid_path(&snapshot.target)));
         }
         let previous = shared.devices.values().filter(|device| device.basic.as_ref().is_some_and(|other|
-            other.target.same_channel(&snapshot.target) && other.target.key != snapshot.target.key))
-            .max_by_key(|device| device.full_at)
+            other.target.same_channel(&snapshot.target)))
+            .max_by_key(|device| (device.reading.connected, device.full_at))
             .and_then(|device| device.basic.as_ref()).map(|other| other.target.clone());
         if previous.is_none() && snapshot.target.verified_identity {
             let discovery_key = snapshot.target.unverified_key();
@@ -742,19 +742,13 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
                 shared.device_keys_dirty = true;
             }
         }
-        if let Some(previous) = previous {
-            let link_key = previous.unverified_key();
-            let had_identity = previous.verified_identity || previous.key != link_key;
-            if snapshot.target.verified_identity && !had_identity {
+        if let Some(previous) = previous.filter(|previous| previous.key != snapshot.target.key) {
+            if snapshot.target.verified_identity && !previous.verified_identity {
                 if shared.promote_device_key(&previous.key, &snapshot.target.key) { shared.device_keys_dirty = true; }
                 shared.devices.remove(&previous.key);
-            } else if !snapshot.target.verified_identity {
-                if had_identity { continue; }
-                snapshot.target.key = previous.key;
-                if snapshot.target.family == crate::device::DeviceFamily::Unknown { snapshot.target.family = previous.family; }
-                if snapshot.target.hid().is_ok_and(|i| snapshot.target.name == i.product) { snapshot.target.name = previous.name; }
+            } else if previous.verified_identity && !snapshot.target.verified_identity {
+                continue;
             } else if let Some(device) = shared.devices.get_mut(&previous.key) {
-                // 同一接收器槽位出现另一个已确认身份，旧设备不能继续显示在线。
                 if let Some(status) = &mut device.basic_status {
                     status.observe(Some(false), None, now, backend.sample_lifetime());
                 }
@@ -6343,6 +6337,92 @@ mod backend_tests {
         assert!(shared.devices[&key].reading.connected);
         assert_eq!(shared.devices[&key].reading.battery_text(true), "—");
         assert_eq!(shared.devices[&other_key].reading.battery_text(true), "≈50%");
+    }
+
+    #[test]
+    fn standard_topology_resolution_recovers_without_reusing_old_identity() {
+        assert_standard_topology_transition(None, Some("usb\\vid_1234&pid_5678\\receiver-a"));
+    }
+
+    #[test]
+    fn standard_topology_loss_recovers_without_reusing_old_identity() {
+        assert_standard_topology_transition(Some("usb\\vid_1234&pid_5678\\receiver-a"), None);
+    }
+
+    fn assert_standard_topology_transition(first_group: Option<&str>, next_group: Option<&str>) {
+        let mut shared = Shared::new(Settings::default());
+        let now = std::time::Instant::now();
+        let interface = hid::HidInterface {
+            path: "receiver-a-col01".into(), serial: "shared-serial".into(), product: "HID mouse".into(),
+            vendor_id: 0x1234, product_id: 0x5678, usage_page: 1, usage: 2,
+            input_len: 8, output_len: 0, feature_len: 8,
+        };
+        let other_interface = hid::HidInterface { path: "receiver-b-col01".into(), ..interface.clone() };
+        let first = crate::backends::standard::snapshot_for_test(&interface, first_group, 90, now);
+        let other = crate::backends::standard::snapshot_for_test(&other_interface,
+            Some("usb\\vid_1234&pid_5678\\receiver-b"), 70, now);
+        let old_key = first.target.key.clone();
+        let other_key = other.target.key.clone();
+        merge_additional_at(&mut shared, BackendId::StandardHid, vec![first, other.clone()].into(), now);
+        shared.cfg.device_names.insert(old_key.clone(), "Old discovery preference".into());
+        shared.history_tracker.take_pending();
+
+        let measured = now + Duration::from_secs(1);
+        let next = crate::backends::standard::snapshot_for_test(&interface, next_group, 25, measured);
+        let new_key = next.target.key.clone();
+        assert_ne!(new_key, old_key);
+        assert_ne!(new_key, other_key);
+        merge_additional_at(&mut shared, BackendId::StandardHid, vec![next, other.clone()].into(), measured);
+        let current = shared.devices.get(&new_key).expect("successful Standard HID sample must be published");
+        assert_eq!(current.reading.percent(), Some(25));
+        assert_eq!(current.battery_at, Some(measured));
+        assert_eq!(current.reading.quality, crate::device::ReadingQuality::Live);
+        let basic = current.basic.as_ref().unwrap();
+        assert!(!basic.target.verified_identity);
+        assert!(!basic.dpi.writable && !basic.dpi.stage_writable && !basic.polling_rate.writable);
+        assert!(!shared.devices[&old_key].reading.connected);
+        assert_eq!(shared.devices[&other_key].reading.percent(), Some(70));
+        assert!(!shared.cfg.device_names.contains_key(&new_key));
+        assert_eq!(shared.cfg.device_names[&old_key], "Old discovery preference");
+        assert!(shared.key_aliases.is_empty());
+        let (samples, aliases) = shared.history_tracker.take_pending();
+        assert!(aliases.is_empty());
+        assert!(samples.iter().all(|(key, _)| key != &old_key));
+
+        let measured = measured + Duration::from_secs(1);
+        let next = crate::backends::standard::snapshot_for_test(&interface, next_group, 24, measured);
+        merge_additional_at(&mut shared, BackendId::StandardHid, vec![next, other].into(), measured);
+        assert_eq!(shared.devices[&new_key].reading.percent(), Some(24));
+        assert_eq!(shared.devices[&new_key].battery_at, Some(measured));
+        assert!(!shared.devices[&old_key].reading.connected);
+        assert_eq!(shared.devices.len(), 3);
+    }
+
+    #[test]
+    fn same_channel_refresh_never_promotes_a_retired_discovery_record() {
+        let mut shared = Shared::new(Settings::default());
+        let now = std::time::Instant::now();
+        let mut sample = snapshot(BackendId::Logitech, "receiver", 90);
+        sample.battery_at = Some(now);
+        sample.target.key = "retired-discovery".into();
+        merge_additional_at(&mut shared, BackendId::Logitech, vec![sample.clone()].into(), now);
+        shared.cfg.device_names.insert(sample.target.key.clone(), "Retired device".into());
+        sample.target.key = "current-discovery".into();
+        merge_additional_at(&mut shared, BackendId::Logitech, vec![sample.clone()].into(), now + Duration::from_secs(1));
+        sample.target.key = "confirmed-current".into();
+        sample.target.verified_identity = true;
+        merge_additional_at(&mut shared, BackendId::Logitech, vec![sample.clone()].into(), now + Duration::from_secs(2));
+        shared.history_tracker.take_pending();
+        sample.battery.as_mut().unwrap().percent = Some(25);
+        sample.battery_at = Some(now + Duration::from_secs(3));
+        merge_additional_at(&mut shared, BackendId::Logitech, vec![sample].into(), now + Duration::from_secs(3));
+        assert_eq!(shared.devices["confirmed-current"].reading.percent(), Some(25));
+        assert!(!shared.devices["retired-discovery"].reading.connected);
+        assert_eq!(shared.cfg.device_names["retired-discovery"], "Retired device");
+        assert!(!shared.cfg.device_names.contains_key("confirmed-current"));
+        assert!(!shared.key_aliases.contains_key("retired-discovery"));
+        assert!(shared.history_tracker.take_pending().1.is_empty());
+        assert_eq!(shared.devices.len(), 2);
     }
 
     #[test]
