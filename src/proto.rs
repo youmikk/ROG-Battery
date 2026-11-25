@@ -357,33 +357,6 @@ pub fn parse_buttons(m: &[u8], st: &mut State) -> Result<(), String> {
     Ok(())
 }
 
-/// 读一帧并交给解析函数。
-fn read_frame(
-    dev: &mut HidDevice,
-    rid: u8,
-    cmd: u8,
-    sub: u8,
-    tail: &[u8],
-    parse: impl Fn(&[u8], &mut State) -> Result<(), String>,
-    st: &mut State,
-) -> Result<(), String> {
-    let m = dev
-        .xfer(rid, cmd, sub, tail, DEFAULT_TIMEOUT_MS)
-        .ok_or("鼠标无应答（休眠中？先移动一下鼠标）")?;
-    parse(&m, st)
-}
-
-fn read_energy(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
-    read_frame(dev, rid, 0x12, 0x07, &[0x00, 0x00], parse_energy, st)
-}
-
-/// 只读能量块。`restore` 结尾要用它做「能量块是否真的写进去了」的断言。
-pub fn read_energy_only(dev: &mut HidDevice, rid: u8) -> Result<State, String> {
-    let mut st = State::default();
-    read_energy(dev, rid, &mut st)?;
-    Ok(st)
-}
-
 // ==================== 身份信息 ====================
 
 /// 身份信息（只读，`info` 用）

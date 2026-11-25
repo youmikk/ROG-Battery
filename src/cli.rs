@@ -7,7 +7,7 @@
 use crate::backup;
 use crate::hid::{is_nak, HidDevice, HidInterface, Link};
 use crate::ops::{self, ApplyReport, ErrorKind, OpsError, StateReader};
-use crate::proto::{self, BUTTON_NAME, BUTTON_SLOTS, DPI_STAGES, LIGHT_ZONE};
+use crate::proto::LIGHT_ZONE;
 use crate::report;
 use crate::snapshot::{FetchOutcome, SnapshotCache};
 
@@ -100,7 +100,7 @@ pub fn error_hint(kind: ErrorKind) -> &'static str {
 
 /// `info` —— 只读，零风险。
 ///
-/// **一次读全 17 帧**（约 690ms，超出缓存有效期时才付），之后从缓存出。
+/// 完整展示快照可复用缓存；命中前仍需查询设备身份。
 pub fn cmd_info(ctx: &mut Ctx, dev: &mut HidDevice, force_fresh: bool) -> Result<(), String> {
     if force_fresh {
         ctx.cache.invalidate();
@@ -208,210 +208,18 @@ pub fn cmd_backup(ctx: &mut Ctx, dev: &mut HidDevice, path: &str) -> Result<(), 
 
 // ==================== 还原 ====================
 
-/// CLI 与 GUI 共用恢复入口；缺失字段沿用首次写入前新读的完整配置。
-pub fn apply_backup(
-    dev: &mut HidDevice,
-    rid: u8,
-    b: &backup::Backup,
-    save: bool,
-    log_raw: &mut dyn FnMut(&str),
-) -> Result<(), String> {
-    // 逐项写回，任何一步失败都只返回一句字符串 —— 用户不知道前面改了哪些。
-    // 这里包一层：数一下已写项数，失败时把「已写 N 项」附在错误后面。
-    let mut count = 0usize;
-    let mut log = |line: &str| {
-        count += 1;
-        log_raw(line);
-    };
-    let outcome: Result<(), String> = (|| -> Result<(), String> {
-    let mut reader = ops::DirectReader;
-    let configuration = reader.read(dev, rid).map_err(|e| e.message)?;
-    let base = configuration.state();
-    crate::snapshot::invalidate_disk_cache();
-
-    for i in 0..DPI_STAGES {
-        let Some(enc) = b.dpi_enc[i] else { continue };
-        if !(proto::DPI_ENC_MIN..=proto::DPI_ENC_MAX).contains(&enc) {
-            return Err(format!(
-                "DPI 档 {} 的编码 {enc} 超范围（合法 {}..={}，即 {}..={} DPI）。\
-                 备份文件可能已损坏，为安全起见整份还原已中止，设备未被修改。",
-                i + 1,
-                proto::DPI_ENC_MIN,
-                proto::DPI_ENC_MAX,
-                proto::decode_dpi(proto::DPI_ENC_MIN),
-                proto::decode_dpi(proto::DPI_ENC_MAX)
-            ));
-        }
-        let rgb = b.dpi_rgb[i].unwrap_or(base.rgb[i]);
-        if proto::write_dpi(dev, rid, i, proto::decode_dpi(enc), rgb).is_none() {
-            return Err(format!("写 DPI 档 {} 无应答", i + 1));
-        }
-        log(&format!(
-            "DPI 档 {} -> {}  颜色 #{:02x}{:02x}{:02x}",
-            i + 1,
-            proto::decode_dpi(enc),
-            rgb[0],
-            rgb[1],
-            rgb[2]
-        ));
-    }
-
-    // ---- 回报率（寄存器 0x04）----
-    if let Some(code) = b.poll_code {
-        if proto::write_reg(dev, rid, 0x04, &[code]).is_none() {
-            return Err("写回报率无应答".into());
-        }
-        log(&format!("回报率 -> {}", proto::poll_name(code)));
-    }
-
-    // ---- 当前档位（寄存器 0x09，1-based）----
-    if let Some(stage) = b.active_stage {
-        if proto::write_reg(dev, rid, 0x09, &[stage]).is_none() {
-            return Err("写当前档位无应答".into());
-        }
-        log(&format!("当前档位 -> {stage}"));
-    }
-
-    // ---- 去抖 / 角度吸附 / 角度微调 ----
-    if let Some(code) = b.debounce_code {
-        if proto::write_reg(dev, rid, 0x05, &[code]).is_none() {
-            return Err("写去抖无应答".into());
-        }
-        log(&format!("去抖 -> {} (code {code})", proto::debounce_name(code)));
-    }
-    if let Some(snap) = b.angle_snap {
-        if proto::write_reg(dev, rid, 0x06, &[snap]).is_none() {
-            return Err("写角度吸附无应答".into());
-        }
-        log(&format!("角度吸附 -> {snap}"));
-    }
-    if let Some(t) = b.angle_tuning {
-        let v = t as i16;
-        if proto::write_reg(dev, rid, 0x0B, &[(v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8]).is_none() {
-            return Err("写角度微调无应答".into());
-        }
-        log(&format!("角度微调 -> {v}"));
-    }
-
-    // ---- LOD（独立命令族；会重置表面标定）----
-    if let Some(code) = b.lod {
-        if proto::write_lod(dev, rid, code).is_none() {
-            return Err("写 LOD 无应答".into());
-        }
-        log(&format!("LOD -> {} (code {code})", proto::lod_name(code)));
-        log("注意：写 LOD 会把表面标定重置为默认，这是设备行为，无法避免。");
-    }
-
-    if let Some(mode) = b.light_mode {
-        let bright = b.light_bright.unwrap_or(base.light_bright);
-        let rgb = b.light_rgb.unwrap_or(base.light_rgb);
-        let dir = b.light_dir.unwrap_or(base.light_dir);
-        let rnd = b.light_random.unwrap_or(base.light_random);
-        let spd = b.light_speed.unwrap_or(base.light_speed);
-        if proto::write_light(dev, rid, mode, bright, rgb, dir, rnd, spd).is_none() {
-            return Err("写灯光无应答".into());
-        }
-        log(&format!(
-            "灯光 -> {} (code {mode}) 亮度 {bright} 颜色 #{:02x}{:02x}{:02x}",
-            proto::light_mode_name(mode),
-            rgb[0],
-            rgb[1],
-            rgb[2]
-        ));
-    }
-
-    // ---- 8 个按键 ----
-    for i in 0..BUTTON_SLOTS {
-        let Some(dst) = b.buttons[i] else { continue };
-        if proto::write_button(dev, rid, i, dst).is_none() {
-            return Err(format!("写按键槽 {i} 无应答"));
-        }
-        log(&format!("按键 {i} ({}) -> 0x{dst:04X}", BUTTON_NAME[i]));
-    }
-
-    // ---- 能量块：最后单独重写，并读回确认 ----
-    let (Some(sleep), Some(low), Some(full)) = (b.poweroff_code, b.low_warn, b.full_effect) else {
-        if save {
-            // commit 的返回值必须看：None = 设备没应答，这时打「设置已进 flash」
-            // 就是谎报，用户拔线后会发现什么都没保存。
-            ops::commit_or_fail(dev, rid).map_err(|e| e.message)?;
-            log("已 commit（能量块被跳过，见上面的警告）。");
-        }
-        return Ok(());
-    };
-
-    if proto::write_energy(dev, rid, sleep, low, full).is_none() {
-        return Err("写能量块无应答".into());
-    }
-    log(&format!(
-        "能量块 -> 休眠 {} (code {sleep}) 低电量 {low}% 充满效果 {full}",
-        proto::sleep_mode_name(sleep)
-    ));
-
-    if save {
-        ops::commit_or_fail(dev, rid).map_err(|e| e.message)?;
-        log("已 commit（0x50 0x03），设置已进 flash。");
-    } else {
-        log("未 commit（默认不写 flash）。确认无误后可再加 --save。");
-    }
-
-    // 读回断言（restore 必须做，这是文档第 5 节事故的直接教训）
-    ops::sleep_ms(ops::SETTLE_MS);
-    let verified = proto::read_energy_only(dev, rid)?;
-    let ok = verified.sleep_mode == sleep && verified.low_warn == low && verified.full_effect == full;
-    log(&format!(
-        "VERIFY       能量块读回：休眠 {} / 低电量 {}% / 充满效果 {} → {}",
-        proto::sleep_mode_name(verified.sleep_mode),
-        verified.low_warn,
-        verified.full_effect,
-        if ok { "YES" } else { "NO" }
-    ));
-    if !ok {
-        return Err("能量块读回与备份不一致".into());
-    }
-        Ok(())
-    })();
-    outcome.map_err(|e| partial_hint(e, count))
-}
-
-/// 还原中途失败时，把「已经写进去几项」补进错误信息。
-fn partial_hint(err: String, count: usize) -> String {
-    if count > 0 {
-        format!("{err}（此前已成功写入 {count} 项，见上方逐项输出）")
-    } else {
-        err
-    }
-}
-
-/// `restore <file>` —— 按备份逐项写回，**能量块最后单独重写并断言**。
+/// `restore <file>`：整份预检、合并完整基准，读回确认后按需提交。
 pub fn cmd_restore(ctx: &mut Ctx, dev: &mut HidDevice, path: &str, save: bool) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("读文件 {path} 失败：{e}"))?;
-    let b = backup::parse(&text)?;
+    let backup = backup::parse(&text)?;
 
     println!("== 还原 {path} ==");
-    println!("识别到 {} / {} 个键", b.keys_found, backup::BACKUP_KEYS.len());
-    if !b.rejected.is_empty() {
-        // 以前这些值会被静默截断（256 变 0）或整条丢掉（负角度），
-        // 「还原成功」其实是谎话。现在明确列出来，让用户知道哪几项没还原。
-        eprintln!("警告：有 {} 项的值无法使用，将被跳过：", b.rejected.len());
-        for r in &b.rejected {
-            eprintln!("      {r}");
-        }
-    }
-    if backup::energy_missing(&b) {
-        eprintln!("警告：这份备份缺少能量块（poweroff_code / low_warn / full_effect）。");
-        eprintln!("      文档第 5 节的事故正是因此而起——commit 后休眠时间会被写坏。");
-        eprintln!("      本次还原**跳过**能量块，请手动确认设备休眠设置。");
-    }
-
-    let rid = ctx.rid();
-    let result = {
-        let mut log = |line: &str| println!("  {line}");
-        apply_backup(dev, rid, &b, save, &mut log)
-    };
-
+    println!("识别到 {} / {} 个键", backup.keys_found, backup::BACKUP_KEYS.len());
+    let result = ops::restore_backup(dev, ctx.rid(), &backup, save, &mut |line| println!("  {line}"));
     ctx.invalidate();
-    result
+    let report = result.map_err(|error| error.message)?;
+    print_report(&report);
+    Ok(())
 }
 
 // ==================== setter ====================

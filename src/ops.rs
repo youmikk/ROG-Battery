@@ -503,10 +503,6 @@ where
     }, log)
 }
 
-pub(crate) fn commit_or_fail(dev: &mut HidDevice, rid: u8) -> Result<(), OpsError> {
-    check_reply(proto::commit(dev, rid), "commit ")
-}
-
 pub fn save_configuration(
     dev: &mut HidDevice,
     rid: u8,
@@ -517,6 +513,65 @@ pub fn save_configuration(
         &CycleSpec::new("save").keep(true).save(true),
         |state| format!("配置 {}，DPI 档位 {}，回报率 {}", state.profile, state.active_stage, proto::poll_name(state.poll_code)),
         |before| Ok((before.clone(), Vec::new())), log)
+}
+
+pub fn restore_backup(
+    dev: &mut HidDevice,
+    rid: u8,
+    backup: &crate::backup::Backup,
+    save: bool,
+    log: Logger,
+) -> Result<ApplyReport, OpsError> {
+    restore_with(&mut HidTransaction { dev, rid, reader: &mut DirectReader }, backup, save, log)
+}
+
+fn restore_with(
+    device: &mut impl TransactionDevice,
+    backup: &crate::backup::Backup,
+    save: bool,
+    log: Logger,
+) -> Result<ApplyReport, OpsError> {
+    backup.validate().map_err(OpsError::invalid)?;
+    let mut changes_lod = false;
+    let mut report = transact(device, &CycleSpec::new("restore").keep(true).save(save),
+        |state| format!("配置 {}，DPI 档位 {}，回报率 {}", state.profile, state.active_stage, proto::poll_name(state.poll_code)),
+        |before| {
+            let expected = backup.merge(before).map_err(OpsError::invalid)?;
+            let mut settings = Vec::new();
+            if before.poll_code != expected.poll_code { settings.push(Setting::Poll); }
+            for stage in 0..DPI_STAGES {
+                if (before.enc[stage], before.rgb[stage]) != (expected.enc[stage], expected.rgb[stage]) {
+                    if !(proto::DPI_ENC_MIN..=proto::DPI_ENC_MAX).contains(&before.enc[stage]) {
+                        return Err(OpsError::other(format!("DPI 档 {} 的原编码无法安全回写，未写入任何设置", stage + 1)));
+                    }
+                    settings.push(Setting::Dpi(stage));
+                }
+            }
+            if before.active_stage != expected.active_stage { settings.push(Setting::Stage); }
+            if before.debounce_code != expected.debounce_code { settings.push(Setting::Debounce); }
+            if before.angle_snap != expected.angle_snap { settings.push(Setting::Snap); }
+            if before.angle_tuning != expected.angle_tuning { settings.push(Setting::Tuning); }
+            if (before.light_mode, before.light_bright, before.light_rgb, before.light_dir, before.light_random, before.light_speed)
+                != (expected.light_mode, expected.light_bright, expected.light_rgb, expected.light_dir, expected.light_random, expected.light_speed)
+            {
+                settings.push(Setting::Light);
+            }
+            for slot in 0..BUTTON_SLOTS {
+                if before.buttons[slot] != expected.buttons[slot] { settings.push(Setting::Button(slot)); }
+            }
+            if (before.sleep_mode, before.low_warn, before.full_effect)
+                != (expected.sleep_mode, expected.low_warn, expected.full_effect)
+            {
+                settings.push(Setting::Energy);
+            }
+            changes_lod = before.lod != expected.lod;
+            if changes_lod { settings.push(Setting::Lod); }
+            Ok((expected, settings))
+        }, log)?;
+    if changes_lod {
+        report.warning = Some("写 LOD 会重置表面标定（厂商确认无恢复命令）。".into());
+    }
+    Ok(report)
 }
 
 pub(crate) fn sleep_ms(ms: u64) {
@@ -1200,6 +1255,246 @@ mod transaction_tests {
 
     fn changed() -> State {
         State { sleep_mode: 3, ..baseline() }
+    }
+
+    fn restore(device: &mut FakeDevice, text: &str, save: bool) -> Result<ApplyReport, OpsError> {
+        let backup = crate::backup::parse(text).unwrap();
+        restore_with(device, &backup, save, &mut |_| {})
+    }
+
+    fn written_settings(device: &FakeDevice) -> Vec<Setting> {
+        device.writes.iter().map(|(setting, _)| *setting).collect()
+    }
+
+    fn assert_partial_restore(text: &str, expected: State, setting: Setting) {
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(expected.clone())]);
+        let report = restore(&mut device, text, false).unwrap();
+        assert!(report.applied && !report.committed);
+        assert_eq!(written_settings(&device), [setting], "{text}");
+        assert_eq!(configuration_mismatch(&expected, &device.writes[0].1, false), None, "{text}");
+        assert_eq!(device.operations(), ["read", "write", "read"]);
+    }
+
+    #[test]
+    fn restore_each_partial_energy_field_preserves_its_peers() {
+        for (text, expected) in [
+            ("poweroff_code=255", State { sleep_mode: 255, ..baseline() }),
+            ("low_warn=35", State { low_warn: 35, ..baseline() }),
+            ("full_effect=0", State { full_effect: 0, ..baseline() }),
+        ] {
+            assert_partial_restore(text, expected, Setting::Energy);
+        }
+    }
+
+    #[test]
+    fn restore_each_partial_light_field_preserves_its_peers() {
+        for (text, expected) in [
+            ("light_mode=1", State { light_mode: 1, ..baseline() }),
+            ("light_bright=75", State { light_bright: 75, ..baseline() }),
+            ("light_rgb=123456", State { light_rgb: [0x12, 0x34, 0x56], ..baseline() }),
+            ("light_dir=1", State { light_dir: 1, ..baseline() }),
+            ("light_random=1", State { light_random: 1, ..baseline() }),
+            ("light_speed=80", State { light_speed: 80, ..baseline() }),
+        ] {
+            assert_partial_restore(text, expected, Setting::Light);
+        }
+    }
+
+    #[test]
+    fn restore_dpi_color_only_and_value_only_preserve_the_other_member() {
+        for stage in 0..DPI_STAGES {
+            let mut expected = baseline();
+            expected.rgb[stage] = [0x12, 0x34, 0x56];
+            assert_partial_restore(&format!("dpi{}_rgb=123456", stage + 1), expected, Setting::Dpi(stage));
+            let mut expected = baseline();
+            expected.enc[stage] = 31;
+            assert_partial_restore(&format!("dpi{}_enc=31", stage + 1), expected, Setting::Dpi(stage));
+        }
+    }
+
+    #[test]
+    fn restore_preflights_late_invalid_fields_before_any_device_access() {
+        for invalid in [
+            "dpi4_enc=0", "dpi4_enc=840", "dpi4_enc=-1", "dpi4_enc=2147483647",
+            "active_stage=0", "active_stage=5", "debounce_code=8", "angle_snap=2",
+            "angle_tuning=-25", "angle_tuning=21", "angle_tuning=3", "lod=2",
+            "light_mode=3", "light_mode=5", "light_bright=101", "light_rgb=中文",
+            "light_dir=2", "light_random=2", "light_speed=101", "button7=65536",
+            "poweroff_code=5", "poweroff_code=254", "low_warn=101", "full_effect=2",
+            "low_warn=invalid", "low_warn=20\nlow_warn=invalid", "poll_code=4",
+        ] {
+            let mut device = FakeDevice::new(Vec::new());
+            let error = restore(&mut device, &format!("dpi1_enc=31\n{invalid}"), true).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Invalid, "{invalid}");
+            assert!(device.events.is_empty(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn restore_validates_programmatic_backups_in_shared_core() {
+        let backup = crate::backup::Backup { low_warn: Some(101), keys_found: 1, ..Default::default() };
+        let mut device = FakeDevice::new(Vec::new());
+        assert_eq!(restore_with(&mut device, &backup, true, &mut |_| {}).unwrap_err().kind, ErrorKind::Invalid);
+        assert!(device.events.is_empty());
+    }
+
+    #[test]
+    fn restore_rejects_invalid_inherited_group_members_before_writing() {
+        let mut invalid_dpi = baseline();
+        invalid_dpi.enc[3] = 0;
+        for (text, before) in [
+            ("dpi4_rgb=123456", invalid_dpi),
+            ("light_bright=70", State { light_mode: 3, ..baseline() }),
+            ("light_mode=1", State { light_bright: 101, ..baseline() }),
+            ("light_bright=70", State { light_dir: 2, ..baseline() }),
+            ("light_bright=70", State { light_random: 2, ..baseline() }),
+            ("light_bright=70", State { light_speed: 101, ..baseline() }),
+            ("low_warn=30", State { sleep_mode: 5, ..baseline() }),
+            ("poweroff_code=3", State { low_warn: 101, ..baseline() }),
+            ("low_warn=30", State { full_effect: 2, ..baseline() }),
+        ] {
+            let mut device = FakeDevice::new(vec![Ok(before)]);
+            assert!(restore(&mut device, &format!("poll_code=2\n{text}"), true).is_err(), "{text}");
+            assert_eq!(device.operations(), ["read"], "{text}");
+        }
+    }
+
+    #[test]
+    fn restore_refuses_dpi_changes_that_cannot_be_rolled_back_exactly() {
+        for encoded in [0, proto::DPI_ENC_MAX + 1] {
+            let mut before = baseline();
+            before.enc[3] = encoded;
+            let mut device = FakeDevice::new(vec![Ok(before)]);
+            let error = restore(&mut device, "poll_code=2\ndpi4_enc=31", true).unwrap_err();
+            assert!(error.message.contains("原编码无法安全回写"));
+            assert_eq!(device.operations(), ["read"]);
+        }
+    }
+
+    #[test]
+    fn restore_requires_a_complete_baseline() {
+        let mut device = FakeDevice::new(vec![Err(OpsError::other("缺少配置帧 12:05:00"))]);
+        assert!(restore(&mut device, "low_warn=30", true).is_err());
+        assert_eq!(device.operations(), ["read"]);
+    }
+
+    #[test]
+    fn restore_full_backup_verifies_all_groups_before_commit_and_writes_lod_last() {
+        let expected = State {
+            poll_code: 2, enc: [31; DPI_STAGES], rgb: [[1, 2, 3]; DPI_STAGES],
+            active_stage: 4, debounce_code: 2, angle_snap: 1, angle_tuning: -10,
+            lod: 1, light_mode: 1, light_bright: 70, light_rgb: [40, 50, 60],
+            light_dir: 1, light_random: 1, light_speed: 40,
+            buttons: [0; BUTTON_SLOTS], sleep_mode: 255, low_warn: 35, full_effect: 0,
+            ..baseline()
+        };
+        let text = crate::backup::render(&configuration(&expected), "test", 3, "test");
+        let after = State { calib: [0; 3], ..expected.clone() };
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(after)]);
+        let report = restore(&mut device, &text, true).unwrap();
+        assert!(report.applied && report.committed);
+        assert!(report.warning.unwrap().contains("表面标定"));
+        assert_eq!(written_settings(&device), [
+            Setting::Poll, Setting::Dpi(0), Setting::Dpi(1), Setting::Dpi(2), Setting::Dpi(3),
+            Setting::Stage, Setting::Debounce, Setting::Snap, Setting::Tuning, Setting::Light,
+            Setting::Button(0), Setting::Button(1), Setting::Button(2), Setting::Button(3),
+            Setting::Button(4), Setting::Button(5), Setting::Button(6), Setting::Button(7),
+            Setting::Energy, Setting::Lod,
+        ]);
+        for (_, written) in &device.writes {
+            assert_eq!(configuration_mismatch(&expected, written, false), None);
+        }
+        let operations = device.operations();
+        assert_eq!(operations[0], "read");
+        assert_eq!(&operations[operations.len() - 2..], ["read", "commit"]);
+    }
+
+    #[test]
+    fn restore_unchanged_groups_skip_writes_including_lod() {
+        let text = crate::backup::render(&configuration(&baseline()), "test", 3, "test");
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(baseline())]);
+        let report = restore(&mut device, &text, true).unwrap();
+        assert!(report.applied && report.committed && report.warning.is_none());
+        assert_eq!(device.operations(), ["read", "read", "commit"]);
+    }
+
+    #[test]
+    fn restore_nak_or_lost_ack_stops_forward_writes_and_recovers_attempted_groups() {
+        for reply in [Some(vec![3, 0xff, 0xaa]), None] {
+            let partial = State { poll_code: 2, light_bright: 70, ..baseline() };
+            let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(partial), Ok(baseline())]);
+            device.replies.extend([Some(vec![3, 0x51, 0x31]), reply]);
+            let error = restore(&mut device, "poll_code=2\nlight_bright=70\nlow_warn=35\nlod=1", true).unwrap_err();
+            assert!(error.message.contains("原配置已读回确认"));
+            assert!(error.message.contains("未发送 commit"));
+            assert!(!error.message.contains("未被修改"));
+            assert_eq!(written_settings(&device), [Setting::Poll, Setting::Light, Setting::Light, Setting::Poll]);
+            for (_, written) in &device.writes[2..] {
+                assert_eq!(configuration_mismatch(&baseline(), written, false), None);
+            }
+            assert!(!device.events.contains(&"commit"));
+        }
+    }
+
+    #[test]
+    fn restore_readback_mismatch_rolls_back_before_any_commit() {
+        let wrong = State { poll_code: 2, light_bright: 69, ..baseline() };
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(wrong.clone()), Ok(wrong), Ok(baseline())]);
+        let error = restore(&mut device, "poll_code=2\nlight_bright=70", true).unwrap_err();
+        assert!(error.message.contains("灯光读回"));
+        assert!(error.message.contains("原配置已读回确认"));
+        assert_eq!(written_settings(&device), [Setting::Poll, Setting::Light, Setting::Light, Setting::Poll]);
+        assert!(!device.events.contains(&"commit"));
+    }
+
+    #[test]
+    fn restore_incomplete_readback_never_commits() {
+        let applied = State { poll_code: 2, light_bright: 70, ..baseline() };
+        let mut device = FakeDevice::new(vec![
+            Ok(baseline()), Err(OpsError::other("缺少配置帧 12:07:00")), Ok(applied), Ok(baseline()),
+        ]);
+        let error = restore(&mut device, "poll_code=2\nlight_bright=70", true).unwrap_err();
+        assert!(error.message.contains("原配置已读回确认"));
+        assert!(!device.events.contains(&"commit"));
+    }
+
+    #[test]
+    fn restore_unconfirmed_recovery_reports_remaining_uncertainty() {
+        let partial = State { poll_code: 2, light_bright: 70, ..baseline() };
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(partial.clone()), Ok(partial)]);
+        device.replies.extend([
+            Some(vec![3, 0x51, 0x31]), None, Some(vec![3, 0xff, 0xaa]), None,
+        ]);
+        let error = restore(&mut device, "poll_code=2\nlight_bright=70", true).unwrap_err();
+        assert!(error.message.contains("恢复未确认"));
+        assert!(!error.message.contains("原配置已读回确认"));
+        assert!(!error.message.contains("未被修改"));
+        assert!(!error.message.contains("未写入"));
+        assert!(!device.events.contains(&"commit"));
+    }
+
+    #[test]
+    fn restore_changed_profile_blocks_recovery_writes() {
+        let switched = State { profile: 1, poll_code: 2, light_bright: 70, ..baseline() };
+        let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(switched.clone()), Ok(switched)]);
+        let error = restore(&mut device, "poll_code=2\nlight_bright=70", true).unwrap_err();
+        assert!(error.message.contains("配置号已变化"));
+        assert!(error.message.contains("恢复未确认"));
+        assert_eq!(written_settings(&device), [Setting::Poll, Setting::Light]);
+        assert!(!device.events.contains(&"commit"));
+    }
+
+    #[test]
+    fn restore_commit_nak_or_lost_ack_reports_unknown_flash_and_recovers_ram() {
+        for reply in [Some(vec![3, 0xff, 0xaa]), None] {
+            let expected = State { poll_code: 2, light_bright: 70, ..baseline() };
+            let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(expected.clone()), Ok(expected), Ok(baseline())]);
+            device.commit_reply = reply;
+            let error = restore(&mut device, "poll_code=2\nlight_bright=70", true).unwrap_err();
+            assert!(error.message.contains("flash 状态未知"));
+            assert!(error.message.contains("原配置已读回确认"));
+            assert_eq!(device.operations(), ["read", "write", "write", "read", "commit", "read", "write", "write", "read"]);
+        }
     }
 
     #[test]

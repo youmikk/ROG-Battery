@@ -246,31 +246,17 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
             Ok(b) => b,
             Err(e) => return fail(crate::trf!("备份文件解析失败：{e}", e = e), ""),
         };
-        if b.keys_found == 0 {
-            return fail(crate::tr!("备份文件里没有任何已知键").into(), "");
-        }
-        // 值解析失败/超范围的键必须让用户看到：静默跳过会让「已还原」变成谎话。
-        if !b.rejected.is_empty() {
-            return fail(
-                crate::trf!(
-                    "备份里有 {} 项值不可用（{}），未还原任何设置",
-                    b.rejected.len(),
-                    b.rejected.join("；")
-                ),
-                "",
-            );
-        }
-        let mut lines: Vec<String> = Vec::new();
-        match crate::cli::apply_backup(&mut dev, link.report_id, &b, true, &mut |l| {
-            lines.push(l.to_string())
-        }) {
-            Ok(()) => CmdResult {
+        match crate::ops::restore_backup(&mut dev, link.report_id, &b, true, &mut |_| {}) {
+            Ok(report) => CmdResult {
                 label,
-                ok: Some(crate::trf!("已还原 {} 个键", b.keys_found)),
+                ok: Some(match report.warning {
+                    Some(warning) => format!("{}：{}", crate::trf!("已还原 {} 个键", b.keys_found), crate::i18n::translate(&warning)),
+                    None => crate::trf!("已还原 {} 个键", b.keys_found),
+                }),
                 err: None,
                 hint: "",
             },
-            Err(e) => fail(e, ""),
+            Err(error) => fail(error.message, ""),
         }
     }
 }

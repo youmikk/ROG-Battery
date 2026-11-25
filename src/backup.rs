@@ -1,19 +1,7 @@
-//! 备份文件的读写与还原。
-//!
-//! 备份格式是 `key=value` 的 ini 风格纯文本，**恰好 31 个键**：
-//!
-//! ```text
-//! poll_code, dpi{1..4}_enc, dpi{1..4}_rgb, active_stage,
-//! debounce_code, angle_snap, angle_tuning, lod,
-//! light_mode, light_bright, light_rgb, light_dir, light_random, light_speed,
-//! button0..button7, poweroff_code, low_warn, full_effect
-//! ```
-//!
-//! 其中**能量块（poweroff_code / low_warn / full_effect）必须存在** ——
-//! 文档第 5 节的事故就是因为最初的备份漏了这三项，commit 之后休眠时间字节被写坏，
-//! 鼠标变成 1 分钟就休眠，看起来像坏了。
+//! 完整导出包含 31 个 key=value 设置；恢复允许只提供部分字段。
+//! 同一写入组中缺失的字段沿用新读的完整配置，整份预检通过后才写设备。
 
-use crate::proto::{BUTTON_SLOTS, DPI_STAGES};
+use crate::proto::{self, State, BUTTON_SLOTS, DPI_STAGES};
 
 /// 备份文件的 31 个键，顺序即写文件的顺序。
 pub const BACKUP_KEYS: [&str; 31] = [
@@ -112,15 +100,14 @@ pub fn render(configuration: &crate::snapshot::Configuration, link_mode: &str, r
     for i in 0..BUTTON_SLOTS {
         s.push_str(&format!("button{}={}\r\n", i, st.buttons[i]));
     }
-    // 能量块必须最后写，也必须存在 —— 见文件头注释。
     s.push_str(&format!("poweroff_code={}\r\n", st.sleep_mode));
     s.push_str(&format!("low_warn={}\r\n", st.low_warn));
     s.push_str(&format!("full_effect={}\r\n", st.full_effect));
     s
 }
 
-/// 解析后的备份。缺键用 `None` 表示（还原时跳过）。
-#[derive(Default, Debug)]
+/// 缺失字段用 `None` 表示，恢复时保留对应基准值。
+#[derive(Default, Debug, Clone)]
 pub struct Backup {
     pub poll_code: Option<u8>,
     pub dpi_enc: [Option<i32>; DPI_STAGES],
@@ -140,20 +127,98 @@ pub struct Backup {
     pub poweroff_code: Option<u8>,
     pub low_warn: Option<u8>,
     pub full_effect: Option<u8>,
-    /// 文件里实际出现的已知键数量（用于校验「31 个键」）
+    /// 文件里实际出现的不同已知键数量。
     pub keys_found: usize,
-    /// 值存在但解析失败/超范围的键。调用方应把它们提示给用户 ——
-    /// 静默丢弃会让「还原成功」变成谎话。
+    /// 解析失败、类型越界或重复的字段；恢复时整份拒绝。
     pub rejected: Vec<String>,
 }
 
-/// 备份字段的类型化读取。
-///
-/// 原来的 `get_u8`/`get_u16` 是 `get_u32(...) as u8` —— 静默截断：文件里
-/// `poll_code=256` 会变成 0，`angle_tuning=-90` 因为 `parse::<u32>` 失败直接
-/// 变成 `None`，**负角度整个丢失**（而设备确实会写出负值）。这里改成范围
-/// 检查：超范围或解析失败都记进 `rejected`，由调用方决定怎么提示，不再悄悄
-/// 改写数值。
+impl Backup {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.keys_found == 0 {
+            return Err("备份中没有任何已知设置".into());
+        }
+        if !self.rejected.is_empty() {
+            return Err(format!("备份含不可用字段：{}", self.rejected.join("；")));
+        }
+        let mut invalid = Vec::new();
+        let mut check = |key: &str, valid: bool| {
+            if !valid { invalid.push(key.to_string()); }
+        };
+        check("poll_code", self.poll_code.is_none_or(|value| value <= 3));
+        for (stage, encoded) in self.dpi_enc.iter().enumerate() {
+            check(&format!("dpi{}_enc", stage + 1), encoded.is_none_or(|value|
+                (proto::DPI_ENC_MIN..=proto::DPI_ENC_MAX).contains(&value)));
+        }
+        check("active_stage", self.active_stage.is_none_or(|value| (1..=DPI_STAGES as u8).contains(&value)));
+        check("debounce_code", self.debounce_code.is_none_or(|value| proto::debounce_ms(value).is_some()));
+        check("angle_snap", self.angle_snap.is_none_or(|value| value <= 1));
+        check("angle_tuning", self.angle_tuning.is_none_or(|value| (-20..=20).contains(&value) && value % 5 == 0));
+        check("lod", self.lod.is_none_or(|value| value <= 1));
+        check("light_mode", self.light_mode.is_none_or(proto::light_mode_supported));
+        check("light_bright", self.light_bright.is_none_or(|value| value <= 100));
+        check("light_dir", self.light_dir.is_none_or(|value| value <= 1));
+        check("light_random", self.light_random.is_none_or(|value| value <= 1));
+        check("light_speed", self.light_speed.is_none_or(|value| value <= 100));
+        check("poweroff_code", self.poweroff_code.is_none_or(proto::sleep_code_valid));
+        check("low_warn", self.low_warn.is_none_or(|value| value <= 100));
+        check("full_effect", self.full_effect.is_none_or(|value| value <= 1));
+        if invalid.is_empty() { Ok(()) } else {
+            Err(format!("备份字段超出支持范围：{}", invalid.join("、")))
+        }
+    }
+
+    pub fn merge(&self, before: &State) -> Result<State, String> {
+        let mut complete = self.clone();
+        for stage in 0..DPI_STAGES {
+            if complete.dpi_enc[stage].is_some() || complete.dpi_rgb[stage].is_some() {
+                complete.dpi_enc[stage].get_or_insert(before.enc[stage]);
+                complete.dpi_rgb[stage].get_or_insert(before.rgb[stage]);
+            }
+        }
+        if self.light_mode.is_some() || self.light_bright.is_some() || self.light_rgb.is_some()
+            || self.light_dir.is_some() || self.light_random.is_some() || self.light_speed.is_some()
+        {
+            complete.light_mode.get_or_insert(before.light_mode);
+            complete.light_bright.get_or_insert(before.light_bright);
+            complete.light_rgb.get_or_insert(before.light_rgb);
+            complete.light_dir.get_or_insert(before.light_dir);
+            complete.light_random.get_or_insert(before.light_random);
+            complete.light_speed.get_or_insert(before.light_speed);
+        }
+        if self.poweroff_code.is_some() || self.low_warn.is_some() || self.full_effect.is_some() {
+            complete.poweroff_code.get_or_insert(before.sleep_mode);
+            complete.low_warn.get_or_insert(before.low_warn);
+            complete.full_effect.get_or_insert(before.full_effect);
+        }
+        complete.validate()?;
+        let mut state = before.clone();
+        for stage in 0..DPI_STAGES {
+            if let Some(value) = complete.dpi_enc[stage] { state.enc[stage] = value; }
+            if let Some(value) = complete.dpi_rgb[stage] { state.rgb[stage] = value; }
+        }
+        if let Some(value) = complete.poll_code { state.poll_code = value; }
+        if let Some(value) = complete.active_stage { state.active_stage = value; }
+        if let Some(value) = complete.debounce_code { state.debounce_code = value; }
+        if let Some(value) = complete.angle_snap { state.angle_snap = value; }
+        if let Some(value) = complete.angle_tuning { state.angle_tuning = value; }
+        if let Some(value) = complete.lod { state.lod = value; }
+        if let Some(value) = complete.light_mode { state.light_mode = value; }
+        if let Some(value) = complete.light_bright { state.light_bright = value; }
+        if let Some(value) = complete.light_rgb { state.light_rgb = value; }
+        if let Some(value) = complete.light_dir { state.light_dir = value; }
+        if let Some(value) = complete.light_random { state.light_random = value; }
+        if let Some(value) = complete.light_speed { state.light_speed = value; }
+        for slot in 0..BUTTON_SLOTS {
+            if let Some(value) = complete.buttons[slot] { state.buttons[slot] = value; }
+        }
+        if let Some(value) = complete.poweroff_code { state.sleep_mode = value; }
+        if let Some(value) = complete.low_warn { state.low_warn = value; }
+        if let Some(value) = complete.full_effect { state.full_effect = value; }
+        Ok(state)
+    }
+}
+
 struct Reader<'a> {
     map: &'a [(String, String)],
     rejected: Vec<String>,
@@ -222,7 +287,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// 角度微调是**有符号**的：设备会返回 -90..90。
+    /// 保留符号，支持范围由恢复预检统一校验。
     fn i16(&mut self, key: &str) -> Option<i16> {
         let v = self.i32(key)?;
         match i16::try_from(v) {
@@ -298,6 +363,11 @@ pub fn parse(text: &str) -> Result<Backup, String> {
     b.low_warn = r.u8("low_warn");
     b.full_effect = r.u8("full_effect");
     b.rejected = r.rejected;
+    for key in BACKUP_KEYS {
+        if map.iter().filter(|(found, _)| found == key).count() > 1 {
+            b.rejected.push(format!("{key}：重复字段"));
+        }
+    }
 
     if b.keys_found == 0 {
         return Err("备份文件里没有任何已知的键，可能不是本程序生成的文件".into());
@@ -305,14 +375,61 @@ pub fn parse(text: &str) -> Result<Backup, String> {
     Ok(b)
 }
 
-/// 备份缺少能量块时给出明确警告 —— 这正是文档第 5 节事故的根因。
-pub fn energy_missing(b: &Backup) -> bool {
-    b.poweroff_code.is_none() && b.low_warn.is_none() && b.full_effect.is_none()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_accepts_supported_boundary_values() {
+        for text in [
+            "poll_code=0\ndpi1_enc=1\nactive_stage=1\ndebounce_code=0\nangle_snap=0\nangle_tuning=-20\nlod=0\nlight_mode=0\nlight_bright=0\nlight_dir=0\nlight_random=0\nlight_speed=0\nbutton0=0\npoweroff_code=0\nlow_warn=0\nfull_effect=0",
+            "poll_code=3\ndpi4_enc=839\nactive_stage=4\ndebounce_code=7\nangle_snap=1\nangle_tuning=20\nlod=1\nlight_mode=240\nlight_bright=100\nlight_dir=1\nlight_random=1\nlight_speed=100\nbutton7=65535\npoweroff_code=255\nlow_warn=100\nfull_effect=1",
+        ] {
+            parse(text).unwrap().validate().unwrap();
+        }
+        for mode in [0, 1, 2, 4, 6, 240] {
+            parse(&format!("light_mode={mode}")).unwrap().validate().unwrap();
+        }
+        for code in [0, 1, 2, 3, 4, 255] {
+            parse(&format!("poweroff_code={code}")).unwrap().validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn validation_reports_all_invalid_fields_together() {
+        let backup = parse("poll_code=4\ndpi4_enc=840\nactive_stage=0\nlight_mode=3\npoweroff_code=5").unwrap();
+        let error = backup.validate().unwrap_err();
+        for key in ["poll_code", "dpi4_enc", "active_stage", "light_mode", "poweroff_code"] {
+            assert!(error.contains(key), "{error}");
+        }
+    }
+
+    #[test]
+    fn duplicate_known_fields_reject_the_whole_backup() {
+        for text in [
+            "low_warn=20\nlow_warn=101",
+            "light_rgb=abcdef\nlight_rgb=invalid",
+            "poll_code=3\npoll_code=3",
+        ] {
+            let backup = parse(text).unwrap();
+            assert_eq!(backup.keys_found, 1);
+            assert!(backup.validate().unwrap_err().contains("重复字段"));
+        }
+    }
+
+    #[test]
+    fn validation_rejects_empty_programmatic_backups() {
+        assert!(Backup::default().validate().is_err());
+    }
+
+    #[test]
+    fn unrelated_baseline_groups_are_preserved_without_revalidation() {
+        let before = State { light_mode: 3, sleep_mode: 5, ..Default::default() };
+        let merged = parse("poll_code=2").unwrap().merge(&before).unwrap();
+        assert_eq!(merged.poll_code, 2);
+        assert_eq!(merged.light_mode, 3);
+        assert_eq!(merged.sleep_mode, 5);
+    }
 
     #[test]
     fn rgb_accepts_hex_colors_with_optional_prefix_and_whitespace() {
