@@ -348,22 +348,7 @@ pub fn draw_frame(
     theme: &Theme,
     data: &Data,
 ) -> crate::ui::gfx::Gdi {
-    // 建内存位图要一个「参考 DC」。**不能用空句柄**：
-    // `CreateCompatibleBitmap(NULL, w, h)` 会返回一张 **1bpp 单色**位图 ——
-    // 它不报错，只是画出来全是黑白噪点。所以必须取一次屏幕 DC。
-    //
-    // 位图只增不减，尺寸没变时 `ensure` 会原样返回，模板 DC 根本用不上 ——
-    // 这时连取都不用取（`covers` 先判，省掉每帧一次 GetDC/ReleaseDC）。
-    let mem = if inner.covers(a.pixel_w, a.pixel_h) {
-        inner.ensure(0, a.pixel_w, a.pixel_h)
-    } else {
-        let sdc = unsafe { crate::win32::GetDC(std::ptr::null_mut()) };
-        let mem = inner.ensure(sdc as crate::ui::gfx::Gdi, a.pixel_w, a.pixel_h);
-        if !sdc.is_null() {
-            unsafe { crate::win32::ReleaseDC(std::ptr::null_mut(), sdc) };
-        }
-        mem
-    };
+    let mem = inner.ensure(0, a.pixel_w, a.pixel_h);
     if mem == 0 {
         return 0;
     }

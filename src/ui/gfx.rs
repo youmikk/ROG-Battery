@@ -1487,19 +1487,16 @@ pub(crate) fn bitmap_action(have: Option<(i32, i32)>, need: (i32, i32)) -> Bitma
     let Some((hw, hh)) = have else {
         return BitmapAction::Grow;
     };
-    if hw > nw + nw / 4 || hh > nh + nh / 4 {
+    if hw < nw || hh < nh {
+        return BitmapAction::Grow;
+    }
+    if hw > nw.saturating_add(nw / 4) || hh > nh.saturating_add(nh / 4) {
         return BitmapAction::Recreate;
     }
-    if hw >= nw && hh >= nh {
-        BitmapAction::Keep
-    } else {
-        BitmapAction::Grow
-    }
+    BitmapAction::Keep
 }
 
-/// 尺寸连续这么多帧没变，才认为「缩放停了」，允许把位图换小。
-///
-/// 60fps 下约 0.3 秒；空闲时每帧间隔几百毫秒，也就是一两帧就够。
+/// 连续稳定 20 帧后才缩小位图，避免拖动时反复分配。
 const STABLE_FRAMES: u32 = 20;
 
 impl Canvas {
@@ -1517,17 +1514,15 @@ impl Canvas {
         }
     }
 
-    /// 保证画布尺寸至少是 `w × h`，返回真正的绘制 DC。
-    ///
-    /// **位图只会变大不会变小**：缩窗口时不重建，避免拖拽时每帧
-    /// `CreateCompatibleBitmap`（那是内核对象分配，很慢）。
-    /// 多出来的部分不 `BitBlt`，所以看不到。
+    /// 返回覆盖需求的 DC；分配失败且旧画布不足时返回 0，保留旧资源供重试。
     pub fn ensure(&mut self, screen_dc: Gdi, w: i32, h: i32) -> Gdi {
+        self.ensure_with(screen_dc, w, h, Self::allocate)
+    }
+
+    fn ensure_with(&mut self, screen_dc: Gdi, w: i32, h: i32,
+        allocate: impl FnOnce(Gdi, i32, i32) -> Option<Self>) -> Gdi {
         let w = w.max(1);
         let h = h.max(1);
-        // 尺寸还在变（拖边框、最大化/还原动画）就先别缩：`CreateCompatibleBitmap`
-        // 是内核对象分配，全屏 2560×1440 那张要 14 MB，塞在动画帧里就是明显卡顿。
-        // 连续 `STABLE_FRAMES` 帧尺寸没变，才认为「停下来了」，此时再换小位图。
         if (w, h) == self.last_need {
             self.stable = self.stable.saturating_add(1);
         } else {
@@ -1546,30 +1541,40 @@ impl Canvas {
         if action == BitmapAction::Keep {
             return self.dc;
         }
-        if action == BitmapAction::Recreate {
-            self.release();
+        let (width, height) = if action == BitmapAction::Recreate { (w, h) }
+            else { (self.w.max(w), self.h.max(h)) };
+        let Some(mut replacement) = allocate(screen_dc, width, height) else {
+            return if self.covers(w, h) { self.dc } else { 0 };
+        };
+        replacement.last_need = self.last_need;
+        replacement.stable = self.stable;
+        *self = replacement;
+        self.dc
+    }
+
+    fn allocate(screen_dc: Gdi, width: i32, height: i32) -> Option<Self> {
+        let acquired = if screen_dc == 0 {
+            unsafe { crate::win32::GetDC(std::ptr::null_mut()) }
+        } else { std::ptr::null_mut() };
+        let reference = if screen_dc == 0 { acquired as Gdi } else { screen_dc };
+        let result = (|| {
+            if reference == 0 { return None; }
+            let mut canvas = Self::new();
+            canvas.dc = gdi_create_compatible_dc(reference);
+            if canvas.dc == 0 { return None; }
+            canvas.bmp = unsafe { CreateCompatibleBitmap(reference, width, height) };
+            if canvas.bmp == 0 { return None; }
+            let old = gdi_select_object(canvas.dc, canvas.bmp);
+            if old == 0 || old == -1 { return None; }
+            canvas.old = old;
+            canvas.w = width;
+            canvas.h = height;
+            Some(canvas)
+        })();
+        if !acquired.is_null() {
+            unsafe { crate::win32::ReleaseDC(std::ptr::null_mut(), acquired); }
         }
-        let nw = if self.w == 0 { w } else { self.w.max(w) };
-        let nh = if self.h == 0 { h } else { self.h.max(h) };
-        self.release();
-        unsafe {
-            let dc = gdi_create_compatible_dc(screen_dc);
-            if dc == 0 {
-                return 0;
-            }
-            let bmp = CreateCompatibleBitmap(screen_dc, nw, nh);
-            if bmp == 0 {
-                gdi_delete_dc(dc);
-                return 0;
-            }
-            let old = gdi_select_object(dc, bmp);
-            self.dc = dc;
-            self.bmp = bmp;
-            self.old = old;
-            self.w = nw;
-            self.h = nh;
-            dc
-        }
+        result
     }
 
     /// 释放所有 GDI 对象。顺序见类型文档。
@@ -1595,11 +1600,7 @@ impl Canvas {
         self.h = 0;
     }
 
-    /// 位图是否已经够大（够大就不必重新要屏幕 DC 当格式模板）。
-    ///
-    /// `ensure` 在位图够大时直接返回，但调用方为了给它递模板 DC 会先
-    /// `GetDC(NULL)` —— 那是每帧两次系统调用，尺寸不变时纯属白花。
-    /// 60fps 的充电动效下这是每秒 120 次多余的 GDI 调用。
+    /// 当前位图是否覆盖需求尺寸。
     pub fn covers(&self, w: i32, h: i32) -> bool {
         self.dc != 0 && self.w >= w.max(1) && self.h >= h.max(1)
     }
@@ -1735,6 +1736,65 @@ impl Default for Canvas {
 impl Drop for Canvas {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+#[cfg(test)]
+mod canvas_tests {
+    use super::*;
+
+    fn bitmap(canvas: &Canvas) -> winapi::um::wingdi::BITMAP {
+        let mut bitmap = unsafe { std::mem::zeroed() };
+        assert_ne!(unsafe { winapi::um::wingdi::GetObjectW(canvas.bmp as _,
+            std::mem::size_of::<winapi::um::wingdi::BITMAP>() as i32,
+            &mut bitmap as *mut _ as _) }, 0);
+        bitmap
+    }
+
+    #[test]
+    fn shrinking_without_a_reference_dc_preserves_color_and_valid_frames() {
+        let mut canvas = Canvas::new();
+        assert_ne!(canvas.ensure(0, 200, 200), 0);
+        let depth = bitmap(&canvas).bmBitsPixel;
+        assert!(depth > 1);
+        for _ in 0..STABLE_FRAMES + 3 {
+            assert_ne!(canvas.ensure(0, 100, 100), 0);
+            assert!(canvas.covers(100, 100));
+            assert_eq!(bitmap(&canvas).bmBitsPixel, depth);
+        }
+        assert_eq!((canvas.w, canvas.h), (100, 100));
+    }
+
+    #[test]
+    fn growing_either_axis_never_waits_for_shrink_settling() {
+        let mut canvas = Canvas::new();
+        assert_ne!(canvas.ensure(0, 100, 100), 0);
+        for (width, height) in [(70, 110), (120, 60), (50, 140), (150, 40)] {
+            assert_ne!(canvas.ensure(0, width, height), 0);
+            assert!(canvas.covers(width, height));
+            let bitmap = bitmap(&canvas);
+            assert!(bitmap.bmWidth >= width && bitmap.bmHeight >= height);
+        }
+    }
+
+    #[test]
+    fn failed_replacement_keeps_the_old_bitmap_and_pixels_for_retry() {
+        let mut canvas = Canvas::new();
+        assert_ne!(canvas.ensure(0, 100, 100), 0);
+        let original = (canvas.dc, canvas.bmp);
+        let color = 0x0012_3456;
+        unsafe { winapi::um::wingdi::SetPixel(canvas.dc as _, 1, 1, color); }
+        assert_eq!(canvas.ensure_with(0, 200, 200, |_, _, _| None), 0);
+        assert_eq!((canvas.dc, canvas.bmp), original);
+        for _ in 0..STABLE_FRAMES + 2 {
+            assert_eq!(canvas.ensure_with(0, 50, 50, |_, _, _| None), original.0);
+        }
+        assert_eq!((canvas.dc, canvas.bmp), original);
+        assert_eq!(unsafe { winapi::um::wingdi::GetPixel(canvas.dc as _, 1, 1) }, color);
+        assert_eq!(bitmap(&canvas).bmWidth, 100);
+        assert_ne!(canvas.ensure(0, 200, 200), 0);
+        assert!(canvas.covers(200, 200));
+        assert_ne!(canvas.bmp, original.1);
     }
 }
 
