@@ -235,6 +235,7 @@ pub enum Act {
     ExitToStoreUpdate,
     ReviewStore,
     DeviceFeedback,
+    SoftwareFeedback,
     FeedbackHistory,
     /// 设置页「关于」：打开 Microsoft Store 产品页。
     OpenStore,

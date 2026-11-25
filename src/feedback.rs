@@ -1,6 +1,7 @@
 //! 适配报告使用白名单字段重新生成，不复制用户日志、路径或配置。
 use std::fmt::Write;
 pub mod client;
+pub mod software;
 
 #[derive(Clone)]
 pub struct Candidate {

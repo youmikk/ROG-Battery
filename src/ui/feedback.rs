@@ -13,6 +13,10 @@ use std::{
 };
 use winapi::um::winuser as wu;
 
+mod layout;
+mod state;
+use state::{Model, Task, View};
+
 pub fn text<'a>(zh: &'a str, en: &'a str) -> &'a str {
     if crate::i18n::english() {
         en
@@ -25,15 +29,6 @@ const WIDTH: f32 = 660.0;
 const BODY_TOP: f32 = 91.0;
 const FOOTER: f32 = 66.0;
 const SLOTS: usize = 156;
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum View {
-    Form,
-    Diagnostics,
-    History,
-    Thread,
-    Success,
-}
 
 fn back_view(view: View, submitted: bool) -> View {
     if matches!(view, View::Thread | View::Success) {
@@ -66,6 +61,19 @@ enum Action {
     Reply,
     Refresh,
     New,
+}
+impl Action {
+    fn enabled(&self, model: &Model) -> bool {
+        if matches!(self, Self::History) && model.task == Some(Task::History) {
+            return false;
+        }
+        !model.busy() || matches!(self,
+            Self::Close | Self::Back | Self::History | Self::New | Self::Entry(_) | Self::OpenIssue)
+    }
+
+    fn navigates(&self) -> bool {
+        matches!(self, Self::Back | Self::History | Self::New | Self::Entry(_))
+    }
 }
 #[derive(Clone, Copy)]
 enum Style {
@@ -100,6 +108,15 @@ enum Decoration {
     Center(String, R, f32, bool),
     Check(R),
 }
+impl Decoration {
+    fn rect(&self) -> R {
+        match self {
+            Self::Surface(rect, _) | Self::Glyph(_, rect) | Self::Tag(_, rect)
+                | Self::Note(_, rect) | Self::Count(rect) | Self::Center(_, rect, _, _)
+                | Self::Check(rect) => *rect,
+        }
+    }
+}
 struct Label {
     text: String,
     rect: R,
@@ -115,59 +132,12 @@ enum ResultMessage {
         Result<client::Thread, String>,
         Result<Option<String>, String>,
     ),
-    Reply(Result<client::ReplyReceipt, String>),
+    Reply(u64, String, Result<client::ReplyReceipt, String>),
     Draft(String, Result<client::Draft, String>),
     Images(Result<Vec<client::Image>, String>),
-}
-struct Model {
-    view: View,
-    devices: Vec<Candidate>,
-    latest_devices: Vec<Candidate>,
-    initialized: bool,
-    menu: bool,
-    selected: Option<usize>,
-    connection: usize,
-    category: usize,
-    attach_diagnostics: bool,
-    images: Vec<client::Image>,
-    entries: Vec<client::Entry>,
-    current: Option<client::Entry>,
-    thread: Option<client::Thread>,
-    draft_retry: Option<String>,
-    error: String,
-    busy: bool,
-    submitted: bool,
-    generation: u64,
-    diagnostics_override: Option<String>,
-    restored_draft: Option<client::Draft>,
-    reply_drafts: std::collections::BTreeMap<u64, String>,
-}
-impl Default for Model {
-    fn default() -> Self {
-        Self {
-            view: View::Form,
-            devices: Vec::new(),
-            selected: None,
-            connection: 0,
-            category: 0,
-            attach_diagnostics: true,
-            images: Vec::new(),
-            entries: Vec::new(),
-            current: None,
-            thread: None,
-            draft_retry: None,
-            error: String::new(),
-            busy: false,
-            submitted: false,
-            generation: 0,
-            diagnostics_override: None,
-            latest_devices: Vec::new(),
-            initialized: false,
-            menu: false,
-            restored_draft: None,
-            reply_drafts: Default::default(),
-        }
-    }
+    Fallback(Result<client::Fallback, String>),
+    SoftwareDiagnostics(String),
+    Failed,
 }
 struct Colors {
     theme: Theme,
@@ -216,7 +186,6 @@ struct Controls {
     brand: nwg::TextInput,
     model: nwg::TextInput,
     reply: nwg::TextBox,
-    viewer: nwg::TextBox,
     _font: nwg::Font,
     state: RefCell<Model>,
     items: RefCell<Vec<Item>>,
@@ -236,6 +205,9 @@ struct Controls {
     results: Arc<Mutex<Vec<(u64, ResultMessage)>>>,
     notice: nwg::NoticeSender,
     updating: Cell<bool>,
+    description_count: Cell<usize>,
+    applied: RefCell<std::collections::BTreeMap<usize, layout::NativeState>>,
+    scrollbar: Cell<Option<(i32, u32, i32)>>,
 }
 pub struct Dialog {
     controls: Rc<Controls>,
@@ -342,6 +314,10 @@ impl Controls {
         if let Some(value) = &s.diagnostics_override {
             return value.clone();
         }
+        if s.software {
+            return format!("App: X-Battery {}\nSystem: {}\nLog: preparing safe summary\nSoftware log summary\n",
+                crate::gui::APP_VERSION, crate::feedback::system_version());
+        }
         let mut value = s
             .selected
             .and_then(|i| s.devices.get(i).map(|d| d.diagnostics.clone()))
@@ -361,9 +337,13 @@ impl Controls {
     fn draft(&self) -> client::Draft {
         let s = self.state.borrow();
         if let Some(draft) = &s.restored_draft {
-            return draft.clone();
+            let mut draft = draft.clone();
+            draft.images = s.images.clone();
+            return draft;
         }
-        let mut device = s
+        let mut device = if s.software {
+            crate::feedback::software::device()
+        } else { s
             .selected
             .and_then(|i| s.devices.get(i).map(|d| d.device.clone()))
             .unwrap_or_else(|| client::Device {
@@ -374,10 +354,12 @@ impl Controls {
                 connection: String::new(),
                 brand: Some(self.brand.text().trim().into()),
                 model: Some(self.model.text().trim().into()),
-            });
-        device.connection = ["2.4GHz", "USB", "Bluetooth", "unknown"][s.connection].into();
+            }) };
+        if !s.software {
+            device.connection = ["2.4GHz", "USB", "Bluetooth", "unknown"][s.connection].into();
+        }
         client::Draft {
-            category: ["device", "battery", "dpi", "other"][s.category].into(),
+            category: if s.software { "other" } else { ["device", "battery", "dpi", "other"][s.category] }.into(),
             device,
             description: self.description.text().trim().to_string(),
             diagnostics: s.attach_diagnostics.then(|| self.diagnostics()),
@@ -390,18 +372,10 @@ impl Controls {
         self.edit_rects.borrow_mut().clear();
         self.boxes.borrow_mut().clear();
         self.decorations.borrow_mut().clear();
-        for edit in [
-            self.description.handle,
-            self.brand.handle,
-            self.model.handle,
-            self.reply.handle,
-            self.viewer.handle,
-        ] {
-            visible(edit, false);
-        }
         let s = self.state.borrow();
-        self.window
-            .set_text(text("反馈设备 · X-Battery", "Device feedback · X-Battery"));
+        self.window.set_text(if s.software {
+            text("反馈软件问题 · X-Battery", "Software feedback · X-Battery")
+        } else { text("反馈设备 · X-Battery", "Device feedback · X-Battery") });
         self.button(
             Action::Close,
             text("关闭反馈", "Close feedback"),
@@ -438,6 +412,7 @@ impl Controls {
         let mut y = 0.0;
         match s.view {
             View::Form => {
+                if !s.software {
                 self.label(
                     text("反馈哪台设备", "Which device?"),
                     25.0,
@@ -582,6 +557,7 @@ impl Controls {
                     x += w + 6.0;
                 }
                 y += 52.0;
+                }
                 self.label(
                     text("问题描述", "Description"),
                     25.0,
@@ -668,7 +644,8 @@ impl Controls {
                 self.surface(R::new(25.0, y, 610.0, 65.0), true);
                 self.glyph(Icon::File, R::new(39.0, y + 22.0, 20.0, 20.0));
                 self.label(
-                    text("附带设备诊断", "Include device diagnostics"),
+                    if s.software { text("附带软件诊断", "Include software diagnostics") }
+                        else { text("附带设备诊断", "Include device diagnostics") },
                     70.0,
                     y + 10.0,
                     360.0,
@@ -679,8 +656,10 @@ impl Controls {
                 );
                 self.label(
                     text(
-                        "设备信息与近期读取记录，帮助定位问题",
-                        "Device details and recent queries to help investigate",
+                        if s.software { "自动整理近期运行记录，可预览或关闭" }
+                            else { "设备信息与近期读取记录，帮助定位问题" },
+                        if s.software { "Recent activity is summarized automatically; preview or opt out" }
+                            else { "Device details and recent queries to help investigate" },
                     ),
                     70.0,
                     y + 33.0,
@@ -700,7 +679,8 @@ impl Controls {
                 );
                 self.button(
                     Action::ToggleDiagnostics,
-                    text("附带设备诊断", "Include device diagnostics"),
+                    if s.software { text("附带软件诊断", "Include software diagnostics") }
+                        else { text("附带设备诊断", "Include device diagnostics") },
                     "",
                     R::new(589.0, y + 23.0, 33.0, 19.0),
                     Style::Toggle(s.attach_diagnostics),
@@ -721,7 +701,8 @@ impl Controls {
             }
             View::Diagnostics => {
                 self.tag(
-                    text("设备诊断", "Device diagnostics"),
+                    if s.software { text("软件诊断", "Software diagnostics") }
+                        else { text("设备诊断", "Device diagnostics") },
                     R::new(
                         25.0,
                         y,
@@ -749,7 +730,8 @@ impl Controls {
                 }
                 y += 20.0;
                 self.label(
-                    text("近期读取记录", "Recent queries"),
+                    if s.software { text("近期运行记录", "Recent activity") }
+                        else { text("近期读取记录", "Recent queries") },
                     25.0,
                     y,
                     600.0,
@@ -762,7 +744,8 @@ impl Controls {
                 if queries.is_empty() {
                     self.surface(R::new(25.0, y, 610.0, 42.0), false);
                     self.label(
-                        text("暂无查询记录", "No query records yet"),
+                        if s.software { text("暂无运行记录，仍可直接描述并提交问题", "No activity records yet; you can still describe and submit the problem") }
+                            else { text("暂无查询记录", "No query records yet") },
                         37.0,
                         y + 10.0,
                         580.0,
@@ -781,8 +764,10 @@ impl Controls {
                 }
                 self.label(
                     text(
-                        "记录请求结果和耗时，不包含原始通信数据。",
-                        "Query results and timing only, without raw communication data.",
+                        if s.software { "仅提取操作类型、错误码与耗时，不上传原始日志。" }
+                            else { "记录请求结果和耗时，不包含原始通信数据。" },
+                        if s.software { "Operation types, error codes and timings only. Raw logs are not uploaded." }
+                            else { "Query results and timing only, without raw communication data." },
                     ),
                     25.0,
                     y,
@@ -799,7 +784,11 @@ impl Controls {
             View::History => {
                 if s.entries.is_empty() {
                     self.decorations.borrow_mut().push(Decoration::Center(
-                        text("还没有反馈记录", "No feedback yet").into(),
+                        if s.task == Some(Task::History) {
+                            text("正在读取反馈记录…", "Loading feedback history…")
+                        } else {
+                            text("还没有反馈记录", "No feedback yet")
+                        }.into(),
                         R::new(25.0, 30.0, 610.0, 70.0),
                         13.0,
                         false,
@@ -828,7 +817,7 @@ impl Controls {
                         entry
                             .number
                             .map(|n| format!("#{n}"))
-                            .unwrap_or_else(|| text("待提交", "Pending").into()),
+                            .unwrap_or_else(|| text("待确认", "Unconfirmed").into()),
                         short_date(entry.created_at)
                     ));
                     y += 112.0;
@@ -969,7 +958,7 @@ impl Controls {
                         }
                     } else {
                         self.label(
-                            if s.busy {
+                            if s.task == Some(Task::Thread) {
                                 text("正在读取回复…", "Loading replies…")
                             } else {
                                 text("暂时无法读取回复，请点击刷新回复重试。", "Replies are unavailable. Select Refresh replies to try again.")
@@ -1059,7 +1048,7 @@ impl Controls {
         let (primary, label) = match s.view {
             View::Form => (
                 Action::Submit,
-                if s.busy {
+                if s.task == Some(Task::Submit) {
                     text("提交中…", "Submitting…")
                 } else {
                     text("提交反馈", "Submit feedback")
@@ -1069,7 +1058,7 @@ impl Controls {
             View::History => (Action::New, text("新建反馈", "New feedback")),
             View::Thread => (
                 Action::Reply,
-                if s.busy {
+                if s.task == Some(Task::Reply) {
                     text("发送中…", "Sending…")
                 } else {
                     text("发送补充", "Send follow-up")
@@ -1100,7 +1089,7 @@ impl Controls {
                 text("在 GitHub 查看", "View on GitHub"),
                 Style::Card,
             )),
-            View::Success => Some((Action::Close, text("完成", "Done"), Style::Plain)),
+            View::Success => Some((Action::New, text("继续反馈", "New feedback"), Style::Card)),
             View::Form => Some((Action::Close, text("取消", "Cancel"), Style::Plain)),
         };
         if let Some((action, label, style)) = secondary {
@@ -1116,7 +1105,7 @@ impl Controls {
         }
         self.content_height.set(y.max(self.body_height()));
         drop(s);
-        self.layout();
+        self.layout(true);
         self.center();
         self.window.invalidate();
     }
@@ -1153,22 +1142,73 @@ impl Controls {
             }
         }
     }
-    fn layout(&self) {
-        let scale = self.scale.get();
+    fn sync_control(&self, handle: nwg::ControlHandle, rect: Option<R>, label: Option<&str>,
+        show: bool, enabled: bool) {
+        let hwnd = handle.hwnd().unwrap();
+        let changes = self.applied.borrow_mut().entry(hwnd as usize).or_default()
+            .update(rect.map(|rect| layout::pixels(rect, self.scale.get())), label, show, enabled);
+        let repaint = changes.rect.is_some() || changes.visible == Some(true);
+        if let Some((x, y, width, height)) = changes.rect {
+            super::canvas::set_window_pos(hwnd as _, x, y, width, height,
+                wu::SWP_NOZORDER | wu::SWP_NOACTIVATE | wu::SWP_NOCOPYBITS);
+        }
+        if let Some(label) = changes.text {
+            unsafe { wu::SetWindowTextW(hwnd, crate::win32::to_wide(&label).as_ptr()); }
+        }
+        if let Some(enabled) = changes.enabled {
+            unsafe { wu::EnableWindow(hwnd, i32::from(enabled)); }
+        }
+        if let Some(show) = changes.visible {
+            visible(handle, show);
+        }
+        if repaint {
+            unsafe { wu::InvalidateRect(hwnd, std::ptr::null(), 1); }
+        }
+    }
+    fn invalidate_count(&self) {
+        let count = self.decorations.borrow().iter().find_map(|decoration| match decoration {
+            Decoration::Count(rect) => Some(*rect),
+            _ => None,
+        });
+        if let Some(mut rect) = count {
+            rect.y -= self.scroll.get();
+            let (left, top, width, height) = layout::pixels(rect, self.scale.get());
+            let damage = winapi::shared::windef::RECT {
+                left: left - 1, top: top - 1, right: left + width + 1, bottom: top + height + 1,
+            };
+            unsafe { wu::InvalidateRect(self.body.handle.hwnd().unwrap(), &damage, 0); }
+        }
+    }
+    fn set_description(&self, value: &str) {
+        let updating = self.updating.replace(true);
+        self.description.set_text_unix2dos(value);
+        self.description_count.set(self.description.text().chars().count());
+        self.updating.set(updating);
+        self.invalidate_count();
+    }
+    fn reset_inputs(&self) {
+        self.updating.set(true);
+        self.set_description("");
+        self.brand.set_text("");
+        self.model.set_text("");
+        self.updating.set(false);
+    }
+    fn layout(&self, repaint_controls: bool) {
         let scroll = self.scroll.get().clamp(
             0.0,
             (self.content_height.get() - self.body_height()).max(0.0),
         );
         self.scroll.set(scroll);
-        set_rect(
+        self.sync_control(
             self.body.handle,
-            R::new(0.0, BODY_TOP, WIDTH, self.body_height()),
-            scale,
+            Some(R::new(0.0, BODY_TOP, WIDTH, self.body_height())),
+            None, true, true,
         );
         let items = self.items.borrow();
         let mut body = 0;
         let mut root = 0;
-        let busy = self.state.borrow().busy;
+        let model = self.state.borrow();
+        let viewport = R::new(0.0, 0.0, WIDTH, self.body_height());
         for item in items.iter() {
             let button = if item.root {
                 let b = &self.header_buttons[root];
@@ -1183,24 +1223,30 @@ impl Controls {
             if !item.root {
                 r.y -= scroll;
             }
-            set_rect(button.handle, r, scale);
-            button.set_text(&item.label);
-            button.set_enabled(!busy || matches!(item.action, Action::Close));
-            button.set_visible(true);
+            let show = item.root || layout::intersects(r, viewport);
+            self.sync_control(button.handle, show.then_some(r), Some(&item.label), show,
+                item.action.enabled(&model));
+            if repaint_controls && show {
+                unsafe { wu::InvalidateRect(button.handle.hwnd().unwrap(), std::ptr::null(), 0); }
+            }
         }
         for b in &self.buttons[body..] {
-            b.set_visible(false);
+            self.sync_control(b.handle, None, None, false, true);
         }
         for b in &self.header_buttons[root..] {
-            b.set_visible(false);
+            self.sync_control(b.handle, None, None, false, true);
         }
-        for (handle, rect) in self.edit_rects.borrow().iter() {
-            let mut r = *rect;
-            r.y -= scroll;
-            set_rect(*handle, r, scale);
-            visible(*handle, true);
-            unsafe {
-                wu::EnableWindow(handle.hwnd().unwrap(), (!busy) as i32);
+        let editors_enabled = !model.task.is_some_and(Task::locks_editors);
+        for handle in [self.description.handle, self.brand.handle, self.model.handle, self.reply.handle] {
+            let rect = self.edit_rects.borrow().iter()
+                .find(|(editor, _)| *editor == handle).map(|(_, rect)| {
+                    let mut rect = *rect;
+                    rect.y -= scroll;
+                    rect
+                }).filter(|rect| layout::intersects(*rect, viewport));
+            self.sync_control(handle, rect, None, rect.is_some(), editors_enabled);
+            if repaint_controls && rect.is_some() {
+                unsafe { wu::InvalidateRect(handle.hwnd().unwrap(), std::ptr::null(), 1); }
             }
         }
         let mut info: wu::SCROLLINFO = unsafe { std::mem::zeroed() };
@@ -1209,13 +1255,16 @@ impl Controls {
         info.nMax = self.content_height.get().ceil() as i32 - 1;
         info.nPage = self.body_height().floor() as u32;
         info.nPos = scroll as i32;
-        unsafe {
-            wu::SetScrollInfo(
+        let scrollbar = (info.nMax, info.nPage, info.nPos);
+        if self.scrollbar.replace(Some(scrollbar)) != Some(scrollbar) {
+            unsafe { wu::SetScrollInfo(
                 self.body.handle.hwnd().unwrap(),
                 wu::SB_VERT as i32,
                 &info,
                 1,
-            );
+            ); }
+        }
+        unsafe {
             wu::InvalidateRect(self.body.handle.hwnd().unwrap(), std::ptr::null(), 0);
         }
     }
@@ -1259,29 +1308,33 @@ impl Controls {
         self.state.borrow_mut().view = view;
         self.scroll.set(0.0);
         self.rebuild();
+        self.prepare_software_diagnostics();
+    }
+    fn prepare_software_diagnostics(&self) {
+        let prepare = {
+            let model = self.state.borrow();
+            model.software && model.view == View::Form && !model.busy()
+                && model.diagnostics_override.is_none() && model.restored_draft.is_none()
+        };
+        if prepare {
+            self.work(Task::SoftwareDiagnostics,
+                || ResultMessage::SoftwareDiagnostics(crate::feedback::software::collect()));
+        }
     }
     fn error(&self, error: impl Into<String>) {
         self.state.borrow_mut().error = error.into();
         self.scroll.set(f32::MAX);
         self.rebuild();
     }
-    fn work(&self, task: impl FnOnce() -> ResultMessage + Send + 'static) {
-        if self.state.borrow().busy {
-            return;
-        }
-        let generation = {
-            let mut s = self.state.borrow_mut();
-            s.busy = true;
-            s.error.clear();
-            s.generation += 1;
-            s.generation
-        };
+    fn work(&self, kind: Task, task: impl FnOnce() -> ResultMessage + Send + 'static) {
+        let Some(generation) = self.state.borrow_mut().begin_task(kind) else { return; };
         let results = self.results.clone();
         let notice = self.notice;
         let spawn = std::thread::Builder::new()
             .name("device-feedback".into())
             .spawn(move || {
-                let result = task();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task))
+                    .unwrap_or(ResultMessage::Failed);
                 results
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1289,7 +1342,7 @@ impl Controls {
                 notice.notice();
             });
         if spawn.is_err() {
-            self.state.borrow_mut().busy = false;
+            self.state.borrow_mut().finish_task(generation);
             self.state.borrow_mut().error = text(
                 "无法启动反馈任务，请重试。",
                 "Could not start the feedback task. Please retry.",
@@ -1299,8 +1352,16 @@ impl Controls {
         self.rebuild();
     }
     fn action(&self, action: Action) {
-        if self.state.borrow().busy && !matches!(action, Action::Close) {
+        self.action_with_submit(action, client::configured().then_some(submit_feedback));
+    }
+    fn action_with_submit(&self, action: Action,
+        submit: Option<impl FnOnce(client::Draft, Option<String>) -> ResultMessage + Send + 'static>) {
+        if !action.enabled(&self.state.borrow()) {
             return;
+        }
+        if action.navigates() {
+            self.remember_reply();
+            self.state.borrow_mut().detach_task();
         }
         if matches!(
             action,
@@ -1332,12 +1393,12 @@ impl Controls {
                 let target = back_view(view, self.state.borrow().submitted);
                 self.set_view(target);
                 if target == View::History {
-                    self.work(|| ResultMessage::History(client::load_history()));
+                    self.work(Task::History, || ResultMessage::History(client::load_history()));
                 }
             }
             Action::History => {
                 self.set_view(View::History);
-                self.work(|| ResultMessage::History(client::load_history()));
+                self.work(Task::History, || ResultMessage::History(client::load_history()));
             }
             Action::Devices => {
                 let mut s = self.state.borrow_mut();
@@ -1382,11 +1443,14 @@ impl Controls {
                 self.rebuild();
             }
             Action::Diagnostics => {
-                self.viewer.set_text_unix2dos(&self.diagnostics());
                 self.set_view(View::Diagnostics);
             }
             Action::Example => {
-                self.description.set_text(text("接收器已经连接，官方驱动能看到电量，但这里一直显示未知。唤醒设备后仍然如此。","The receiver is connected and the official driver shows the battery, but X-Battery keeps showing unknown, even after waking the device."));
+                let software = self.state.borrow().software;
+                self.set_description(if software {
+                    text("操作步骤：打开设置并修改选项。\n实际结果：保存时显示错误，重新打开后设置没有保留。\n预期结果：正常保存设置。\n出现频率：每次都会出现。",
+                        "Steps: Open settings and change an option.\nActual: Saving shows an error and the change is lost after reopening.\nExpected: Settings should be saved.\nFrequency: Every time.")
+                } else { text("接收器已经连接，官方驱动能看到电量，但这里一直显示未知。唤醒设备后仍然如此。","The receiver is connected and the official driver shows the battery, but X-Battery keeps showing unknown, even after waking the device.") });
                 self.state.borrow_mut().error.clear();
                 self.rebuild();
             }
@@ -1398,7 +1462,8 @@ impl Controls {
             Action::AddImage => self.choose_images(),
             Action::Submit => {
                 let draft = self.draft();
-                if self.state.borrow().draft_retry.is_none()
+                if !self.state.borrow().software
+                    && self.state.borrow().draft_retry.is_none()
                     && self.state.borrow().selected.is_none()
                     && (self.brand.text().trim().is_empty() || self.model.text().trim().is_empty())
                 {
@@ -1408,57 +1473,26 @@ impl Controls {
                     ));
                     return;
                 }
-                if let Err(error) = client::validate_draft(&draft) {
+                if let Err(error) = client::validate_details(&draft) {
                     self.error(error);
                     return;
                 }
-                if !client::configured() {
+                let Some(submit) = submit else {
                     self.error(text("应用内提交尚未启用。内容已保留，可复制后前往 GitHub 提交。","In-app submission is not enabled. Your draft is preserved; copy it and submit on GitHub."));
                     return;
-                }
+                };
                 let retry = self.state.borrow().draft_retry.clone();
-                self.work(move || {
-                    let result = if let Some(id) = &retry {
-                        client::retry(id)
-                    } else {
-                        client::submit(draft.clone())
-                    };
-                    let pending = if result.is_err() {
-                        retry.or_else(|| {
-                            client::find_pending(&draft)
-                                .ok()
-                                .flatten()
-                                .map(|e| e.request_id)
-                        })
-                    } else {
-                        None
-                    };
-                    ResultMessage::Submitted(result, pending)
-                });
+                self.work(Task::Submit, move || submit(draft, retry));
             }
-            Action::Fallback => match client::fallback(&self.draft()) {
-                Ok(fallback) => {
-                    if !copy_report(self.window.handle, &fallback.markdown) {
-                        self.error(text("剪贴板暂时不可用，请重试。内容仍保留在窗口中。", "The clipboard is unavailable. Retry; your report is still in this window."));
-                        return;
-                    }
-                    if crate::dynlight::shell_open(&fallback.url).is_err() {
-                        self.error(text(
-                            "内容已复制，但无法打开浏览器。",
-                            "Report copied, but the browser could not be opened.",
-                        ));
-                    } else {
-                        self.error(if fallback.images_omitted{text("内容已复制。请在 GitHub 粘贴，并手动添加所选截图。","Report copied. Paste it on GitHub and attach your screenshots manually.")}else{text("内容已复制，请在 GitHub 确认并提交。","Report copied. Review and submit it on GitHub.")});
-                    }
-                }
-                Err(error) => self.error(error),
-            },
+            Action::Fallback => {
+                let draft = self.draft();
+                self.work(Task::Fallback, move || ResultMessage::Fallback(client::fallback(&draft)));
+            }
             Action::Entry(i) => {
                 self.remember_reply();
                 let entry = self.state.borrow().entries[i].clone();
                 self.state.borrow_mut().current = Some(entry.clone());
                 if let Some(number) = entry.number {
-                    self.viewer.set_text_unix2dos(&entry.description);
                     self.reply.set_text_unix2dos(
                         self.state
                             .borrow()
@@ -1469,13 +1503,13 @@ impl Controls {
                     );
                     self.state.borrow_mut().thread = None;
                     self.set_view(View::Thread);
-                    self.work(move || {
+                    self.work(Task::Thread, move || {
                         let pending = client::load_pending_reply(number);
                         ResultMessage::Thread(client::refresh(number), pending)
                     });
                 } else {
                     let id = entry.request_id;
-                    self.work(move || {
+                    self.work(Task::Draft, move || {
                         let draft = client::load_draft(&id);
                         ResultMessage::Draft(id, draft)
                     });
@@ -1484,7 +1518,7 @@ impl Controls {
             Action::Refresh => {
                 let number = self.state.borrow().current.as_ref().and_then(|e| e.number);
                 if let Some(number) = number {
-                    self.work(move || {
+                    self.work(Task::Thread, move || {
                         let pending = client::load_pending_reply(number);
                         ResultMessage::Thread(client::refresh(number), pending)
                     });
@@ -1504,7 +1538,8 @@ impl Controls {
                 }
             }
             Action::Reply => {
-                let body = self.reply.text().trim().to_string();
+                let draft = self.reply.text();
+                let body = draft.trim().to_string();
                 if body.is_empty() || body.chars().count() > 2000 {
                     self.error(text(
                         "补充说明需为 1–2000 字。",
@@ -1514,28 +1549,15 @@ impl Controls {
                 }
                 let number = self.state.borrow().current.as_ref().and_then(|e| e.number);
                 if let Some(number) = number {
-                    self.work(move || ResultMessage::Reply(client::reply(number, &body)));
+                    self.work(Task::Reply, move || {
+                        let result = client::reply(number, &body);
+                        ResultMessage::Reply(number, draft, result)
+                    });
                 }
             }
             Action::New => {
-                let mut s = self.state.borrow_mut();
-                s.submitted = false;
-                s.draft_retry = None;
-                s.restored_draft = None;
-                s.diagnostics_override = None;
-                s.error.clear();
-                s.images.clear();
-                s.menu = false;
-                s.devices = s.latest_devices.clone();
-                s.selected = (!s.devices.is_empty()).then_some(0);
-                s.connection = s
-                    .selected
-                    .map(|i| connection_index(&s.devices[i].device.connection))
-                    .unwrap_or(0);
-                drop(s);
-                self.description.set_text("");
-                self.brand.set_text("");
-                self.model.set_text("");
+                self.state.borrow_mut().new_form();
+                self.reset_inputs();
                 self.set_view(View::Form);
             }
         }
@@ -1578,7 +1600,7 @@ impl Controls {
             return;
         };
         let path = std::path::PathBuf::from(path);
-        self.work(move || {
+        self.work(Task::Images, move || {
             ResultMessage::Images((|| {
                 use std::io::Read;
                 let file = std::fs::File::open(&path)
@@ -1609,10 +1631,12 @@ impl Controls {
     fn complete(&self) {
         let messages = std::mem::take(&mut *self.results.lock().unwrap_or_else(|e| e.into_inner()));
         for (generation, message) in messages {
-            if generation != self.state.borrow().generation {
+            if let ResultMessage::Reply(number, draft, Ok(_)) = &message {
+                self.state.borrow_mut().confirm_reply(*number, draft);
+            }
+            if !self.state.borrow_mut().finish_task(generation) {
                 continue;
             }
-            self.state.borrow_mut().busy = false;
             match message {
                 ResultMessage::History(result) => match result {
                     Ok(entries) => self.state.borrow_mut().entries = entries,
@@ -1621,14 +1645,17 @@ impl Controls {
                 ResultMessage::Submitted(result, pending) => match result {
                     Ok(outcome) => {
                         let mut s = self.state.borrow_mut();
-                        s.current = Some(outcome.entry.clone());
+                        let request_id = outcome.entry.request_id.clone();
+                        s.record_entry(outcome.entry);
                         if outcome.pending {
-                            s.draft_retry = Some(outcome.entry.request_id);
+                            s.draft_retry = Some(request_id);
                             s.error=text("服务正在确认结果，请稍后重试。重试不会重复创建反馈。","The service is confirming the result. Retry shortly; the same request will be reused.").into();
                         } else {
                             s.view = View::Success;
                             s.submitted = true;
                             s.draft_retry = None;
+                            s.restored_draft = None;
+                            s.images.clear();
                             self.scroll.set(0.0);
                         }
                     }
@@ -1648,52 +1675,33 @@ impl Controls {
                     }
                     match result {
                         Ok(thread) => {
-                            let mut content =
-                                format!("{}\n\n{}\n\n", thread.issue.title, thread.issue.body);
-                            if thread.comments.is_empty() {
-                                content.push_str(text(
-                                    "暂无维护者回复。",
-                                    "No maintainer replies yet.",
-                                ));
-                            }
-                            for comment in &thread.comments {
-                                content.push_str(&format!(
-                                    "────────────\n{} · {}\n{}\n\n",
-                                    comment.author, comment.created_at, comment.body
-                                ));
-                            }
-                            if thread.comments_truncated {
-                                content.push_str(text(
-                                    "更多回复请在 GitHub 查看。",
-                                    "Open GitHub to see more replies.",
-                                ));
-                            }
-                            self.viewer.set_text_unix2dos(&content);
                             self.state.borrow_mut().thread = Some(thread);
                         }
                         Err(e) => self.state.borrow_mut().error = e,
                     }
                 }
-                ResultMessage::Reply(result) => match result {
+                ResultMessage::Reply(_, _, result) => match result {
                     Ok(_) => {
                         self.reply.set_text("");
-                        self.remember_reply();
                         self.action(Action::Refresh);
                     }
                     Err(e) => self.state.borrow_mut().error = e,
                 },
                 ResultMessage::Draft(id, result) => match result {
-                    Ok(draft) => {
+                    Ok(mut draft) => {
                         self.updating.set(true);
-                        self.description.set_text_unix2dos(&draft.description);
+                        self.set_description(&draft.description);
                         self.brand
                             .set_text(draft.device.brand.as_deref().unwrap_or(""));
                         self.model
                             .set_text(draft.device.model.as_deref().unwrap_or(&draft.device.name));
                         self.updating.set(false);
+                        let images = std::mem::take(&mut draft.images);
                         self.state.borrow_mut().restored_draft = Some(draft.clone());
                         let mut s = self.state.borrow_mut();
                         s.draft_retry = Some(id);
+                        s.software = crate::feedback::software::is_device(&draft.device);
+                        s.latest_software = s.software;
                         s.selected = s
                             .devices
                             .iter()
@@ -1705,7 +1713,8 @@ impl Controls {
                             .unwrap_or(3);
                         s.attach_diagnostics = draft.diagnostics.is_some();
                         s.diagnostics_override = draft.diagnostics;
-                        s.images = draft.images;
+                        s.images = images;
+                        s.submitted = false;
                         s.view = View::Form;
                     }
                     Err(e) => self.state.borrow_mut().error = e,
@@ -1719,6 +1728,27 @@ impl Controls {
                     }
                     Err(e) => self.state.borrow_mut().error = e,
                 },
+                ResultMessage::SoftwareDiagnostics(report) => {
+                    self.state.borrow_mut().diagnostics_override = Some(report);
+                }
+                ResultMessage::Fallback(result) => match result {
+                    Ok(fallback) => {
+                        let error = if !copy_report(self.window.handle, &fallback.markdown) {
+                            text("剪贴板暂时不可用，请重试。内容仍保留在窗口中。", "The clipboard is unavailable. Retry; your report is still in this window.")
+                        } else if crate::dynlight::shell_open(&fallback.url).is_err() {
+                            text("内容已复制，但无法打开浏览器。", "Report copied, but the browser could not be opened.")
+                        } else if fallback.images_omitted {
+                            text("内容已复制。请在 GitHub 粘贴，并手动添加所选截图。", "Report copied. Paste it on GitHub and attach your screenshots manually.")
+                        } else {
+                            text("内容已复制，请在 GitHub 确认并提交。", "Report copied. Review and submit it on GitHub.")
+                        };
+                        self.state.borrow_mut().error = error.into();
+                    }
+                    Err(error) => self.state.borrow_mut().error = error,
+                },
+                ResultMessage::Failed => {
+                    self.state.borrow_mut().error = text("反馈任务未完成，内容已保留，请重试。", "The feedback task did not complete. Your draft is preserved; please retry.").into();
+                }
             }
             if !self.state.borrow().error.is_empty() {
                 self.scroll.set(f32::MAX);
@@ -1726,6 +1756,25 @@ impl Controls {
             self.rebuild();
         }
     }
+}
+
+fn submit_feedback(draft: client::Draft, retry: Option<String>) -> ResultMessage {
+    let result = if let Some(id) = &retry {
+        client::retry(id)
+    } else {
+        client::submit(draft.clone())
+    };
+    let pending = if result.is_err() {
+        retry.or_else(|| {
+            client::find_pending(&draft)
+                .ok()
+                .flatten()
+                .map(|entry| entry.request_id)
+        })
+    } else {
+        None
+    };
+    ResultMessage::Submitted(result, pending)
 }
 
 fn connection_index(value: &str) -> usize {
@@ -1815,7 +1864,7 @@ fn diagnostic_rows(value: &str) -> (Vec<(String, String)>, Vec<String>) {
     let mut queries = Vec::new();
     let mut querying = false;
     for line in value.lines().filter(|line| !line.trim().is_empty()) {
-        if line.starts_with("Protocol query summary") {
+        if line.starts_with("Protocol query summary") || line == "Software log summary" {
             querying = true;
             continue;
         }
@@ -1827,6 +1876,8 @@ fn diagnostic_rows(value: &str) -> (Vec<(String, String)>, Vec<String>) {
             let key = match key {
                 "App" => text("应用版本", "App version"),
                 "System" => text("系统版本", "System version"),
+                "Distribution" => text("运行版本", "Distribution"),
+                "Log" => text("运行记录", "Activity log"),
                 "Model" => text("设备名称", "Device name"),
                 "Type" => text("设备类型", "Device type"),
                 "Connection" => text("检测连接", "Detected link"),
@@ -1866,6 +1917,194 @@ fn diagnostic_rows(value: &str) -> (Vec<(String, String)>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn regression_dialog() -> (nwg::Window, nwg::Notice, Dialog) {
+        nwg::init().unwrap();
+        let mut owner = nwg::Window::default();
+        nwg::Window::builder().title("Feedback regression")
+            .flags(nwg::WindowFlags::POPUP).size((760, 680)).build(&mut owner).unwrap();
+        let mut notice = nwg::Notice::default();
+        nwg::Notice::builder().parent(&owner).build(&mut notice).unwrap();
+        let dialog = Dialog::new(&owner, notice.sender()).unwrap();
+        (owner, notice, dialog)
+    }
+
+    fn offscreen_regression_dialog() -> (nwg::Window, nwg::Notice, Dialog) {
+        let (owner, notice, mut dialog) = regression_dialog();
+        let handle = dialog.controls.window.handle;
+        dialog.raw.push(nwg::bind_raw_event_handler(&handle, 0x1015b, |_, message, _, data| {
+            if message == wu::WM_WINDOWPOSCHANGING {
+                let position = unsafe { &mut *(data as *mut wu::WINDOWPOS) };
+                position.x = -32000;
+                position.y = -32000;
+                position.flags &= !wu::SWP_NOMOVE;
+            }
+            None
+        }).unwrap());
+        unsafe { wu::ShowWindow(handle.hwnd().unwrap(), wu::SW_SHOWNOACTIVATE); }
+        (owner, notice, dialog)
+    }
+
+    fn update_rect(handle: nwg::ControlHandle) -> (i32, i32, i32, i32) {
+        let mut rect = unsafe { std::mem::zeroed() };
+        unsafe { wu::GetUpdateRect(handle.hwnd().unwrap(), &mut rect, 0); }
+        (rect.left, rect.top, rect.right, rect.bottom)
+    }
+
+    #[test]
+    fn feedback_children_clip_siblings_during_layout_changes() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        for handle in [controls.body.handle, controls.description.handle, controls.reply.handle,
+            controls.brand.handle, controls.model.handle].into_iter()
+            .chain(controls.buttons.iter().map(|button| button.handle))
+            .chain(controls.header_buttons.iter().map(|button| button.handle)) {
+            let style = super::super::canvas::get_window_long(handle.hwnd().unwrap() as _, -16);
+            assert_ne!(style & wu::WS_CLIPSIBLINGS as isize, 0);
+        }
+    }
+
+    #[test]
+    fn moving_feedback_editors_invalidates_their_entire_client_area() {
+        let (_owner, _notice, dialog) = offscreen_regression_dialog();
+        let controls = &dialog.controls;
+        let handle = controls.description.handle;
+        let mut rect = controls.edit_rects.borrow().iter()
+            .find(|(editor, _)| *editor == handle).unwrap().1;
+        let (_, _, width, height) = layout::pixels(rect, controls.scale.get());
+        unsafe { wu::ValidateRect(handle.hwnd().unwrap(), std::ptr::null()); }
+        assert_eq!(update_rect(handle), (0, 0, 0, 0));
+        rect.y -= 25.0;
+        controls.sync_control(handle, Some(rect), None, true, true);
+        assert_eq!(update_rect(handle), (0, 0, width, height));
+    }
+
+    #[test]
+    fn feedback_rebuild_repaints_editors_without_changing_text_or_selection() {
+        let (_owner, _notice, dialog) = offscreen_regression_dialog();
+        let controls = &dialog.controls;
+        let handle = controls.description.handle;
+        let value = "反馈重绘测试\r\n内容不能丢失";
+        controls.set_description(value);
+        unsafe { wu::SendMessageW(handle.hwnd().unwrap(), wu::EM_SETSEL as u32, 1, 4); }
+        for menu in [true, false, true, false] {
+            controls.state.borrow_mut().menu = menu;
+            controls.rebuild();
+        }
+        unsafe { wu::ValidateRect(handle.hwnd().unwrap(), std::ptr::null()); }
+        controls.state.borrow_mut().category = 1;
+        controls.rebuild();
+        let mut rect = unsafe { std::mem::zeroed() };
+        unsafe { wu::GetClientRect(handle.hwnd().unwrap(), &mut rect); }
+        assert_eq!(update_rect(handle), (0, 0, rect.right, rect.bottom));
+        assert_eq!(controls.description.text(), value);
+        assert_eq!(controls.description_count.get(), value.chars().count());
+        let mut start = 0u32;
+        let mut end = 0u32;
+        unsafe { wu::SendMessageW(handle.hwnd().unwrap(), wu::EM_GETSEL as u32,
+            &mut start as *mut u32 as usize, &mut end as *mut u32 as isize); }
+        assert_eq!((start, end), (1, 4));
+    }
+
+    #[test]
+    fn software_feedback_uses_a_short_form_and_attaches_only_the_previewed_summary() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen_software();
+        controls.rebuild();
+        controls.set_description("修改设置后保存失败，重启后未保留。");
+        let generation = controls.state.borrow_mut().begin_task(Task::SoftwareDiagnostics).unwrap();
+        let report = "App: X-Battery test\nSoftware log summary\noperation=settings_save_failed; os_error=17\n";
+        controls.results.lock().unwrap().push((generation, ResultMessage::SoftwareDiagnostics(report.into())));
+        controls.complete();
+        let draft = controls.draft();
+        assert_eq!(draft.category, "other");
+        assert!(crate::feedback::software::is_device(&draft.device));
+        assert_eq!(draft.diagnostics.as_deref(), Some(report));
+        assert!(client::validate_details(&draft).is_ok());
+        assert!(!controls.items.borrow().iter().any(|item|
+            matches!(item.action, Action::Devices | Action::Device(_) | Action::Connection(_) | Action::Category(_))));
+        controls.action(Action::Diagnostics);
+        assert_eq!(controls.state.borrow().view, View::Diagnostics);
+        assert_eq!(controls.diagnostics(), report);
+        controls.action(Action::Back);
+        controls.action(Action::ToggleDiagnostics);
+        assert!(controls.draft().diagnostics.is_none());
+        assert_eq!(controls.description.text(), "修改设置后保存失败，重启后未保留。");
+    }
+
+    fn submit_offline(controls: &Controls) -> client::Draft {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        controls.action_with_submit(Action::Submit, Some(move |draft: client::Draft, retry: Option<String>| {
+            assert!(retry.is_none());
+            let entry = client::Entry {
+                request_id: "12345678-1234-4234-9234-123456789abc".into(),
+                created_at: 1, updated_at: 1, category: draft.category.clone(),
+                device: draft.device.clone(), description: draft.description.clone(),
+                status: client::Status::Completed, number: Some(123),
+                url: Some("https://github.com/youmikk/X-Battery/issues/123".into()),
+            };
+            sender.send(draft).unwrap();
+            ResultMessage::Submitted(Ok(client::SubmitOutcome { entry, pending: false }), None)
+        }));
+        assert!(controls.state.borrow().error.is_empty(), "{}", controls.state.borrow().error);
+        let draft = receiver.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while controls.state.borrow().busy() {
+            controls.complete();
+            assert!(std::time::Instant::now() < deadline, "Submission did not complete");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(controls.state.borrow().view, View::Success);
+        assert!(controls.state.borrow().submitted);
+        draft
+    }
+
+    #[test]
+    fn submit_action_accepts_software_feedback_without_hidden_brand_or_model() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen_software();
+        controls.state.borrow_mut().attach_diagnostics = false;
+        controls.reset_inputs();
+        controls.rebuild();
+        controls.set_description("Settings are lost after restarting the application.");
+        assert!(controls.state.borrow().selected.is_none());
+        assert!(controls.brand.text().is_empty());
+        assert!(controls.model.text().is_empty());
+        for handle in [controls.brand.handle, controls.model.handle] {
+            assert!(!controls.edit_rects.borrow().iter().any(|(editor, _)| *editor == handle));
+        }
+        let draft = submit_offline(controls);
+        assert!(crate::feedback::software::is_device(&draft.device));
+        assert_eq!(draft.category, "other");
+        assert_eq!(draft.description, "Settings are lost after restarting the application.");
+        assert!(draft.device.brand.is_none());
+        assert!(draft.device.model.is_none());
+    }
+
+    #[test]
+    fn submit_action_still_requires_both_manual_device_fields() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(Vec::new(), false);
+        controls.state.borrow_mut().attach_diagnostics = false;
+        controls.set_description("The connected mouse never reports its battery level.");
+        for (brand, model) in [("", ""), ("Example", "  "), ("  ", "Mouse")] {
+            controls.brand.set_text(brand);
+            controls.model.set_text(model);
+            controls.action_with_submit(Action::Submit, Some(|_, _| panic!("Invalid form submitted")));
+            assert_eq!(controls.state.borrow().error,
+                text("请填写品牌和型号。", "Enter both the brand and model."));
+            assert!(!controls.state.borrow().busy());
+        }
+        controls.brand.set_text("Example");
+        controls.model.set_text("Mouse");
+        let draft = submit_offline(controls);
+        assert_eq!(draft.device.brand.as_deref(), Some("Example"));
+        assert_eq!(draft.device.model.as_deref(), Some("Mouse"));
+    }
+
     #[test]
     fn completed_feedback_cannot_return_to_a_submittable_form() {
         let history = back_view(View::Success, true);
@@ -1874,6 +2113,68 @@ mod tests {
         assert_eq!(back_view(View::Diagnostics, true), View::Success);
         assert_eq!(back_view(View::History, false), View::Form);
         assert_eq!(back_view(View::Thread, false), View::History);
+    }
+
+    #[test]
+    fn slow_requests_leave_navigation_and_new_feedback_available() {
+        let mut model = Model::default();
+        for task in [Task::History, Task::Submit, Task::Thread, Task::Reply, Task::Draft, Task::Images] {
+            model.detach_task();
+            model.begin_task(task).unwrap();
+            assert!(Action::New.enabled(&model));
+            assert!(Action::Back.enabled(&model));
+            assert!(Action::Close.enabled(&model));
+            assert!(!Action::Submit.enabled(&model));
+            assert!(!Action::Reply.enabled(&model));
+        }
+    }
+
+    #[test]
+    fn refreshing_history_twice_does_not_start_a_duplicate_load() {
+        let mut model = Model::default();
+        model.begin_task(Task::History).unwrap();
+        assert!(!Action::History.enabled(&model));
+        assert!(Action::Entry(0).enabled(&model));
+    }
+
+    #[test]
+    fn native_feedback_controls_support_a_second_session_without_recreation() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        let editor = controls.description.handle.hwnd().unwrap();
+        controls.set_description("First feedback description");
+        assert_eq!(controls.description_count.get(), "First feedback description".chars().count());
+        let generation = controls.state.borrow_mut().begin_task(Task::Submit).unwrap();
+        let entry = client::Entry {
+            request_id: "12345678-1234-4234-9234-123456789abc".into(),
+            created_at: 1, updated_at: 1, category: "battery".into(),
+            device: client::Device {
+                name: "Example mouse".into(), family: "mouse".into(), connection: "USB".into(),
+                brand: None, model: None,
+            },
+            description: "First feedback description".into(), status: client::Status::Completed,
+            number: Some(123), url: Some("https://github.com/youmikk/X-Battery/issues/123".into()),
+        };
+        controls.results.lock().unwrap().push((generation,
+            ResultMessage::Submitted(Ok(client::SubmitOutcome { entry, pending: false }), None)));
+        controls.complete();
+        assert_eq!(controls.state.borrow().view, View::Success);
+        controls.action(Action::New);
+        assert_eq!(controls.state.borrow().view, View::Form);
+        assert!(controls.description.text().is_empty());
+        assert_eq!(controls.description.handle.hwnd().unwrap(), editor);
+        controls.set_description("Second feedback description");
+        assert_eq!(controls.description_count.get(), "Second feedback description".chars().count());
+        let addition = crate::win32::to_wide(" · 补充");
+        let end = controls.description.text().encode_utf16().count();
+        unsafe {
+            wu::SendMessageW(editor, wu::EM_SETSEL as u32, end, end as isize);
+            wu::SendMessageW(editor, wu::EM_REPLACESEL as u32, 1, addition.as_ptr() as isize);
+        }
+        assert_eq!(controls.description.text(), "Second feedback description · 补充");
+        assert_eq!(controls.description_count.get(), controls.description.text().chars().count());
+        assert!(controls.state.borrow_mut().begin_task(Task::Submit).is_some());
+        assert_eq!(controls.state.borrow().entries.len(), 1);
     }
 }
 fn category_label(value: &str) -> &'static str {
@@ -1914,13 +2215,18 @@ fn copy_report(owner: nwg::ControlHandle, content: &str) -> bool {
     }
 }
 
-fn draw(c: &Controls, p: &mut Painter, body: bool) {
+fn draw(c: &Controls, p: &mut Painter, body: bool, damage: R) {
     let t = p.t;
     if body {
         for r in c.boxes.borrow().iter() {
-            p.card(*r, 8.0, t.card, t.border_strong);
+            if layout::intersects(*r, damage) {
+                p.card(*r, 8.0, t.card, t.border_strong);
+            }
         }
         for decoration in c.decorations.borrow().iter() {
+            if !layout::intersects(decoration.rect(), damage) {
+                continue;
+            }
             match decoration {
                 Decoration::Surface(r, soft) => {
                     p.card(*r, 8.0, if *soft { t.bg_sunken } else { t.card }, t.border)
@@ -1929,7 +2235,8 @@ fn draw(c: &Controls, p: &mut Painter, body: bool) {
                 Decoration::Tag(value, r) => {
                     p.round(*r, 5.0, t.accent_soft);
                     let mut content = *r;
-                    if value == text("设备诊断", "Device diagnostics") {
+                    if value == text("设备诊断", "Device diagnostics")
+                        || value == text("软件诊断", "Software diagnostics") {
                         content.x += 18.0;
                         content.w -= 18.0;
                     }
@@ -1952,7 +2259,7 @@ fn draw(c: &Controls, p: &mut Painter, body: bool) {
                     );
                 }
                 Decoration::Count(r) => p.text(
-                    &format!("{} / 2000", c.description.text().chars().count()),
+                    &format!("{} / 2000", c.description_count.get()),
                     *r,
                     10.0,
                     false,
@@ -1979,6 +2286,9 @@ fn draw(c: &Controls, p: &mut Painter, body: bool) {
             }
         }
         for label in c.labels.borrow().iter() {
+            if !layout::intersects(label.rect, damage) {
+                continue;
+            }
             if label.bold || label.centered {
                 p.text(
                     &label.text,
@@ -2009,7 +2319,8 @@ fn draw(c: &Controls, p: &mut Painter, body: bool) {
                 .and_then(|e| e.number)
                 .map(|n| format!("#{n}"))
                 .unwrap_or_else(|| text("反馈详情", "Feedback details").into()),
-            _ => text("反馈设备", "Device feedback").into(),
+            _ => if s.software { text("反馈软件问题", "Software feedback").into() }
+                else { text("反馈设备", "Device feedback").into() },
         };
         if !sub {
             p.round(R::new(25.0, 24.0, 39.0, 39.0), 11.0, t.accent_soft);
@@ -2030,14 +2341,18 @@ fn draw(c: &Controls, p: &mut Painter, body: bool) {
                 "Read replies and add more device details.",
             ),
             View::Diagnostics => text(
-                "只包含这次反馈需要的设备信息。",
-                "Only the device details needed for this report.",
+                if s.software { "已自动整理近期运行记录，不包含原始日志。" }
+                    else { "只包含这次反馈需要的设备信息。" },
+                if s.software { "Recent activity is summarized automatically. Raw logs are excluded." }
+                    else { "Only the device details needed for this report." },
             ),
             View::Thread => text("反馈详情", "Feedback details"),
             View::Success => "",
             View::Form => text(
-                "描述遇到的问题，我们一起完善设备支持。",
-                "Tell us what happened. Help improve device support.",
+                if s.software { "简单描述问题，诊断摘要会随反馈一起发送。" }
+                    else { "描述遇到的问题，我们一起完善设备支持。" },
+                if s.software { "Describe the problem. A safe diagnostic summary can be attached." }
+                    else { "Tell us what happened. Help improve device support." },
             ),
         };
         p.text(
@@ -2052,7 +2367,8 @@ fn draw(c: &Controls, p: &mut Painter, body: bool) {
         p.hline(0.0, WIDTH, fy, t.border);
         let footer = match s.view {
             View::Diagnostics => text(
-                "可以在反馈窗口关闭“附带设备诊断”。",
+                if s.software { "可以在反馈窗口关闭“附带软件诊断”。" }
+                    else { "可以在反馈窗口关闭“附带设备诊断”。" },
                 "You can turn off diagnostics in the feedback form.",
             ),
             View::Thread => text(
@@ -2068,8 +2384,9 @@ fn draw(c: &Controls, p: &mut Painter, body: bool) {
                 "Sent. You can check progress at any time.",
             ),
             View::Form if client::configured() => text(
-                "无需 GitHub 账号。反馈及所选附件会公开显示。",
-                "No GitHub account needed. Reports and attachments are public.",
+                if s.software { "无需 GitHub 账号。描述及所选诊断摘要会公开显示。" }
+                    else { "无需 GitHub 账号。反馈及所选附件会公开显示。" },
+                "No GitHub account needed. Reports and selected diagnostics are public.",
             ),
             View::Form => text(
                 "反馈和附件将公开。应用内提交服务尚未启用。",
@@ -2431,7 +2748,8 @@ impl Dialog {
             .map_err(|e| e.to_string())?;
         let hwnd = body.handle.hwnd().unwrap() as _;
         let style = super::canvas::get_window_long(hwnd, -16);
-        super::canvas::set_window_long(hwnd, -16, style | 0x0020_0000 | 0x0200_0000);
+        super::canvas::set_window_long(hwnd, -16,
+            style | (wu::WS_VSCROLL | wu::WS_CLIPCHILDREN | wu::WS_CLIPSIBLINGS) as isize);
         let hwnd = window.handle.hwnd().unwrap() as _;
         let style = super::canvas::get_window_long(hwnd, -16);
         super::canvas::set_window_long(hwnd, -16, style | 0x0200_0000);
@@ -2441,29 +2759,27 @@ impl Dialog {
             .size_absolute(px(12.0) as u32)
             .build(&mut font)
             .map_err(|e| e.to_string())?;
-        let new_box = |readonly: bool| -> Result<nwg::TextBox, String> {
+        let new_box = || -> Result<nwg::TextBox, String> {
             let mut edit = nwg::TextBox::default();
             edit.handle = nwg::ControlBase::build_hwnd()
                 .class_name("EDIT")
                 .parent(Some(body.handle))
-                .flags(0x5001_1044)
+                .flags(0x4001_1044 | wu::WS_CLIPSIBLINGS)
                 .build()
                 .map_err(|e| e.to_string())?;
             edit.set_font(Some(&font));
             edit.set_text("");
-            edit.set_limit(if readonly { 256 * 1024 } else { 4000 });
-            edit.set_readonly(readonly);
+            edit.set_limit(4000);
             Ok(edit)
         };
-        let description = new_box(false)?;
-        let reply = new_box(false)?;
-        let viewer = new_box(true)?;
+        let description = new_box()?;
+        let reply = new_box()?;
         let new_input = |limit| -> Result<nwg::TextInput, String> {
             let mut edit = nwg::TextInput::default();
             edit.handle = nwg::ControlBase::build_hwnd()
                 .class_name("EDIT")
                 .parent(Some(body.handle))
-                .flags(0x5001_0080)
+                .flags(0x4001_0080 | wu::WS_CLIPSIBLINGS)
                 .build()
                 .map_err(|e| e.to_string())?;
             edit.set_font(Some(&font));
@@ -2478,7 +2794,7 @@ impl Dialog {
             button.handle = nwg::ControlBase::build_hwnd()
                 .class_name("BUTTON")
                 .parent(Some(parent))
-                .flags(0x5001_000b)
+                .flags(0x4001_000b | wu::WS_CLIPSIBLINGS)
                 .build()
                 .map_err(|e| e.to_string())?;
             button.set_font(Some(&font));
@@ -2499,7 +2815,6 @@ impl Dialog {
             brand,
             model,
             reply,
-            viewer,
             _font: font,
             state: RefCell::new(Model::default()),
             items: RefCell::new(Vec::new()),
@@ -2519,6 +2834,9 @@ impl Dialog {
             results: Arc::new(Mutex::new(Vec::new())),
             notice,
             updating: Cell::new(false),
+            description_count: Cell::new(0),
+            applied: RefCell::new(Default::default()),
+            scrollbar: Cell::new(None),
         });
         let callback = c.clone();
         let handler = nwg::full_bind_event_handler(&c.window.handle, move |event, data, handle| {
@@ -2564,21 +2882,20 @@ impl Dialog {
                     }
                 }
                 E::OnTextInput
-                    if !callback.updating.get()
-                        && (handle == callback.description.handle
+                    if handle == callback.description.handle
                             || handle == callback.brand.handle
-                            || handle == callback.model.handle) =>
+                            || handle == callback.model.handle =>
                 {
-                    if let Ok(mut s) = callback.state.try_borrow_mut() {
-                        s.draft_retry = None;
-                        s.restored_draft = None;
+                    if handle == callback.description.handle {
+                        callback.description_count.set(callback.description.text().chars().count());
+                        callback.invalidate_count();
                     }
-                    unsafe {
-                        wu::InvalidateRect(
-                            callback.body.handle.hwnd().unwrap(),
-                            std::ptr::null(),
-                            0,
-                        );
+                    if !callback.updating.get() {
+                        let rebuild = callback.state.try_borrow_mut()
+                            .map(|mut model| model.edit_draft()).unwrap_or(false);
+                        if rebuild {
+                            callback.rebuild();
+                        }
                     }
                 }
                 _ => {}
@@ -2622,7 +2939,7 @@ impl Dialog {
                     if empty&&wu::GetFocus()!=hwnd {
                         let dc=wu::GetDC(hwnd);let old=winapi::um::wingdi::SelectObject(dc,c._font.handle as _);winapi::um::wingdi::SetTextColor(dc,colorref(c.colors.borrow().theme.text3));winapi::um::wingdi::SetBkMode(dc,1);
                         let mut rect=std::mem::zeroed();wu::GetClientRect(hwnd,&mut rect);
-                        let hint=if is_description{text("例如：接收器已经连接，官方驱动可以看到电量，但这里一直显示未知。","For example: the receiver is connected and the official driver shows the battery, but it stays unknown here.")}else{text("补充测试结果、固件版本或新的问题表现…","Add test results, firmware versions or new observations…")};
+                        let hint=if is_description{if c.state.borrow().software{text("例如：修改设置后点击保存出现报错，重新打开软件后设置没有保留。","For example: saving settings shows an error, and the changes are lost after reopening the app.")}else{text("例如：接收器已经连接，官方驱动可以看到电量，但这里一直显示未知。","For example: the receiver is connected and the official driver shows the battery, but it stays unknown here.")}}else{text("补充测试结果、固件版本或新的问题表现…","Add test results, firmware versions or new observations…")};
                         let wide=crate::win32::to_wide(hint);wu::DrawTextW(dc,wide.as_ptr(),-1,&mut rect,wu::DT_WORDBREAK|wu::DT_NOPREFIX);winapi::um::wingdi::SelectObject(dc,old);wu::ReleaseDC(hwnd,dc);
                     }
                     return Some(result);
@@ -2633,7 +2950,9 @@ impl Dialog {
         }
         for (body, handle) in [(false, c.window.handle), (true, c.body.handle)] {
             let c = c.clone();
-            let buffer = RefCell::new(super::gfx::Canvas::new());
+            let content_buffer = RefCell::new(super::gfx::Canvas::new());
+            let control_buffer = RefCell::new(super::gfx::Canvas::new());
+            let control_buffer_size = Cell::new((0, 0));
             let fonts = RefCell::new(
                 super::gfx::Fonts::new("Microsoft YaHei UI").ok_or("Font initialization failed")?,
             );
@@ -2652,7 +2971,7 @@ impl Dialog {
                             };
                             let mut rect = std::mem::zeroed();
                             wu::GetClientRect(hwnd, &mut rect);
-                            let mut canvas = buffer.borrow_mut();
+                            let mut canvas = content_buffer.borrow_mut();
                             let mut fonts = fonts.borrow_mut();
                             let colors = c.colors.borrow();
                             let mem = canvas.ensure(dc as isize, rect.right, rect.bottom);
@@ -2666,14 +2985,20 @@ impl Dialog {
                                 },
                                 colors.brush,
                             );
+                            let dirty = if msg == wu::WM_PAINT { ps.rcPaint } else { rect };
+                            let scroll = if body { c.scroll.get() } else { 0.0 };
+                            let damage = R::new(dirty.left as f32 / c.scale.get(),
+                                dirty.top as f32 / c.scale.get() + scroll,
+                                (dirty.right - dirty.left) as f32 / c.scale.get(),
+                                (dirty.bottom - dirty.top) as f32 / c.scale.get());
                             canvas.paint(
                                 &mut fonts,
                                 &colors.theme,
                                 c.scale.get(),
-                                if body { c.scroll.get() } else { 0.0 },
+                                scroll,
                                 rect.right as f32 / c.scale.get(),
                                 rect.bottom as f32 / c.scale.get(),
-                                |p| draw(&c, p, body),
+                                |p| draw(&c, p, body, damage),
                             );
                             super::gfx::blit(dc as isize, mem, rect.right, rect.bottom);
                             if msg == wu::WM_PAINT {
@@ -2701,10 +3026,12 @@ impl Dialog {
                             if let Some(item) = item {
                                 let w = draw.rcItem.right - draw.rcItem.left;
                                 let h = draw.rcItem.bottom - draw.rcItem.top;
-                                let mut buffer = buffer.borrow_mut();
+                                let mut buffer = control_buffer.borrow_mut();
                                 let mut fonts = fonts.borrow_mut();
                                 let colors = c.colors.borrow();
-                                let mem = buffer.ensure(draw.hDC as isize, w, h);
+                                let size = layout::buffer_size(control_buffer_size.get(), (w, h));
+                                control_buffer_size.set(size);
+                                let mem = buffer.ensure(draw.hDC as isize, size.0, size.1);
                                 crate::win32::FillRect(
                                     mem as _,
                                     &crate::win32::Rect {
@@ -2749,7 +3076,7 @@ impl Dialog {
                         wu::WM_MOUSEWHEEL => {
                             let delta = (wp >> 16) as i16 as f32;
                             c.scroll.set(c.scroll.get() - delta / 120.0 * 66.0);
-                            c.layout();
+                            c.layout(false);
                             Some(0)
                         }
                         wu::WM_VSCROLL if body => {
@@ -2770,7 +3097,7 @@ impl Dialog {
                                 _ => {}
                             }
                             c.scroll.set(scroll);
-                            c.layout();
+                            c.layout(false);
                             Some(0)
                         }
                         wu::WM_NCHITTEST if !body => {
@@ -2803,29 +3130,20 @@ impl Dialog {
         })
     }
     pub fn show(&self, owner: &nwg::Window, devices: Vec<Candidate>, dark: bool, history: bool) {
+        self.show_mode(owner, devices, dark, history, false);
+    }
+    pub fn show_software(&self, owner: &nwg::Window, dark: bool) {
+        self.show_mode(owner, Vec::new(), dark, false, true);
+    }
+    fn show_mode(&self, owner: &nwg::Window, devices: Vec<Candidate>, dark: bool, history: bool, software: bool) {
         let c = &self.controls;
         c.remember_reply();
         *c.colors.borrow_mut() = Colors::new(dark);
         c.update_input_prompts();
-        if !c.state.borrow().busy {
-            let mut s = c.state.borrow_mut();
-            s.latest_devices = devices;
-            if !s.initialized {
-                s.devices = s.latest_devices.clone();
-                s.selected = (!s.devices.is_empty()).then_some(0);
-                s.connection = s
-                    .selected
-                    .map(|i| connection_index(&s.devices[i].device.connection))
-                    .unwrap_or(0);
-                s.initialized = true;
-            }
-            if history {
-                s.view = View::History;
-            } else if s.submitted {
-                s.view = View::Success;
-            } else {
-                s.view = View::Form;
-            }
+        let reset = if software { c.state.borrow_mut().reopen_software() }
+            else { c.state.borrow_mut().reopen(devices, history) };
+        if reset {
+            c.reset_inputs();
         }
         let hwnd = c.window.handle.hwnd().unwrap() as _;
         let monitor =
@@ -2866,8 +3184,9 @@ impl Dialog {
         }
         c.window.set_visible(true);
         c.window.set_focus();
-        if history && !c.state.borrow().busy {
-            c.work(|| ResultMessage::History(client::load_history()));
+        c.prepare_software_diagnostics();
+        if history && !c.state.borrow().busy() {
+            c.work(Task::History, || ResultMessage::History(client::load_history()));
         }
     }
     pub fn poll(&self) {

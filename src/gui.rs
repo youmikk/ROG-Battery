@@ -2480,6 +2480,10 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.canvas.repaint_now();
         }
         Act::ReviewStore => open_url(env, crate::store::REVIEW_URL),
+        Act::SoftwareFeedback => {
+            let dark = crate::ui::theme::resolve(&lock_shared(env.shared).cfg.theme) == crate::ui::theme::Mode::Dark;
+            env.feedback_dialog.show_software(env.window, dark);
+        }
         Act::DeviceFeedback | Act::FeedbackHistory => {
             let s = lock_shared(env.shared);
             let devices = s.readings.iter().map(|reading| {

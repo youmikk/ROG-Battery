@@ -3483,12 +3483,13 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     p.text(tr("支持与反馈", "Support & feedback"),
         R::new(x + 2.0, heading_y, w - 4.0, 19.0),
         12.0, true, t.text2, Align::Left);
-    let support = R::new(x, heading_y + 29.0, w, row_h * 4.0);
-    p.card(support, 10.0, t.card, t.border);
     let rows = [
         (FeedbackIcon::Message, tr("反馈设备", "Device feedback"),
             tr("设备未识别、电量异常或其他使用问题", "Unrecognized devices, battery issues or other problems"),
             tr("反馈", "Feedback"), Act::DeviceFeedback),
+        (FeedbackIcon::File, tr("反馈软件问题", "Software feedback"),
+            tr("快速描述问题，自动附带脱敏诊断摘要", "Describe the problem with an automatic, privacy-safe diagnostic summary"),
+            tr("反馈", "Feedback"), Act::SoftwareFeedback),
         (FeedbackIcon::History, tr("我的反馈", "My feedback"),
             tr("查看处理进度和回复，补充设备信息", "Track progress, read replies and add device details"),
             tr("查看", "View"), Act::FeedbackHistory),
@@ -3499,6 +3500,8 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             tr("你的好评，是开发者持续更新的最大动力", "Your positive review is the developer's greatest motivation to keep improving"),
             tr("前往", "View"), Act::ReviewStore),
     ];
+    let support = R::new(x, heading_y + 29.0, w, row_h * rows.len() as f32);
+    p.card(support, 10.0, t.card, t.border);
     for (index, (icon, title, description, label, act)) in rows.into_iter().enumerate() {
         let row = R::new(support.x, support.y + index as f32 * row_h, support.w, row_h);
         if index != 0 {
