@@ -102,7 +102,7 @@ fn collect(mut sample: impl FnMut(u8) -> Sample, now: Instant) -> Poll {
             }
         }
     }
-    Poll { snapshots, present_channels: Some(present) }
+    Poll { snapshots, present_channels: Some(present), ..Default::default() }
 }
 
 pub fn poll() -> Result<Poll, String> {

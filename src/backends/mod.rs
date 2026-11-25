@@ -386,13 +386,16 @@ pub struct Poll {
     pub snapshots: Vec<Snapshot>,
     /// None 表示枚举失败，不提供拔出设备的证据。
     pub present_channels: Option<std::collections::BTreeSet<String>>,
+    pub legacy_key_migrations: std::collections::BTreeMap<String, String>,
 }
 
 impl Poll {
     #[cfg(test)]
     pub fn from_snapshots(snapshots: Vec<Snapshot>) -> Self {
         let present_channels = Some(snapshots.iter().map(|s| s.target.channel_key()).collect());
-        Self { snapshots, present_channels }
+        let targets: Vec<_> = snapshots.iter().map(|snapshot| snapshot.target.clone()).collect();
+        let legacy_key_migrations = legacy_key_migrations(&targets, &[]);
+        Self { snapshots, present_channels, legacy_key_migrations }
     }
 }
 
@@ -555,8 +558,39 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
     };
     let mut poll = Poll { present_channels: Some(present_channels),
         ..Default::default() };
-    poll.snapshots = read_targets(provider.discover(&api, &interfaces)?, |target| provider.read(&api, target, detail));
+    let targets = provider.discover(&api, &interfaces)?;
+    poll.legacy_key_migrations = legacy_key_migrations(&targets, &enumeration.skipped);
+    poll.snapshots = read_targets(targets, |target| provider.read(&api, target, detail));
     Ok(poll)
+}
+
+fn legacy_key_migrations(targets: &[Target], skipped: &[crate::hid::Skipped])
+    -> std::collections::BTreeMap<String, String> {
+    let mut migrations = std::collections::BTreeMap::new();
+    for target in targets.iter().filter(|target| target.backend == BackendId::Rapoo) {
+        let Ok(interface) = target.hid() else { continue; };
+        if interface.serial.is_empty() { continue; }
+        if skipped.iter().any(|entry| {
+            let path = entry.path.to_ascii_lowercase();
+            let field = |prefix| path.split(['#', '&']).find_map(|part|
+                part.strip_prefix(prefix).filter(|value| value.len() == 4)
+                    .and_then(|value| u16::from_str_radix(value, 16).ok()));
+            match (field("vid_"), field("pid_")) {
+                (Some(vendor), Some(product)) => vendor == interface.vendor_id && product == interface.product_id,
+                _ => true,
+            }
+        }) { continue; }
+        let matches: std::collections::BTreeSet<_> = targets.iter().filter(|other|
+            other.backend == target.backend && other.address == target.address
+                && other.hid().is_ok_and(|other| other.vendor_id == interface.vendor_id
+                    && other.product_id == interface.product_id && other.serial == interface.serial))
+            .map(|target| target.channel_key().to_ascii_lowercase()).collect();
+        if matches.len() != 1 { continue; }
+        let legacy = crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",
+            target.backend.name(), interface.vendor_id, interface.product_id, interface.serial, target.address));
+        migrations.insert(legacy, target.key.clone());
+    }
+    migrations
 }
 
 fn read_targets(targets: Vec<Target>, mut read: impl FnMut(&Target) -> Result<Snapshot, String>) -> Vec<Snapshot> {
@@ -798,6 +832,29 @@ mod tests {
             let expected = crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",
                 backend.name(), interface.vendor_id, interface.product_id, interface.serial, target.address));
             assert_eq!(target.unverified_key(), expected);
+        }
+    }
+
+    #[test]
+    fn legacy_preferences_require_all_discovered_receivers_to_be_unambiguous() {
+        let mut first = reading(BackendId::Rapoo).target;
+        first.hid_mut().serial = "duplicate".into();
+        first.hid_mut().path = "receiver-a".into();
+        first.key = "first-path-key".into();
+        let mut second = first.clone();
+        second.hid_mut().path = "receiver-b".into();
+        second.key = "second-path-key".into();
+        let unique = legacy_key_migrations(&[first.clone()], &[]);
+        assert_eq!(unique.len(), 1);
+        assert_eq!(unique.values().next().map(String::as_str), Some("first-path-key"));
+        assert!(legacy_key_migrations(&[first.clone(), second.clone()], &[]).is_empty());
+        second.hid_mut().serial = "different".into();
+        assert_eq!(legacy_key_migrations(&[first.clone(), second], &[]).len(), 2);
+        let interface = first.hid().unwrap();
+        for path in [format!("hid#vid_{:04x}&pid_{:04x}#occupied#hid", interface.vendor_id, interface.product_id),
+            "unresolved-interface".into()] {
+            let skipped = crate::hid::Skipped { path, reason: "unavailable descriptor".into() };
+            assert!(legacy_key_migrations(&[first.clone()], &[skipped]).is_empty());
         }
     }
 

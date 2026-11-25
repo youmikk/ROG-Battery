@@ -752,6 +752,7 @@ pub fn poll() -> Result<Poll, String> {
     Ok(Poll {
         snapshots,
         present_channels: Some(present),
+        ..Default::default()
     })
 }
 

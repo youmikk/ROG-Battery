@@ -445,7 +445,7 @@ fn rog_record(link: &hid::Link, outcome: &FetchOutcome, previous: Option<&Device
     if let (Some(state), Some(quick)) = (&mut state, Quick::from_snapshot(&outcome.snapshot)) {
         quick.apply_to(state);
     }
-    if link.read_only { state = None; }
+    if link.read_only || ident.device_id().is_none() { state = None; }
     Some(DeviceSnapshot {
         reading: crate::device::DeviceReading {
             key, name: if name.is_empty() { family.noun().into() } else { name }, family,
@@ -640,15 +640,10 @@ fn legacy_rog_history_owner(
 fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll,
     now: std::time::Instant) {
     if backend==crate::backends::BackendId::Rapoo {
-        // Older builds keyed Rapoo by serial. Migrate only when the current scan
-        // establishes one receiver for that serial; identical receivers stay separate.
         for snapshot in &poll.snapshots {
             let Ok(i)=snapshot.target.hid() else {continue;};
-            if i.serial.is_empty() || poll.snapshots.iter().filter(|s| {
-                s.target.hid().is_ok_and(|other|
-                    other.vendor_id==i.vendor_id && other.product_id==i.product_id && other.serial==i.serial)
-            }).count()!=1 {continue;}
             let old=crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",backend.name(),i.vendor_id,i.product_id,i.serial,snapshot.target.address));
+            if poll.legacy_key_migrations.get(&old) != Some(&snapshot.target.key) { continue; }
             if old!=snapshot.target.key && (shared.cfg.device_names.contains_key(&old)
                 || shared.cfg.device_tray.contains_key(&old) || shared.cfg.dpi_presets.contains_key(&old)
                 || shared.cfg.device_order.contains(&old) || shared.cfg.tray_device.as_ref()==Some(&old)) {
@@ -5923,7 +5918,7 @@ mod backend_tests {
         first.dpi.writable = true;
         shared.publish_additional(BackendId::Logitech, vec![first], 0, 1);
         let poll = crate::backends::Poll { snapshots: vec![],
-            present_channels: Some(["logitech".to_string()].into_iter().collect()) };
+            present_channels: Some(["logitech".to_string()].into_iter().collect()), ..Default::default() };
         shared.publish_additional(BackendId::Logitech, poll, 0, 2);
         let device = &shared.devices["logitech"];
         assert!(device.reading.connected);
@@ -5934,7 +5929,7 @@ mod backend_tests {
         shared.publish_additional(BackendId::Logitech, crate::backends::Poll::default(), 0, 3);
         assert!(shared.devices["logitech"].reading.connected);
         shared.publish_additional(BackendId::Logitech, crate::backends::Poll {
-            snapshots: vec![], present_channels: Some(Default::default()) }, 0, 4);
+            snapshots: vec![], present_channels: Some(Default::default()), ..Default::default() }, 0, 4);
         assert!(!shared.devices["logitech"].reading.connected);
         assert_eq!(shared.devices["logitech"].reading.battery.as_ref().unwrap().percent, Some(75));
     }
@@ -5987,7 +5982,7 @@ mod backend_tests {
                     vec![reading]
                 } else { Vec::new() };
                 merge_additional_at(&mut shared, BackendId::Rapoo, crate::backends::Poll { snapshots,
-                    present_channels: Some(["rapoo".into()].into_iter().collect()) }, tick);
+                    present_channels: Some(["rapoo".into()].into_iter().collect()), ..Default::default() }, tick);
             }
             shared.expire_readings_at(tick);
             let device = &shared.devices["rapoo"];
@@ -6022,7 +6017,7 @@ mod backend_tests {
         let mut armed = true;
         assert_eq!(low_battery_reading(&shared.readings[0], &mut armed), None);
         let poll = crate::backends::Poll { snapshots: Vec::new(),
-            present_channels: Some(["controller".into()].into_iter().collect()) };
+            present_channels: Some(["controller".into()].into_iter().collect()), ..Default::default() };
         merge_additional_at(&mut shared, backend, poll, now + Duration::from_secs(3));
         assert_eq!(shared.readings[0].battery_text(false), "≈55");
         shared.expire_readings_at(now + backend.sample_lifetime());
@@ -6034,6 +6029,7 @@ mod backend_tests {
         assert!(shared.devices["controller"].basic.as_ref().unwrap().dpi.stages.is_empty());
         merge_additional_at(&mut shared, backend, crate::backends::Poll {
             snapshots: Vec::new(), present_channels: Some(Default::default()),
+            ..Default::default()
         }, now + Duration::from_secs(10));
         assert!(!shared.readings[0].connected);
         assert_eq!(shared.readings[0].battery_text(true), "—");
@@ -6051,7 +6047,7 @@ mod backend_tests {
         merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
         assert_eq!(shared.devices["headset"].reading.battery_text(true), "61%");
         let silent = crate::backends::Poll { snapshots: Vec::new(),
-            present_channels: Some(["headset".into()].into_iter().collect()) };
+            present_channels: Some(["headset".into()].into_iter().collect()), ..Default::default() };
         merge_additional_at(&mut shared, backend, silent, now + Duration::from_secs(10));
         assert!(shared.devices["headset"].reading.connected);
         assert_eq!(shared.devices["headset"].reading.quality, crate::device::ReadingQuality::Cached);
@@ -6127,7 +6123,7 @@ mod backend_tests {
         for second in [10, 60, 119, 120, 130] {
             let time = now + Duration::from_secs(second);
             let sleeping = crate::backends::Poll { snapshots: Vec::new(),
-                present_channels: Some(["keyboard".into()].into_iter().collect()) };
+                present_channels: Some(["keyboard".into()].into_iter().collect()), ..Default::default() };
             merge_additional_at(&mut shared, backend, sleeping, time);
             shared.expire_readings_at(time);
             let device = &shared.devices["keyboard"];
@@ -6434,6 +6430,13 @@ mod backend_tests {
         shared.publish_additional(BackendId::Rapoo,vec![a.clone()],0,2);
         assert!(!shared.device_keys_dirty);
         let mut b=a.clone();b.target.key="b".into();b.target.hid_mut().path ="b".into();
+        let mut shared=Shared::new(cfg.clone());
+        let mut partial = crate::backends::Poll::from_snapshots(vec![a.clone(), b.clone()]);
+        partial.snapshots.retain(|sample| sample.target.key == "a");
+        shared.publish_additional(BackendId::Rapoo, partial, 0, 1);
+        assert!(shared.cfg.device_names.contains_key(&old));
+        assert!(!shared.cfg.device_names.contains_key("a"));
+        assert_eq!(shared.cfg.tray_device.as_deref(), Some(old.as_str()));
         let mut shared=Shared::new(cfg);
         shared.publish_additional(BackendId::Rapoo,vec![a,b],0,1);
         assert!(shared.cfg.device_names.contains_key(&old));
