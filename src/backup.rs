@@ -13,7 +13,7 @@
 //! 文档第 5 节的事故就是因为最初的备份漏了这三项，commit 之后休眠时间字节被写坏，
 //! 鼠标变成 1 分钟就休眠，看起来像坏了。
 
-use crate::proto::{State, BUTTON_SLOTS, DPI_STAGES};
+use crate::proto::{BUTTON_SLOTS, DPI_STAGES};
 
 /// 备份文件的 31 个键，顺序即写文件的顺序。
 pub const BACKUP_KEYS: [&str; 31] = [
@@ -69,7 +69,8 @@ pub fn parse_rgb(s: &str) -> Result<[u8; 3], String> {
 }
 
 /// 把状态渲染成备份文本。
-pub fn render(st: &State, link_mode: &str, report_id: u8, timestamp: &str) -> String {
+pub fn render(configuration: &crate::snapshot::Configuration, link_mode: &str, report_id: u8, timestamp: &str) -> String {
+    let st = configuration.state();
     let mut s = String::new();
     s.push_str("# X-Battery 设置备份 —— ROG 鼠标\r\n");
     s.push_str(&format!("# 由 X-Battery 生成于 {timestamp}\r\n"));

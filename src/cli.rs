@@ -3,14 +3,12 @@
 //! 所有**写**操作都转调 [`crate::ops`]：六步安全循环只有那一份实现，
 //! 这里只负责「把结构化报告打到终端」和「文件/参数这类外壳工作」。
 //!
-//! 所有读都经过 [`Ctx`]：它包着「一次性读完 + 缓存」的 [`SnapshotCache`]。
-//! 只读命令（`info` / `backup`）直接吃缓存；写命令的「读原值」也吃缓存，
-//! 但写后的读回断言必须直读设备（RAM 已经变了）。
+//! 展示读取可使用 [`SnapshotCache`]；备份、写入基准和读回验证均新读完整配置。
 
 use crate::backup;
 use crate::hid::{is_nak, HidDevice, HidInterface, Link};
 use crate::ops::{self, ApplyReport, ErrorKind, OpsError, StateReader};
-use crate::proto::{self, State, BUTTON_NAME, BUTTON_SLOTS, DPI_STAGES, LIGHT_ZONE};
+use crate::proto::{self, BUTTON_NAME, BUTTON_SLOTS, DPI_STAGES, LIGHT_ZONE};
 use crate::report;
 use crate::snapshot::{FetchOutcome, SnapshotCache};
 
@@ -39,24 +37,12 @@ impl<'a> Ctx<'a> {
 
     /// 取快照：内存 → 磁盘 → 真读设备。
     fn snapshot(&mut self, dev: &mut HidDevice) -> FetchOutcome {
-        self.cache.get(
-            dev,
-            &self.link.all_interfaces,
-            self.link.report_id,
-            &self.link.mode,
-        )
+        self.cache.get(dev, self.link)
     }
 
-    /// 当前完整状态（缓存优先）。
-    fn state(&mut self, dev: &mut HidDevice) -> Result<State, String> {
-        let out = self.snapshot(dev);
-        if out.snapshot.state.poll_code == 0
-            && out.snapshot.state.enc == [0; DPI_STAGES]
-            && out.snapshot.failed.contains_key("12:04:00")
-        {
-            return Err("鼠标无应答（休眠中？先移动一下鼠标）".to_string());
-        }
-        Ok(out.snapshot.state.clone())
+    fn state(&mut self, dev: &mut HidDevice) -> Result<crate::snapshot::Configuration, String> {
+        self.invalidate();
+        crate::snapshot::read_configuration(dev, self.rid())
     }
 
     /// 操作结束：整体失效，下一次命令会重新读设备。
@@ -65,21 +51,12 @@ impl<'a> Ctx<'a> {
     }
 }
 
-/// 给 [`ops::cycle`] 用的状态读取器。
-///
-/// * `fresh = false`：走缓存（「读原值」这一步）。
-/// * `fresh = true`：**直读 8 个状态帧并让缓存失效**。
-///   刻意只读 8 帧而不是全部 17 帧：写操作的断言只关心状态，
-///   身份信息不会因为写而改变，读它们纯属浪费 27ms × 9。
 impl StateReader for Ctx<'_> {
-    fn read(&mut self, dev: &mut HidDevice, rid: u8, fresh: bool) -> Result<State, OpsError> {
-        if !fresh {
-            return self.state(dev).map_err(ops::map_read_error);
+    fn read(&mut self, dev: &mut HidDevice, rid: u8) -> Result<crate::snapshot::Configuration, OpsError> {
+        if rid != self.rid() {
+            return Err(OpsError::other("配置读取的 report ID 与所选设备不匹配"));
         }
-        let r = proto::read_state(dev, rid);
-        // 不管读成没成，RAM 已经变了，缓存都不能再信
-        self.cache.invalidate();
-        r.map_err(ops::map_read_error)
+        self.state(dev).map_err(ops::map_read_error)
     }
 }
 
@@ -187,9 +164,7 @@ pub fn cmd_info(ctx: &mut Ctx, dev: &mut HidDevice, force_fresh: bool) -> Result
 }
 
 pub fn cmd_quick(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
-    let rid = ctx.rid();
-    let link_mode = ctx.link.mode.clone();
-    let out = match ctx.cache.get_light(dev, rid, &link_mode) {
+    let out = match ctx.cache.get_light(dev, ctx.link) {
         Some(o) => o,
         None => {
             // 休眠不是错误：给一个明确的、脚本能识别的状态行，退出码仍然是 0
@@ -236,16 +211,13 @@ pub fn cmd_quick(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
 ///
 /// 快照里已经包含 `12 06`（LOD 与表面标定），不需要再单独读一次。
 pub fn cmd_backup(ctx: &mut Ctx, dev: &mut HidDevice, path: &str) -> Result<(), String> {
-    let out = ctx.snapshot(dev);
-    let st = out.snapshot.state.clone();
-    if out.snapshot.frames.is_empty() {
-        return Err("读不到设备状态，无法备份".into());
-    }
+    let configuration = ctx.state(dev)?;
+    let st = configuration.state();
 
     // 人读的时间戳，不要放 unix 秒（对照时还得自己换算）
     let timestamp = crate::settings::timestamp_for_humans();
 
-    let text = backup::render(&st, &ctx.link.mode, ctx.link.report_id, &timestamp);
+    let text = backup::render(&configuration, &ctx.link.mode, ctx.link.report_id, &timestamp);
 
     // 备份目录不存在就先建（配置/数据放系统标准位置，不是 exe 同目录）；
     // 走原子写 —— 备份是 set_lod 重置标定之后唯一的退路，不能留半份。
@@ -253,50 +225,19 @@ pub fn cmd_backup(ctx: &mut Ctx, dev: &mut HidDevice, path: &str) -> Result<(), 
         .map_err(|e| format!("写文件 {path} 失败：{e}"))?;
 
     println!("== 备份 ==");
-    report::print_state(&st);
+    report::print_state(st);
     println!();
     println!("已写入 {path}（{} 个键）", backup::BACKUP_KEYS.len());
     println!(
         "能量块：poweroff_code={} low_warn={} full_effect={}",
         st.sleep_mode, st.low_warn, st.full_effect
     );
-    if !out.snapshot.failed.is_empty() {
-        eprintln!();
-        eprintln!(
-            "警告：有 {} 帧没读到，备份可能不完整：",
-            out.snapshot.failed.len()
-        );
-        for w in out.snapshot.warnings() {
-            eprintln!("  - {w}");
-        }
-    }
     Ok(())
 }
 
 // ==================== 还原 ====================
 
-/// 把一份已解析的备份逐项写回设备。
-///
-/// # 为什么它从 `cmd_restore` 里抽出来
-///
-/// GUI 也要「从备份还原」，但 GUI 里没有终端 —— `cmd_restore` 满篇 `println!`
-/// 和 `eprintln!`，直接调会把文字吐进一个已经被 `FreeConsole` 脱离的进程。
-///
-/// 抽成这个函数而不是在 gui.rs 里重写一遍，是因为这段代码里**每一条校验都对应
-/// 一次真实事故**（DPI 编码范围、缺 `dpiN_rgb` 时兜底成黑色、灯光缺字段时
-/// 把亮度打到 50、能量块填错槽位）。两套实现必然漂移，而漂移的那次
-/// 就是用户设备被写坏的那次。
-///
-/// `log` 收的是**已格式化好的一行**（不带换行），调用方决定打到终端还是
-/// 塞进界面的结果框。
-/// 还原 DPI 档位时，是否需要为了补齐颜色去读一次设备状态。
-///
-/// 只有「这一档要写、但备份里没记颜色」才需要；这种情况整份还原最多发生
-/// 一次读取（见 `apply_backup` 里的 `base`）。
-fn needs_color_base(b: &backup::Backup) -> bool {
-    (0..DPI_STAGES).any(|i| b.dpi_enc[i].is_some() && b.dpi_rgb[i].is_none())
-}
-
+/// CLI 与 GUI 共用恢复入口；缺失字段沿用首次写入前新读的完整配置。
 pub fn apply_backup(
     dev: &mut HidDevice,
     rid: u8,
@@ -312,12 +253,10 @@ pub fn apply_backup(
         log_raw(line);
     };
     let outcome: Result<(), String> = (|| -> Result<(), String> {
-    let base = if needs_color_base(b) {
-        let mut reader = ops::DirectReader;
-        Some(reader.read(dev, rid, true).map_err(|e| e.message)?)
-    } else {
-        None
-    };
+    let mut reader = ops::DirectReader;
+    let configuration = reader.read(dev, rid).map_err(|e| e.message)?;
+    let base = configuration.state();
+    crate::snapshot::invalidate_disk_cache();
 
     for i in 0..DPI_STAGES {
         let Some(enc) = b.dpi_enc[i] else { continue };
@@ -332,16 +271,7 @@ pub fn apply_backup(
                 proto::decode_dpi(proto::DPI_ENC_MAX)
             ));
         }
-        // 缺 `dpiN_rgb` 时沿用设备当前颜色，绝不兜底成黑色。
-        // `base` 必然是 `Some`（上面的 `any` 条件与这里的分支一一对应），
-        // 万一不成立也必须报错而不是写黑色。
-        let rgb = match b.dpi_rgb[i] {
-            Some(c) => c,
-            None => match base.as_ref() {
-                Some(st) => st.rgb[i],
-                None => return Err(format!("DPI 档 {} 缺少颜色基准状态", i + 1)),
-            },
-        };
+        let rgb = b.dpi_rgb[i].unwrap_or(base.rgb[i]);
         if proto::write_dpi(dev, rid, i, proto::decode_dpi(enc), rgb).is_none() {
             return Err(format!("写 DPI 档 {} 无应答", i + 1));
         }
@@ -401,53 +331,12 @@ pub fn apply_backup(
         log("注意：写 LOD 会把表面标定重置为默认，这是设备行为，无法避免。");
     }
 
-    // ---- 灯光 ----
-    //
-    // 和上面 DPI 那段同一个道理：备份里缺的键**不能兜底成零值**。
-    // 旧代码用 `unwrap_or(50)` / `unwrap_or([0,0,0])` / `unwrap_or(0)`，
-    // 于是一份只记了 `light_mode` 的残缺备份会把亮度打到 50、
-    // 颜色刷成黑色、方向/随机/速度清零 —— 用户看到的就是「还原备份后灯变黑了」。
-    //
-    // 现在缺失的字段一律沿用设备当前值。只有 `light_mode` 存在才进这段，
-    // 所以「备份里完全没提灯光」仍然是「不动灯光」，语义不变。
     if let Some(mode) = b.light_mode {
-        let need_any = b.light_bright.is_none()
-            || b.light_rgb.is_none()
-            || b.light_dir.is_none()
-            || b.light_random.is_none()
-            || b.light_speed.is_none();
-        // 只在确实缺字段时才去读设备 —— 完整的备份不该多付一帧的代价
-        let cur = if need_any {
-            let mut reader = ops::DirectReader;
-            Some(reader.read(dev, rid, true).map_err(|e| e.message)?)
-        } else {
-            None
-        };
-        let bright = match (b.light_bright, &cur) {
-            (Some(v), _) => v,
-            (None, Some(c)) => c.light_bright,
-            (None, None) => unreachable!("need_any 为 true 时 cur 必然为 Some"),
-        };
-        let rgb = match (b.light_rgb, &cur) {
-            (Some(v), _) => v,
-            (None, Some(c)) => c.light_rgb,
-            (None, None) => unreachable!("need_any 为 true 时 cur 必然为 Some"),
-        };
-        let dir = match (b.light_dir, &cur) {
-            (Some(v), _) => v,
-            (None, Some(c)) => c.light_dir,
-            (None, None) => unreachable!("need_any 为 true 时 cur 必然为 Some"),
-        };
-        let rnd = match (b.light_random, &cur) {
-            (Some(v), _) => v,
-            (None, Some(c)) => c.light_random,
-            (None, None) => unreachable!("need_any 为 true 时 cur 必然为 Some"),
-        };
-        let spd = match (b.light_speed, &cur) {
-            (Some(v), _) => v,
-            (None, Some(c)) => c.light_speed,
-            (None, None) => unreachable!("need_any 为 true 时 cur 必然为 Some"),
-        };
+        let bright = b.light_bright.unwrap_or(base.light_bright);
+        let rgb = b.light_rgb.unwrap_or(base.light_rgb);
+        let dir = b.light_dir.unwrap_or(base.light_dir);
+        let rnd = b.light_random.unwrap_or(base.light_random);
+        let spd = b.light_speed.unwrap_or(base.light_speed);
         if proto::write_light(dev, rid, mode, bright, rgb, dir, rnd, spd).is_none() {
             return Err("写灯光无应答".into());
         }
@@ -747,8 +636,8 @@ pub fn cmd_setfulleffect(
 pub fn cmd_save(ctx: &mut Ctx, dev: &mut HidDevice) -> Result<(), String> {
     println!("== save（提交进 flash）==");
     // 提交前先把当前状态打印出来，让用户知道到底把什么写进去了
-    let st = ctx.state(dev)?;
-    report::print_state(&st);
+    let configuration = ctx.state(dev)?;
+    report::print_state(configuration.state());
 
     let rid = ctx.rid();
     // 归类规则只有一份：无应答 → Asleep、NAK → Rejected、回全零 → Ok。

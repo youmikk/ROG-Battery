@@ -131,28 +131,20 @@ pub type Logger<'a> = &'a mut dyn FnMut(&str);
 
 // ==================== 状态读取 ====================
 
-/// `cycle` 读取设备状态的来源。
-///
-/// `fresh = false` 允许吃缓存（「读原值」这一步用）；
-/// `fresh = true` 必须真的去读设备（「读回断言」用，因为 RAM 已经变了）。
-///
-/// `dev` 作为参数传入而不是存在实现里，是为了避开借用冲突：
-/// `cycle` 同时需要 `&mut HidDevice` 和 `&mut reader`。
+/// 每次从设备新读完整配置，写入基准和读回验证均不使用展示缓存。
 pub trait StateReader {
-    fn read(&mut self, dev: &mut HidDevice, rid: u8, fresh: bool) -> Result<State, OpsError>;
+    fn read(&mut self, dev: &mut HidDevice, rid: u8) -> Result<crate::snapshot::Configuration, OpsError>;
 }
 
 pub struct DirectReader;
 
 impl StateReader for DirectReader {
-    fn read(&mut self, dev: &mut HidDevice, rid: u8, _fresh: bool) -> Result<State, OpsError> {
-        proto::read_state(dev, rid).map_err(map_read_error)
+    fn read(&mut self, dev: &mut HidDevice, rid: u8) -> Result<crate::snapshot::Configuration, OpsError> {
+        crate::snapshot::read_configuration(dev, rid).map_err(map_read_error)
     }
 }
 
-/// 把 `proto::read_state` 的字符串错误归类成 [`OpsError`]。
-///
-/// `read_state` 在设备无应答时会连续 MISS 若干帧，报错文本里含「无应答」。
+/// 把配置读取的字符串错误归类成 [`OpsError`]。
 pub fn map_read_error(msg: String) -> OpsError {
     if msg.contains("无应答") || msg.contains("休眠") {
         OpsError::asleep(msg)
@@ -274,7 +266,7 @@ impl CycleSpec {
 
 /// 六步安全循环，对应 `rw-hid.cs` 的 `Cycle()`。
 ///
-/// 1. 读原值（缓存优先，**整个流程只读这一次**）
+/// 1. 新读完整配置，作为本次写入和还原的共同基准
 /// 2. 写新值（`save` 时顺带 commit）
 /// 3. 读回并断言 `applied`
 /// 4. 自动写回原值（`keep` 时跳过）
@@ -323,18 +315,20 @@ where
     log(&format!("== {} ==", spec.title));
 
     // ---- 步骤 1：读原值（唯一的一次）----
-    let before = reader.read(dev, rid, false)?;
-    let old_value = probe(&before);
+    let before = reader.read(dev, rid)?;
+    let before = before.state();
+    let old_value = probe(before);
     log(&format!("BEFORE       {old_value}"));
 
-    let expected = expected_text(&probe, &before, mutate);
-    let (apply, revert) = build(&before);
+    let expected = expected_text(&probe, before, mutate);
+    let (apply, revert) = build(before);
 
     if expected == old_value {
         log("提示：目标值与当前值相同，本次写入实际是空操作。");
     }
 
     // ---- 步骤 2：写新值 ----
+    crate::snapshot::invalidate_disk_cache();
     let reply = apply(dev, rid).ok_or_else(|| OpsError::asleep("写入无应答"))?;
     if is_nak(&reply) {
         return Err(OpsError::rejected(format!(
@@ -348,8 +342,8 @@ where
     sleep_ms(SETTLE_MS);
 
     // ---- 步骤 3：读回断言 ----
-    let after = reader.read(dev, rid, true)?;
-    let readback_value = probe(&after);
+    let after = reader.read(dev, rid)?;
+    let readback_value = probe(after.state());
     log(&format!("AFTER WRITE  {readback_value}"));
     let applied = readback_value == expected;
     log(&format!(
@@ -388,8 +382,8 @@ where
     sleep_ms(SETTLE_MS);
 
     // ---- 步骤 5：再读回断言 ----
-    let back = reader.read(dev, rid, true)?;
-    let restored_value = probe(&back);
+    let back = reader.read(dev, rid)?;
+    let restored_value = probe(back.state());
     log(&format!("AFTER RESTORE {restored_value}"));
     report.restored = restored_value == report.old_value;
     report.restored_value = restored_value;

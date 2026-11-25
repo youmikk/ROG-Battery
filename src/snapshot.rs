@@ -2,18 +2,13 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::hid::HidDevice;
+use crate::hid::{HidDevice, Link};
 use crate::proto::{self, Identity, State};
 
 /// 默认缓存有效期（秒）。可在 `settings.ini` 里用 `cache_ttl_sec` 覆盖。
 pub const DEFAULT_TTL_SEC: u64 = 30;
 
-/// 设备的完整快照：17 帧原始数据 + 解析结果 + 时间戳。
-///
-/// **缓存原始帧而不是解析后的值**，是为了让「从设备读」和「从缓存读」
-/// 走完全相同的解析代码路径（`proto::parse_*`），不可能出现两条逻辑不一致的情况。
-
-/// 设备的完整快照：17 帧原始数据 + 解析结果 + 时间戳。
+/// 原始帧及部分解析结果；配置操作须通过 `configuration` 检查完整性。
 #[derive(Clone, Default)]
 pub struct Snapshot {
     /// 抓取时刻（进程内相对时间，用于判断内存缓存是否过期）
@@ -29,6 +24,7 @@ pub struct Snapshot {
     /// 链路模式与 report id（缓存跨进程复用时要还原）
     pub link_mode: String,
     pub report_id: u8,
+    pub cache_key: Option<String>,
     /// 解析失败的帧（key -> 原因）。不让一帧读失败就整体失败。
     pub failed: BTreeMap<String, String>,
 }
@@ -36,6 +32,18 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn parsed_frame(&self, key: &str) -> bool {
         self.frames.contains_key(key) && !self.failed.contains_key(key)
+    }
+
+    pub fn configuration(&self) -> Result<Configuration, String> {
+        let mut state = State::default();
+        for &(key, sub, _, parse) in CONFIGURATION_FRAMES {
+            if let Some(reason) = self.failed.get(key) {
+                return Err(format!("配置帧 {key} 不可用：{reason}"));
+            }
+            let frame = self.frames.get(key).ok_or_else(|| format!("缺少配置帧 {key}"))?;
+            parse_configuration_frame(self.report_id, key, sub, frame, parse, &mut state)?;
+        }
+        Ok(Configuration { state })
     }
 
     pub fn battery(&self) -> Option<crate::device::Battery> {
@@ -65,6 +73,65 @@ impl Snapshot {
             .map(|(k, v)| format!("{k}：{v}"))
             .collect()
     }
+}
+
+/// 配置帧全部有效后的只读状态，不能由展示用的默认值直接构造。
+pub struct Configuration {
+    state: State,
+}
+
+impl Configuration {
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+}
+
+type StateParser = fn(&[u8], &mut State) -> Result<(), String>;
+const CONFIGURATION_FRAMES: &[(&str, u8, &[u8], StateParser)] = &[
+    ("12:04:00", 0x04, &[0, 0], proto::parse_perf),
+    ("12:04:02", 0x04, &[2, 0], proto::parse_dpi),
+    ("12:04:03", 0x04, &[3, 0], proto::parse_colors),
+    ("12:00:00", 0x00, &[0, 0], proto::parse_profile),
+    ("12:07:00", 0x07, &[0, 0], proto::parse_energy),
+    ("12:06:00", 0x06, &[0, 0], proto::parse_lod),
+    ("12:03:00", 0x03, &[0, 0], proto::parse_light),
+    ("12:05:00", 0x05, &[0, 0], proto::parse_buttons),
+];
+
+fn parse_configuration_frame(
+    report_id: u8,
+    key: &str,
+    sub: u8,
+    frame: &[u8],
+    parse: StateParser,
+    state: &mut State,
+) -> Result<(), String> {
+    if crate::hid::is_nak(frame) {
+        return Err(format!("配置帧 {key} 被设备 NAK"));
+    }
+    if !frame.starts_with(&[report_id, 0x12, sub]) {
+        return Err(format!("配置帧 {key} 的应答头不匹配"));
+    }
+    parse(frame, state).map_err(|error| format!("配置帧 {key} 无效：{error}"))
+}
+
+pub fn read_configuration(dev: &mut HidDevice, report_id: u8) -> Result<Configuration, String> {
+    read_configuration_with(report_id, |rid, cmd, sub, tail| {
+        dev.xfer(rid, cmd, sub, tail, crate::hid::DEFAULT_TIMEOUT_MS)
+    })
+}
+
+pub(crate) fn read_configuration_with(
+    report_id: u8,
+    mut ask: impl FnMut(u8, u8, u8, &[u8]) -> Option<Vec<u8>>,
+) -> Result<Configuration, String> {
+    let mut snapshot = Snapshot { report_id, ..Default::default() };
+    for &(key, sub, tail, _) in CONFIGURATION_FRAMES {
+        let frame = ask(report_id, 0x12, sub, tail)
+            .ok_or_else(|| format!("配置帧 {key} 无应答"))?;
+        snapshot.frames.insert(key.into(), frame);
+    }
+    snapshot.configuration()
 }
 
 // ==================== 抓取 ====================
@@ -288,14 +355,9 @@ fn parse_all(snap: &mut Snapshot) {
         }
     };
 
-    try_parse("12:04:00", &proto::parse_perf);
-    try_parse("12:04:02", &proto::parse_dpi);
-    try_parse("12:04:03", &proto::parse_colors);
-    try_parse("12:00:00", &proto::parse_profile);
-    try_parse("12:07:00", &proto::parse_energy);
-    try_parse("12:06:00", &proto::parse_lod);
-    try_parse("12:03:00", &proto::parse_light);
-    try_parse("12:05:00", &proto::parse_buttons);
+    for &(key, _, _, parse) in CONFIGURATION_FRAMES {
+        try_parse(key, &parse);
+    }
 
     // 身份字段：逐帧取，缺哪帧就留空，不算失败
     if let Some(m) = snap.frames.get("7D:02:01") {
@@ -372,6 +434,11 @@ impl Snapshot {
         s.push_str("report_id=");
         s.push_str(&self.report_id.to_string());
         s.push('\n');
+        if let Some(key) = &self.cache_key {
+            s.push_str("cache_key=");
+            s.push_str(key);
+            s.push('\n');
+        }
         for (k, v) in &self.frames {
             s.push_str("frame ");
             s.push_str(k);
@@ -409,6 +476,10 @@ impl Snapshot {
                 snap.link_mode = v.trim().to_string();
             } else if let Some(v) = line.strip_prefix("report_id=") {
                 snap.report_id = v.trim().parse().unwrap_or(3);
+            } else if let Some(v) = line.strip_prefix("cache_key=") {
+                if v.len() == 16 && v.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    snap.cache_key = Some(v.to_string());
+                }
             } else if let Some(rest) = line.strip_prefix("frame ") {
                 let mut it = rest.splitn(2, ' ');
                 let key = it.next().unwrap_or("").to_string();
@@ -440,8 +511,9 @@ impl Snapshot {
 
         snap.taken_unix = wall;
         // 用墙钟年龄反推 `Instant`；`checked_sub` 防止年龄超出开机时长时 panic。
-        if wall > 0 {
-            let age = std::time::Duration::from_secs(unix_now().saturating_sub(wall));
+        let now = unix_now();
+        if wall > 0 && wall <= now {
+            let age = std::time::Duration::from_secs(now - wall);
             snap.taken = std::time::Instant::now().checked_sub(age);
         }
         parse_all(&mut snap);
@@ -469,13 +541,69 @@ pub struct SnapshotCache {
 fn cached_hit(
     slot: &Option<std::sync::Arc<Snapshot>>,
     ttl: Duration,
+    key: Option<&str>,
+    link: &Link,
 ) -> Option<std::sync::Arc<Snapshot>> {
     let s = slot.as_ref()?;
-    if s.is_fresh(ttl) {
+    if cache_matches(s, ttl, key, link) {
         Some(std::sync::Arc::clone(s))
     } else {
         None
     }
+}
+
+fn cache_matches(snapshot: &Snapshot, ttl: Duration, key: Option<&str>, link: &Link) -> bool {
+    key.is_some()
+        && snapshot.cache_key.as_deref() == key
+        && snapshot.report_id == link.report_id
+        && snapshot.link_mode == link.mode
+        && snapshot.is_fresh(ttl)
+}
+
+fn device_identity(identity: &Identity) -> Option<String> {
+    let serial = identity.mouse_sn.trim();
+    if !serial.is_empty() {
+        return Some(format!("serial:{serial}"));
+    }
+    let mac = identity.mouse_mac.trim();
+    if !mac.is_empty() && mac != "00:00:00:00:00:00" && mac != "FF:FF:FF:FF:FF:FF" {
+        return Some(format!("mac:{mac}"));
+    }
+    None
+}
+
+fn cache_key(link: &Link, identity: &str) -> String {
+    crate::device::stable_key(&format!(
+        "{:?}:{:04x}:{:04x}:{:04x}:{}:{:?}:{}:{identity}",
+        link.iface.path.to_ascii_lowercase(), link.iface.vendor_id, link.iface.product_id,
+        link.iface.usage_page, link.iface.usage, link.mode, link.report_id,
+    ))
+}
+
+fn live_cache_key(dev: &mut HidDevice, link: &Link) -> Option<String> {
+    live_cache_key_with(link, |rid, cmd, sub, tail| {
+        dev.xfer(rid, cmd, sub, tail, crate::hid::DEFAULT_TIMEOUT_MS)
+    })
+}
+
+fn live_cache_key_with(
+    link: &Link,
+    mut ask: impl FnMut(u8, u8, u8, &[u8]) -> Option<Vec<u8>>,
+) -> Option<String> {
+    let mut identity = Identity::default();
+    if let Some(frame) = ask(link.report_id, 0x12, 0x12, &[2, 0]) {
+        if frame.starts_with(&[link.report_id, 0x12, 0x12]) {
+            identity.mouse_sn = proto::parse_sn(&frame);
+        }
+    }
+    if device_identity(&identity).is_none() {
+        if let Some(frame) = ask(link.report_id, 0xFB, 0x02, &[0, 0]) {
+            if frame.starts_with(&[link.report_id, 0xFB, 0x02]) {
+                identity.mouse_mac = proto::parse_mac(&frame);
+            }
+        }
+    }
+    device_identity(&identity).map(|identity| cache_key(link, &identity))
 }
 
 impl SnapshotCache {
@@ -487,17 +615,12 @@ impl SnapshotCache {
         }
     }
 
-    /// 轻量读取：3 帧，约 100-200ms。给 GUI 后台周期刷新用。
-    ///
-    /// 三层策略：
-    /// 1. 内存里有**全量**快照且还新鲜 → 直接用它（它一定含这 3 项）
-    /// 2. 内存里有新鲜的轻量快照 → 用它
-    /// 3. 真读 3 帧（第一帧 MISS 立刻返回，不白等两次超时）
-    ///
-    /// 返回 `None` 表示连第一帧都没读到 —— 即**鼠标休眠**，不是错误。
-    pub fn get_light(&mut self, dev: &mut HidDevice, report_id: u8, link_mode: &str) -> Option<FetchOutcome> {
-        // 1) 全量快照新鲜：它含这三项，没必要再读
-        if let Some(s) = cached_hit(&self.snapshot, self.ttl) {
+    /// CLI quick：先查询身份再匹配缓存；未命中时读 3 帧并复核身份。
+    /// 身份查询优先 SN，失败后尝试 MAC；没有有效回帧时返回 `None`。
+    pub fn get_light(&mut self, dev: &mut HidDevice, link: &Link) -> Option<FetchOutcome> {
+        let key = live_cache_key(dev, link);
+        // 1) 身份匹配的全量读取结果
+        if let Some(s) = cached_hit(&self.snapshot, self.ttl, key.as_deref(), link) {
             return Some(FetchOutcome {
                 frames_read: s.frames.len(),
                 elapsed: Duration::ZERO,
@@ -506,7 +629,7 @@ impl SnapshotCache {
         }
 
         // 2) 轻量快照新鲜
-        if let Some(s) = cached_hit(&self.light, self.ttl) {
+        if let Some(s) = cached_hit(&self.light, self.ttl, key.as_deref(), link) {
             return Some(FetchOutcome {
                 frames_read: s.frames.len(),
                 elapsed: Duration::ZERO,
@@ -515,11 +638,14 @@ impl SnapshotCache {
         }
 
         // 3) 真读
-        let out = fetch_light(dev, report_id, link_mode);
+        let mut out = fetch_light(dev, link.report_id, &link.mode);
         if out.frames_read == 0 {
             // 一帧都没读到：鼠标睡了。不缓存「空」，否则界面会卡在休眠态
             self.light = None;
             return None;
+        }
+        if key.is_some() && live_cache_key(dev, link) == key {
+            std::sync::Arc::make_mut(&mut out.snapshot).cache_key = key;
         }
         self.light = Some(out.snapshot.clone());
         Some(out)
@@ -530,12 +656,23 @@ impl SnapshotCache {
     pub fn get(
         &mut self,
         dev: &mut HidDevice,
-        all_interfaces: &[crate::hid::HidInterface],
-        report_id: u8,
-        link_mode: &str,
+        link: &Link,
+    ) -> FetchOutcome {
+        let key = live_cache_key(dev, link);
+        self.get_with(link, key.as_deref(), load_disk_cache,
+            || fetch(dev, &link.all_interfaces, link.report_id, &link.mode), save_disk_cache)
+    }
+
+    fn get_with(
+        &mut self,
+        link: &Link,
+        key: Option<&str>,
+        load: impl FnOnce() -> Option<Snapshot>,
+        fetch: impl FnOnce() -> FetchOutcome,
+        save: impl FnOnce(&Snapshot),
     ) -> FetchOutcome {
         // 1) 内存
-        if let Some(s) = cached_hit(&self.snapshot, self.ttl) {
+        if let Some(s) = cached_hit(&self.snapshot, self.ttl, key, link) {
             return FetchOutcome {
                 frames_read: s.frames.len(),
                 elapsed: Duration::ZERO,
@@ -544,9 +681,8 @@ impl SnapshotCache {
         }
 
         // 2) 磁盘（跨进程复用，CLI 每次都重启，没有这层缓存就没意义）
-        if let Some(s) = load_disk_cache() {
-            let fresh = s.wall_age_sec() < self.ttl.as_secs();
-            if fresh {
+        if let Some(s) = key.and_then(|_| load()) {
+            if cache_matches(&s, self.ttl, key, link) {
                 let s = std::sync::Arc::new(s);
                 self.snapshot = Some(std::sync::Arc::clone(&s));
                 return FetchOutcome {
@@ -558,9 +694,13 @@ impl SnapshotCache {
         }
 
         // 3) 真读设备
-        let out = fetch(dev, all_interfaces, report_id, link_mode);
-        if !out.snapshot.frames.is_empty() {
-            save_disk_cache(&out.snapshot);
+        let mut out = fetch();
+        let snapshot = std::sync::Arc::make_mut(&mut out.snapshot);
+        snapshot.cache_key = device_identity(&snapshot.identity)
+            .map(|identity| cache_key(link, &identity))
+            .filter(|observed| Some(observed.as_str()) == key);
+        if snapshot.cache_key.is_some() && !snapshot.frames.is_empty() {
+            save(snapshot);
         }
         self.snapshot = Some(std::sync::Arc::clone(&out.snapshot));
         FetchOutcome {
@@ -576,10 +716,13 @@ impl SnapshotCache {
     pub fn invalidate(&mut self) {
         self.snapshot = None;
         self.light = None;
-        let p = crate::paths::snapshot_cache_file();
-        let _ = std::fs::remove_file(p);
+        invalidate_disk_cache();
     }
 
+}
+
+pub(crate) fn invalidate_disk_cache() {
+    let _ = std::fs::remove_file(crate::paths::snapshot_cache_file());
 }
 
 fn load_disk_cache() -> Option<Snapshot> {
@@ -595,4 +738,229 @@ fn save_disk_cache(s: &Snapshot) {
     }
     let p = crate::paths::snapshot_cache_file();
     let _ = std::fs::write(p, s.to_cache_text());
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+
+    fn link(path: &str) -> Link {
+        Link {
+            mode: "Wireless24G".into(), report_id: 3, all_interfaces: Vec::new(),
+            iface: crate::hid::HidInterface {
+                path: path.into(), vendor_id: 0x0b05, product_id: 0x1ace,
+                usage_page: 0xff01, usage: 1, input_len: 64, output_len: 64,
+                feature_len: 0, product: "Test receiver".into(), serial: "shared".into(),
+            },
+        }
+    }
+
+    fn complete_snapshot() -> Snapshot {
+        let mut snapshot = Snapshot {
+            taken: Some(Instant::now()), taken_unix: unix_now(),
+            report_id: 3, link_mode: "Wireless24G".into(), ..Default::default()
+        };
+        for &(key, sub, tail, _) in CONFIGURATION_FRAMES {
+            let mut frame = vec![0; 64];
+            frame[..3].copy_from_slice(&[3, 0x12, sub]);
+            frame[3..5].copy_from_slice(tail);
+            match key {
+                "12:04:00" => frame[13] = 3,
+                "12:04:02" => {
+                    for offset in (5..21).step_by(4) { frame[offset] = 15; }
+                }
+                "12:00:00" => frame[12] = 1,
+                "12:07:00" => { frame[5] = 50; frame[6] = 2; frame[7] = 20; frame[12] = 1; }
+                "12:05:00" => {
+                    for (index, value) in proto::BUTTON_SRC.iter().enumerate() {
+                        frame[5 + index * 2..7 + index * 2].copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+                _ => (),
+            }
+            snapshot.frames.insert(key.into(), frame);
+        }
+        parse_all(&mut snapshot);
+        snapshot.identity.mouse_sn = "synthetic-mouse-a".into();
+        snapshot
+    }
+
+    fn outcome(snapshot: Snapshot) -> FetchOutcome {
+        FetchOutcome { frames_read: snapshot.frames.len(), snapshot: std::sync::Arc::new(snapshot),
+            elapsed: Duration::from_millis(1) }
+    }
+
+    #[test]
+    fn complete_configuration_preserves_every_backup_field() {
+        let snapshot = complete_snapshot();
+        let configuration = snapshot.configuration().unwrap();
+        let text = crate::backup::render(&configuration, &snapshot.link_mode, snapshot.report_id, "test");
+        let backup = crate::backup::parse(&text).unwrap();
+        assert_eq!(backup.keys_found, crate::backup::BACKUP_KEYS.len());
+        assert!(backup.rejected.is_empty());
+        assert_eq!(backup.buttons, proto::BUTTON_SRC.map(Some));
+        assert_eq!((backup.poweroff_code, backup.low_warn, backup.full_effect), (Some(2), Some(20), Some(1)));
+    }
+
+    #[test]
+    fn every_configuration_frame_is_required_even_when_display_state_exists() {
+        for &(key, _, _, _) in CONFIGURATION_FRAMES {
+            let mut snapshot = complete_snapshot();
+            snapshot.frames.remove(key);
+            parse_all(&mut snapshot);
+            assert!(snapshot.configuration().err().unwrap().contains(key));
+            if key != "12:07:00" { assert_eq!(snapshot.battery().unwrap().percent, Some(50)); }
+            if key == "12:05:00" { assert_eq!(snapshot.state.buttons, [0; proto::BUTTON_SLOTS]); }
+        }
+    }
+
+    #[test]
+    fn malformed_nak_and_wrong_report_id_never_form_a_configuration() {
+        for &(key, sub, _, _) in CONFIGURATION_FRAMES {
+            for frame in [vec![3, 0x12, sub], vec![3, 0xff, 0xaa], vec![1; 64]] {
+                let mut snapshot = complete_snapshot();
+                snapshot.frames.insert(key.into(), frame);
+                assert!(snapshot.configuration().err().unwrap().contains(key));
+            }
+            let mut snapshot = complete_snapshot();
+            snapshot.failed.insert(key.into(), "read failed".into());
+            assert!(snapshot.configuration().is_err());
+        }
+    }
+
+    #[test]
+    fn configuration_reader_always_uses_new_frames_and_rejects_each_missing_frame() {
+        let original = complete_snapshot();
+        let mut fresh = original.clone();
+        fresh.frames.get_mut("12:07:00").unwrap()[7] = 35;
+        let mut reads = 0;
+        let configuration = read_configuration_with(3, |rid, cmd, sub, tail| {
+            assert_eq!((rid, cmd), (3, 0x12));
+            reads += 1;
+            fresh.frames.get(&format!("12:{sub:02X}:{:02X}", tail[0])).cloned()
+        }).unwrap();
+        assert_eq!(reads, 8);
+        assert_eq!(configuration.state().low_warn, 35);
+        assert_eq!(original.state.low_warn, 20);
+        for &(missing, _, _, _) in CONFIGURATION_FRAMES {
+            let result = read_configuration_with(3, |_, _, sub, tail| {
+                let key = format!("12:{sub:02X}:{:02X}", tail[0]);
+                if key == missing { None } else { fresh.frames.get(&key).cloned() }
+            });
+            assert!(result.err().unwrap().contains(missing));
+        }
+    }
+
+    #[test]
+    fn cache_binding_separates_path_device_report_id_and_transport() {
+        let selected = link("synthetic-receiver-a");
+        let identity = "serial:synthetic-mouse-a";
+        let key = cache_key(&selected, identity);
+        let mut snapshot = complete_snapshot();
+        snapshot.cache_key = Some(key.clone());
+        let slot = Some(std::sync::Arc::new(snapshot));
+        let ttl = Duration::from_secs(30);
+        assert!(cached_hit(&slot, ttl, Some(&key), &selected).is_some());
+        assert!(cached_hit(&slot, ttl, None, &selected).is_none());
+        assert!(cached_hit(&slot, ttl, Some(&cache_key(&selected, "serial:synthetic-mouse-b")), &selected).is_none());
+        let mut other = link("synthetic-receiver-b");
+        assert!(cached_hit(&slot, ttl, Some(&cache_key(&other, identity)), &other).is_none());
+        other = selected.clone(); other.report_id = 1;
+        assert!(cached_hit(&slot, ttl, Some(&key), &other).is_none());
+        assert_ne!(cache_key(&other, identity), key);
+        other = selected.clone(); other.mode = "Wired".into();
+        assert!(cached_hit(&slot, ttl, Some(&key), &other).is_none());
+        assert_ne!(cache_key(&other, identity), key);
+    }
+
+    #[test]
+    fn cache_identity_requires_a_live_serial_or_valid_mouse_mac() {
+        let selected = link("synthetic-receiver-a");
+        let key = live_cache_key_with(&selected, |rid, cmd, sub, tail| {
+            assert_eq!((cmd, sub, tail), (0x12, 0x12, &[2, 0][..]));
+            let mut frame = vec![rid, cmd, sub, 2, 0];
+            frame.extend_from_slice(b"synthetic-mouse-a\0");
+            Some(frame)
+        });
+        assert_eq!(key, Some(cache_key(&selected, "serial:synthetic-mouse-a")));
+        for invalid in [None, Some(vec![3, 0xff, 0xaa]), Some(vec![0; 64]), Some(vec![1; 64])] {
+            assert!(live_cache_key_with(&selected, |_, _, _, _| invalid.clone()).is_none());
+        }
+        for mac in [[0; 6], [255; 6], [2, 3, 4, 5, 6, 7]] {
+            let key = live_cache_key_with(&selected, |rid, cmd, sub, _| {
+                if cmd == 0x12 { return None; }
+                let mut frame = vec![rid, cmd, sub, 0, 0, 0];
+                frame.extend_from_slice(&mac);
+                Some(frame)
+            });
+            assert_eq!(key.is_some(), mac == [2, 3, 4, 5, 6, 7]);
+        }
+    }
+
+    #[test]
+    fn disk_cache_roundtrip_keeps_binding_and_rejects_old_or_future_entries() {
+        let selected = link("synthetic-receiver-a");
+        let key = cache_key(&selected, "serial:synthetic-mouse-a");
+        let mut snapshot = complete_snapshot();
+        snapshot.cache_key = Some(key.clone());
+        let text = snapshot.to_cache_text();
+        let restored = Snapshot::from_cache_text(&text).unwrap();
+        assert!(cache_matches(&restored, Duration::from_secs(30), Some(&key), &selected));
+        let unbound = text.lines().filter(|line| !line.starts_with("cache_key=")).collect::<Vec<_>>().join("\n");
+        let restored = Snapshot::from_cache_text(&unbound).unwrap();
+        assert!(!cache_matches(&restored, Duration::from_secs(30), Some(&key), &selected));
+        for taken in [0, unix_now().saturating_sub(60), unix_now() + 3600] {
+            snapshot.taken_unix = taken;
+            let restored = Snapshot::from_cache_text(&snapshot.to_cache_text()).unwrap();
+            assert!(!cache_matches(&restored, Duration::from_secs(30), Some(&key), &selected));
+        }
+    }
+
+    #[test]
+    fn mismatched_memory_and_disk_cache_are_replaced_by_fresh_device_read() {
+        let selected = link("synthetic-receiver-b");
+        let key = cache_key(&selected, "serial:synthetic-mouse-a");
+        let mut stale = complete_snapshot();
+        stale.cache_key = Some(cache_key(&link("synthetic-receiver-a"), "serial:synthetic-mouse-a"));
+        let disk = Snapshot::from_cache_text(&stale.to_cache_text()).unwrap();
+        let mut cache = SnapshotCache::new(30);
+        cache.snapshot = Some(std::sync::Arc::new(stale));
+        let mut fetched = false;
+        let mut saved = false;
+        let result = cache.get_with(&selected, Some(&key), || Some(disk), || {
+            fetched = true;
+            let mut fresh = complete_snapshot(); fresh.state.low_warn = 35;
+            outcome(fresh)
+        }, |snapshot| { saved = true; assert_eq!(snapshot.cache_key.as_deref(), Some(key.as_str())); });
+        assert!(fetched && saved);
+        assert_eq!(result.snapshot.state.low_warn, 35);
+    }
+
+    #[test]
+    fn a_matching_disk_cache_is_reused_only_with_current_identity_evidence() {
+        let selected = link("synthetic-receiver-a");
+        let key = cache_key(&selected, "serial:synthetic-mouse-a");
+        let mut snapshot = complete_snapshot(); snapshot.cache_key = Some(key.clone());
+        let disk = Snapshot::from_cache_text(&snapshot.to_cache_text()).unwrap();
+        let mut cache = SnapshotCache::new(30);
+        let result = cache.get_with(&selected, Some(&key), || Some(disk),
+            || panic!("matching cache should be reused"), |_| panic!("hit must not be saved again"));
+        assert_eq!(result.elapsed, Duration::ZERO);
+        let result = cache.get_with(&selected, None, || panic!("unverified identity must not load disk"),
+            || outcome(complete_snapshot()), |_| panic!("unverified reading must not be cached on disk"));
+        assert!(result.snapshot.cache_key.is_none());
+    }
+
+    #[test]
+    fn identity_change_during_fetch_prevents_cache_publication() {
+        let selected = link("synthetic-receiver-a");
+        let key = cache_key(&selected, "serial:synthetic-mouse-a");
+        let mut cache = SnapshotCache::new(30);
+        let result = cache.get_with(&selected, Some(&key), || None, || {
+            let mut snapshot = complete_snapshot(); snapshot.identity.mouse_sn = "synthetic-mouse-b".into();
+            outcome(snapshot)
+        }, |_| panic!("changed device must not be saved"));
+        assert!(result.snapshot.cache_key.is_none());
+        assert!(cached_hit(&cache.snapshot, cache.ttl, Some(&key), &selected).is_none());
+    }
 }

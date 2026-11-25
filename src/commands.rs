@@ -242,12 +242,12 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&hid::Link>) -> CmdResult {
     };
 
     if save {
-        let out = snapshot::fetch(&mut dev, &link.all_interfaces, link.report_id, &link.mode);
-        if out.snapshot.frames.is_empty() {
-            return fail(crate::tr!("读不到设备状态，无法备份").into(), "");
-        }
+        let configuration = match snapshot::read_configuration(&mut dev, link.report_id) {
+            Ok(configuration) => configuration,
+            Err(error) => return fail(error, ""),
+        };
         let text = crate::backup::render(
-            &out.snapshot.state,
+            &configuration,
             &link.mode,
             link.report_id,
             &settings::timestamp_for_humans(),

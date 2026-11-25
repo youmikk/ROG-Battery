@@ -373,49 +373,12 @@ fn read_frame(
     parse(&m, st)
 }
 
-fn read_perf(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
-    read_frame(dev, rid, 0x12, 0x04, &[0x00, 0x00], parse_perf, st)
-}
-
-fn read_dpi(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
-    read_frame(dev, rid, 0x12, 0x04, &[0x02, 0x00], parse_dpi, st)
-}
-
-fn read_colors(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
-    read_frame(dev, rid, 0x12, 0x04, &[0x03, 0x00], parse_colors, st)
-}
-
-fn read_profile(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
-    read_frame(dev, rid, 0x12, 0x00, &[0x00, 0x00], parse_profile, st)
-}
-
 fn read_energy(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
     read_frame(dev, rid, 0x12, 0x07, &[0x00, 0x00], parse_energy, st)
 }
 
 fn read_lod(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
     read_frame(dev, rid, 0x12, 0x06, &[0x00, 0x00], parse_lod, st)
-}
-
-fn read_light(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
-    read_frame(dev, rid, 0x12, 0x03, &[LIGHT_ZONE, 0x00], parse_light, st)
-}
-
-fn read_buttons(dev: &mut HidDevice, rid: u8, st: &mut State) -> Result<(), String> {
-    read_frame(dev, rid, 0x12, 0x05, &[0x00, 0x00], parse_buttons, st)
-}
-
-pub fn read_state(dev: &mut HidDevice, rid: u8) -> Result<State, String> {
-    let mut st = State::default();
-    read_perf(dev, rid, &mut st)?;
-    read_dpi(dev, rid, &mut st)?;
-    read_colors(dev, rid, &mut st)?;
-    read_profile(dev, rid, &mut st)?;
-    read_energy(dev, rid, &mut st)?;
-    read_lod(dev, rid, &mut st)?;
-    read_light(dev, rid, &mut st)?;
-    read_buttons(dev, rid, &mut st)?;
-    Ok(st)
 }
 
 /// 只读能量块。`restore` 结尾要用它做「能量块是否真的写进去了」的断言。
