@@ -82,6 +82,13 @@ pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
 
 /// 只读描述符枚举，品牌协议决定后续可用的控制接口。
 pub fn enumerate_all_report(hid: &HidApi) -> Result<EnumerateReport, String> {
+    enumerate_all_report_with(hid, |_, _| {})
+}
+
+fn enumerate_all_report_with(
+    hid: &HidApi,
+    mut devnode: impl FnMut(&str, u32),
+) -> Result<EnumerateReport, String> {
     let mut guid = Guid::default();
     unsafe { (hid.get_hid_guid)(&mut guid) };
 
@@ -112,7 +119,12 @@ pub fn enumerate_all_report(hid: &HidApi) -> Result<EnumerateReport, String> {
                 Ok(did)
             }
         },
-        |interface| interface_path(dev_info, interface),
+        |interface| {
+            Ok(interface_path(dev_info, interface)?.map(|(path, instance)| {
+                devnode(&path, instance);
+                path
+            }))
+        },
         |path| probe_interface(hid, path),
     );
 
@@ -168,7 +180,7 @@ fn empty_reason(skipped: &[Skipped]) -> String {
 fn interface_path(
     dev_info: Handle,
     did: &mut SpDeviceInterfaceData,
-) -> Result<Option<String>, String> {
+) -> Result<Option<(String, u32)>, String> {
     let mut required: u32 = 0;
     unsafe {
         SetupDiGetDeviceInterfaceDetailW(
@@ -180,8 +192,8 @@ fn interface_path(
             core::ptr::null_mut(),
         )
     };
-    if required == 0 {
-        return Ok(None);
+    if required < 6 {
+        return Err(format!("SetupDiGetDeviceInterfaceDetailW 长度查询失败（GetLastError={}）", last_error()));
     }
 
     // SP_DEVICE_INTERFACE_DETAIL_DATA_W：cbSize(4) 之后是 WCHAR 路径。
@@ -196,6 +208,7 @@ fn interface_path(
         core::ptr::write_unaligned(buf.as_mut_ptr() as *mut u32, cb_size);
     }
 
+    let mut device_info = SpDevInfoData::default();
     let ok = unsafe {
         SetupDiGetDeviceInterfaceDetailW(
             dev_info,
@@ -203,11 +216,11 @@ fn interface_path(
             buf.as_mut_ptr() as *mut c_void,
             required,
             core::ptr::null_mut(),
-            core::ptr::null_mut(),
+            (&mut device_info as *mut SpDevInfoData).cast(),
         )
     };
     if ok == 0 {
-        return Ok(None);
+        return Err(format!("SetupDiGetDeviceInterfaceDetailW 失败（GetLastError={}）", last_error()));
     }
 
     let wchars: Vec<u16> = buf[4..]
@@ -215,7 +228,46 @@ fn interface_path(
         .map(|c| u16::from_ne_bytes([c[0], c[1]]))
         .collect();
     let end = wchars.iter().position(|&c| c == 0).unwrap_or(wchars.len());
-    Ok(Some(String::from_utf16_lossy(&wchars[..end])))
+    Ok(Some((String::from_utf16_lossy(&wchars[..end]), device_info.dev_inst)))
+}
+
+fn usb_physical_group(instance: u32, interface: &HidInterface) -> Option<String> {
+    use winapi::um::cfgmgr32::{CM_Get_Device_IDW, CM_Get_Parent, CR_SUCCESS, MAX_DEVICE_ID_LEN};
+    usb_physical_group_with(instance, interface.vendor_id, interface.product_id,
+        |instance| {
+            let mut buffer = [0u16; MAX_DEVICE_ID_LEN];
+            if unsafe { CM_Get_Device_IDW(instance, buffer.as_mut_ptr(), buffer.len() as u32, 0) } != CR_SUCCESS {
+                return None;
+            }
+            let end = buffer.iter().position(|&unit| unit == 0)?;
+            String::from_utf16(&buffer[..end]).ok()
+        },
+        |instance| {
+            let mut parent = 0;
+            (unsafe { CM_Get_Parent(&mut parent, instance, 0) } == CR_SUCCESS).then_some(parent)
+        },
+    )
+}
+
+fn usb_physical_group_with(
+    mut instance: u32,
+    vendor_id: u16,
+    product_id: u16,
+    mut device_id: impl FnMut(u32) -> Option<String>,
+    mut parent: impl FnMut(u32) -> Option<u32>,
+) -> Option<String> {
+    let expected = format!("vid_{vendor_id:04x}&pid_{product_id:04x}");
+    let mut visited = std::collections::BTreeSet::new();
+    for _ in 0..32 {
+        if !visited.insert(instance) { return None; }
+        let identity = device_id(instance)?.to_ascii_lowercase();
+        let parts: Vec<_> = identity.split('\\').collect();
+        if parts.len() == 3 && parts[0] == "usb" && parts[1] == expected && !parts[2].is_empty() {
+            return Some(identity);
+        }
+        instance = parent(instance)?;
+    }
+    None
 }
 
 /// 打开一个接口，读它的属性与 caps，然后立刻关闭。
@@ -827,7 +879,7 @@ pub struct Link {
     pub mode: String,
     pub report_id: u8,
     pub iface: HidInterface,
-    /// 枚举到的全部 ASUS 接口，供 `info` 顺带读接收器侧信息
+    /// 同一物理设备的接口；无法确认分组时仅保留当前接口。
     pub all_interfaces: Vec<HidInterface>,
 }
 
@@ -843,22 +895,18 @@ impl Link {
 }
 
 fn parse_pairing_table(scan: &[u8], wanted: &[u16]) -> Option<u8> {
-if scan.len() < 6 {
-    return None;
-}
-let count = scan[4] as usize | ((scan[5] as usize) << 8);
-let mut at = 6;
-for _ in 0..count {
-    if at + 4 > scan.len() {
-        return None;
+    if scan.len() < 6 { return None; }
+    let count = u16::from_le_bytes([scan[4], scan[5]]) as usize;
+    let entries = scan.get(6..6 + count * 4)?;
+    let mut report_id = None;
+    for entry in entries.chunks_exact(4) {
+        let pid = u16::from_le_bytes([entry[0], entry[1]]);
+        if wanted.contains(&pid) {
+            if report_id.is_some() || entry[2] == 0 { return None; }
+            report_id = Some(entry[2]);
+        }
     }
-    let pid = scan[at] as u16 | ((scan[at + 1] as u16) << 8);
-    if wanted.contains(&pid) {
-        return Some(scan[at + 2]);
-    }
-    at += 4;
-}
-None
+    report_id
 }
 
 /// 可能是命令通道的 usage page。
@@ -874,86 +922,82 @@ fn is_command_page(page: u16) -> bool {
 /// 优先有线（PID != 接收器 && usage page == 0xFF01），
 /// 否则走接收器：用 `A0 00` 读配对表，从里面找出鼠标的 report id。
 pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
-    let report = enumerate_report(hid)?;
+    let mut instances = std::collections::BTreeMap::new();
+    let mut report = enumerate_all_report_with(hid, |path, instance| {
+        instances.insert(path.to_string(), instance);
+    })?;
+    report.interfaces.retain(|interface| interface.vendor_id == VID_ASUS);
+    open_links_with(
+        report,
+        |interface| usb_physical_group(*instances.get(&interface.path)?, interface),
+        |iface| {
+            let mut device = HidDevice::open(iface).ok()?;
+            [1, 0].into_iter().find(|&report_id| {
+                device.xfer(report_id, 0x12, 0x07, &[0, 0], DEFAULT_TIMEOUT_MS)
+                    .is_some_and(|reply| !is_nak(&reply) && reply.len() >= 12)
+            })
+        },
+        |iface| HidDevice::open(iface).ok()?.xfer(1, 0xA0, 0x00, &[], 2500),
+    )
+}
+
+fn open_links_with(
+    report: EnumerateReport,
+    mut physical_group: impl FnMut(&HidInterface) -> Option<String>,
+    mut wired_report_id: impl FnMut(&HidInterface) -> Option<u8>,
+    mut pairing_table: impl FnMut(&HidInterface) -> Option<Vec<u8>>,
+) -> Result<Vec<Link>, String> {
     let all = report.interfaces;
     if all.is_empty() {
+        if report.skipped.is_empty() { return Ok(Vec::new()); }
         return Err(empty_reason(&report.skipped));
     }
 
-    let mut wired: Vec<Link> = Vec::new();
+    let mut groups = std::collections::BTreeMap::<String, Vec<HidInterface>>::new();
     for iface in &all {
-        if iface.product_id == PID_DONGLE || !iface.is_command_channel() {
-            continue;
+        let group = physical_group(iface).filter(|group| !group.is_empty())
+            .map(|group| format!("physical:{}", group.to_ascii_lowercase()))
+            .unwrap_or_else(|| format!("interface:{}", iface.path.to_ascii_lowercase()));
+        groups.entry(format!("{:04x}:{:04x}:{group}", iface.vendor_id, iface.product_id))
+            .or_default().push(iface.clone());
+    }
+    let mut links = Vec::new();
+    for interfaces in groups.values() {
+        for iface in interfaces {
+            if iface.product_id == PID_DONGLE || !iface.is_command_channel()
+                || !is_command_page(iface.usage_page) { continue; }
+            if let Some(report_id) = wired_report_id(iface) {
+                links.push(Link {
+                    mode: "Wired".into(), report_id, iface: iface.clone(),
+                    all_interfaces: interfaces.clone(),
+                });
+            }
         }
-        // 不按「鼠标专用页」筛：键盘、耳机、手柄的命令通道也在这几页上，
-        // 认谁不认谁交给「发一帧电量查询、答得上来才算」来判定。
-        if !is_command_page(iface.usage_page) {
-            continue;
-        }
-        let Ok(mut dev) = HidDevice::open(iface) else {
-            continue;
+    }
+    for interfaces in groups.values() {
+        let controls: Vec<_> = interfaces.iter().filter(|iface| iface.product_id == PID_DONGLE
+            && iface.usage_page == USAGE_PAGE_DONGLE_CTRL && iface.is_command_channel()).collect();
+        let mice: Vec<_> = interfaces.iter().filter(|iface| iface.product_id == PID_DONGLE
+            && iface.usage_page == USAGE_PAGE_MOUSE_CTRL && iface.is_command_channel()).collect();
+        let [control] = controls.as_slice() else { continue; };
+        let iface = match mice.as_slice() {
+            [] => *control,
+            [mouse] => *mouse,
+            _ => continue,
         };
-        for rid in [1u8, 0u8] {
-            if let Some(m) = dev.xfer(rid, 0x12, 0x07, &[0, 0], DEFAULT_TIMEOUT_MS) {
-                if !is_nak(&m) && m.len() >= 12 {
-                    if std::env::var_os("ROG_HID_DEBUG").is_some() {
-                        eprintln!("[hid] 有线命中 report id {rid}：{}", iface.path);
-                    }
-                    wired.push(Link {
-                        mode: "Wired".to_string(),
-                        report_id: rid,
-                        iface: iface.clone(),
-                        all_interfaces: all.clone(),
-                    });
-                    break;
-                }
-            }
-        }
+        let Some(scan) = pairing_table(control) else { continue; };
+        if scan.get(..3) != Some(&[1, 0xA0, 0][..]) { continue; }
+        let Some(report_id) = parse_pairing_table(&scan, &[PID_MOUSE_WIRELESS, PID_MOUSE_WIRED])
+            .filter(|report_id| *report_id != 0) else { continue; };
+        links.push(Link {
+            mode: "Wireless24G".into(), report_id, iface: iface.clone(),
+            all_interfaces: interfaces.clone(),
+        });
     }
-
-    // 2) 无线：先找接收器控制通道（0xFF02），读配对表拿 report id
-    let dongle_ctrl = all.iter().find(|x| {
-        x.product_id == PID_DONGLE
-            && x.usage_page == USAGE_PAGE_DONGLE_CTRL
-            && x.is_command_channel()
-    });
-    let dongle_mouse = all.iter().find(|x| {
-        x.product_id == PID_DONGLE
-            && x.usage_page == USAGE_PAGE_MOUSE_CTRL
-            && x.is_command_channel()
-    });
-
-    if dongle_ctrl.is_none() {
-        if !wired.is_empty() {
-            return Ok(wired);
-        }
-        return Err("没有找到接收器控制通道（usage page 0xFF02）".to_string());
+    if links.is_empty() && all.iter().any(HidInterface::is_command_channel) {
+        return Err("没有找到可确认的设备命令通道或接收器配对信息".into());
     }
-
-    let mut report_id: u8 = 3; // 文档实测的默认值
-    if let Some(ctrl) = dongle_ctrl {
-        if let Ok(mut dev) = HidDevice::open(ctrl) {
-            // A0 00 -> 01 A0 00 count(2) 之后每项 4 字节 {PID(LE16), report_id, notify_id}
-            if let Some(scan) = dev.xfer(1, 0xA0, 0x00, &[], 2500) {
-                if let Some(rid) =
-                    parse_pairing_table(&scan, &[PID_MOUSE_WIRELESS, PID_MOUSE_WIRED])
-                {
-                    report_id = rid;
-                }
-            }
-        }
-    }
-
-    let iface = dongle_mouse
-        .or(dongle_ctrl)
-        .ok_or("接收器上没有可用的命令通道")?;
-    wired.push(Link {
-        mode: "Wireless24G".to_string(),
-        report_id,
-        iface: iface.clone(),
-        all_interfaces: all.clone(),
-    });
-    Ok(wired)
+    Ok(links)
 }
 
 /// 只取第一条链路。命令行走的是这条 —— 一次只操作一台设备。
@@ -970,6 +1014,152 @@ fn protocol_input(mut frame: Vec<u8>, report_id: Option<u8>, capacity: usize) ->
         frame.remove(0);
     }
     Some(frame)
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    fn interface(path: &str, page: u16) -> HidInterface {
+        HidInterface {
+            path: path.into(), vendor_id: VID_ASUS, product_id: PID_DONGLE,
+            usage_page: page, usage: 1, input_len: 64, output_len: 64,
+            feature_len: 0, product: "identical receiver".into(), serial: String::new(),
+        }
+    }
+
+    fn pairing(report_id: u8) -> Vec<u8> {
+        vec![1, 0xA0, 0, 0, 1, 0, 0x65, 0x1B, report_id, 0]
+    }
+
+    fn report(interfaces: Vec<HidInterface>) -> EnumerateReport {
+        EnumerateReport { interfaces, skipped: Vec::new() }
+    }
+
+    #[test]
+    fn every_receiver_keeps_its_own_report_id_and_interfaces_in_any_order() {
+        let interfaces = [
+            interface("A-control", USAGE_PAGE_DONGLE_CTRL),
+            interface("B-mouse", USAGE_PAGE_MOUSE_CTRL),
+            interface("B-control", USAGE_PAGE_DONGLE_CTRL),
+            interface("A-mouse", USAGE_PAGE_MOUSE_CTRL),
+        ];
+        for rotation in 0..4 {
+            let mut interfaces = interfaces.to_vec();
+            interfaces.rotate_left(rotation);
+            let links = open_links_with(report(interfaces),
+                |interface| Some(interface.path[..1].into()),
+                |_| panic!("receiver is not wired"),
+                |interface| Some(pairing(if interface.path.starts_with('A') { 3 } else { 7 })),
+            ).unwrap();
+            assert_eq!(links.len(), 2);
+            for link in links {
+                let group = &link.iface.path[..1];
+                assert!(link.iface.path.ends_with("-mouse"));
+                assert_eq!(link.report_id, if group == "A" { 3 } else { 7 });
+                assert_eq!(link.all_interfaces.len(), 2);
+                assert!(link.all_interfaces.iter().all(|interface| interface.path.starts_with(group)));
+            }
+        }
+    }
+
+    #[test]
+    fn unresolved_parent_never_attaches_another_interfaces_control_channel() {
+        let links = open_links_with(report(vec![
+            interface("control", USAGE_PAGE_DONGLE_CTRL),
+            interface("mouse", USAGE_PAGE_MOUSE_CTRL),
+        ]), |_| None, |_| None, |_| Some(pairing(7))).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].iface.path, "control");
+        assert_eq!(links[0].all_interfaces.len(), 1);
+        assert_eq!(links[0].all_interfaces[0].path, "control");
+    }
+
+    #[test]
+    fn unconfirmed_pairing_never_invents_a_default_report_id() {
+        for scan in [None, Some(vec![1, 0xFF, 0xAA]), Some(vec![1, 0xA0, 0, 0, 0, 0]),
+            Some(vec![1, 0xA0, 0, 0, 1, 0, 1, 2, 7, 0])] {
+            let links = open_links_with(report(vec![interface("control", USAGE_PAGE_DONGLE_CTRL)]),
+                |_| Some("receiver".into()), |_| None, |_| scan.clone());
+            assert!(links.is_err());
+        }
+    }
+
+    #[test]
+    fn wired_link_carries_only_its_physical_interfaces() {
+        let mut wired = interface("wired", USAGE_PAGE_MOUSE_CTRL);
+        wired.product_id = PID_MOUSE_WIRED;
+        let links = open_links_with(report(vec![wired, interface("receiver", USAGE_PAGE_DONGLE_CTRL)]),
+            |interface| Some(interface.path.clone()), |_| Some(1), |_| None).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].all_interfaces.len(), 1);
+        assert_eq!(links[0].all_interfaces[0].path, "wired");
+    }
+
+    #[test]
+    fn ambiguous_sibling_control_channels_are_not_selected_by_order() {
+        let result = open_links_with(report(vec![
+            interface("control-a", USAGE_PAGE_DONGLE_CTRL),
+            interface("control-b", USAGE_PAGE_DONGLE_CTRL),
+            interface("mouse", USAGE_PAGE_MOUSE_CTRL),
+        ]), |_| Some("receiver".into()), |_| None, |_| Some(pairing(3)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn complete_empty_enumeration_is_distinct_from_unreadable_candidates() {
+        assert!(open_links_with(report(Vec::new()), |_| None, |_| None, |_| None).unwrap().is_empty());
+        let report = EnumerateReport { interfaces: Vec::new(),
+            skipped: vec![Skipped { path: "occupied".into(), reason: "sharing violation".into() }] };
+        assert!(open_links_with(report, |_| None, |_| None, |_| None).is_err());
+        let mut standard = interface("standard", 1);
+        standard.usage = 2;
+        assert!(open_links_with(self::report(vec![standard]), |_| None, |_| None, |_| None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn incomplete_or_ambiguous_pairing_table_does_not_select_a_slot() {
+        let mut truncated = pairing(3);
+        truncated[4] = 2;
+        let mut ambiguous = truncated.clone();
+        ambiguous.extend_from_slice(&[0x63, 0x1B, 7, 0]);
+        for scan in [truncated, ambiguous, pairing(0)] {
+            assert!(parse_pairing_table(&scan, &[PID_MOUSE_WIRELESS, PID_MOUSE_WIRED]).is_none());
+        }
+    }
+
+    #[test]
+    fn usb_ancestry_joins_interfaces_but_preserves_physical_instances() {
+        let nodes = [
+            (1, "HID\\VID_0B05&PID_1ACE&MI_00&COL01\\collection-a", Some(2)),
+            (2, "USB\\VID_0B05&PID_1ACE&MI_00\\interface-a", Some(3)),
+            (3, "USB\\VID_0B05&PID_1ACE\\physical-a", None),
+            (4, "HID\\VID_0B05&PID_1ACE&MI_01&COL01\\collection-b", Some(5)),
+            (5, "USB\\VID_0B05&PID_1ACE&MI_01\\interface-b", Some(3)),
+            (6, "USB\\VID_0B05&PID_1ACE\\physical-b", None),
+        ];
+        let group = |start| usb_physical_group_with(start, VID_ASUS, PID_DONGLE,
+            |node| nodes.iter().find(|entry| entry.0 == node).map(|entry| entry.1.into()),
+            |node| nodes.iter().find(|entry| entry.0 == node).and_then(|entry| entry.2));
+        assert_eq!(group(1), Some("usb\\vid_0b05&pid_1ace\\physical-a".into()));
+        assert_eq!(group(1), group(4));
+        assert_ne!(group(1), group(6));
+        assert_eq!(group(99), None);
+    }
+
+    #[test]
+    fn usb_ancestry_fails_closed_on_missing_wrong_or_cyclic_parents() {
+        assert_eq!(usb_physical_group_with(1, VID_ASUS, PID_DONGLE,
+            |_| Some("USB\\VID_1234&PID_5678\\other".into()), |_| None), None);
+        assert_eq!(usb_physical_group_with(1, VID_ASUS, PID_DONGLE,
+            |_| Some("USB\\VID_0B05&PID_1ACE&MI_00\\interface".into()), |_| Some(1)), None);
+        assert_eq!(usb_physical_group_with(1, VID_ASUS, PID_DONGLE,
+            |_| Some("USB\\VID_0B05&PID_1ACE\\".into()), |_| None), None);
+        let mut calls = 0;
+        assert_eq!(usb_physical_group_with(1, VID_ASUS, PID_DONGLE,
+            |_| { calls += 1; Some("ROOT\\unknown\\node".into()) }, |node| Some(node + 1)), None);
+        assert_eq!(calls, 32);
+    }
 }
 
 #[cfg(test)]
@@ -1089,6 +1279,16 @@ mod enumeration_tests {
                 assert!(result.is_err());
             }
         }
+    }
+
+    #[test]
+    fn interface_path_failure_is_not_a_successful_empty_scan() {
+        let result = enumerate_interfaces_with(
+            |_| Ok(SpDeviceInterfaceData::default()),
+            |_| Err("interface disappeared during detail lookup".into()),
+            |_| panic!("no path was resolved"),
+        );
+        assert_eq!(result.err().as_deref(), Some("interface disappeared during detail lookup"));
     }
 }
 

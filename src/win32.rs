@@ -806,6 +806,21 @@ extern "system" {
 }
 
 // ============ setupapi ============
+#[repr(C)]
+pub struct SpDevInfoData {
+    pub cb_size: u32,
+    pub class_guid: Guid,
+    pub dev_inst: u32,
+    pub reserved: usize,
+}
+
+impl Default for SpDevInfoData {
+    fn default() -> Self {
+        Self { cb_size: core::mem::size_of::<Self>() as u32,
+            class_guid: Guid::default(), dev_inst: 0, reserved: 0 }
+    }
+}
+
 #[link(name = "setupapi")]
 extern "system" {
     pub fn SetupDiGetClassDevsW(
