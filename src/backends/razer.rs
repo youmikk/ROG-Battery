@@ -287,6 +287,55 @@ impl<C: Channel> Session<C> {
     fn normal_mode(&mut self) -> bool {
         self.query(0, 0x84, 2, &[], 2).is_ok_and(|r| r == [0, 0])
     }
+    fn read_snapshot(&mut self, target: &Target) -> Result<Snapshot, String> {
+        let mut target = target.clone();
+        target.key = target.unverified_key();
+        target.verified_identity = false;
+        if let Some(key) = self.identity() {
+            target.key = key;
+            target.verified_identity = true;
+        }
+        let (battery, battery_at) = match self.battery() {
+            Some((battery, at)) => (Some(battery), Some(at)),
+            None => (None, None),
+        };
+        let mut dpi = self.dpi();
+        let mut polling_rate = if dpi.current.is_some() {
+            target.family = DeviceFamily::Mouse;
+            self.rate()
+        } else {
+            PollingRate::default()
+        };
+        if battery.is_none() && dpi.current.is_none() {
+            return Err(crate::i18n::translate("Razer 设备无有效应答").into());
+        }
+        if target.verified_identity {
+            if let Some(caps) = razer_capabilities::for_product(target.hid()?.product_id)
+                .filter(|_| self.normal_mode())
+            {
+                dpi.values = (100..=caps.max_dpi).collect();
+                dpi.write_effect = Some(if caps.dpi_storage == 0 { crate::device::DpiWriteEffect::Current }
+                    else { crate::device::DpiWriteEffect::Stored });
+                dpi.writable = dpi.current.is_some() && dpi.current == dpi.current_y;
+                dpi.stage_editable = !dpi.stages.is_empty()
+                    && dpi.stages.iter().all(|stage| {
+                        (100..=caps.max_dpi).contains(&stage.value)
+                            && dpi.stage_y.get(&stage.index)
+                                .is_some_and(|y| (100..=caps.max_dpi).contains(y))
+                    });
+                dpi.stage_writable = dpi.stage_editable;
+                if polling_rate.current.is_some_and(|hz| caps.rates.contains(&hz)) {
+                    polling_rate.values = caps.rates.to_vec();
+                    polling_rate.writable = true;
+                }
+            }
+            if self.identity().as_ref() != Some(&target.key) {
+                return Err("设备身份已变化，请刷新后重试".into());
+            }
+        }
+        Ok(Snapshot { target, battery, battery_unavailable: false, battery_at,
+            dpi, polling_rate, connected: true })
+    }
     fn check(&mut self, target: &Target) -> Result<Capabilities, String> {
         let caps = razer_capabilities::for_product(self.interface.product_id)
             .ok_or("此连接尚未确认设置写入协议")?;
@@ -577,59 +626,7 @@ impl DeviceBackend for Razer {
             feature::FeatureChannel::open_with_length(target.hid()?, LENGTH)?,
             target.hid()?,
         );
-        let (battery, battery_at) = match s.battery() {
-            Some((battery, at)) => (Some(battery), Some(at)),
-            None => (None, None),
-        };
-        let mut dpi = s.dpi();
-        let mut target = target.clone();
-        let mut polling_rate = if dpi.current.is_some() {
-            target.family = DeviceFamily::Mouse;
-            s.rate()
-        } else {
-            PollingRate::default()
-        };
-        if battery.is_none() && dpi.current.is_none() {
-            return Err(crate::i18n::translate("Razer 设备无有效应答").into());
-        }
-        if let Some(key) = s.identity() {
-            target.key = key;
-            target.verified_identity = true;
-        }
-        if target.verified_identity {
-            if let Some(caps) = razer_capabilities::for_product(target.hid()?.product_id)
-                .filter(|_| s.normal_mode())
-            {
-                dpi.values = (100..=caps.max_dpi).collect();
-                dpi.write_effect = Some(if caps.dpi_storage == 0 { crate::device::DpiWriteEffect::Current }
-                    else { crate::device::DpiWriteEffect::Stored });
-                dpi.writable = dpi.current.is_some() && dpi.current == dpi.current_y;
-                dpi.stage_editable = !dpi.stages.is_empty()
-                    && dpi.stages.iter().all(|stage| {
-                        (100..=caps.max_dpi).contains(&stage.value)
-                            && dpi
-                                .stage_y
-                                .get(&stage.index)
-                                .is_some_and(|y| (100..=caps.max_dpi).contains(y))
-                    });
-                dpi.stage_writable = dpi.stage_editable;
-                if polling_rate
-                    .current
-                    .is_some_and(|hz| caps.rates.contains(&hz))
-                {
-                    polling_rate.values = caps.rates.to_vec();
-                    polling_rate.writable = true;
-                }
-            }
-        }
-        Ok(Snapshot {
-            target,
-            battery,
-            battery_unavailable: false, battery_at,
-            dpi,
-            polling_rate,
-            connected: true,
-        })
+        s.read_snapshot(target)
     }
     fn set_dpi(&self, _: &HidApi, target: &Target, dpi: u16) -> Result<(), String> {
         with_session(target, |s| s.numeric(target, dpi))
@@ -868,6 +865,11 @@ mod tests {
         ack: bool,
         reject: bool,
         replace_after_write: bool,
+        replace_after_battery: bool,
+        replace_after_mode: bool,
+        identity_available: bool,
+        identity_after_battery: Option<bool>,
+        identity_reads: usize,
         table_reads: usize,
         change_table_at: usize,
         corrupt_neighbor: bool,
@@ -893,6 +895,11 @@ mod tests {
                 ack: true,
                 reject: false,
                 replace_after_write: false,
+                replace_after_battery: false,
+                replace_after_mode: false,
+                identity_available: true,
+                identity_after_battery: None,
+                identity_reads: 0,
                 table_reads: 0,
                 change_table_at: usize::MAX,
                 corrupt_neighbor: false,
@@ -916,8 +923,26 @@ mod tests {
             }
             let args = &p[9..9 + usize::from(p[6])];
             let data = match (class, cmd) {
-                (0, 0x82) => self.serial.clone(),
-                (0, 0x84) => vec![self.mode, 0],
+                (7, 0x80) => {
+                    if self.replace_after_battery { self.serial[6] = b'X'; }
+                    if let Some(available) = self.identity_after_battery.take() {
+                        self.identity_available = available;
+                    }
+                    vec![1, 128]
+                }
+                (7, 0x84) => vec![0, 0],
+                (0, 0x82) => {
+                    self.identity_reads += 1;
+                    if !self.identity_available {
+                        self.pending = Some(reply(p, 5, &[]));
+                        return Ok(());
+                    }
+                    self.serial.clone()
+                }
+                (0, 0x84) => {
+                    if self.replace_after_mode { self.serial[6] = b'X'; }
+                    vec![self.mode, 0]
+                }
                 (4, 0x85) => {
                     let mut data = self.current.clone();
                     data[0] = args[0];
@@ -996,6 +1021,61 @@ mod tests {
             StageContext::Configuration(table.token()),
         )
     }
+    #[test]
+    fn snapshot_rejects_a_mouse_replaced_after_its_battery_reply() {
+        let (mut session, target) = mouse();
+        session.channel.replace_after_battery = true;
+        session.channel.identity_reads = 0;
+        assert!(session.read_snapshot(&target).is_err());
+        assert_eq!(session.channel.identity_reads, 2);
+        assert!(session.channel.writes.is_empty());
+    }
+
+    #[test]
+    fn snapshot_rejects_missing_identity_and_replacement_at_the_last_mode_query() {
+        for missing in [false, true] {
+            let (mut session, target) = mouse();
+            session.channel.identity_reads = 0;
+            if missing { session.channel.identity_after_battery = Some(false); }
+            else { session.channel.replace_after_mode = true; }
+            assert!(session.read_snapshot(&target).is_err());
+            assert_eq!(session.channel.identity_reads, 2);
+            assert!(session.channel.writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn snapshot_without_initial_identity_cannot_reuse_or_promote_verified_identity() {
+        for restored in [false, true] {
+            let (mut session, target) = mouse();
+            session.channel.identity_available = false;
+            session.channel.identity_after_battery = Some(restored);
+            session.channel.identity_reads = 0;
+            let snapshot = session.read_snapshot(&target).unwrap();
+            assert_eq!(snapshot.target.key, target.unverified_key());
+            assert!(!snapshot.target.verified_identity);
+            assert_eq!(snapshot.battery.unwrap().percent, Some(50));
+            assert!(!snapshot.dpi.writable && !snapshot.dpi.stage_writable
+                && !snapshot.dpi.stage_editable && !snapshot.polling_rate.writable);
+            assert_eq!(session.channel.identity_reads, 1);
+            assert!(session.channel.writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn snapshot_with_stable_identity_preserves_measurements_and_capabilities() {
+        let (mut session, target) = mouse();
+        session.channel.identity_reads = 0;
+        let snapshot = session.read_snapshot(&target).unwrap();
+        assert_eq!(snapshot.target.key, target.key);
+        assert!(snapshot.target.verified_identity);
+        assert_eq!(snapshot.battery.unwrap().percent, Some(50));
+        assert_eq!(snapshot.dpi.current, Some(800));
+        assert!(snapshot.dpi.stage_writable && snapshot.polling_rate.writable);
+        assert_eq!(session.channel.identity_reads, 2);
+        assert!(session.channel.writes.is_empty());
+    }
+
     #[test]
     fn stage_edit_preserves_other_axes_reserved_bytes_unused_slots_and_active_stage() {
         let (mut s, target) = mouse();
