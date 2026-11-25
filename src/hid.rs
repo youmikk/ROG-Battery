@@ -82,9 +82,6 @@ pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
 
 /// 只读描述符枚举，品牌协议决定后续可用的控制接口。
 pub fn enumerate_all_report(hid: &HidApi) -> Result<EnumerateReport, String> {
-    let mut list = Vec::new();
-    let mut skipped: Vec<Skipped> = Vec::new();
-
     let mut guid = Guid::default();
     unsafe { (hid.get_hid_guid)(&mut guid) };
 
@@ -103,43 +100,49 @@ pub fn enumerate_all_report(hid: &HidApi) -> Result<EnumerateReport, String> {
         ));
     }
 
-    // 无论成败都要销毁 dev_info
-    let result = (|| -> Result<(), String> {
-        let mut index: u32 = 0;
-        loop {
+    let result = enumerate_interfaces_with(
+        |index| {
             let mut did = SpDeviceInterfaceData::default();
             let ok = unsafe {
                 SetupDiEnumDeviceInterfaces(dev_info, core::ptr::null_mut(), &guid, index, &mut did)
             };
             if ok == 0 {
-                let err = last_error();
-                // ERROR_NO_MORE_ITEMS 是正常结束
-                if err == ERROR_NO_MORE_ITEMS || index > 0 {
-                    break;
-                }
-                return Err(format!(
-                    "SetupDiEnumDeviceInterfaces 失败（GetLastError={err}）"
-                ));
+                Err(last_error())
+            } else {
+                Ok(did)
             }
-            index += 1;
-
-            let Some(path) = interface_path(dev_info, &mut did)? else {
-                continue;
-            };
-            match probe_interface(hid, &path) {
-                Ok(iface) => {
-                    list.push(iface);
-                }
-                // 单个接口打不开（权限 / 被占用）不算致命，但要留下原因，
-                // 否则「设备插着却报找不到」没法解释。
-                Err(reason) => skipped.push(Skipped { path, reason }),
-            }
-        }
-        Ok(())
-    })();
+        },
+        |interface| interface_path(dev_info, interface),
+        |path| probe_interface(hid, path),
+    );
 
     unsafe { SetupDiDestroyDeviceInfoList(dev_info) };
-    result?;
+    result
+}
+
+fn enumerate_interfaces_with(
+    mut next: impl FnMut(u32) -> Result<SpDeviceInterfaceData, u32>,
+    mut path: impl FnMut(&mut SpDeviceInterfaceData) -> Result<Option<String>, String>,
+    mut probe: impl FnMut(&str) -> Result<HidInterface, String>,
+) -> Result<EnumerateReport, String> {
+    let mut list = Vec::new();
+    let mut skipped = Vec::new();
+    let mut index = 0;
+    loop {
+        let mut interface = match next(index) {
+            Ok(interface) => interface,
+            Err(error) if error == ERROR_NO_MORE_ITEMS => break,
+            Err(error) => return Err(format!(
+                "SetupDiEnumDeviceInterfaces 失败（GetLastError={error}）"
+            )),
+        };
+        index += 1;
+        let Some(path) = path(&mut interface)? else { continue; };
+        match probe(&path) {
+            Ok(interface) => list.push(interface),
+            Err(reason) => skipped.push(Skipped { path, reason }),
+        }
+    }
     Ok(EnumerateReport {
         interfaces: list,
         skipped,
@@ -973,6 +976,75 @@ fn protocol_input(mut frame: Vec<u8>, report_id: Option<u8>, capacity: usize) ->
         frame.remove(0);
     }
     Some(frame)
+}
+
+#[cfg(test)]
+mod enumeration_tests {
+    use super::*;
+
+    fn interface(path: &str) -> HidInterface {
+        HidInterface {
+            path: path.into(), vendor_id: VID_ASUS, product_id: PID_DONGLE,
+            usage_page: USAGE_PAGE_DONGLE_CTRL, usage: 1,
+            input_len: 64, output_len: 64, feature_len: 0,
+            product: String::new(), serial: String::new(),
+        }
+    }
+
+    #[test]
+    fn enumeration_error_after_a_valid_interface_rejects_the_partial_scan() {
+        let mut indices = Vec::new();
+        let result = enumerate_interfaces_with(
+            |index| {
+                indices.push(index);
+                if index == 0 { Ok(SpDeviceInterfaceData::default()) } else { Err(5) }
+            },
+            |_| Ok(Some("first".into())),
+            |path| Ok(interface(path)),
+        );
+        assert!(result.is_err(), "a partial scan must not report other devices absent");
+        assert!(result.err().unwrap().contains("GetLastError=5"));
+        assert_eq!(indices, [0, 1]);
+    }
+
+    #[test]
+    fn enumeration_error_after_a_skipped_interface_is_not_an_empty_success() {
+        let result = enumerate_interfaces_with(
+            |index| if index == 0 { Ok(SpDeviceInterfaceData::default()) } else { Err(31) },
+            |_| Ok(Some("occupied".into())),
+            |_| Err("sharing violation".into()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn normal_enumeration_end_preserves_present_and_skipped_interfaces() {
+        let report = enumerate_interfaces_with(
+            |index| if index < 2 {
+                Ok(SpDeviceInterfaceData { flags: index, ..Default::default() })
+            } else { Err(ERROR_NO_MORE_ITEMS) },
+            |interface| Ok(Some(format!("path-{}", interface.flags))),
+            |path| if path == "path-0" { Ok(interface(path)) } else { Err("occupied".into()) },
+        ).unwrap();
+        assert_eq!(report.interfaces.len(), 1);
+        assert_eq!(report.interfaces[0].path, "path-0");
+        assert_eq!(report.skipped, [Skipped { path: "path-1".into(), reason: "occupied".into() }]);
+    }
+
+    #[test]
+    fn initial_enumeration_failure_and_normal_empty_result_remain_distinct() {
+        for error in [5, ERROR_NO_MORE_ITEMS] {
+            let result = enumerate_interfaces_with(
+                |_| Err(error), |_| panic!("no interface"), |_| panic!("no path"),
+            );
+            if error == ERROR_NO_MORE_ITEMS {
+                let report = result.unwrap();
+                assert!(report.interfaces.is_empty() && report.skipped.is_empty());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
