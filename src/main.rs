@@ -1,11 +1,4 @@
-//! X-Battery —— 多品牌外设电量监控与 ROG 鼠标 HID 参数控制工具。
-//!
-//! 面向 ROG 鼠标这一套私有 HID 参数协议（真机验证用 ROG HARPE ACE MINI，非型号专属）。
-//! 完全不依赖 ASUS 驱动 / Armoury Crate / GearLink：自己枚举 HID 接口、
-//! 自己拼 64 字节 feature report、自己解析应答。
-//!
-//!
-//! 读模型：**一次读全 17 帧 + 缓存**（见 `snapshot.rs`）。
+//! X-Battery：多品牌外设电量监控与 ROG 鼠标参数控制。
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
@@ -102,41 +95,21 @@ const USAGE: &str = r#"x-battery.exe —— X-Battery 外设电量与 ROG 鼠标
 "#;
 
 fn main() -> ExitCode {
-    // 子系统是 `windows`，命令行调用时进程默认没有控制台。先把父控制台接回来：
-    // 重定向（`info > report.txt`）走继承句柄，直接跑在终端里走 `CONOUT$`，
-    // 双击启动则两边都没有，函数返回 false、不做事。
+    // CLI 复用父控制台或重定向句柄，双击启动无需控制台。
     win32::attach_console();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // ---- 入口分流 ----
-    //
-    // 判据严格用「有没有参数」：用户双击 exe 时没有参数，必须直接进 GUI。
-    // 裸跑如果进 CLI 只会打印帮助然后退出，双击的人什么都看不到。
-    //
-    // 唯一例外是 `--help` / `-h` / `help`：这几个仍然走 CLI 打印帮助，
-    // 否则在命令行里敲 `x-battery.exe --help` 会弹出一个窗口，很奇怪。
-    //
-    // `--autostart` 是**开机自启专用参数**（见 `src/autostart.rs` 的 `RUN_ARG`）。
-    // 它必须和裸跑走同一条路进 GUI —— 开机时没有控制台，不 FreeConsole 会闪黑框；
-    // 而且它**绝不能落到下面的 CLI 分支**，那只会打印用法然后立刻退出，
-    // 用户看到的就是「开机自启勾了但什么也没发生」。
+    // 无参数和自启参数进入 GUI；帮助请求留在 CLI。
     let wants_help = matches!(args.first().map(|s| s.as_str()), Some("-h" | "--help" | "help"));
     let wants_autostart = args.len() == 1 && args[0] == autostart::RUN_ARG;
 
     if args.is_empty() || wants_autostart {
-        // 子系统是 `windows`，裸跑本来就没有控制台，黑框不会再出现。这里保留
-        // `FreeConsole` 只为一种情况：从终端启动 GUI 时 `attach_console` 已经把
-        // 父控制台接上了，进 GUI 前脱开，免得退出后终端被占着。
         // SAFETY: `FreeConsole` 只影响本进程的控制台关联，无指针参数。
         unsafe {
             win32::FreeConsole();
         }
-        // 开机自启只在托盘里待着，不要弹主窗口。
-        //
-        // 绿色版的自启一定带 `--autostart`；MSIX 版做不到 —— `desktop:StartupTask`
-        // 是系统激活，命令行里没有参数，所以那里只能靠父进程判断（见
-        // `autostart::launched_at_logon`）。
+        // 绿色版自启携带参数；MSIX 由启动环境判断是否隐藏。
         let start_hidden = wants_autostart || autostart::launched_at_logon();
         return run_gui(start_hidden);
     }
@@ -223,11 +196,7 @@ impl Drop for MutexGuard {
     }
 }
 
-/// 单实例检查的三种结果。
-///
-/// 原来把「创建互斥体失败」和「已有实例在跑」压成同一个 `None`：前者会让程序
-/// 一声不响地 `ExitCode::SUCCESS` 退出，用户看到的就是「双击没反应」。这两种
-/// 情况必须分开 —— 抢不到锁是正常多开，建不出锁是环境异常，后者应该照常启动。
+/// 区分已有实例和锁创建失败；后者允许继续启动。
 enum Instance {
     /// 抢到了锁。值要在进程存活期间一直持有，否则锁会被系统回收。
     Owner(MutexGuard),
@@ -237,13 +206,8 @@ enum Instance {
     Unavailable,
 }
 
-/// 查找已经开着的主窗口，兼容升级前的应用名称。
-///
-/// 用户双击图标通常是想看面板；直接静默退出会像「程序打不开」。窗口标题是
-/// [`crate::gui::WINDOW_TITLE`]，用标题找而不靠类名 —— 类名由 nwg 生成，换库
-/// 版本就会变。
+/// 按标题查找已有窗口，兼容升级前的应用名称。
 fn existing_window() -> win32::Handle {
-    // Keep the mutex and recognize the old title during upgrades.
     let legacy = if crate::mock::enabled() { "R Battery · 模拟设备" } else { "R Battery" };
     for title in [crate::mock::window_title(), legacy] {
         let title = win32::to_wide(title);
@@ -310,15 +274,7 @@ fn run_gui(start_hidden: bool) -> ExitCode {
         Instance::Unavailable => None,
     };
 
-    // DPI 感知必须在**任何窗口创建之前**声明，否则 Windows 会先按 96 DPI 建窗口，
-    // 再把整窗当位图拉伸到实际缩放比 —— 那就是「字体发虚」的根因（GDI+ 画出来的
-    // 抗锯齿文字被整体插值放大，边缘糊掉）。
-    //
-    // 只影响 GUI 分支：CLI 分支不建窗口，设不设都无所谓，但设了会让控制台的
-    // 字符尺寸按物理像素算 —— 保持不设更安全。
-    //
-    // 失败（返回 false）不致命：老系统没有 `SetProcessDpiAwarenessContext` 时会走
-    // 降级链，全失败也只是退回模糊状态，不该因此拒绝启动。
+    // 创建窗口前声明 DPI 感知，失败时允许系统缩放。
     let _ = dwm::enable_dpi_awareness();
 
     match gui::run(start_hidden) {
@@ -453,10 +409,7 @@ fn run(
                 .map_err(fail)
         }
         Cmd::Raw { cmd_byte, sub_byte, tail } => {
-            // 超时 900ms，比 DEFAULT_TIMEOUT_MS(1200) 短：raw 是人手敲的调试口，
-            // 会故意发不存在的 cmd 试探协议边界，MISS 是**预期结果**，早报早好；
-            // 而 light/ops 是高频自动路径，MISS 本身就是判据（休眠 / 链路断），
-            // 必须诚实等满整个超时。两个值有差异是对的。
+            // 手动协议探测使用较短超时。
             const RAW_TIMEOUT_MS: u32 = 900;
             if use_dongle {
                 let mut d = cli::open_dongle(&link.all_interfaces)?;
@@ -555,12 +508,7 @@ fn cmd_cache(pos: &[&str]) -> Result<(), String> {
     }
 }
 
-/// 参数校验。放在打开设备之前，拼错的命令不会碰到硬件。
-/// 命令行参数解析一次完成，返回强类型 [`Cmd`]。
-///
-/// 以前是「`validate()` 校验一遍 + `run()` 里 `pos[1].parse()` 再解析一遍」：
-/// 范围规则写两份，漂了就是「校验说行、执行报错」；而且 `run()` 的裸索引在
-/// 参数缺失时是 panic 而不是提示。现在只在这里解析，`run()` 只消费结果。
+/// 打开设备前完成参数解析与范围校验。
 enum Cmd {
     Version,
     Info,
