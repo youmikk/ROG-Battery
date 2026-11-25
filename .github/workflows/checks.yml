@@ -1,0 +1,52 @@
+name: Regression checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+      - name: Configure compiler
+        shell: pwsh
+        run: |
+          'C:\msys64\mingw64\bin' >> $env:GITHUB_PATH
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Check package versions
+        shell: pwsh
+        run: ./tools/check-release.ps1 -SourceOnly
+      - name: Test application
+        run: cargo test --release --locked -- --test-threads=1
+      - name: Build application
+        run: cargo build --release --locked
+
+  feedback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test feedback relay
+        working-directory: services/feedback-relay
+        run: node --test test/*.test.mjs
