@@ -73,11 +73,6 @@ fn target(i: &HidInterface) -> Option<Target> {
     let mut target = Target::new(BackendId::AjazzAk980, i, 0);
     target.name = "AJAZZ AK980 PRO".into();
     target.family = DeviceFamily::Keyboard;
-    target.key = crate::device::stable_key(&format!(
-        "ajazz-ak980:{}:{}",
-        i.product_id,
-        i.serial.trim()
-    ));
     Some(target)
 }
 
@@ -178,6 +173,46 @@ mod tests {
         ] {
             assert_eq!(link(&wrong), None);
         }
+    }
+
+    #[test]
+    fn independent_keyboards_survive_deduplication_with_missing_or_duplicate_serials() {
+        for original in [
+            interface(WIRED_PID, 0xff68, "AK980 PRO", 2),
+            interface(WIRELESS_PID, 0xff60, "AJAZZ AK980 PRO 2.4G", 3),
+        ] {
+            for (first_serial, second_serial) in [("", ""), ("   ", "   "),
+                ("duplicate", "duplicate"), ("first-serial", "second-serial")] {
+                let mut first = original.clone();
+                first.path = first.path.replace("&fixture&", "&first&");
+                first.serial = first_serial.into();
+                let mut second = original.clone();
+                second.path = second.path.replace("&fixture&", "&second&");
+                second.serial = second_serial.into();
+                let first = target(&first).unwrap();
+                let second = target(&second).unwrap();
+                assert_ne!(first.key, second.key);
+                for targets in [vec![first.clone(), second.clone()], vec![second.clone(), first.clone()]] {
+                    let snapshots = super::super::read_targets(targets, |target| Ok(Snapshot {
+                        target: target.clone(), battery: None, dpi: Dpi::default(),
+                        polling_rate: Default::default(), connected: true,
+                        battery_at: None, battery_unavailable: true,
+                    }));
+                    assert_eq!(snapshots.len(), 2);
+                    assert!(snapshots.iter().any(|sample| sample.target.key == first.key));
+                    assert!(snapshots.iter().any(|sample| sample.target.key == second.key));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn path_identity_is_stable_across_case_and_serial_metadata_changes() {
+        let original = interface(WIRELESS_PID, 0xff60, "AJAZZ AK980 PRO 2.4G", 3);
+        let mut refreshed = original.clone();
+        refreshed.path = refreshed.path.to_ascii_uppercase();
+        refreshed.serial = "new-serial-metadata".into();
+        assert_eq!(target(&original).unwrap().key, target(&refreshed).unwrap().key);
     }
 
     #[test]
