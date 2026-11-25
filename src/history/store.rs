@@ -417,9 +417,7 @@ fn migrate_history_at(source: &Path, target: &Path, now_sec: i64) -> Result<Devi
 /// 同目录临时文件写完并刷盘后替换目标，读者只会看到替换前或替换后的完整文件。
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    use std::os::windows::ffi::OsStrExt;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         crate::paths::ensure_dir(parent)?;
@@ -440,12 +438,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     drop(file);
     let result = written.map_err(|error| format!("写入历史临时文件 {} 失败：{error}", temp.display()))
         .and_then(|_| {
-            let source: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
-            let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
-                Err(format!("替换历史文件 {} 失败：{}", path.display(), std::io::Error::last_os_error()))
-            } else { Ok(()) }
+            crate::paths::replace_file(&temp, path)
+                .map_err(|error| format!("替换历史文件 {} 失败：{error}", path.display()))
         });
     if result.is_err() { let _ = std::fs::remove_file(temp); }
     result

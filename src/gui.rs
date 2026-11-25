@@ -1631,7 +1631,7 @@ fn tray_log(line: &str) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     text.push_str(&format!("{secs} {line}\n"));
-    let _ = std::fs::write(&path, text);
+    let _ = crate::paths::write_atomic(&path, text.as_bytes());
 }
 
 struct TrayCtl {
@@ -2393,7 +2393,7 @@ fn handle_act(a: Act, env: &UiEnv) {
         Act::ResetHistoryPath => reset_custom_path(env, SavePathKind::History),
         Act::ResetSettingsPath => reset_custom_path(env, SavePathKind::Settings),
         Act::OpenLogFolder => {
-            let dir = crate::paths::settings_file()
+            let dir = crate::diagnostics::log_path()
                 .parent()
                 .map(|d| d.to_path_buf())
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -3064,8 +3064,14 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
 /// 用系统 shell 打开一个文件夹（`explorer.exe` 的 spawn 在部分受限环境下
 /// 返回 Ok 但窗口并不出现，`ShellExecuteW` 走的是真正的 shell 激活，可靠）。
 fn open_in_explorer(env: &UiEnv, dir: &std::path::Path) {
-    let _ = crate::paths::ensure_dir(dir);
-    if let Err(e) = crate::dynlight::shell_open(&dir.to_string_lossy()) {
+    let directory = match crate::paths::directory_for_shell(dir) {
+        Ok(directory) => directory,
+        Err(error) => {
+            env.say(format!("✘ {error}"));
+            return;
+        }
+    };
+    if let Err(e) = crate::dynlight::shell_open(&directory.to_string_lossy()) {
         env.say(crate::trf!("✘ 打不开文件夹：{e}", e = e));
     }
 }

@@ -115,6 +115,54 @@ pub fn ensure_dir(p: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(p).map_err(|e| format!("无法创建目录 {}：{e}", p.display()))
 }
 
+pub fn directory_for_shell(p: &std::path::Path) -> Result<PathBuf, String> {
+    let directory = if p.as_os_str().is_empty() { std::path::Path::new(".") } else { p };
+    ensure_dir(directory)?;
+    let physical = directory.canonicalize()
+        .map_err(|error| format!("无法解析目录 {}：{error}", directory.display()))?;
+    Ok(shell_path(&physical))
+}
+
+fn shell_path(p: &std::path::Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let prefix = p.components().next();
+    let wide: Vec<u16> = p.as_os_str().encode_wide().collect();
+    match prefix {
+        Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
+            std::path::Prefix::VerbatimDisk(_) => {
+                PathBuf::from(std::ffi::OsString::from_wide(&wide[4..]))
+            }
+            std::path::Prefix::VerbatimUNC(_, _) => {
+                let mut normalized = vec![b'\\' as u16, b'\\' as u16];
+                normalized.extend_from_slice(&wide[8..]);
+                PathBuf::from(std::ffi::OsString::from_wide(&normalized))
+            }
+            _ => p.to_path_buf(),
+        },
+        _ => p.to_path_buf(),
+    }
+}
+
+pub fn replace_file(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    if source.parent() != target.parent() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+            "Atomic replacement requires a temporary file in the destination directory"));
+    }
+    let physical = source.canonicalize()?;
+    let parent = physical.parent().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let name = target.file_name().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination = parent.join(name);
+    let source: Vec<u16> = physical.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// 原子写文件：先写同目录的临时文件，再整份改名覆盖。
 ///
 /// 直接 `fs::write` 中途崩溃/断电会留下截断文件；备份和设置都是「唯一的
@@ -133,7 +181,7 @@ pub fn write_atomic(p: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("写临时文件 {} 失败：{e}", tmp.display()));
     }
-    if let Err(e) = std::fs::rename(&tmp, p) {
+    if let Err(e) = replace_file(&tmp, p) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("替换 {} 失败：{e}", p.display()));
     }
@@ -157,4 +205,91 @@ pub fn resolve_backup_path(arg: Option<&str>, default_name: &str) -> PathBuf {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scratch").join("path-tests");
+            std::fs::create_dir_all(&root).unwrap();
+            let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let path = root.join(format!("{}-{unique}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            std::fs::create_dir(&path).unwrap();
+            assert!(path.canonicalize().unwrap().starts_with(root.canonicalize().unwrap()));
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scratch").join("path-tests");
+            if let (Ok(path), Ok(root)) = (self.0.canonicalize(), root.canonicalize()) {
+                if path != root && path.starts_with(&root) { let _ = std::fs::remove_dir_all(path); }
+            }
+        }
+    }
+
+    #[test]
+    fn shell_paths_preserve_unicode_and_unc_shares_without_verbatim_prefixes() {
+        assert_eq!(shell_path(std::path::Path::new(r"\\?\D:\用户目录\日志")), PathBuf::from(r"D:\用户目录\日志"));
+        assert_eq!(shell_path(std::path::Path::new(r"\\?\UNC\server\share\日志")), PathBuf::from(r"\\server\share\日志"));
+        assert_eq!(shell_path(std::path::Path::new(r"D:\日志")), PathBuf::from(r"D:\日志"));
+    }
+
+    #[test]
+    fn opening_a_missing_log_directory_creates_it_and_returns_an_explorer_path() {
+        let scratch = Scratch::new();
+        let directory = scratch.0.join("用户目录").join("logs");
+        assert!(!directory.exists());
+        let physical = directory_for_shell(&directory).unwrap();
+        assert!(physical.is_absolute());
+        assert!(physical.is_dir());
+        assert!(!physical.as_os_str().to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(physical.canonicalize().unwrap(), directory.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn a_file_at_the_requested_directory_is_reported_before_opening_explorer() {
+        let scratch = Scratch::new();
+        let file = scratch.0.join("not-a-directory");
+        std::fs::write(&file, b"original").unwrap();
+        assert!(directory_for_shell(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"original");
+    }
+
+    #[test]
+    fn atomic_replacement_uses_the_temporary_files_resolved_directory() {
+        let scratch = Scratch::new();
+        let directory = scratch.0.join("用户目录");
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.join("draft.tmp");
+        let target = directory.join("feedback-history.dat");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&target, b"old").unwrap();
+        replace_file(&source, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn cross_directory_replacement_is_rejected_without_touching_either_file() {
+        let scratch = Scratch::new();
+        let directory = scratch.0.join("other");
+        std::fs::create_dir(&directory).unwrap();
+        let source = scratch.0.join("draft.tmp");
+        let target = directory.join("settings.ini");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&target, b"old").unwrap();
+        assert_eq!(replace_file(&source, &target).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+    }
+
 }

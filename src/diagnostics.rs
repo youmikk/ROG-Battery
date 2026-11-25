@@ -30,10 +30,11 @@ pub struct Facts<'a> {
 }
 
 pub fn log_path() -> PathBuf {
-    crate::paths::settings_file()
+    let path = crate::paths::settings_file()
         .parent()
         .map(|dir| dir.join("diagnostics.log"))
-        .unwrap_or_else(|| crate::paths::config_dir().join("diagnostics.log"))
+        .unwrap_or_else(|| crate::paths::config_dir().join("diagnostics.log"));
+    path.canonicalize().unwrap_or(path)
 }
 
 fn masked(value: &str, keep: usize) -> String {
@@ -117,7 +118,7 @@ pub fn append(path: &Path, f: &Facts<'_>) -> Result<(), String> {
 pub fn append_text(path: &Path, text: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
-            let _ = std::fs::create_dir_all(dir);
+            crate::paths::ensure_dir(dir)?;
         }
     }
     use std::io::Write as _;

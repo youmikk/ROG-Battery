@@ -461,7 +461,12 @@ pub fn load() -> Settings {
 /// 走原子写：中途崩溃留下半份 settings.ini，下次启动会把整份配置读成默认值。
 pub fn save(s: &Settings) -> Result<(), String> {
     let p = paths::settings_file();
-    paths::write_atomic(&p, s.to_text().as_bytes())
+    let result = paths::write_atomic(&p, s.to_text().as_bytes());
+    #[cfg(not(test))]
+    if let Err(error) = &result {
+        crate::diagnostics::event_once("settings_save_failed", error);
+    }
+    result
 }
 
 /// 用于备份文件名的**本地**时间戳 `YYYYMMDD-HHMMSS`。
