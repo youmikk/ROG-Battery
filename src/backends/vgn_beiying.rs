@@ -132,7 +132,7 @@ fn read_with(
     target: &Target,
     mut exchange: impl FnMut(&[u8], u32) -> Option<Vec<u8>>,
 ) -> Result<Snapshot, String> {
-    let fail = || crate::i18n::translate("设备无有效状态回报").to_string();
+    let fail = || crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string();
     let selected = model(target.hid()?).ok_or_else(fail)?;
     let reply = exchange(&request(), QUERY_TIMEOUT_MS).ok_or_else(fail)?;
     let battery = battery(&reply, selected).ok_or_else(fail)?;
@@ -159,7 +159,7 @@ impl DeviceBackend for VgnBeiying {
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
         if target.backend != BackendId::VgnBeiying || !proven(api, interface) {
-            return Err(crate::i18n::translate("设备无有效状态回报").into());
+            return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into());
         }
         let lock = channel::lock(&channel::collection_group(interface));
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

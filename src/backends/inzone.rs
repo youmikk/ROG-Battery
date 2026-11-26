@@ -82,7 +82,7 @@ impl DeviceBackend for Inzone {
 
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
-        control(interface).ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+        control(interface).ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         let lock = channel::lock(&interface.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(interface)?;
@@ -95,7 +95,7 @@ impl DeviceBackend for Inzone {
             query.len(), response.as_ref().map_or(0, Vec::len), started,
             if response.is_some() { trace::Outcome::Ok } else { trace::Outcome::NoReply });
         let report = response.as_deref().and_then(|r| battery_reply(r, transaction))
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         Ok(snapshot(target, report, Instant::now()))
     }
 }

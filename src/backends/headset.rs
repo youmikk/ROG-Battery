@@ -300,14 +300,14 @@ fn pro_version_with(cache: &Mutex<ProCache>, interface: &HidInterface,
     query: impl FnOnce(&HidInterface, &[u8]) -> Result<Vec<u8>, String>) -> Result<Option<u16>, String> {
     let group = channel::collection_group(interface);
     let entry = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-        .versions.get(&group).cloned().ok_or("接收器枚举已变化，请刷新后重试")?;
+        .versions.get(&group).cloned().ok_or("接收器连接状态发生变化，请刷新后重试")?;
     let mut cached = entry.value.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let firmware = {
         let cache = cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !cache.versions.get(&group).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
-            return Err("接收器枚举已变化，请刷新后重试".into());
+            return Err("接收器连接状态发生变化，请刷新后重试".into());
         }
         if let Some(version) = *cached {
             return Ok(version);
@@ -341,7 +341,7 @@ fn pro_version_with(cache: &Mutex<ProCache>, interface: &HidInterface,
     );
     let cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if !cache.versions.get(&group).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
-        return Err("接收器枚举已变化，请刷新后重试".into());
+        return Err("接收器连接状态发生变化，请刷新后重试".into());
     }
     *cached = Some(version);
     Ok(version)
@@ -364,9 +364,9 @@ impl DeviceBackend for Headset {
     }
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let selected = model(target.hid()?)
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         if target.backend != BackendId::Headset || !proven(api, target.hid()?) {
-            return Err(crate::i18n::translate("设备无有效状态回报").into());
+            return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into());
         }
         let lock = channel::lock(&channel::collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -396,7 +396,7 @@ impl DeviceBackend for Headset {
         let parsed = response
             .as_deref()
             .and_then(|r| reading(selected, r))
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         Ok(snapshot(target, selected, parsed))
     }
 }

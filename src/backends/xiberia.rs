@@ -10,7 +10,7 @@ const PRODUCT: &str = "XIBERIA K06S Wireless";
 const REPORT: u8 = 0x55;
 const LENGTH: u16 = 64;
 const TIMEOUT_MS: u32 = 800;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x36f9 && i.product_id == 0xf002

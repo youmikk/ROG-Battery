@@ -663,7 +663,141 @@ fn legacy_rog_history_owner(
     (owners.len() == 1).then(|| owners[0].reading.key.clone())
 }
 
-fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll,
+fn coalesce_rapoo_paired_poll(shared: &mut Shared, poll: &mut crate::backends::Poll) {
+    use crate::backends::rapoo::{LinkRole, device_signature};
+    use std::collections::BTreeMap;
+
+    // 仅当同一型号与非空序列号同时各存在唯一 2.4G 与有线端点时合并为单台实体鼠标。
+    // 双 2.4G 接收器（即使序列号相同）不会被合并，继续保持独立设备隔离。
+    #[derive(Default)]
+    struct Group {
+        receivers: Vec<usize>,
+        wired: Vec<usize>,
+        others: usize,
+    }
+
+    let mut groups: BTreeMap<(&'static str, String), Group> = BTreeMap::new();
+    for (idx, snap) in poll.snapshots.iter().enumerate() {
+        let Some(sig) = device_signature(&snap.target) else { continue; };
+        if sig.serial.is_empty() { continue; }
+        let entry = groups.entry((sig.model, sig.serial)).or_default();
+        match sig.role {
+            LinkRole::Receiver => entry.receivers.push(idx),
+            LinkRole::Wired => entry.wired.push(idx),
+        }
+    }
+    for device in shared.devices.values() {
+        let Some(basic) = &device.basic else { continue; };
+        let Some(sig) = device_signature(&basic.target) else { continue; };
+        if sig.serial.is_empty() { continue; }
+        if let Some(entry) = groups.get_mut(&(sig.model, sig.serial)) {
+            let key = &basic.target.key;
+            let known_in_poll = entry.receivers.iter().chain(entry.wired.iter())
+                .any(|&idx| poll.snapshots[idx].target.key == *key);
+            if !known_in_poll
+                && poll.present_channels.as_ref().is_some_and(|paths| paths.contains(&basic.target.channel_key()))
+            {
+                entry.others += 1;
+            }
+        }
+    }
+
+    let mut remove_indices = Vec::new();
+    for group in groups.into_values() {
+        if group.others > 0 || group.receivers.len() != 1 || group.wired.len() != 1 {
+            continue;
+        }
+        let rx_idx = group.receivers[0];
+        let wired_idx = group.wired[0];
+        let rx_key = poll.snapshots[rx_idx].target.key.clone();
+        let wired_key = poll.snapshots[wired_idx].target.key.clone();
+        if rx_key == wired_key { continue; }
+
+        let canonical_target = match (shared.devices.contains_key(&rx_key), shared.devices.contains_key(&wired_key)) {
+            (true, true) => {
+                if shared.promote_device_key(&wired_key, &rx_key) {
+                    shared.device_keys_dirty = true;
+                }
+                shared.devices.remove(&wired_key);
+                poll.snapshots[rx_idx].target.clone()
+            }
+            (true, false) => poll.snapshots[rx_idx].target.clone(),
+            (false, true) => poll.snapshots[wired_idx].target.clone(),
+            (false, false) => poll.snapshots[rx_idx].target.clone(),
+        };
+
+        let rx = &poll.snapshots[rx_idx];
+        let wired = &poll.snapshots[wired_idx];
+        let wired_wins = (wired.connected, wired.battery.is_some(), wired.battery_at, true)
+            >= (rx.connected, rx.battery.is_some(), rx.battery_at, false);
+        let mut merged = if wired_wins { wired.clone() } else { rx.clone() };
+        if merged.target.key != canonical_target.key {
+            merged.disable_writes();
+        }
+        merged.target = canonical_target.clone();
+
+        let keep_idx = if canonical_target.key == wired_key { wired_idx } else { rx_idx };
+        let drop_idx = if keep_idx == rx_idx { wired_idx } else { rx_idx };
+        poll.snapshots[keep_idx] = merged;
+        remove_indices.push(drop_idx);
+    }
+
+    if !remove_indices.is_empty() {
+        remove_indices.sort_unstable();
+        for idx in remove_indices.into_iter().rev() {
+            poll.snapshots.remove(idx);
+        }
+    }
+}
+
+fn find_unplugged_rapoo_replacement(
+    shared: &Shared,
+    present: Option<&std::collections::BTreeSet<String>>,
+    snapshots: &[crate::backends::Snapshot],
+    current_idx: usize,
+) -> Option<String> {
+    use crate::backends::rapoo::device_signature;
+    let present = present?;
+    let target = &snapshots[current_idx].target;
+    let sig = device_signature(target)?;
+    let serial_compatible = |a: &str, b: &str| a.is_empty() || b.is_empty() || a == b;
+
+    let competing = snapshots.iter().enumerate().any(|(idx, other)| {
+        idx != current_idx
+            && device_signature(&other.target).is_some_and(|osig| {
+                osig.model == sig.model
+                    && serial_compatible(&osig.serial, &sig.serial)
+                    && !shared.devices.values().any(|d| d.basic.as_ref().is_some_and(|b| b.target.same_channel(&other.target)))
+            })
+    });
+    if competing {
+        return None;
+    }
+
+    let mut candidates = shared.devices.iter().filter_map(|(old_key, device)| {
+        let basic = device.basic.as_ref()?;
+        if device.reading.connected || *old_key == target.key {
+            return None;
+        }
+        let old_sig = device_signature(&basic.target)?;
+        if old_sig.model != sig.model || !serial_compatible(&old_sig.serial, &sig.serial) {
+            return None;
+        }
+        if present.contains(&basic.target.channel_key())
+            || snapshots.iter().any(|s| s.target.same_channel(&basic.target))
+        {
+            return None;
+        }
+        Some(old_key.clone())
+    });
+    let first = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, mut poll: crate::backends::Poll,
     now: std::time::Instant) {
     if backend==crate::backends::BackendId::Rapoo {
         for snapshot in &poll.snapshots {
@@ -679,6 +813,7 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
                 shared.devices.remove(&old);
             }
         }
+        coalesce_rapoo_paired_poll(shared, &mut poll);
     }
     for device in shared.devices.values_mut() {
         if let Some(basic) = &mut device.basic {
@@ -700,7 +835,28 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
             device.reading.quality = status.quality;
         }
     }
-    for mut snapshot in poll.snapshots {
+    let present_channels = poll.present_channels.take();
+    let replacements: Vec<Option<String>> = if backend == crate::backends::BackendId::Rapoo {
+        (0..poll.snapshots.len()).map(|idx| {
+            let has_previous = shared.devices.values().any(|device| {
+                device.basic.as_ref().is_some_and(|other| other.target.same_channel(&poll.snapshots[idx].target))
+            });
+            if has_previous {
+                None
+            } else {
+                find_unplugged_rapoo_replacement(shared, present_channels.as_ref(), &poll.snapshots, idx)
+            }
+        }).collect()
+    } else {
+        vec![None; poll.snapshots.len()]
+    };
+    for (mut snapshot, replacement) in poll.snapshots.into_iter().zip(replacements) {
+        if let Some(old_key) = replacement {
+            if shared.promote_device_key(&old_key, &snapshot.target.key) {
+                shared.device_keys_dirty = true;
+            }
+            shared.devices.remove(&old_key);
+        }
         if backend == crate::backends::BackendId::Bluetooth
             && shared.devices.values().any(|device| {
                 device.basic.as_ref().is_some_and(|other| {
@@ -1781,11 +1937,11 @@ impl TrayCtl {
                             .or_else(|| r.coarse_level().map(|level| crate::i18n::battery_level(level).to_string()))
                             .unwrap_or_else(|| crate::tr!("电量未知").to_string()),
                         if !r.connected {
-                            crate::tr!("（上次电量，未连接）")
+                            crate::tr!("（上次记录，未连接）")
                         } else if r.quality == crate::device::ReadingQuality::Cached {
-                            crate::tr!("（上次电量，等待回报）")
+                            crate::tr!("（上次记录，等待更新）")
                         } else if r.quality == crate::device::ReadingQuality::Stale {
-                            crate::tr!("（上次电量已过期）")
+                            crate::tr!("（上次记录已过期）")
                         } else if r.is_charging() {
                             crate::tr!("（充电中）")
                         } else {
@@ -2170,7 +2326,7 @@ impl<'a> UiEnv<'a> {
             // 以前这里是什么都不说就返回 false —— 用户点了一下，
             // 界面上完全没有变化，只会以为功能坏了。现在至少给一句话。
             self.say(crate::tr!(
-                "✘ 操作排不进去了（前面的还没写完），稍等一下再试"
+                "✘ 上一项设置仍在写入设备，请稍等片刻再试"
             ));
         }
         ok
@@ -2512,11 +2668,11 @@ fn handle_act(a: Act, env: &UiEnv) {
         // 但只在用户点按钮时发生，不是每帧，也不会在绘制路径上。
         Act::RefreshLighting => match crate::dynlight::refresh() {
             Some(l) => env.say(crate::trf!(
-                "✔ 已检测到灯效设备（{} 个灯 · {}）",
+                "✔ 已识别灯效设备（{} 颗灯珠 · {}）",
                 l.lamp_count,
                 l.kind_name()
             )),
-            None => env.say(crate::tr!("✘ 未检测到 HID LampArray 灯效设备")),
+            None => env.say(crate::tr!("✘ 未发现支持系统动态光效的设备")),
         },
 
         Act::ClearHistory => {
@@ -2792,7 +2948,7 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
             env.say(crate::trf!(
                 "✔ 缓存有效期改为 {}",
                 if code == 0 {
-                    crate::tr!("每次都重读").to_string()
+                    crate::tr!("不缓存（每次实时读取）").to_string()
                 } else {
                     crate::trf!("{code} 秒", code = code)
                 }
@@ -2805,8 +2961,8 @@ fn pick_drop(env: &UiEnv, d: Drop, idx: usize) {
             let confirmed = if dst == 0 {
                 let name = crate::i18n::translate(proto::BUTTON_NAME[slot]);
                 ask_confirm(
-                    crate::tr!("把按键绑成「无功能」"),
-                    &crate::trf!("{name} 将被绑成 0000（无功能）。\n\n绑好以后这个键在鼠标上就再也按不出任何作用，要恢复必须重新写一遍完整映射。\n\n确定继续？" , name = name),
+                    crate::tr!("停用鼠标按键"),
+                    &crate::trf!("确定停用「{name}」吗？\n\n停用后该按键会暂时屏蔽操作，之后随时可以恢复或还原备份。", name = name),
                 )
             } else {
                 true
@@ -3098,7 +3254,7 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
         Pref::AutoStart => {
             let on = lock_shared(env.shared).autostart_on();
             if !env.submit(Cmd::AutoStart(!on)) {
-                env.say(crate::tr!("✘ 后台正在执行别的操作，这次开机自启没有提交"));
+                env.say(crate::tr!("✘ 当前有其他设置正在处理，开机自启暂未修改，请稍后再试"));
             }
         }
         Pref::FullEffect => {
@@ -3141,7 +3297,7 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
         return;
     }
     let Ok(item) = fd.get_selected_item() else {
-        env.say(crate::tr!("✘ 没拿到选中的文件"));
+        env.say(crate::tr!("✘ 未读取到所选文件"));
         return;
     };
     let path = PathBuf::from(item);
@@ -3151,7 +3307,7 @@ fn pick_backup_file(env: &UiEnv, save: bool) {
         Cmd::Restore(path)
     };
     if !env.submit(cmd) {
-        env.say(crate::tr!("✘ 后台正在执行别的操作，请稍后再试"));
+        env.say(crate::tr!("✘ 当前有其他设置正在处理，请稍后再试"));
     }
 }
 
@@ -3227,12 +3383,12 @@ fn pick_save_path(env: &UiEnv, kind: SavePathKind) {
         return;
     }
     let Ok(item) = fd.get_selected_item() else {
-        env.say(crate::tr!("✘ 没拿到选中的路径"));
+        env.say(crate::tr!("✘ 未读取到所选路径"));
         return;
     };
     let new_path = std::path::PathBuf::from(item);
     if new_path == old {
-        env.say(crate::tr!("位置没变"));
+        env.say(crate::tr!("保存位置与当前相同"));
         return;
     }
     let gate = lock_shared(env.shared).history_gate.clone();
@@ -3374,7 +3530,7 @@ fn apply_outcome(out: &FetchOutcome, s: &mut Shared, gen_at_read: u64) -> Option
             .values()
             .next()
             .cloned()
-            .unwrap_or_else(|| crate::tr!("没有任何帧有应答").to_string());
+            .unwrap_or_else(|| crate::tr!("设备暂未响应，请确认接收器已插稳或轻动设备唤醒后再试").to_string());
         // 三态：接收器在、设备不应答 = 休眠（动一下就能唤醒）；接收器都不在 =
         // 真错误（要用户去查线和口）。两件事用一句话说会把人引向错误方向。
         let link = crate::linkstate::classify(0, snap.identity.dongle_sn.as_str());
@@ -3543,18 +3699,18 @@ pub(crate) fn autostart_hint(
             S::Enabled | S::EnabledByPolicy => {
                 crate::trf!("已开启开机自启（{}）。" , crate::i18n::translate(state.describe()))
             }
-            S::DisabledByUser => crate::trf!("系统记着你之前拒绝过自启，程序再请求会被静默忽略。请到 {where_} 手动把「{WINDOW_TITLE}」打开。" , WINDOW_TITLE = WINDOW_TITLE, where_ = where_),
+            S::DisabledByUser => crate::trf!("你在系统设置中关闭过开机自启，软件无法直接替你改回，请前往 {where_} 开启「{WINDOW_TITLE}」。" , WINDOW_TITLE = WINDOW_TITLE, where_ = where_),
             S::DisabledByPolicy => {
-                crate::tr!("组策略禁止了开机自启，本程序无法绕过。请联系管理员。").to_string()
+                crate::tr!("受系统策略限制，暂无法由应用开启开机自启，如需调整请联系管理员。").to_string()
             }
-            S::Disabled => crate::trf!("系统没有接受这次请求，请到 {where_} 手动打开。" , where_ = where_),
+            S::Disabled => crate::trf!("未能自动开启开机自启，请前往 {where_} 手动开启。" , where_ = where_),
             S::Unknown => crate::trf!("读不到自启状态，请到 {where_} 确认。" , where_ = where_),
         }
     } else {
         match state {
             S::Enabled | S::EnabledByPolicy => {
                 crate::trf!(
-                    "没能关掉（{}），请到 {where_} 手动关闭。",
+                    "未能自动关闭开机自启（{}），请前往 {where_} 手动关闭。",
                     crate::i18n::translate(state.describe()),
                     where_ = where_
                 )
@@ -3632,7 +3788,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
     crate::diagnostics::install_panic_hook(APP_VERSION);
     let cfg = settings::load();
     crate::i18n::apply(cfg.language);
-    nwg::init().map_err(|e| crate::trf!("nwg 初始化失败：{e}", e = e))?;
+    nwg::init().map_err(|e| crate::trf!("界面框架初始化失败：{e}", e = e))?;
     Settings::write_default_if_missing();
     // 盘上写的配色和界面默认值必须一开始就一致，否则首帧是浅色、
     // 用户一拖窗口就变成深色。`system` 在这里按系统深浅色换算成具体配色。
@@ -3661,12 +3817,12 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
         // 初始化完、dispatch 前再 ShowWindow。
         .flags(nwg::WindowFlags::MAIN_WINDOW)
         .build(&mut window)
-        .map_err(|e| crate::trf!("建主窗口失败：{e}", e = e))?;
+        .map_err(|e| crate::trf!("无法创建应用主窗口：{e}", e = e))?;
 
     let hwnd = window
         .handle
         .hwnd()
-        .ok_or_else(|| crate::tr!("主窗口没有句柄").to_string())?
+        .ok_or_else(|| crate::tr!("主窗口未就绪").to_string())?
         as crate::win32::Handle;
 
     // 深色标题栏要和界面配色一起决定，否则浅色界面配深色标题栏很割裂。
@@ -3707,7 +3863,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                 }
                 None
             })
-            .map_err(|e| crate::trf!("绑定客户区重算子类失败：{e}", e = e))?;
+            .map_err(|e| crate::trf!("窗口布局组件初始化失败：{e}", e = e))?;
 
         let minmax =
             nwg::bind_raw_event_handler(&window.handle, ID_MINMAXINFO, |h, msg, _wp, lp| {
@@ -3719,7 +3875,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                 }
                 None
             })
-            .map_err(|e| crate::trf!("绑定最大化尺寸子类失败：{e}", e = e))?;
+            .map_err(|e| crate::trf!("窗口尺寸调整初始化失败：{e}", e = e))?;
 
         let ncact =
             nwg::bind_raw_event_handler(&window.handle, ID_NCACTIVATE, |_h, msg, _wp, _lp| {
@@ -3730,7 +3886,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                 }
                 None
             })
-            .map_err(|e| crate::trf!("绑定非客户区激活子类失败：{e}", e = e))?;
+            .map_err(|e| crate::trf!("窗口激活处理初始化失败：{e}", e = e))?;
 
         let ncpaint =
             nwg::bind_raw_event_handler(&window.handle, ID_NCPAINT, |_h, msg, _wp, _lp| {
@@ -3741,7 +3897,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                 }
                 None
             })
-            .map_err(|e| crate::trf!("绑定非客户区绘制子类失败：{e}", e = e))?;
+            .map_err(|e| crate::trf!("窗口边框绘制初始化失败：{e}", e = e))?;
 
         (nccalcs, minmax, ncact, ncpaint)
     };
@@ -3760,14 +3916,14 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
     let mut msg_window = nwg::MessageWindow::default();
     nwg::MessageWindow::builder()
         .build(&mut msg_window)
-        .map_err(|e| crate::trf!("建消息窗口失败：{e}", e = e))?;
+        .map_err(|e| crate::trf!("后台消息窗口创建失败：{e}", e = e))?;
 
     let mut menu = nwg::Menu::default();
     nwg::Menu::builder()
         .popup(true)
         .parent(&msg_window)
         .build(&mut menu)
-        .map_err(|e| crate::trf!("建托盘菜单失败：{e}", e = e))?;
+        .map_err(|e| crate::trf!("系统托盘菜单创建失败：{e}", e = e))?;
 
     // Menu 没有 append()，每个 MenuItem 都要显式 parent。
     //
@@ -3778,7 +3934,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
         .text(crate::tr!("退出"))
         .parent(&menu)
         .build(&mut mi_quit)
-        .map_err(|e| crate::trf!("菜单项：{e}", e = e))?;
+        .map_err(|e| crate::trf!("托盘菜单项初始化失败：{e}", e = e))?;
 
     // 托盘图标自己管（见 `TrayCtl` 注释：nwg 不暴露 guidItem，做不到跨版本固定）。
     // 图标在消息循环起来之后再添加 —— 那时 `msg_window` 才能收回调消息。
@@ -3807,7 +3963,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
     nwg::Notice::builder()
         .parent(&window)
         .build(&mut notice)
-        .map_err(|e| crate::trf!("建通知通道失败：{e}", e = e))?;
+        .map_err(|e| crate::trf!("界面消息通道创建失败：{e}", e = e))?;
 
     // ── 共享状态 ────────────────────────────────────────────
     let shared = Arc::new(Mutex::new(Shared::new(cfg.clone())));
@@ -3841,7 +3997,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
     let damage: Rc<dyn Fn()> = Rc::new(move || sender_d.notice());
     let (cw, ch) = window.size();
     let canvas = Canvas::create(hwnd, 0, 0, cw as i32, ch as i32, scale, damage)
-        .map_err(|e| crate::trf!("建自绘内容区失败：{e}", e = e))?;
+        .map_err(|e| crate::trf!("窗口显示画布创建失败：{e}", e = e))?;
     // 句柄先留一份：`canvas` 后面会被 move 进事件闭包，但「显示窗口前先画
     // 首帧」那一步在闭包外，只能靠这个裸句柄。
     let canvas_hwnd = canvas.hwnd();
@@ -4263,7 +4419,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
             }
             None
         })
-        .map_err(|e| crate::trf!("绑 WM_SIZE 处理器失败：{e}", e = e))?;
+        .map_err(|e| crate::trf!("窗口缩放处理初始化失败：{e}", e = e))?;
 
     let wh = window.handle.clone();
     let taskbar_updates = Rc::clone(&taskbar_widget);
@@ -4723,7 +4879,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
             Some(0)
         })
     }
-    .map_err(|e| crate::trf!("绑托盘回调失败：{e}", e = e))?;
+    .map_err(|e| crate::trf!("托盘交互初始化失败：{e}", e = e))?;
     unsafe {
         win32::SetTimer(message_hwnd, TASKBAR_TIMER, 1000, 0);
         win32::SetTimer(hwnd, STORE_TIMER, 1000, 0);
@@ -6159,10 +6315,12 @@ mod backend_tests {
         assert_eq!(signal.work_interval_ms(BackendId::Logitech.publish_interval_limit_ms()), 60000);
         let mut shared = Shared::new(Settings::default());
         let first = snapshot(BackendId::Rapoo, "rapoo", 75);
+        let lifetime = BackendId::Rapoo.sample_lifetime().as_secs();
+        let pause_end = 90 + lifetime + 14;
         let mut measurement = now;
-        for second in 0..=150 {
+        for second in 0..=(pause_end + 16) {
             let tick = now + Duration::from_secs(second);
-            let reporting = second <= 90 || second >= 111;
+            let reporting = second <= 90 || second >= pause_end + 1;
             if reporting && second % 3 == 0 { measurement = tick; }
             if second * 1000 % interval_ms == 0 {
                 let snapshots = if tick.duration_since(measurement) < BackendId::Rapoo.sample_lifetime() {
@@ -6175,9 +6333,9 @@ mod backend_tests {
             shared.expire_readings_at(tick);
             let device = &shared.devices["rapoo"];
             assert!(device.reading.connected);
-            if second <= 90 || second >= 112 {
+            if second <= 90 + lifetime - 2 || second >= pause_end + 2 {
                 assert_eq!(device.reading.percent(), Some(75), "battery lost at second {second}");
-            } else if (100..111).contains(&second) {
+            } else if (90 + lifetime + 2..=pause_end).contains(&second) {
                 assert_eq!(device.reading.percent(), None);
                 assert_eq!(device.reading.battery.as_ref().unwrap().percent, Some(75));
             }
@@ -6828,6 +6986,66 @@ mod backend_tests {
         assert!(shared.cfg.device_names.contains_key(&old));
         assert!(!shared.cfg.device_names.contains_key("a"));assert!(!shared.cfg.device_names.contains_key("b"));
         assert_eq!(shared.readings.len(),2);
+    }
+
+    #[test]
+    fn rapoo_paired_wired_and_receiver_coalesce_and_replug_replaces_unplugged_card() {
+        let mk_rapoo = |pid: u16, path: &str, serial: &str, percent: u8, connected: bool| {
+            let iface = hid::HidInterface {
+                vendor_id: 0x24ae, product_id: pid, usage_page: 0xff00, usage: 2,
+                input_len: 19, output_len: 0, feature_len: 0, serial: serial.into(),
+                product: "Rapoo VT1".into(), path: path.into(),
+            };
+            let mut snap = snapshot(BackendId::Rapoo, path, percent);
+            snap.target = Target::new(BackendId::Rapoo, &iface, 0);
+            snap.target.name = "Rapoo VT1".into();
+            snap.connected = connected;
+            if !connected {
+                snap.battery = None;
+                snap.battery_unavailable = true;
+                snap.battery_at = None;
+            }
+            snap
+        };
+
+        let rx_a = mk_rapoo(0x1415, r"\\?\hid#vid_24ae&pid_1415&mi_01&col09#a&1111&0&0008#hid", "2507-54L", 58, true);
+        let rx_a_key = rx_a.target.key.clone();
+        let wired_offline_rx = mk_rapoo(0x1415, r"\\?\hid#vid_24ae&pid_1415&mi_01&col09#a&1111&0&0008#hid", "2507-54L", 0, false);
+        let wired = mk_rapoo(0x4615, r"\\?\hid#vid_24ae&pid_4615&mi_01&col09#a&2222&0&0008#hid", "2507-54L", 59, true);
+        let rx_b = mk_rapoo(0x1415, r"\\?\hid#vid_24ae&pid_1415&mi_01&col09#a&3333&0&0008#hid", "2507-54L", 60, true);
+        let rx_b_key = rx_b.target.key.clone();
+
+        let mut cfg = Settings::default();
+        cfg.device_names.insert(rx_a_key.clone(), "My VT1".into());
+        cfg.device_order = vec![rx_a_key.clone()];
+        let mut shared = Shared::new(cfg);
+
+        // 1. 仅 2.4G 接收器连接：产生 1 张卡。
+        shared.publish_additional(BackendId::Rapoo, vec![rx_a], 0, 1);
+        assert_eq!(shared.readings.len(), 1);
+        assert_eq!(shared.readings[0].percent(), Some(58));
+
+        // 2. 同时插上有线充电且 2.4G 暂停上报：仍然只显示 1 张卡并沿用有线电量。
+        shared.publish_additional(BackendId::Rapoo, vec![wired_offline_rx, wired], 0, 2);
+        assert_eq!(shared.readings.len(), 1);
+        assert_eq!(shared.readings[0].key, rx_a_key);
+        assert!(shared.readings[0].connected);
+        assert_eq!(shared.readings[0].percent(), Some(59));
+
+        // 3. 拔出后将 2.4G 接收器插到另一 USB 端口：旧离线卡平滑迁移，不留重复离线卡。
+        shared.publish_additional(BackendId::Rapoo, crate::backends::Poll {
+            present_channels: Some(Default::default()), ..Default::default()
+        }, 0, 3);
+        assert_eq!(shared.readings.len(), 1);
+        assert!(!shared.readings[0].connected);
+
+        shared.publish_additional(BackendId::Rapoo, vec![rx_b], 0, 4);
+        assert_eq!(shared.readings.len(), 1);
+        assert_eq!(shared.readings[0].key, rx_b_key);
+        assert!(shared.readings[0].connected);
+        assert_eq!(shared.readings[0].percent(), Some(60));
+        assert_eq!(shared.cfg.device_names.get(&rx_b_key).map(String::as_str), Some("My VT1"));
+        assert_eq!(shared.cfg.device_order, vec![rx_b_key]);
     }
 
     #[test]

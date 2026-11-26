@@ -495,7 +495,7 @@ impl Canvas {
         damage: Rc<dyn Fn()>,
     ) -> Result<Canvas, String> {
         if !gfx::start() {
-            return Err("GdiplusStartup 失败".to_string());
+            return Err("图形渲染组件启动失败".to_string());
         }
         let fonts = Fonts::from_candidates(&[
             "Microsoft YaHei UI",
@@ -503,12 +503,12 @@ impl Canvas {
             "SimSun",
             "Segoe UI",
         ])
-        .ok_or_else(|| "一个可用字体都建不出来".to_string())?;
+        .ok_or_else(|| "系统缺少可用的显示字体".to_string())?;
 
         // SAFETY: 传空指针 = 取当前 exe 的模块句柄。
         let inst = unsafe { GetModuleHandleW(std::ptr::null()) };
         if inst.is_null() {
-            return Err("GetModuleHandleW 失败".to_string());
+            return Err("无法获取程序模块实例".to_string());
         }
 
         let class = to_wide(CLASS_NAME);
@@ -548,7 +548,7 @@ impl Canvas {
         };
         if hwnd.is_null() {
             let err = unsafe { crate::win32::GetLastError() };
-            return Err(format!("CreateWindowExW 失败（GetLastError={err}）"));
+            return Err(format!("显示窗口创建失败（错误码 {err}）"));
         }
 
         let me = Canvas {

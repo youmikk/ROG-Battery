@@ -9,7 +9,7 @@ pub struct AulaHfdMechanical;
 
 const INFO_BYTES: usize = 56;
 const TRANSACTION_LIMIT: Duration = Duration::from_secs(2);
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 #[derive(Clone, Copy)]
 struct Model {

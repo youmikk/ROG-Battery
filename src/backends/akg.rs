@@ -12,7 +12,7 @@ const OUTPUT_ID: u8 = 6;
 const MAX_FRAGMENT: usize = 59;
 const MAX_MESSAGE: usize = 1024;
 const IO_TIMEOUT_MS: u32 = 500;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(interface: &HidInterface) -> bool {
     interface.vendor_id == 0x0ecb && interface.product_id == 0x20d9

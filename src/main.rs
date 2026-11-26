@@ -48,7 +48,7 @@ const USAGE: &str = r#"x-battery.exe —— X-Battery 外设电量与 ROG 鼠标
   x-battery.exe device-report                 输出不含序列号与接口路径的适配报告
   x-battery.exe device-report --probe         只读探测电量/DPI并导出同次运行的脱敏报告
   x-battery.exe info [--fresh]                读全部信息（一次读全，默认吃 30 秒缓存）
-  x-battery.exe backup [文件]                 备份全部 31 项设置（默认 %USERPROFILE%\Documents\rog-mouse-ctl\backups\）
+  x-battery.exe backup [文件]                 备份全部设备设置（默认 %USERPROFILE%\Documents\rog-mouse-ctl\backups\）
   x-battery.exe restore <文件> [--save]       从备份还原（能量块最后单独重写并断言）
   x-battery.exe save                          把当前 RAM 设置提交进 flash（0x50 0x03）
 
@@ -58,10 +58,10 @@ const USAGE: &str = r#"x-battery.exe —— X-Battery 外设电量与 ROG 鼠标
   x-battery.exe setdebounce <0-7>             去抖：0=关 1=8ms … 7=32ms
   x-battery.exe setsnap <0|1>                 角度吸附
   x-battery.exe settuning <-20..20>           角度微调（步进 5）
-  x-battery.exe setlod <low|high>             抬起距离（⚠️ 会重置表面标定）
+  x-battery.exe setlod <low|high>             抬起距离（⚠️ 会重置表面校准）
   x-battery.exe setlight <mode> [亮] [RRGGBB] 灯光 mode: 0=Static 1=Breathing 2=ColorCycle
                                               4=React 6=BatteryState 240=Off
-  x-battery.exe setbutton <0-7> <dstHex>      按键绑定（dst=0x0000 即禁用，需 --yes）
+  x-battery.exe setbutton <0-7> <dstHex>      按键绑定（dst=0x0000 为停用，需 --yes）
   x-battery.exe setsleep <code>               休眠：0=1分 1=2分 2=3分 3=5分 4=10分 255=永不
   x-battery.exe setlowbatt <0-100>            低电量告警阈值（%）
   x-battery.exe setfulleffect <0|1>           充满电时的灯效开关
@@ -463,10 +463,7 @@ fn parse_hex_u8(s: &str, what: &str) -> Result<u8, String> {
 /// 休眠 = 动一下鼠标。两种都笼统报「失败」只会让用户瞎试。
 fn fail(e: ops::OpsError) -> String {
     if e.is_invalid() {
-        return format!(
-            "{e}\n提示：{}（本次未向设备发送任何帧）",
-            cli::error_hint(e.kind())
-        );
+        return format!("{e}\n提示：{}", cli::error_hint(e.kind()));
     }
     if e.is_asleep() {
         // 休眠不是错误，不该让人以为程序坏了

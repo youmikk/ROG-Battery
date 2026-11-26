@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 pub struct Aula;
 const LENGTH: usize = 520;
 const MODEL: [u8; 6] = [4, 0, 0, 0, 0, 0x2e];
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 const CHANGED: &str = "设备档位或配置已变化，请刷新后重试";
 type Packet = [u8; LENGTH];
 

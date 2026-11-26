@@ -534,8 +534,8 @@ impl Controls {
                     y += 40.0;
                 } else if device.is_some_and(|device| device.battery == "—") {
                     y += 10.0;
-                    self.label(text("请核对完整型号；不一致时选择“列表中没有我的设备”填写。",
-                        "Check the full model; select 'My device is not listed' to correct it."),
+                    self.label(text("请确认显示的型号与实物一致；如果有出入，可以选择“列表中没有我的设备”手动补充。",
+                        "Check that the full model matches your device, or select 'My device is not listed' to enter it manually."),
                         25.0, y, 610.0, 36.0, 10.0, false, true);
                     y += 36.0;
                 }
@@ -794,8 +794,8 @@ impl Controls {
                 if queries.is_empty() {
                     self.surface(R::new(25.0, y, 610.0, 42.0), false);
                     self.label(
-                        if s.software { text("暂无运行记录，仍可直接描述并提交问题", "No activity records yet; you can still describe and submit the problem") }
-                            else { text("暂无查询记录", "No query records yet") },
+                        if s.software { text("暂时还没有日志记录，不影响直接提交问题", "No activity logs yet; you can still describe and submit the issue") }
+                            else { text("暂时还没有设备沟通记录", "No device communication records yet") },
                         37.0,
                         y + 10.0,
                         580.0,
@@ -1590,12 +1590,13 @@ impl Controls {
                 }
                 if !self.inventory_ready() {
                     self.prepare_inventory();
-                    self.error(text("正在收集设备接口信息，请稍后提交；也可关闭附带诊断。",
-                        "Collecting HID interfaces. Submit shortly, or turn off diagnostics."));
+                    self.error(text("正在整理设备诊断信息，请稍等片刻；如果不希望附带诊断，也可以取消勾选后直接提交。",
+                        "Collecting device diagnostics. Submit shortly, or uncheck diagnostics to submit right away."));
                     return;
                 }
                 let Some(submit) = submit else {
-                    self.error(text("应用内反馈尚未启用，请复制内容后前往 GitHub 提交。","In-app feedback is not enabled. Copy the report and submit it on GitHub."));
+                    self.error(text("当前版本暂未开通应用内直投，请先复制报告前往 GitHub 提交。",
+                        "In-app submission is not enabled in this build. Copy the report and submit it on GitHub."));
                     return;
                 };
                 let retry = self.state.borrow().draft_retry.clone();
@@ -1604,8 +1605,8 @@ impl Controls {
             Action::Fallback => {
                 if !self.inventory_ready() {
                     self.prepare_inventory();
-                    self.error(text("正在收集设备接口信息，请稍后复制；也可关闭附带诊断。",
-                        "Collecting HID interfaces. Copy shortly, or turn off diagnostics."));
+                    self.error(text("正在整理设备诊断信息，请稍等片刻；如果不希望附带诊断，也可以取消勾选后直接复制。",
+                        "Collecting device diagnostics. Copy shortly, or uncheck diagnostics to copy right away."));
                     return;
                 }
                 let draft = self.draft();
@@ -1888,7 +1889,8 @@ impl Controls {
                         let error = if !copy_report(self.window.handle, &fallback.markdown) {
                             text("暂时无法复制，请重试。", "Could not copy the report. Please retry.")
                         } else if crate::dynlight::shell_open(&fallback.url).is_err() {
-                            text("内容已复制，但无法打开浏览器。", "Report copied, but the browser could not be opened.")
+                            text("内容已复制到剪贴板，但没能自动打开浏览器，请手动访问 GitHub 提交。",
+                                "Report copied, but the browser could not be opened automatically. Submit it on GitHub.")
                         } else if fallback.images_omitted || fallback.capture_omitted {
                             text("内容已复制。请在 GitHub 粘贴，并手动添加截图或采集文件。", "Report copied. Paste it on GitHub and attach your screenshots or capture file manually.")
                         } else {
@@ -2859,8 +2861,8 @@ fn draw(c: &Controls, p: &mut Painter, body: bool, damage: R) {
                 "No GitHub account needed. Reports and selected diagnostics are public.",
             ),
             View::Form => text(
-                "反馈和附件将公开。应用内提交服务尚未启用。",
-                "Reports and attachments are public. In-app submission is not enabled.",
+                "当前版本暂未开通应用内直投，可复制下方整理好的报告前往 GitHub 提交（内容与附件将公开）。",
+                "In-app submission is not enabled in this build. Copy the report to submit publicly on GitHub.",
             ),
         };
         let content_y = fy + 15.0;

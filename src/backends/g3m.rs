@@ -4,7 +4,7 @@ use crate::hid::HidDevice;
 use std::time::Instant;
 
 pub struct G3m;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x320f && i.product_id == 0x706e && i.usage_page == 0xff1c && i.usage == 0x0092

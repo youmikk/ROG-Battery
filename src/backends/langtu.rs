@@ -8,7 +8,7 @@ const PRODUCT: &str = "2.4 Wireless Device";
 const LENGTH: u16 = 65;
 const TIMEOUT_MS: u32 = 7_000;
 const MAX_FRAMES: usize = 32;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(interface: &HidInterface) -> bool {
     interface.vendor_id == 0x1a2c && interface.product_id == 0x8fff

@@ -65,11 +65,11 @@ struct Config { profile:u8, x:Vec<u8>, y:Vec<u8> }
 impl Config {
     fn decode(profile:u8, x:Vec<u8>, y:Vec<u8>) -> Result<Self,String> {
         if profile>7 || x.len()!=17 || y.len()!=14 || x[14]>=SLOTS as u8 || x[16]>x[14] {
-            return Err("雷柏 DPI 配置无效".into());
+            return Err("读取到的设备 DPI 配置异常，请刷新重试".into());
         }
         for index in 0..=usize::from(x[14]) {
             if !(50..u16::MAX).contains(&Self::axis(&x,index))
-                || !(50..u16::MAX).contains(&Self::axis(&y,index)) { return Err("雷柏 DPI 配置无效".into()); }
+                || !(50..u16::MAX).contains(&Self::axis(&y,index)) { return Err("读取到的设备 DPI 配置异常，请刷新重试".into()); }
         }
         Ok(Self {profile,x,y})
     }
@@ -112,8 +112,8 @@ impl<C:Channel> Session<C> {
     fn query(&mut self,command:u8,address:u32,count:usize,data:&[u8])->Result<Vec<u8>,String> {
         let started=Instant::now();
         let result=(|| {
-            if started>=self.deadline {return Err("雷柏配置查询超时".into());}
-            let p=packet(self.mode,command,address,count,data).ok_or("雷柏 DPI 配置无效")?;
+            if started>=self.deadline {return Err("等待设备配置响应超时，请唤醒后重试".into());}
+            let p=packet(self.mode,command,address,count,data).ok_or("读取到的设备 DPI 配置异常，请刷新重试")?;
             self.channel.send(&p)?;
             // Never resend a write when its acknowledgement is lost.
             for _ in 0..5 {
@@ -122,11 +122,11 @@ impl<C:Channel> Session<C> {
                 let Ok(frame)=self.channel.receive() else {continue;};
                 match reply(&frame,count) {
                     Some(Reply::Data(data))=>return Ok(data.to_vec()),
-                    Some(Reply::Rejected)=>return Err("雷柏拒绝配置请求".into()),
+                    Some(Reply::Rejected)=>return Err("设备暂未接受此次配置请求".into()),
                     _=>{}
                 }
             }
-            Err("雷柏配置应答不可用".into())
+            Err("暂未获取到设备配置响应，请重试".into())
         })();
         trace::record(&self.interface,BackendId::Rapoo,if command==0xa4 {"read-register"} else {"set-stage"},
             address as u16,command,LENGTH,if result.is_ok(){LENGTH}else{0},started,
@@ -136,7 +136,7 @@ impl<C:Channel> Session<C> {
     fn read(&mut self,address:u32,count:usize)->Result<Vec<u8>,String> {self.query(0xa4,address,count,&[])}
     fn profile(&mut self)->Result<u8,String> {
         let p=self.read(PROFILE,1)?[0];
-        if p>7 {Err("雷柏 DPI 配置无效".into())} else {Ok(p)}
+        if p>7 {Err("读取到的设备 DPI 配置异常，请刷新重试".into())} else {Ok(p)}
     }
     fn config(&mut self)->Result<Config,String> {
         let profile=self.profile()?;
@@ -168,7 +168,7 @@ impl<C:Channel> Session<C> {
 }
 
 fn open(target:&Target,interfaces:&[HidInterface])->Result<Session<Transport>,String> {
-    let (output,feature)=endpoints(target.hid()?,interfaces).ok_or("雷柏配置接口不可用")?;
+    let (output,feature)=endpoints(target.hid()?,interfaces).ok_or("暂未找到设备配置通道，请检查连接后重试")?;
     Ok(Session::new(Transport {output:FeatureChannel::open_output(output)?,feature:FeatureChannel::open(feature)?},target.hid()?))
 }
 

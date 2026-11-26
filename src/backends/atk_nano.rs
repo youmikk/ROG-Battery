@@ -8,7 +8,7 @@ use winapi::um::cfgmgr32::{CM_Locate_DevNodeW, CM_Get_Parent, CM_Get_Device_IDW}
 pub struct AtkNano;
 const OUTPUT_ID: u8 = 8;
 const OUTPUT_LENGTH: u16 = 64;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x373b && i.product_id == 0x1216

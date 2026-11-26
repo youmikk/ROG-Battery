@@ -19,7 +19,7 @@ const SAMPLE_LIFETIME: Duration = Duration::from_secs(120);
 const FIRST_WAIT: Duration = Duration::from_secs(2);
 const SILENT_REOPEN: Duration = Duration::from_secs(30);
 const REOPEN_BACKOFF: Duration = Duration::from_secs(2);
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x24ae && i.product_id == 0x1872 && i.usage_page == 0xff00 && i.usage == 0x0e

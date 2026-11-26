@@ -717,10 +717,14 @@ impl HidDevice {
 
         let wait = unsafe { WaitForSingleObject(self.read_event, timeout_ms) };
         if wait != WAIT_OBJECT_0 {
-            unsafe {
+            let mut xfer: u32 = 0;
+            let completed = unsafe {
                 CancelIoEx(self.read_handle, &mut self.read_ov);
-                let mut xfer: u32 = 0;
-                GetOverlappedResult(self.read_handle, &mut self.read_ov, &mut xfer, 1);
+                GetOverlappedResult(self.read_handle, &mut self.read_ov, &mut xfer, 1)
+            };
+            // 若报告在超时临界点已由内核完成且未被取消，保留该完整报文而不是丢弃。
+            if wait == WAIT_TIMEOUT && completed != 0 && xfer > 0 && xfer as usize <= self.read_buf.len() {
+                return Ok(Some(self.read_buf[..xfer as usize].to_vec()));
             }
             return if wait == WAIT_TIMEOUT { Ok(None) } else { Err(()) };
         }

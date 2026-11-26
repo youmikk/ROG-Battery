@@ -7,7 +7,7 @@ use winapi::um::cfgmgr32::{CM_Get_Device_IDW, CM_Get_Parent, CM_Locate_DevNodeW}
 pub struct MchoseModern;
 const REPORT: u8 = 0x4d;
 const LENGTH: u16 = 64;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 const V7_PID: u16 = 0x101d;
 const V7_NAME: &str = "MCHOSE V7 Pro";
 

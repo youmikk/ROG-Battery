@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 pub struct MchoseMouse;
 const LENGTH: u16 = 65;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 const CHANGED: &str = "设备档位或配置已变化，请刷新后重试";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

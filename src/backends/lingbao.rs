@@ -8,7 +8,7 @@ use winapi::um::cfgmgr32::{CM_Get_Device_IDW, CM_Get_Parent, CM_Locate_DevNodeW}
 pub struct Lingbao;
 const REPORT_ID: u8 = 0x0f;
 const REPORT_LENGTH: u16 = 33;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x088d

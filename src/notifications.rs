@@ -48,7 +48,7 @@ fn notification(device_key: &str, device_name: &str, level: u8, threshold: u8) -
 
 pub fn show_low_battery(device_key: &str, device_name: &str, level: u8, threshold: u8) -> Result<(), String> {
     if !supported() {
-        return Err("仅 Microsoft Store 版本支持系统通知".into());
+        return Err("当前非微软商店版，暂不支持触发 Windows 低电量系统通知".into());
     }
     let _apartment = crate::winrt::Apartment::open()?;
     let result = (|| -> windows::core::Result<()> {

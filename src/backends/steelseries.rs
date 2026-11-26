@@ -129,7 +129,7 @@ fn snapshot(target: &Target, status: Status) -> Snapshot {
 
 fn response_snapshot(target: &Target, response: Option<&[u8]>, layout: Layout) -> Result<Snapshot, String> {
     let status = response.and_then(|frame| status(frame, layout))
-        .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+        .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
     Ok(snapshot(target, status))
 }
 
@@ -139,7 +139,7 @@ impl DeviceBackend for Nova {
     }
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let (_, layout) = confirmed(target.hid()?, |i| unnumbered_reports(api, i))
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(target.hid()?)?;
@@ -284,7 +284,7 @@ mod tests {
         let invalid = frame(&[0, 0xb0, 3, 5, 0]);
         for response in [None, Some(echo.as_slice()), Some(invalid.as_slice())] {
             let failed = response_snapshot(&target, response, layout);
-            assert_eq!(failed.unwrap_err(), crate::i18n::translate("设备无有效状态回报"));
+            assert_eq!(failed.unwrap_err(), crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"));
             state.observe_sample(None, None, None, measured + lifetime, lifetime);
             assert_eq!(state.measured_at, Some(measured));
             assert_eq!(state.battery.as_ref().unwrap().estimated_percent, Some(75));

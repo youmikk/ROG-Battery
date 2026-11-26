@@ -207,7 +207,7 @@ impl<C: Channel> Session<C> {
         Self { channel, interface: i.clone(), id: None, layout: None }
     }
     fn query(&mut self, command: u8, address: u16, data: &[u8], len: usize) -> Result<Vec<u8>, String> {
-        if len > 10 || data.len() > 10 { return Err("CompX 请求长度无效".into()); }
+        if len > 10 || data.len() > 10 { return Err("请求数据格式超出设备限制".into()); }
         let started = Instant::now();
         let p = packet(command, address, data, len);
         let r = self.channel.exchange(&p, &mut |r| {
@@ -227,10 +227,10 @@ impl<C: Channel> Session<C> {
             17, r.as_ref().map_or(0, Vec::len), started,
             if r.is_some() { trace::Outcome::Ok } else { trace::Outcome::NoReply });
         self.channel.settle();
-        r.ok_or_else(|| "CompX 设备无有效应答".into())
+        r.ok_or_else(|| "设备暂未响应，请唤醒或检查连接后重试".into())
     }
     fn read(&mut self, address: u16, len: usize) -> Result<Vec<u8>, String> {
-        if len == 0 { return Err("CompX 请求长度无效".into()); }
+        if len == 0 { return Err("请求数据格式超出设备限制".into()); }
         self.query(8, address, &[], len).map(|r| r[6..6 + len].to_vec())
     }
     fn identify(&mut self) {
@@ -277,7 +277,7 @@ impl<C: Channel> Session<C> {
                 (0xf58c,Some([2,27])) | (0xf58f,Some([2,32]))))
     }
     fn config(&mut self) -> Result<Config, String> {
-        let layout = self.layout.ok_or("CompX 传感器布局尚未确认")?;
+        let layout = self.layout.ok_or("尚未识别到设备传感器规格，请刷新后重试")?;
         let profile = self.profile();
         let system = self.read(0, 6)?;
         let mut rate = self.read_rate(&system,profile);
@@ -287,13 +287,13 @@ impl<C: Channel> Session<C> {
     }
     fn read_stages(&mut self, layout: Layout, profile: Option<u16>, system: &[u8]) -> Result<Dpi,String> {
         let count = scalar(&system[2..4]).filter(|n| (1..=layout.stages).contains(n))
-            .ok_or("CompX DPI 档位数无效")?;
-        let active = scalar(&system[4..6]).filter(|n| *n < count).ok_or("CompX 当前档位无效")?;
+            .ok_or("读取到的 DPI 档位数量异常，请刷新后重试")?;
+        let active = scalar(&system[4..6]).filter(|n| *n < count).ok_or("未读取到当前 DPI 档位，请刷新后重试")?;
         let mut dpi = Dpi { values: layout.options(), active_stage: Some(active), profile,
             ..Default::default() };
         for index in 0..count {
             let bytes = self.read(layout.address(index), layout.record_len())?;
-            let (x,y) = layout.decode(&bytes).ok_or("CompX DPI 档位响应无效")?;
+            let (x,y) = layout.decode(&bytes).ok_or("读取到的 DPI 档位数据异常，请刷新后重试")?;
             dpi.stages.push(DpiStage { index, value: x }); dpi.stage_y.insert(index, y);
             if index == active { dpi.current = Some(x); dpi.current_y = Some(y); }
         }
@@ -387,7 +387,7 @@ impl<C: Channel> Session<C> {
             || config.dpi.stage_y.get(&stage.index) != Some(&expected_y) {
             return Err("设备档位已变化，请刷新后重试".into());
         }
-        let layout = self.layout.ok_or("CompX 传感器布局尚未确认")?;
+        let layout = self.layout.ok_or("尚未识别到设备传感器规格，请刷新后重试")?;
         let encoded = layout.encode(x,y).ok_or("DPI 不在设备报告的可用范围内")?;
         let (address,len,offset) = if self.group_write() {
             (layout.address(stage.index / 2 * 2),8,usize::from(stage.index % 2)*4)
@@ -440,9 +440,9 @@ impl DeviceBackend for CompX {
             control(i) && (!power_only(i) || power_only_proven(api, i))).map(candidate).collect())
     }
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot,String> {
-        if !control(target.hid()?) { return Err("CompX 控制接口无效".into()); }
+        if !control(target.hid()?) { return Err("暂未找到可用的设备设置通道".into()); }
         if power_only(target.hid()?) && !power_only_proven(api, target.hid()?) {
-            return Err("CompX 电量报告描述符未确认".into());
+            return Err("暂未识别到设备电量上报格式".into());
         }
         let lock = channel_lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -450,11 +450,11 @@ impl DeviceBackend for CompX {
         if !power_only(target.hid()?) { s.identify(); }
         let battery = s.battery(); let battery_at = battery.as_ref().map(|_| Instant::now());
         let config = (!power_only(target.hid()?)).then(|| s.config().ok()).flatten();
-        if battery.is_none() && config.is_none() { return Err("CompX 设备无有效应答".into()); }
+        if battery.is_none() && config.is_none() { return Err("设备暂未响应，请唤醒或检查连接后重试".into()); }
         let target = s.target(target);
         let (dpi,polling_rate) = config.map(|c| (c.dpi,c.rate)).unwrap_or_default();
         if battery.is_none() && dpi.current.is_none() && polling_rate.current.is_none() {
-            return Err("CompX 设备无有效应答".into());
+            return Err("设备暂未响应，请唤醒或检查连接后重试".into());
         }
         Ok(Snapshot { target, battery, battery_at, battery_unavailable: false, dpi, polling_rate, connected: true })
     }
@@ -462,10 +462,10 @@ impl DeviceBackend for CompX {
         with_session(target, |s| {
             s.check(target)?; let c = s.config()?;
             if !c.dpi.writable { return Err("请分别设置 X/Y DPI".into()); }
-            let active = c.dpi.active_stage.ok_or("CompX 当前档位无效")?;
-            let stage = *c.dpi.stages.iter().find(|v| v.index == active).ok_or("CompX 当前档位无效")?;
+            let active = c.dpi.active_stage.ok_or("未读取到当前 DPI 档位，请刷新后重试")?;
+            let stage = *c.dpi.stages.iter().find(|v| v.index == active).ok_or("未读取到当前 DPI 档位，请刷新后重试")?;
             let _ = api;
-            let expected_y = *c.dpi.stage_y.get(&stage.index).ok_or("CompX DPI 档位响应无效")?;
+            let expected_y = *c.dpi.stage_y.get(&stage.index).ok_or("读取到的 DPI 档位数据异常，请刷新后重试")?;
             s.edit(target,stage,c.dpi.profile.ok_or("设备配置未知")?,expected_y,dpi,dpi)
         })
     }
@@ -485,7 +485,7 @@ pub fn set_preset(target: &Target, stage: DpiStage, context: crate::device::Stag
 }
 
 fn with_session(target: &Target, f: impl FnOnce(&mut Session<DeviceChannel>) -> Result<(),String>) -> Result<(),String> {
-    if !control(target.hid()?) { return Err("CompX 控制接口无效".into()); }
+    if !control(target.hid()?) { return Err("暂未找到可用的设备设置通道".into()); }
     let lock = channel_lock(&target.hid()?.path);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
     f(&mut Session::open(DeviceChannel::open(target.hid()?)?, target.hid()?))

@@ -111,11 +111,11 @@ impl DeviceBackend for Lofree {
 
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
-        if !control(interface) { return Err(crate::i18n::translate("设备无有效状态回报").into()); }
+        if !control(interface) { return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into()); }
         let lock = channel::lock(&interface.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut channel = Session { device: HidDevice::open(interface)?, interface };
-        let sample = sample(&mut channel).ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+        let sample = sample(&mut channel).ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         let battery = sample.percent.map(|percent| Battery { percent: Some(percent), estimated_percent: None,
             charging: None, voltage_mv: None, approximate: false, level: None });
         Ok(Snapshot { target: target.clone(), battery, battery_at: sample.measured,

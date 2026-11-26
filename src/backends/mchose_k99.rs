@@ -10,7 +10,7 @@ const PRODUCT: &str = "MCHOSE K99 V3 2.4G";
 const REPORT_BYTES: u16 = 65;
 const PAYLOAD_BYTES: usize = 64;
 const TIMEOUT_MS: u32 = 1_000;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x3837 && i.product_id == 0x3033 && i.usage_page == 1 && i.usage == 0

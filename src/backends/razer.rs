@@ -668,7 +668,7 @@ impl DeviceBackend for Razer {
     }
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         if !control(target.hid()?) {
-            return Err(crate::tr!("设备功能报告长度无效").into());
+            return Err(crate::tr!("设备通信数据格式异常").into());
         }
         let lock = channel::lock(&collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -714,7 +714,7 @@ fn with_session(
     f: impl FnOnce(&mut Session<feature::FeatureChannel>) -> Result<(), String>,
 ) -> Result<(), String> {
     if !control(target.hid()?) {
-        return Err(crate::tr!("设备功能报告长度无效").into());
+        return Err(crate::tr!("设备通信数据格式异常").into());
     }
     let lock = channel::lock(&collection_group(target.hid()?));
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());

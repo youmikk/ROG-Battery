@@ -7,7 +7,7 @@ use crate::store::{Failure, Phase, View};
 fn title(phase: Phase) -> &'static str {
     match phase {
         Phase::Unsupported => text("微软商店更新", "Microsoft Store updates"),
-        Phase::Idle => text("更新状态尚未确认", "Update status not yet confirmed"),
+        Phase::Idle => text("尚未检查更新", "Not checked yet"),
         Phase::Checking => text("正在检查微软商店更新…", "Checking Microsoft Store…"),
         Phase::Available => text(
             "微软商店有可用更新",
@@ -33,7 +33,7 @@ fn title(phase: Phase) -> &'static str {
 fn description(view: &View) -> String {
     let message = match view.phase {
         Phase::Unsupported => "",
-        Phase::Idle => text("点击“检查更新”获取更新状态。", "Select Check for updates to get the update status."),
+        Phase::Idle => text("点击「检查更新」查看最新版本。", "Select Check for updates to check the latest version."),
         Phase::Checking | Phase::Current => "",
         Phase::Available => text("更新完成后自动重启。", "Restarts automatically after updating."),
         Phase::CheckFailed | Phase::UpdateFailed | Phase::RestartFailed => text("请稍后重试。", "Try again later."),
@@ -42,19 +42,19 @@ fn description(view: &View) -> String {
     let detail = match view.failure {
         Some(Failure::Windows(code)) => format!(" (0x{:08X})", code as u32),
         Some(Failure::TimedOut) => {
-            format!(" {}", text("商店查询超时。", "The Store query timed out."))
+            format!(" {}", text("连接微软商店超时，请检查网络后重试。", "The Store connection timed out. Check your network and try again."))
         }
         Some(Failure::LowBattery) => format!(
             " {}",
-            text("请先为电脑充电。", "Charge your computer first.")
+            text("当前电脑电量较低，接通电源后再试会更稳妥。", "Your computer's battery is low. Plug in power and try again.")
         ),
         Some(Failure::WifiRecommended) => format!(
             " {}",
-            text("商店建议使用 Wi-Fi。", "The Store recommends Wi-Fi.")
+            text("当前网络环境受限，商店建议切换至 Wi-Fi 后更新。", "The connection is metered. Microsoft Store recommends Wi-Fi to update.")
         ),
         Some(Failure::WifiRequired) => format!(
             " {}",
-            text("商店要求使用 Wi-Fi。", "The Store requires Wi-Fi.")
+            text("当前网络受限，需要连接 Wi-Fi 才能通过商店下载更新。", "Microsoft Store requires a Wi-Fi connection to download updates.")
         ),
         _ => String::new(),
     };

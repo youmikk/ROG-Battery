@@ -113,7 +113,7 @@ impl DeviceBackend for DualSense {
 
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let (_, transport) = control(target.hid()?)
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open_read_only(target.hid()?)?;
@@ -142,7 +142,7 @@ impl DeviceBackend for DualSense {
         };
         trace::record(target.hid()?, BackendId::DualSense, "input-battery", 0,
             transport.report_id(), 0, batch.bytes, started, outcome);
-        let report = batch.report.ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+        let report = batch.report.ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         Ok(snapshot(target, report, Instant::now()))
     }
 }

@@ -6,7 +6,7 @@ use std::{hash::{BuildHasher, Hasher}, time::{Duration, Instant}};
 
 pub struct Dareu;
 const LENGTH: usize = 17;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 const CHANGED: &str = "设备档位或配置已变化，请刷新后重试";
 
 fn management(i: &HidInterface) -> bool {

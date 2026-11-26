@@ -8,7 +8,7 @@ pub struct EweadnX87;
 
 const PRODUCT: &str = "2.4G Dongle";
 const TIMEOUT_MS: u32 = 600;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x0c45 && i.product_id == 0xfefe

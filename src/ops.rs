@@ -205,7 +205,7 @@ impl ApplyReport {
         }
         if self.revert_attempted && !self.restored {
             return Err(OpsError::mismatch(format!(
-                "还原失败：原值 {}，现在 {}。请用 backup 文件 restore",
+                "还原未成功：原值 {}，当前 {}。建议结合备份文件重新恢复",
                 self.old_value, self.restored_value
             )));
         }
@@ -371,7 +371,7 @@ fn configuration_mismatch(expected: &State, actual: &State, allow_calibration_re
 
 fn check_reply(reply: Option<Vec<u8>>, action: &str) -> Result<(), OpsError> {
     match reply {
-        Some(frame) if is_nak(&frame) => Err(OpsError::rejected(format!("{action}被设备 NAK"))),
+        Some(frame) if is_nak(&frame) => Err(OpsError::rejected(format!("{action}未获设备接受"))),
         Some(_) => Ok(()),
         None => Err(OpsError::asleep(format!("{action}无应答"))),
     }
@@ -423,7 +423,7 @@ fn transaction_failure(
         "未发送 commit"
     };
     let calibration = if attempted.contains(&Setting::Lod) {
-        "；LOD 写入可能重置表面标定，无法通过 LOD 命令恢复"
+        "；抬起距离改动可能已重置表面校准，请按需重新校准"
     } else { "" };
     let kind = if cause.kind == ErrorKind::Asleep { ErrorKind::Other } else { cause.kind };
     OpsError::new(kind, format!("{}；{recovery}；{persistence}{calibration}", cause.message))
@@ -486,7 +486,7 @@ where
                 .map_err(|error| OpsError::other(format!(
                     "试写已确认，但恢复未确认：{}；未发送 commit{}",
                     error.message,
-                    if attempted.contains(&Setting::Lod) { "；表面标定无法通过 LOD 命令恢复" } else { "" }
+                    if attempted.contains(&Setting::Lod) { "；原有表面校准已重置" } else { "" }
                 )))?;
             report.restored = true;
             report.restored_value = probe(restored.state());
@@ -599,7 +599,7 @@ fn restore_with(
             Ok((expected, settings))
         }, log)?;
     if changes_lod {
-        report.warning = Some("写 LOD 会重置表面标定（厂商确认无恢复命令）。".into());
+        report.warning = Some("抬起距离已更新，设备原有的表面校准已重置。".into());
     }
     Ok(report)
 }
@@ -874,7 +874,7 @@ pub fn set_lod(
     .keep(keep)
     .save(save)
     .warning(Some(
-        "写 LOD 会重置表面标定（厂商确认无恢复命令）。".to_string(),
+        "抬起距离已更新，设备原有的表面校准已重置。".to_string(),
     ));
 
     cycle(
@@ -1126,13 +1126,12 @@ pub fn set_button(
     }
     if dst == 0x0000 && !confirmed {
         return Err(OpsError::invalid(format!(
-            "dst = 0x0000 表示**禁用**「{}」这个键，禁用后它完全没反应，\
-             恢复只能靠备份文件。确认要禁用请二次确认。",
+            "停用「{}」后该按键将不再响应，需要时可重新绑定或从备份恢复。如需继续，请加上 --yes 确认。",
             proto::BUTTON_NAME[slot]
         )));
     }
 
-    let alt = if dst == 0 { "（禁用）" } else { "" };
+    let alt = if dst == 0 { "（停用）" } else { "" };
     let spec = CycleSpec::new(format!(
         "setbutton 槽 {slot} ({}) -> 0x{dst:04X}{alt}",
         proto::BUTTON_NAME[slot]
@@ -1141,8 +1140,7 @@ pub fn set_button(
     .save(save)
     .warning(if dst == 0 {
         Some(format!(
-            "「{}」已被禁用（dst = 0x0000），这个键现在完全没反应。\
-             恢复只能靠备份文件或重新绑定。",
+            "「{}」已停用，需要时可重新绑定功能或从备份恢复。",
             proto::BUTTON_NAME[slot]
         ))
     } else {
@@ -1452,7 +1450,7 @@ mod transaction_tests {
         let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(after)]);
         let report = restore(&mut device, &text, true).unwrap();
         assert!(report.applied && report.committed);
-        assert!(report.warning.unwrap().contains("表面标定"));
+        assert!(report.warning.unwrap().contains("表面校准"));
         assert_eq!(written_settings(&device), [
             Setting::Poll, Setting::Dpi(0), Setting::Dpi(1), Setting::Dpi(2), Setting::Dpi(3),
             Setting::Stage, Setting::Debounce, Setting::Snap, Setting::Tuning, Setting::Light,
@@ -1632,7 +1630,7 @@ mod transaction_tests {
         let mut device = FakeDevice::new(vec![Ok(baseline()), Ok(baseline())]);
         device.replies.push_back(Some(vec![3, 0xff, 0xaa]));
         let error = change_sleep(&mut device, true, true).unwrap_err();
-        assert!(error.message.contains("NAK"));
+        assert!(error.message.contains("未获设备接受"));
         assert!(error.message.contains("原配置已读回确认"));
         assert_eq!(device.operations(), ["read", "write", "read"]);
     }
@@ -1725,7 +1723,7 @@ mod transaction_tests {
                 let mut expected = before.clone(); expected.lod = 1;
                 Ok((expected, vec![Setting::Lod]))
             }, &mut |_| {}).unwrap_err();
-        assert!(error.message.contains("表面标定"));
+        assert!(error.message.contains("表面校准"));
         assert!(error.message.contains("恢复未确认"));
         assert!(!device.events.contains(&"commit"));
     }

@@ -13,7 +13,7 @@ const LENGTH: u16 = 64;
 const COMMAND: u8 = 0x0b;
 const TIMEOUT_MS: u32 = 1_000;
 const MAX_READS: usize = 32;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x3837 && i.product_id == 0x6013

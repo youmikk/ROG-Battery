@@ -116,7 +116,7 @@ fn build_options(drop: Drop) -> Vec<(String, usize)> {
             .iter()
             .map(|s| {
                 if *s == 0 {
-                    (crate::tr!("每次都重读").to_string(), 0)
+                    (crate::tr!("不缓存（每次实时读取）").to_string(), 0)
                 } else {
                     (crate::trf!("{s} 秒", s = s), *s as usize)
                 }
@@ -196,7 +196,7 @@ pub fn drop_current(drop: Drop, d: &Data) -> String {
         Drop::Refresh => crate::trf!("{} 秒", d.cfg.refresh_interval_sec),
         Drop::CacheTtl => {
             if d.cfg.cache_ttl_sec == 0 {
-                crate::tr!("每次都重读").to_string()
+                crate::tr!("不缓存（每次实时读取）").to_string()
             } else {
                 crate::trf!("{} 秒", d.cfg.cache_ttl_sec)
             }
@@ -269,7 +269,7 @@ pub fn drop_selected(drop: Drop, d: &Data) -> usize {
 /// 不猜 —— 猜错会让用户把键绑到别处去。
 pub fn button_target_name(code: u16) -> String {
     match code {
-        0x0000 => crate::tr!("无功能").to_string(),
+        0x0000 => crate::tr!("停用").to_string(),
         0x01F0 => crate::tr!("左键点击").to_string(),
         0x01F1 => crate::tr!("右键点击").to_string(),
         0x01F2 => crate::tr!("中键点击").to_string(),

@@ -467,8 +467,8 @@ pub fn configured() -> bool { endpoint().is_some() }
 
 fn required_endpoint() -> Result<Endpoint, String> {
     option_env!("R_BATTERY_FEEDBACK_URL").and_then(parse_endpoint).ok_or_else(|| message(
-        "此版本尚未配置反馈服务。可以复制报告并前往 GitHub 提交；附件需要手动添加。",
-        "This build has no feedback service configured. Copy the report and submit it on GitHub; add attachments manually."))
+        "当前版本暂未开通应用内直投，请先复制报告前往 GitHub 提交，如有截图或抓包文件记得一并上传。",
+        "In-app submission is not enabled in this build. Copy the report to submit on GitHub and attach screenshots or capture files manually."))
 }
 
 fn wide(value: &str) -> Vec<u16> { value.encode_utf16().chain(Some(0)).collect() }
@@ -574,8 +574,8 @@ fn rejected(status: u32, bytes: &[u8]) -> bool {
 
 fn http_error(status: u32) -> String {
     match status {
-        401 | 403 => message("反馈服务未接受此回复凭证，请通过 GitHub 查看或补充。",
-            "The feedback service did not accept this reply key. View or update the issue on GitHub."),
+        401 | 403 => message("当前设备暂未匹配到这条反馈的跟进权限，如需查看或补充，请直接前往 GitHub 页面。",
+            "This computer does not have permission to update that feedback. View or update the issue on GitHub."),
         404 => message("未找到这条反馈，请稍后重试或前往 GitHub 查看。",
             "This feedback could not be found. Retry later or view it on GitHub."),
         409 => message("反馈请求暂时无法完成，请稍后重试。",
@@ -885,8 +885,8 @@ fn complete_entry(history: &mut History, stored: &StoredEntry, receipt: CreateRe
 fn stored_number(number: u64) -> Result<StoredEntry, String> {
     if !valid_number(number) { return Err(invalid()); }
     with_history(false, |history| history.entries.iter().find(|e| e.status == Status::Completed && e.number == Some(number))
-        .cloned().ok_or_else(|| message("本机没有这条反馈的回复凭证，请前往 GitHub 查看。",
-            "This computer has no reply key for that feedback. View it on GitHub.")))
+        .cloned().ok_or_else(|| message("当前设备没有这条反馈的跟进验证信息，请前往 GitHub 页面查看。",
+            "This computer has no verification key for that feedback. View it on GitHub.")))
 }
 
 fn valid_thread(number: u64, value: &Thread) -> bool {
@@ -919,7 +919,7 @@ pub fn reply(number: u64, body: &str) -> Result<ReplyReceipt, String> {
     if !valid_number(number) || !text(body, 1, 2000, true) { return Err(invalid()); }
     let stored = with_history(true, |history| {
         let entry = history.entries.iter_mut().find(|e| e.status == Status::Completed && e.number == Some(number))
-            .ok_or_else(|| message("本机没有这条反馈的回复凭证。", "This computer has no reply key for that feedback."))?;
+            .ok_or_else(|| message("当前设备没有这条反馈的跟进验证信息。", "This computer has no verification key for that feedback."))?;
         prepare_reply(entry, body)?;
         Ok(entry.clone())
     })?;
@@ -938,8 +938,8 @@ pub fn reply(number: u64, body: &str) -> Result<ReplyReceipt, String> {
     }
     if status == 202 {
         if !pending(&bytes) { return Err(service_error()); }
-        return Err(message("回复已保存，正在等待服务确认。请稍后用相同内容重试。",
-            "The reply is saved and awaiting confirmation. Retry the same reply later."));
+        return Err(message("这条补充回复暂未确认送达，内容已帮你留存，请稍后重试发送。",
+            "This reply has not been confirmed yet. Your text is saved locally; retry shortly."));
     }
     let receipt: ReplyReceipt = serde_json::from_slice(&bytes).map_err(|_| service_error())?;
     if !valid_receipt(number, &receipt) { return Err(service_error()); }
@@ -952,8 +952,8 @@ pub fn reply(number: u64, body: &str) -> Result<ReplyReceipt, String> {
 
 fn prepare_reply(entry: &mut StoredEntry, body: &str) -> Result<(), String> {
     if let Some(pending) = &entry.pending_reply {
-        if pending.body != body { return Err(message("上一条回复尚未确认，请先重试原回复。",
-            "The previous reply is not confirmed. Retry that reply first.")); }
+        if pending.body != body { return Err(message("上一条补充回复还没确认送达，请先重试发送原内容。",
+            "Your previous reply is still awaiting confirmation. Retry sending it first.")); }
     } else {
         // Only an unfinished operation is a retry. After confirmation, a new
         // user action creates another reply even when its text is identical.

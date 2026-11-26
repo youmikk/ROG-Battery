@@ -171,7 +171,7 @@ impl<C: Channel> Session<C> {
         match session.request(0, 1, &[0, 0, 0x5a]) {
             Ok(ping) if ping.len() >= 3 && ping[0] >= 2 && ping[2] == 0x5a => (),
             Err(_) if session.last_protocol_error == Some((0x8f, 1)) => session.legacy = true,
-            _ => return Err("此设备未确认支持 HID++".into()),
+            _ => return Err("暂未确认该设备支持高级设置读取".into()),
         }
         Ok(session)
     }
@@ -188,7 +188,7 @@ impl<C: Channel> Session<C> {
         };
         let mut frame = vec![0u8; total];
         if parameters.len() > total - 4 || function > 15 {
-            return Err("HID++ 请求参数过长".into());
+            return Err("请求参数超出设备限制".into());
         }
         frame[..4].copy_from_slice(&[
             if total == 20 { 0x11 } else { 0x10 },
@@ -221,7 +221,7 @@ impl<C: Channel> Session<C> {
                 started,
                 trace::Outcome::NoReply,
             );
-            return Err("HID++ 设备无应答".into());
+            return Err("设备暂未响应，请唤醒设备或检查连接后重试".into());
         };
         let Some(payload) = hidpp_payload(&reply) else {
             trace::record_address(
@@ -236,7 +236,7 @@ impl<C: Channel> Session<C> {
                 started,
                 trace::Outcome::InvalidData,
             );
-            return Err("HID++ 回帧长度无效".into());
+            return Err("设备返回的数据长度异常，请刷新重试".into());
         };
         if reply[2] == 0xff || reply[2] == 0x8f {
             self.last_protocol_error = Some((reply[2], reply.get(5).copied().unwrap_or(0)));
@@ -253,7 +253,7 @@ impl<C: Channel> Session<C> {
                 trace::Outcome::Rejected(u32::from(reply.get(5).copied().unwrap_or(0))),
             );
             return Err(crate::trf!(
-                "HID++ 查询被拒绝：{code:02x}",
+                "设备未接受该项查询（错误码 {code:02x}）",
                 code = reply.get(5).copied().unwrap_or(0)
             ));
         }
@@ -640,7 +640,7 @@ impl<C: Channel> Session<C> {
         parameters: &[u8],
     ) -> Result<Vec<u8>, String> {
         if parameters.len() > 3 {
-            return Err("HID++ 请求参数过长".into());
+            return Err("请求参数超出设备限制".into());
         }
         let sub_id = if register & 0x200 != 0 { 0x83 } else { 0x81 };
         let low_register = register as u8;
@@ -674,10 +674,10 @@ impl<C: Channel> Session<C> {
             outcome,
         );
         match reply {
-            Some(reply) if hidpp_payload(&reply).is_none() => Err("HID++ 回帧长度无效".into()),
+            Some(reply) if hidpp_payload(&reply).is_none() => Err("设备返回的数据长度异常，请刷新重试".into()),
             Some(reply) if reply[2] == sub_id => Ok(hidpp_payload(&reply).unwrap().to_vec()),
-            Some(reply) => Err(crate::trf!("HID++ 查询被拒绝：{code:02x}", code = reply[5])),
-            None => Err("HID++ 设备无应答".into()),
+            Some(reply) => Err(crate::trf!("设备未接受该项查询（错误码 {code:02x}）", code = reply[5])),
+            None => Err("设备暂未响应，请唤醒设备或检查连接后重试".into()),
         }
     }
 

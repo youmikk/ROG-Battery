@@ -173,11 +173,11 @@ pub fn predict_device(rows: &[HistoryRow], current: HistoryRow) -> Estimate {
     let span = (current.ts - sel[0].ts) as f64 / 60.0;
     let changes = sel.windows(2).filter(|w| w[0].level != w[1].level).count();
     if !current.charging_known && (now_charging || changes < 2 || span < 30.0) {
-        return Estimate { text: "充电状态未知，等待稳定放电趋势".into(),
+        return Estimate { text: "正在确认设备充放电状态，稍后会更新估算".into(),
             samples: sel.len(), span_minutes: span, ..Default::default() };
     }
     if current.approximate && (changes < 2 || span < 60.0) {
-        return Estimate { text: "仅有粗略电量，等待更多档位变化".into(),
+        return Estimate { text: "当前设备仅支持分档电量，需要更长观察时间".into(),
             samples: sel.len(), span_minutes: span, ..Default::default() };
     }
     let mut estimate = predict_from_series(sel, now_level, now_charging, now_mode);
@@ -276,7 +276,7 @@ fn predict_from_series(
         return Estimate {
             samples: sel.len(),
             span_minutes,
-            text: "预计充满时间：刚插上电，还在观察".to_string(),
+            text: "预计充满时间：刚接上电源，正在观察充电速度".to_string(),
             ..Default::default()
         };
     }
@@ -284,7 +284,7 @@ fn predict_from_series(
         return Estimate {
             samples: sel.len(),
             span_minutes,
-            text: "预计可用时间：刚拔掉线，还在观察".to_string(),
+            text: "预计可用时间：刚切到无线使用，正在观察耗电速度".to_string(),
             ..Default::default()
         };
     }
@@ -300,9 +300,9 @@ fn predict_from_series(
             samples: sel.len(),
             span_minutes,
             text: if now_charging {
-                "预计充满时间：异常（请忽略）".to_string()
+                "预计充满时间：估算中…".to_string()
             } else {
-                "预计可用时间：异常（请忽略）".to_string()
+                "预计可用时间：估算中…".to_string()
             },
             ..Default::default()
         };

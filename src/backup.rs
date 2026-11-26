@@ -136,7 +136,7 @@ pub struct Backup {
 impl Backup {
     pub fn validate(&self) -> Result<(), String> {
         if self.keys_found == 0 {
-            return Err("备份中没有任何已知设置".into());
+            return Err("备份中未包含可识别的设备配置".into());
         }
         if !self.rejected.is_empty() {
             return Err(format!("备份含不可用字段：{}", self.rejected.join("；")));
@@ -370,7 +370,7 @@ pub fn parse(text: &str) -> Result<Backup, String> {
     }
 
     if b.keys_found == 0 {
-        return Err("备份文件里没有任何已知的键，可能不是本程序生成的文件".into());
+        return Err("未能从该文件中识别到有效配置，请检查是否选对了备份文件".into());
     }
     Ok(b)
 }

@@ -1636,7 +1636,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         let line = if d.estimate.stale_seconds > 0 {
             // 沿用旧结论时必须说明白，否则等于拿旧斜率冒充当前状态。
             crate::trf!(
-                "沿用 {}前的估算 · 当前读数没更新，暂时没法重算",
+                "参考 {}前的估算 · 等待设备更新电量后刷新",
                 crate::i18n::age(d.estimate.stale_seconds)
             )
         } else if d.estimate.approximate {
@@ -2465,9 +2465,9 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             let selected = rate.current.and_then(|current| rate.values.iter().position(|&value| value == current)).unwrap_or(usize::MAX);
             let segment_width = (labels.len() as f32 * 64.0).clamp(160.0, 320.0);
             let frequency_label = match rate.connection {
-                Some(crate::device::PollingRateConnection::Wired) => crate::tr!("有线轮询频率"),
-                Some(crate::device::PollingRateConnection::Wireless) => crate::tr!("无线轮询频率"),
-                None => crate::tr!("轮询频率"),
+                Some(crate::device::PollingRateConnection::Wired) => crate::tr!("有线回报率"),
+                Some(crate::device::PollingRateConnection::Wireless) => crate::tr!("无线回报率"),
+                None => crate::tr!("当前回报率"),
             };
             let control = row_label(
                 p,
@@ -2502,7 +2502,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             if basic.connected && rate.onboard_mode {
                 let top = c.y + 10.0;
                 let height = note(p, R::new(c.x, top, c.w, 0.0),
-                    crate::tr!("当前处于板载内存模式，请在 G HUB 中关闭板载内存模式后刷新设备，再修改回报率。"), false);
+                    crate::tr!("设备当前处于板载内存模式。如需修改回报率，请先在 Logitech G HUB 中关闭板载内存模式，再刷新设备。"), false);
                 c.y = top + height;
             }
         }
@@ -2632,7 +2632,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         let ctl = row_label(
             p,
             area,
-            crate::tr!("轮询频率"),
+            crate::tr!("当前回报率"),
             Some(crate::tr!("越高越跟手，也越耗电")),
             330.0,
         );
@@ -2822,7 +2822,7 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        crate::tr!("修改抬起距离会重置设备的表面标定，无法自动恢复。"),
+        crate::tr!("调整抬起距离会清除设备当前的表面校准，校准后可恢复最佳追踪效果。"),
         true,
     );
     c.y += nw;
@@ -2862,7 +2862,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     c.y = card.bottom();
     c.y += 12.0;
     p.text_wrap(
-        crate::tr!("灯效在「设置 → 个性化 → 动态光效」里调：纯色 / 呼吸 / 渐变 / 波浪 / 闪烁等都由 Windows 提供。本程序不再写厂商私有灯效报文，避免和系统互相覆盖导致闪烁。"),
+        crate::tr!("纯色、呼吸、波浪等灯效可在 Windows「设置 → 个性化 → 动态光效」中调节，由系统统一接管，避免与第三方灯效冲突。"),
         R::new(c.x, c.y, c.w, 44.0),
         font::HINT,
         t.text3,
@@ -2884,9 +2884,9 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
         );
         p.text(
             if found {
-                crate::tr!("已检测到 HID LampArray 设备")
+                crate::tr!("已检测到支持系统动态光效的设备")
             } else {
-                crate::tr!("未检测到 HID LampArray 设备")
+                crate::tr!("未检测到支持系统动态光效的设备")
             },
             R::new(area.x + 20.0, area.y, (area.w - 130.0).max(80.0), area.h),
             font::BODY,
@@ -2914,7 +2914,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
         p.hline(card.x, card.right(), area.y, t.border);
         let ctl = row_label(p, area, crate::tr!("灯珠数量 / 类型"), None, 240.0);
         p.text(
-            &crate::trf!("{} 个 · {}", l.lamp_count, l.kind_name()),
+            &crate::trf!("{} 颗灯珠 · {}", l.lamp_count, l.kind_name()),
             R::new(ctl.x, ctl.y, ctl.w, ctl.h),
             font::BODY,
             false,
@@ -2929,7 +2929,7 @@ fn light(p: &mut Painter, ui: &mut Ui, _d: &Data, _f: &Frame, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        crate::tr!("灯效不跟系统走时：Armoury Crate 的灯效可能正在抢占设备，先关掉它的灯效（或退出），再回到系统「动态光效」页面。"),
+        crate::tr!("如果灯光没有随系统设置变化，可能是奥创中心（Armoury Crate）正在控制灯效；请先在其中关闭灯光接管或退出该软件，再回到系统「动态光效」页面。"),
         false,
     );
     c.y += nw + 16.0;
@@ -2945,7 +2945,7 @@ fn keys(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let nw = note(
         p,
         R::new(c.x, c.y, c.w, 20.0),
-        crate::tr!("把某个键绑成「无功能」（0000）后，该键在设备上将完全失效 —— 如需恢复必须重新写入完整映射配置。"),
+        crate::tr!("将按键设为「停用」后按下将不再响应；需要时可随时重新绑定功能或从备份恢复。"),
         true,
     );
     c.y += nw + 16.0;
@@ -3161,7 +3161,7 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             p,
             area,
             crate::tr!("显示托盘图标"),
-            Some(crate::tr!("关闭后只能用窗口操作")),
+            Some(crate::tr!("隐藏托盘图标后，可通过主窗口或任务栏入口使用")),
             40.0,
         );
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
@@ -3251,7 +3251,7 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             p,
             area,
             crate::tr!("快照缓存有效期"),
-            Some(crate::tr!("设为「每次都重读」会明显更慢")),
+            Some(crate::tr!("启用缓存可更快加载数据；关闭缓存则会每次实时向设备读取")),
             150.0,
         );
         drop_button(
@@ -3315,7 +3315,7 @@ fn settings_data(p: &mut Painter, ui: &mut Ui, _d: &Data, c: &mut Cursor) {
             p,
             area,
             crate::tr!("备份与还原"),
-            Some(crate::tr!("把全部 31 项参数存成一个文本文件")),
+            Some(crate::tr!("将设备的完整参数设置备份为本地文本文件")),
             230.0,
         );
         let b1 = R::new(ctl.x, ctl.cy() - 15.0, 105.0, 30.0);
@@ -3454,7 +3454,7 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             draw_button(p, ui, check, check_label, Act::CheckUpdate, false);
         }
     }
-    p.text(tr("设备电量，一眼就懂。", "Device battery at a glance."),
+    p.text(tr("所有设备的电量，一眼就好。", "Battery levels at a glance."),
         R::new(brand_x, y + 36.0, w - (brand_x - x), 19.0),
         12.0, false, t.text2, Align::Left);
 

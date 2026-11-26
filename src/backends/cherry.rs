@@ -97,7 +97,7 @@ fn pixiu_read_with(target: &Target,
     -> Result<Snapshot, String> {
     let interface = target.hid()?;
     if target.backend != BackendId::Cherry || !pixiu(interface) || !control(interface) {
-        return Err(crate::i18n::translate("设备无有效状态回报").into());
+        return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into());
     }
     let started = Instant::now();
     let mut remaining = 32;
@@ -113,7 +113,7 @@ fn pixiu_read_with(target: &Target,
             (Some(_), None) => trace::Outcome::InvalidData,
             (None, None) => trace::Outcome::NoReply,
         });
-    let battery = battery.ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+    let battery = battery.ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
     Ok(Snapshot { target: target.clone(), battery: Some(battery), battery_at: Some(Instant::now()),
         battery_unavailable: false, connected: true, dpi: Dpi::default(), polling_rate: Default::default() })
 }
@@ -123,9 +123,9 @@ fn read_pixiu(api: &HidApi, target: &Target) -> Result<Snapshot, String> {
     let interface = candidates(&interfaces).into_iter().find(|interface|
         target.hid().is_ok_and(|original| interface.path.eq_ignore_ascii_case(&original.path)))
         .filter(|interface| proven(api, interface))
-        .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+        .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
     let lock = channel::lock(&pixiu_group(interface)
-        .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?);
+        .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?);
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut device = HidDevice::open(interface)?;
     // Existing interrupt OUT transport drains queued notifications before querying.
@@ -145,7 +145,7 @@ impl DeviceBackend for Cherry {
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
         if pixiu(interface) { return read_pixiu(api, target); }
-        if !proven(api, interface) { return Err(crate::i18n::translate("设备无有效状态回报").into()); }
+        if !proven(api, interface) { return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into()); }
         let lock = channel::lock(&channel::collection_group(interface));
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(interface)?;
@@ -155,7 +155,7 @@ impl DeviceBackend for Cherry {
             response.as_ref().map_or(0, Vec::len), started,
             if response.is_some() { trace::Outcome::Ok } else { trace::Outcome::NoReply });
         let battery = response.as_deref().and_then(battery)
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         Ok(Snapshot { target: target.clone(), battery: Some(battery), battery_at: Some(Instant::now()),
             battery_unavailable: false, connected: true, dpi: Dpi::default(), polling_rate: Default::default() })
     }

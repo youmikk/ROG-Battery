@@ -129,7 +129,7 @@ fn read_with(
     target: &Target,
     mut exchange: impl FnMut(&[u8], u8, u16, u8) -> Option<Vec<u8>>,
 ) -> Result<Snapshot, String> {
-    let fail = || crate::i18n::translate("设备无有效状态回报").to_string();
+    let fail = || crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string();
     let base = exchange(
         &request(4, 0, 56),
         4,
@@ -227,10 +227,10 @@ impl DeviceBackend for MchoseGlw {
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
         if target.backend != BackendId::MchoseGlw {
-            return Err(crate::i18n::translate("设备无有效状态回报").into());
+            return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into());
         }
         let input_id = input_report_id(api, interface)
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报").to_string())?;
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string())?;
         let lock = channel::lock(&channel::collection_group(interface));
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut device = HidDevice::open(interface)?;

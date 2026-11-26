@@ -233,7 +233,7 @@ fn keyboard_battery(frame: &[u8], selected: Model, identified: bool) -> Option<B
 }
 
 fn read_with(target: &Target, mut exchange: impl FnMut(u8, bool) -> Option<Vec<u8>>) -> Result<Snapshot, String> {
-    let fail = || crate::i18n::translate("设备无有效状态回报").to_string();
+    let fail = || crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string();
     let selected = model(target.hid()?).ok_or_else(fail)?;
     let mut target = target.clone();
     let identify = selected != Model::SharedReceiver || generic_receiver(&target.hid()?.product)
@@ -269,7 +269,7 @@ fn read_aula_with(
     first_identity: &[u8],
     mut exchange: impl FnMut(u8) -> Option<Vec<u8>>,
 ) -> Result<Snapshot, String> {
-    let fail = || crate::i18n::translate("设备无有效状态回报").to_string();
+    let fail = || crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string();
     let name = aula_model_name(first_identity).ok_or_else(fail)?;
     let battery = exchange(0x4a)
         .and_then(|r| aula_battery(&r))
@@ -378,9 +378,9 @@ impl DeviceBackend for Keyboard20 {
     }
 
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        if !proven(api, target.hid()?) { return Err(crate::i18n::translate("设备无有效状态回报").into()); }
+        if !proven(api, target.hid()?) { return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into()); }
         let selected = model(target.hid()?)
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报"))?;
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试"))?;
         let lock = channel::lock(&channel::collection_group(target.hid()?));
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(target.hid()?)?;
@@ -393,7 +393,7 @@ impl DeviceBackend for Keyboard20 {
         if hint == Some(Wire::Mchose) {
             order.swap(0, 1);
         }
-        let mut last_error = crate::i18n::translate("设备无有效状态回报").to_string();
+        let mut last_error = crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string();
         for wire in order {
             if wire == Wire::Mchose {
                 match read_mchose(&mut device, target, selected) {
@@ -414,7 +414,7 @@ impl DeviceBackend for Keyboard20 {
                 |r| by_reply(r, 5),
             );
             let Some(identity) = identity.filter(|r| aula_model_name(r).is_some()) else {
-                let error = crate::i18n::translate("设备无有效状态回报").to_string();
+                let error = crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string();
                 // Once a definitive AULA model has been seen, a failed wake
                 // response must not be reinterpreted by the MCHOSE framing.
                 if hint == Some(Wire::Aula) {

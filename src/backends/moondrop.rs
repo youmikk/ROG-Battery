@@ -8,7 +8,7 @@ pub struct Moondrop;
 const REPORT: u8 = 0x4b;
 const MAX_LENGTH: u16 = 4096;
 const TIMEOUT_MS: u32 = 800;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn priority(i: &HidInterface) -> Option<u8> {
     match (i.usage_page, i.usage) {

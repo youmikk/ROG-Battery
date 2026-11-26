@@ -245,11 +245,11 @@ impl BackendId {
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
                 | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
                 | Self::AtkHoltek | Self::FifineHt6 | Self::MchoseK87s
-                | Self::Lingbao | Self::AulaF108 | Self::RapooMt560
+                | Self::Lingbao | Self::AulaF108 | Self::Rapoo | Self::RapooMt560
                 | Self::MchoseR9 | Self::AulaV9Pro | Self::DareuEm901 | Self::AjazzAk980
                 | Self::VeekosShine60
                 | Self::AulaHfdMechanical => 120,
-            Self::Rapoo | Self::DualSense | Self::XInput => 8,
+            Self::DualSense | Self::XInput => 8,
             Self::Bluetooth => 120,
             Self::Logitech | Self::LogitechHeadset => 180,
             Self::CompX => 45,

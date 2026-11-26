@@ -10,7 +10,7 @@ const PRODUCT: &str = "AULA F87ProV2D Dongle";
 const REPORT_BYTES: u16 = 33;
 const PAYLOAD_BYTES: usize = 32;
 const TIMEOUT_MS: u32 = 1_000;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x0c45 && i.product_id == 0xfefe

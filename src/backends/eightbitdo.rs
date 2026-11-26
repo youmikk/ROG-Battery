@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 pub struct EightBitDo;
 const REPORT_ID: u8 = 0x04;
 const BATTERY_OFFSET: usize = 14;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x2dc8

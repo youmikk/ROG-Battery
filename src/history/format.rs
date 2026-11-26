@@ -28,12 +28,12 @@ impl Why {
     /// 与充电相位无关的那半句。
     fn sentence(self) -> &'static str {
         match self {
-            Why::NotEnough => "样本不足",
-            Why::JustSwitched => "刚切换，重新观察中",
-            Why::Jumped => "电量刚跳变，重新观察中",
-            Why::NoChange => "电量还没变化（需要再多观察一会儿）",
-            Why::SpanTooShort => "数据跨度太短",
-            Why::TooSlow => "变化太慢，暂时测不出",
+            Why::NotEnough => "还在记录用电数据，稍等一会儿就能估算",
+            Why::JustSwitched => "刚切换供电方式，正在观察变化",
+            Why::Jumped => "电量刚有较大跳变，正在重新观察",
+            Why::NoChange => "电量暂时变化不大，多用一会儿再来看看",
+            Why::SpanTooShort => "记录时间还比较短，再过几分钟试试",
+            Why::TooSlow => "耗电非常轻微，需要更长时间才能估算",
         }
     }
 }

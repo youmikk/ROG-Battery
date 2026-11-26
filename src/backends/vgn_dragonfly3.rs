@@ -5,7 +5,7 @@ use std::time::Instant;
 
 pub struct VgnDragonfly3;
 const LENGTH: u16 = 65;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn management(i: &HidInterface) -> bool {
     i.vendor_id == 0x391d && matches!(i.product_id, 0x1a01 | 0x1a03)

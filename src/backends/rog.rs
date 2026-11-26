@@ -81,7 +81,7 @@ fn fetch_bound_with<Channel>(
     let middle = &outcome.snapshot.identity;
     if before.conflicts_with(&after) || before.conflicts_with(middle)
         || middle.conflicts_with(&after) {
-        return Err("读取期间设备身份发生变化，已丢弃本轮数据".into());
+        return Err("读取过程中设备连接状态发生变化，请稍候刷新".into());
     }
     let mut verified = crate::proto::Identity::default();
     if !before.mouse_sn.trim().is_empty() && before.mouse_sn.trim() == after.mouse_sn.trim() {
@@ -92,10 +92,10 @@ fn fetch_bound_with<Channel>(
     }
     if verified.device_id().is_none() && (before.device_id().is_some()
         || after.device_id().is_some() || middle.device_id().is_some()) {
-        return Err("无法在读取前后确认同一设备身份，已丢弃本轮数据".into());
+        return Err("无法确认读取前后是否为同一台设备，已放弃本次更新".into());
     }
     if verified.device_id().is_some() && !before.same_device(&after) {
-        return Err("读取前后的设备身份无法关联，已丢弃本轮数据".into());
+        return Err("前后两次识别到的设备信息不一致，请刷新重试".into());
     }
     let snapshot = std::sync::Arc::make_mut(&mut outcome.snapshot);
     snapshot.identity.mouse_sn = verified.mouse_sn;

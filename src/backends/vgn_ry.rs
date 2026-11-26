@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 pub struct VgnRy;
 const LENGTH: u16 = 65;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn model(pid: u16) -> Option<&'static str> {
     Some(match pid {

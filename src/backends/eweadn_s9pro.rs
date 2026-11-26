@@ -105,7 +105,7 @@ fn read_with(
     mut exchange: impl FnMut(&[u8], u8, u32) -> Result<Vec<u8>, String>,
 ) -> Result<Snapshot, String> {
     if !supported(target.hid()?) {
-        return Err(crate::i18n::translate("设备无有效状态回报").into());
+        return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into());
     }
     let reply = exchange(
         &request(),
@@ -113,7 +113,7 @@ fn read_with(
         TRANSFER_TIMEOUT_MS,
     )?;
     let battery = battery(&reply)
-        .ok_or_else(|| crate::i18n::translate("设备无有效状态回报").to_string())?;
+        .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string())?;
     Ok(Snapshot {
         target: target.clone(),
         battery: Some(battery),
@@ -136,7 +136,7 @@ impl DeviceBackend for EweadnS9Pro {
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
         if target.backend != BackendId::EweadnS9Pro || !proven(api, interface) {
-            return Err(crate::i18n::translate("设备无有效状态回报").into());
+            return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into());
         }
         let lock = channel::lock(&channel::collection_group(interface));
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

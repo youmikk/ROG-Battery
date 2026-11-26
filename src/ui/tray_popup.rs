@@ -1735,9 +1735,9 @@ fn draw_device_row(
     let status = if !d.connected {
         crate::tr!("未连接")
     } else if d.quality == crate::device::ReadingQuality::Cached {
-        crate::tr!("上次电量")
+        crate::tr!("上次记录")
     } else if d.quality == crate::device::ReadingQuality::Stale {
-        crate::tr!("等待状态回报")
+        crate::tr!("等待设备上报")
     } else if d.is_charging() {
         crate::tr!("正在充电")
     } else if let Some(level) = d.coarse_level() {

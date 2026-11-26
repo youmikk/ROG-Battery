@@ -8,7 +8,7 @@ use winapi::shared::hidclass::{IOCTL_HID_GET_INPUT_REPORT, IOCTL_HID_SET_OUTPUT_
 pub struct RapooOffice;
 const REPORT: u8 = 0xba;
 const LENGTH: u16 = 32;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 const MAX_READS: usize = 24;
 
 fn management(i: &HidInterface) -> bool {
@@ -76,7 +76,7 @@ impl NativeTransport {
             FILE_SHARE_READ | FILE_SHARE_WRITE, core::ptr::null_mut(), OPEN_EXISTING,
             FILE_FLAG_OVERLAPPED, core::ptr::null_mut()) };
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(crate::tr!("无法打开设备功能接口").into());
+            return Err(crate::tr!("暂时无法连接设备，请确认未被其他软件占用").into());
         }
         Ok(Self { handle, reply_bytes: None, status: None })
     }
@@ -84,7 +84,7 @@ impl NativeTransport {
     fn transfer(&mut self, input: bool, packet: &mut [u8], timeout_ms: u32) -> Result<usize, String> {
         let event = unsafe { CreateEventW(core::ptr::null_mut(), 1, 0, core::ptr::null()) };
         if event.is_null() || event == INVALID_HANDLE_VALUE {
-            return Err(crate::tr!("无法创建设备通信事件").into());
+            return Err(crate::tr!("暂时无法建立设备通信，请重试").into());
         }
         let mut ov = Overlapped { h_event: event, ..Default::default() };
         let mut count = 0;
@@ -96,7 +96,7 @@ impl NativeTransport {
                 if input { packet.len() as u32 } else { 0 }, &mut count, &mut ov) };
             if ok == 0 {
                 if last_error() != ERROR_IO_PENDING {
-                    return Err(crate::tr!("设备功能报告传输失败").into());
+                    return Err(crate::tr!("与设备通信失败，请检查连接后重试").into());
                 }
                 if unsafe { WaitForSingleObject(event, timeout_ms) } != WAIT_OBJECT_0 {
                     // Cancellation has to finish while the buffers and event
@@ -105,10 +105,10 @@ impl NativeTransport {
                         CancelIoEx(self.handle, &mut ov);
                         GetOverlappedResult(self.handle, &mut ov, &mut count, 1);
                     }
-                    return Err(crate::tr!("设备功能报告传输超时").into());
+                    return Err(crate::tr!("等待设备响应超时，请轻动设备唤醒后再试").into());
                 }
                 if unsafe { GetOverlappedResult(self.handle, &mut ov, &mut count, 0) } == 0 {
-                    return Err(crate::tr!("设备功能报告传输失败").into());
+                    return Err(crate::tr!("与设备通信失败，请检查连接后重试").into());
                 }
             }
             Ok(count as usize)

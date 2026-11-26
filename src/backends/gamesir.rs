@@ -139,19 +139,19 @@ fn read_with(
     mut exchange: impl FnMut(Model, &[u8], u8, u32) -> Option<Vec<u8>>,
 ) -> Result<Snapshot, String> {
     let selected = model(target.hid()?).ok_or_else(|| {
-        crate::i18n::translate("设备无有效状态回报").to_string()
+        crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string()
     })?;
     let (request, input_id): (&[u8], u8) = match selected {
         Model::Nova => (&nova_request(), 0),
         Model::Cyclone2 => (&cyclone_request(), 0x12),
     };
     let reply = exchange(selected, request, input_id, READ_TIMEOUT_MS)
-        .ok_or_else(|| crate::i18n::translate("设备无有效状态回报").to_string())?;
+        .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string())?;
     let battery = match selected {
         Model::Nova => nova_battery(&reply),
         Model::Cyclone2 => cyclone_battery(&reply),
     }
-    .ok_or_else(|| crate::i18n::translate("设备无有效状态回报").to_string())?;
+    .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string())?;
     Ok(Snapshot {
         target: target.clone(),
         battery: Some(battery),
@@ -174,7 +174,7 @@ impl DeviceBackend for GameSir {
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
         if target.backend != BackendId::GameSir || !proven(api, interface) {
-            return Err(crate::i18n::translate("设备无有效状态回报").into());
+            return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into());
         }
         let lock = channel::lock(&channel::collection_group(interface));
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

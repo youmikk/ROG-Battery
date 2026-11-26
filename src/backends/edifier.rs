@@ -42,7 +42,7 @@ fn battery(reply: &[u8]) -> Option<Battery> {
 }
 
 fn read_with(target: &Target, mut exchange: impl FnMut(&[u8]) -> Option<Vec<u8>>) -> Result<Snapshot, String> {
-    let fail = || crate::i18n::translate("设备无有效状态回报").to_string();
+    let fail = || crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").to_string();
     if !control(target.hid()?) { return Err(fail()); }
     let reply = exchange(&request()).ok_or_else(fail)?;
     let battery = battery(&reply).ok_or_else(fail)?;
@@ -62,7 +62,7 @@ impl DeviceBackend for Edifier {
 
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
-        if !proven(api, interface) { return Err(crate::i18n::translate("设备无有效状态回报").into()); }
+        if !proven(api, interface) { return Err(crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into()); }
         let lock = channel::lock(&channel::collection_group(interface));
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(interface)?;

@@ -153,9 +153,9 @@ pub(crate) fn run_cmd(cmd: &Cmd, target: Option<&RogTarget>) -> CmdResult {
             let warning = report.warning.as_ref().map(|warning| {
                 if !crate::i18n::english() { return warning.clone(); }
                 match cmd {
-                    Cmd::Lod(_) => crate::tr!("写 LOD 会重置表面标定（厂商确认无恢复命令）。").to_string(),
+                    Cmd::Lod(_) => crate::tr!("抬起距离已更新，设备原有的表面校准已重置。").to_string(),
                     Cmd::Sleep(_) => crate::tr!("「永不」休眠会显著增加耗电，设备闲置时不会自动休眠。").to_string(),
-                    Cmd::Button { slot, dst: 0, .. } => crate::trf!("「{}」已被禁用，恢复需要重新绑定或还原备份。", crate::i18n::translate(crate::proto::BUTTON_NAME[*slot & 7])),
+                    Cmd::Button { slot, dst: 0, .. } => crate::trf!("「{}」已停用，需要时可重新绑定功能或从备份恢复。", crate::i18n::translate(crate::proto::BUTTON_NAME[*slot & 7])),
                     _ => crate::i18n::translate(warning).to_string(),
                 }
             });
@@ -230,7 +230,7 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&RogTarget>) -> CmdResult {
     let mut reader = crate::ops::BoundReader::new(identity);
     let mut dev = match HidDevice::open(&link.iface) {
         Ok(d) => d,
-        Err(e) => return fail(e, crate::tr!("设备被别的程序占用了？")),
+        Err(e) => return fail(e, crate::tr!("当前可能正被其他设备管理软件（如官方驱动）占用，建议关闭后再试")),
     };
 
     if save {
@@ -248,7 +248,7 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&RogTarget>) -> CmdResult {
             Ok(_) => CmdResult {
                 label,
                 ok: Some(crate::trf!(
-                    "已写入 {}（{} 个键）",
+                    "已将配置保存至 {}（共 {} 项参数）",
                     path.display(),
                     crate::backup::BACKUP_KEYS.len()
                 )),
@@ -270,8 +270,8 @@ pub(crate) fn run_file_cmd(cmd: &Cmd, target: Option<&RogTarget>) -> CmdResult {
             Ok(report) => CmdResult {
                 label,
                 ok: Some(match report.warning {
-                    Some(warning) => format!("{}：{}", crate::trf!("已还原 {} 个键", b.keys_found), crate::i18n::translate(&warning)),
-                    None => crate::trf!("已还原 {} 个键", b.keys_found),
+                    Some(warning) => format!("{}：{}", crate::trf!("已成功恢复 {} 项设备配置", b.keys_found), crate::i18n::translate(&warning)),
+                    None => crate::trf!("已成功恢复 {} 项设备配置", b.keys_found),
                 }),
                 err: None,
                 hint: "",

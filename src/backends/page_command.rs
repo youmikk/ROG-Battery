@@ -315,7 +315,7 @@ impl DeviceBackend for PageCommand {
     }
     fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         if !control(target.hid()?) {
-            return Err(crate::tr!("设备功能报告长度无效").into());
+            return Err(crate::tr!("设备通信数据格式异常").into());
         }
         let lock = channel::lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -325,7 +325,7 @@ impl DeviceBackend for PageCommand {
             address: target_address(target.hid()?),
         };
         s.read(target)
-            .ok_or_else(|| crate::i18n::translate("设备无有效状态回报").into())
+            .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into())
     }
 }
 

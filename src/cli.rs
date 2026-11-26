@@ -91,10 +91,10 @@ pub fn print_report(r: &ApplyReport) {
 /// 把 [`OpsError`] 的类别翻成人话。
 pub fn error_hint(kind: ErrorKind) -> &'static str {
     match kind {
-        ErrorKind::Invalid => "参数不合法，本次没有碰设备。",
+        ErrorKind::Invalid => "输入参数超出设备支持范围，当前设置未改动。",
         ErrorKind::Asleep => "鼠标休眠中。移动一下鼠标即可唤醒，唤醒后重试。",
-        ErrorKind::Rejected => "设备明确拒绝了这个命令（NAK）。",
-        ErrorKind::Mismatch => "写进去了但读回不一致，请用 backup 文件核对。",
+        ErrorKind::Rejected => "设备未接受该项设置，请确认设备处于可修改状态后重试。",
+        ErrorKind::Mismatch => "设置已发送但核对结果不一致，建议刷新设备或结合备份文件确认。",
         ErrorKind::Other => "操作失败。",
     }
 }
@@ -201,7 +201,7 @@ pub fn cmd_backup(ctx: &mut Ctx, dev: &mut HidDevice, path: &str) -> Result<(), 
     println!("== 备份 ==");
     report::print_state(st);
     println!();
-    println!("已写入 {path}（{} 个键）", backup::BACKUP_KEYS.len());
+    println!("已将配置保存至 {path}（共 {} 项参数）", backup::BACKUP_KEYS.len());
     println!(
         "能量块：poweroff_code={} low_warn={} full_effect={}",
         st.sleep_mode, st.low_warn, st.full_effect
@@ -217,7 +217,7 @@ pub fn cmd_restore(ctx: &mut Ctx, dev: &mut HidDevice, path: &str, save: bool) -
     let backup = backup::parse(&text)?;
 
     println!("== 还原 {path} ==");
-    println!("识别到 {} / {} 个键", backup.keys_found, backup::BACKUP_KEYS.len());
+    println!("已识别 {} / {} 项配置", backup.keys_found, backup::BACKUP_KEYS.len());
     let result = ops::restore_backup(dev, ctx.rid(), &backup, save, ctx,
         &mut |line| println!("  {line}"));
     ctx.invalidate();
@@ -532,8 +532,8 @@ pub fn cmd_raw_on(
     match dev.xfer(rid, cmd, sub, tail, timeout_ms) {
         Some(m) => {
             if is_nak(&m) {
-                println!("应答        NAK（03 FF AA）");
-                return Err("设备拒绝该命令（NAK）".to_string());
+                println!("应答        未接受（03 FF AA）");
+                return Err("设备未接受该指令".to_string());
             }
             println!("应答        {} 字节", m.len());
             report::hex_dump(&m);

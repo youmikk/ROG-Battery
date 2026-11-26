@@ -10,9 +10,11 @@ use std::{
 pub struct Rapoo;
 const VID: u16 = 0x24ae;
 const STATUS_REPORT: u8 = 7;
-// VT1 实机会约每三秒上报一次。连接必须跨越刷新轮次保留，不能靠短暂打开碰回帧。
+// VT1 实机活动时约每三秒上报一次；静置停手时会暂停推送，需与其它被动协议一致保留 120 秒有效期。
 const FIRST_REPORT_WAIT: Duration = Duration::from_secs(4);
-const SAMPLE_LIFETIME: Duration = Duration::from_secs(8);
+const SAMPLE_LIFETIME: Duration = Duration::from_secs(120);
+const SILENT_REOPEN: Duration = Duration::from_secs(30);
+const DRAIN_BATCH_LIMIT: usize = 32;
 
 #[derive(Default)]
 struct StatusState {
@@ -55,6 +57,34 @@ fn readers() -> &'static Mutex<BTreeMap<String, Arc<StatusReader>>> {
     READERS.get_or_init(Default::default)
 }
 
+fn record_status_frame(
+    interface: &HidInterface,
+    state: &mut StatusState,
+    read_started: Instant,
+    frame: &[u8],
+) {
+    if frame.first() == Some(&STATUS_REPORT) {
+        trace::record(
+            interface,
+            BackendId::Rapoo,
+            "receive-status",
+            0,
+            STATUS_REPORT,
+            0,
+            frame.len(),
+            read_started,
+            if parse_status(frame).is_some() {
+                trace::Outcome::Ok
+            } else if frame.len() >= 9 && frame[7] == 0 && frame[2] <= 6 {
+                trace::Outcome::Offline
+            } else {
+                trace::Outcome::InvalidData
+            },
+        );
+    }
+    state.receive(frame, Instant::now());
+}
+
 fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
     let mut sessions = readers().lock().unwrap_or_else(|error| error.into_inner());
     if let Some(session) = sessions.get(&interface.path) {
@@ -68,9 +98,9 @@ fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
     let worker = Arc::clone(&session);
     let interface = interface.clone();
     let spawned = std::thread::Builder::new().name("rapoo-status".into()).spawn(move || {
-        // HID 句柄只在拥有它的线程中使用；界面只读取经校验的采样。
+        // HID 句柄只在拥有它的线程中以只读模式打开；界面只读取经校验的采样。
         let started = Instant::now();
-        let mut device = match HidDevice::open(&interface) {
+        let mut device = match HidDevice::open_read_only(&interface) {
             Ok(device) => device,
             Err(_) => {
                 worker.state.lock().unwrap_or_else(|error| error.into_inner()).failed = true;
@@ -82,19 +112,22 @@ fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
         };
         trace::record(&interface, BackendId::Rapoo, "listener-open", 0,
             STATUS_REPORT, 0, 0, started, trace::Outcome::Ok);
+        let mut last_input = started;
         while !worker.stop.load(Ordering::Acquire) {
-            // 无回帧时继续等下一帧，超时不关闭接口，也不重置仍在有效期内的采样。
+            // 无回帧时继续等下一帧，超时不重置仍在有效期内的采样；静默超过阈值时无闪烁重开只读句柄。
             let read_started = Instant::now();
             if let Some(frame) = device.read_report(400) {
-                if frame.first() == Some(&STATUS_REPORT) {
-                    trace::record(&interface, BackendId::Rapoo, "receive-status", 0,
-                        STATUS_REPORT, 0, frame.len(), read_started,
-                        if parse_status(&frame).is_some() { trace::Outcome::Ok }
-                        else if frame.len() >= 9 && frame[7] == 0 && frame[2] <= 6 { trace::Outcome::Offline }
-                        else { trace::Outcome::InvalidData });
+                last_input = Instant::now();
+                let mut frames = vec![frame];
+                while frames.len() < DRAIN_BATCH_LIMIT && !worker.stop.load(Ordering::Acquire) {
+                    let Some(extra) = device.read_report(0) else { break; };
+                    last_input = Instant::now();
+                    frames.push(extra);
                 }
                 let mut state = worker.state.lock().unwrap_or_else(|error| error.into_inner());
-                state.receive(&frame, Instant::now());
+                for frame in &frames {
+                    record_status_frame(&interface, &mut state, read_started, frame);
+                }
                 worker.changed.notify_all();
             } else if read_started.elapsed() < Duration::from_millis(100) {
                 trace::record(&interface, BackendId::Rapoo, "listener-immediate-failure", 0,
@@ -103,6 +136,24 @@ fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
                 worker.state.lock().unwrap_or_else(|error| error.into_inner()).failed = true;
                 worker.changed.notify_all();
                 break;
+            } else if last_input.elapsed() >= SILENT_REOPEN {
+                drop(device);
+                let reopen_started = Instant::now();
+                match HidDevice::open_read_only(&interface) {
+                    Ok(reopened) => {
+                        device = reopened;
+                        last_input = Instant::now();
+                        trace::record(&interface, BackendId::Rapoo, "listener-reopen", 0,
+                            STATUS_REPORT, 0, 0, reopen_started, trace::Outcome::Ok);
+                    }
+                    Err(_) => {
+                        trace::record(&interface, BackendId::Rapoo, "listener-reopen", 0,
+                            STATUS_REPORT, 0, 0, reopen_started, trace::Outcome::NoReply);
+                        worker.state.lock().unwrap_or_else(|error| error.into_inner()).failed = true;
+                        worker.changed.notify_all();
+                        break;
+                    }
+                }
             }
         }
         if worker.stop.load(Ordering::Acquire) {
@@ -115,6 +166,39 @@ fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
         session.changed.notify_all();
     }
     session
+}
+
+/// 雷柏 nRF54L 设备的通道角色与归并指纹。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LinkRole {
+    Receiver,
+    Wired,
+}
+
+/// 用于识别同一实体雷柏鼠标的有线 (`0x4xxx`) 与 2.4G 接收器 (`< 0x4000`) 双通道签名。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct DeviceSignature {
+    pub model: &'static str,
+    pub serial: String,
+    pub role: LinkRole,
+}
+
+pub(crate) fn device_signature(target: &Target) -> Option<DeviceSignature> {
+    if target.backend != BackendId::Rapoo {
+        return None;
+    }
+    let interface = target.hid().ok()?;
+    let model = model(interface.product_id)?;
+    let role = if interface.product_id >= 0x4000 {
+        LinkRole::Wired
+    } else {
+        LinkRole::Receiver
+    };
+    Some(DeviceSignature {
+        model,
+        serial: interface.serial.clone(),
+        role,
+    })
 }
 
 // 型号与协议归属：Rapoo AHUB 官方 VT_nrf54L 清单。
@@ -316,7 +400,7 @@ impl DeviceBackend for Rapoo {
 
 pub(super) fn latest_status(target:&Target,after:Option<Instant>,wait:Duration)->Result<(Instant,Battery,Dpi),String> {
     latest_sample(target, after, wait)?
-        .ok_or_else(|| crate::tr!("雷柏状态报告不可用，请唤醒设备后重试").into())
+        .ok_or_else(|| crate::tr!("暂未收到设备状态更新，请轻动鼠标唤醒后再试").into())
 }
 
 fn latest_sample(target: &Target, after: Option<Instant>, wait: Duration)
@@ -342,7 +426,7 @@ fn status_from_session(target: &Target, session: &StatusReader, after: Option<In
     trace::record_sample(target.hid()?, BackendId::Rapoo, "read-cached-status", 0, STATUS_REPORT, 0,
         sample.map(|sample| sample.2).unwrap_or(0), started, outcome,
         state.sample.as_ref().map(|sample| sample.0));
-    result.ok_or_else(||crate::tr!("雷柏状态报告不可用，请唤醒设备后重试").into())
+    result.ok_or_else(||crate::tr!("暂未收到设备状态更新，请轻动鼠标唤醒后再试").into())
 }
 
 #[cfg(test)]
@@ -600,6 +684,32 @@ mod tests {
         state.receive(&frame,now+Duration::from_secs(3));
         let dpi=&state.confirmed_after(now+Duration::from_secs(3),Some(now)).unwrap().1.as_ref().unwrap().1;
         assert_eq!(dpi.active_stage,Some(6));assert_eq!(dpi.current_y,Some(30000));
-        assert!(state.confirmed_after(now+Duration::from_secs(11),Some(now)).is_none());
+        assert!(state.confirmed_after(now+Duration::from_secs(11),Some(now)).is_some());
+        assert!(state.confirmed_after(now+Duration::from_secs(3)+SAMPLE_LIFETIME,Some(now)).is_none());
+    }
+
+    #[test]
+    fn sample_survives_brief_idle_pause_beyond_eight_seconds() {
+        let now = Instant::now();
+        let mut state = StatusState::default();
+        state.receive(&report(), now);
+        assert!(state.recent(now + Duration::from_secs(25)).is_some());
+        assert!(state.recent(now + SAMPLE_LIFETIME - Duration::from_secs(1)).is_some());
+        assert!(state.recent(now + SAMPLE_LIFETIME).is_none());
+    }
+
+    #[test]
+    fn device_signature_distinguishes_wired_and_receiver_roles() {
+        let mk = |pid: u16, serial: &str, path: &str| Target::new(BackendId::Rapoo, &HidInterface {
+            vendor_id: VID, product_id: pid, usage_page: 0xff00, usage: 2,
+            input_len: 19, output_len: 0, feature_len: 0, serial: serial.into(),
+            product: "Rapoo VT1".into(), path: path.into(),
+        }, 0);
+        let rx = device_signature(&mk(0x1415, "2507-54L", "rx-a")).unwrap();
+        let wired = device_signature(&mk(0x4615, "2507-54L", "wired-a")).unwrap();
+        assert_eq!(rx.model, "Rapoo VT1");
+        assert_eq!(wired.model, "Rapoo VT1");
+        assert_eq!(rx.role, LinkRole::Receiver);
+        assert_eq!(wired.role, LinkRole::Wired);
     }
 }

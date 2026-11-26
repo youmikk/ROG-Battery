@@ -90,13 +90,13 @@ pub fn age(seconds: i64) -> String {
 
 pub fn operation_hint(kind: crate::ops::ErrorKind) -> &'static str {
     match kind {
-        crate::ops::ErrorKind::Invalid => crate::tr!("参数不合法，本次没有碰设备。"),
+        crate::ops::ErrorKind::Invalid => crate::tr!("输入参数超出设备支持范围，当前设置未改动。"),
         crate::ops::ErrorKind::Asleep => {
             crate::tr!("鼠标休眠中。移动一下鼠标即可唤醒，唤醒后重试。")
         }
-        crate::ops::ErrorKind::Rejected => crate::tr!("设备明确拒绝了这个命令（NAK）。"),
+        crate::ops::ErrorKind::Rejected => crate::tr!("设备未接受该项设置，请确认设备处于可修改状态后重试。"),
         crate::ops::ErrorKind::Mismatch => {
-            crate::tr!("写进去了但读回不一致，请用 backup 文件核对。")
+            crate::tr!("设置已发送但核对结果不一致，建议刷新设备或结合备份文件确认。")
         }
         crate::ops::ErrorKind::Other => crate::tr!("操作失败。"),
     }

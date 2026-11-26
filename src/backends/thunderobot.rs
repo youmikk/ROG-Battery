@@ -11,7 +11,7 @@ const INPUT_REPORT: u8 = 0xa1;
 const OUTPUT_REPORT: u8 = 0xa0;
 const TIMEOUT_MS: u32 = 1_500;
 const MAX_FRAMES: usize = 32;
-const UNAVAILABLE: &str = "设备无有效状态回报";
+const UNAVAILABLE: &str = "设备暂未响应，请唤醒或检查连接后重试";
 
 fn control(interface: &HidInterface) -> bool {
     if interface.vendor_id != 0x369b || interface.product_id != 0x0234
