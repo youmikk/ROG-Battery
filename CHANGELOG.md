@@ -1,21 +1,18 @@
 # 更新日志
 
-## 未发布
+## 1.4.11
 
 ### 适配与优化
 
-- 新增 HyperX Cloud Alpha Wireless `03F0:098D` 只读电量、充电与连接状态查询；校验回复命令并在发布前复核连接，保留 Cloud II 和 Alpha 2 适配。
-- 新增狼途 LANGTU T98 `1A2C:8FFF` 接收器被动电量读取，显示估算值并保留未知充电状态；休眠时旧样本按时过期，唤醒后恢复。
-- 新增 AKG N9 Hybrid `0ECB:20D9` 接收器只读电量适配，复用持有的控制句柄，确认空闲后查询并按本轮 ACK 拼接结果，忽略尾部旧缓存。
-- 新增雷神 ML903 NearLink Se `369B:0234` 接收器只读电量查询，按标签边界解析并校验实际报告描述符，充电状态保持未知。
-- 设备反馈在“附带设备诊断”下方提供通信采集，支持操作标记、预览及另存到本机；有数据时可随反馈免登录上传，公开议题提供原始记录下载链接，提交前可关闭附带。
-- 精简更新、反馈和采集页面的说明，保留操作结果与文件公开范围；采集附件支持失败重试和加密草稿恢复。
-- 修复空采集结束后反馈表单仍显示“开始采集”的问题，显示无数据结果并支持重新采集；开始时请求一次正常后台刷新，停止后固定采集时长，有通信数据时显示上传开关。
-- 新增 CHERRY PIXIU75 有线与 2.4G 只读电量、充电适配，独立校验块协议，保留原 MX 2.0S WL Pro 路径。
-- 新增 HyperX Cloud II Wireless 两种 HP 接收器的只读电量、充电与电压查询，保留 Cloud Alpha 2 行为及旧设备偏好。
-- 补齐雷蛇 Naga V2 HyperSpeed、Basilisk V3 X HyperSpeed、DeathAdder V3 HyperSpeed、Basilisk V3 Pro 35K 接收器的只读电量接口，保留原有接口读取能力。
-- 新增赛睿 Arctis 7+、7P+、7X+ 只读电量适配，五档电量显示为估算值。
-- 新增迈从 V7 Pro 接收器只读电量适配，补齐 A7 V3 Ultra+ 接收器的 Windows 描述符兼容。
+- 商店版每天首次启动自动检查更新，在首页提示，点击“立即更新”后下载、安装并重新打开软件。
+- 新增高斯 GANSS GS3104T-Pro、狼途 LANGTU T98 和 CHERRY PIXIU75 电量适配。
+- 新增 HyperX Cloud Alpha Wireless、Cloud II Wireless 和 AKG N9 Hybrid 电量适配。
+- 新增雷神 ML903 NearLink Se 和迈从 V7 Pro 电量适配，改善 A7 V3 Ultra+ 接收器识别。
+- 补齐雷蛇 Naga V2 HyperSpeed、Basilisk V3 X HyperSpeed、DeathAdder V3 HyperSpeed 和 Basilisk V3 Pro 35K 接收器电量读取。
+- 新增赛睿 Arctis 7+、7P+ 和 7X+ 电量适配。
+- 设备反馈增加通信采集，支持操作标记、预览、保存和免登录上传采集附件。
+- 修复采集结束后的结果与上传开关显示，支持重新采集和上传失败重试。
+- 精简更新、反馈和采集页面文案。
 
 ## 1.4.10
 

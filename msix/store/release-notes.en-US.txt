@@ -1,15 +1,11 @@
-1.4.10
+1.4.11
 
-Feedback and diagnostics
-- Rebuild feedback sessions for repeat reports, fix scrolling artifacts and reduce redraws while typing.
-- Report software problems in the app without an account or manual log uploads.
-- Optional diagnostics include current HID interface VID/PID values, including unsupported devices. Unrecognized-device forms request the brand and full model.
-- Add error timestamps, sample ages and battery state changes. Separate identical-model interfaces and devices sharing a Logitech receiver. Preview or disable diagnostics; raw logs, serials and full local paths are excluded.
-
-Stability fixes
-- Fix Store settings, feedback storage and log-directory errors. Preserve existing settings and show errors when saving fails.
-- Improve device identity isolation, reconnection and stale-battery handling; fix detection regressions affecting ROG OMNI, standard HID and Veekos devices.
-- Improve Logitech DPI range detection and validation of device changes and backup restoration.
-- Improve background shutdown, animation timers and drawing resource management.
-
-Support depends on model, firmware and connection. Feedback and selected attachments are public.
+- Check for updates on the first launch each day and show prompts on Home. Choose Update now to download, install and reopen the app.
+- Add battery support for GANSS GS3104T-Pro, LANGTU T98 and CHERRY PIXIU75.
+- Add battery support for HyperX Cloud Alpha Wireless, Cloud II Wireless and AKG N9 Hybrid.
+- Add battery support for THUNDEROBOT ML903 NearLink Se and MCHOSE V7 Pro, and improve A7 V3 Ultra+ receiver detection.
+- Improve battery reading for Razer Naga V2 HyperSpeed, Basilisk V3 X HyperSpeed, DeathAdder V3 HyperSpeed and Basilisk V3 Pro 35K receivers.
+- Add battery support for SteelSeries Arctis 7+, 7P+ and 7X+.
+- Add communication capture to device feedback, with action markers, previews, local export and attachment uploads without a GitHub account.
+- Fix capture results and upload controls, with capture restart and upload retry support.
+- Simplify update, feedback and capture text.

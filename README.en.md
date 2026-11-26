@@ -51,13 +51,12 @@ Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard gene
 
 Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
 
-## Latest release: 1.4.9
+## Latest release: 1.4.11
 
-- Rename the app to X-Battery and the executable to `x-battery.exe`, retaining existing settings, battery histories and startup preferences.
-- Fix taskbar battery strip flicker and improve multi-device cards, drag ordering, DPI controls and settings.
-- Add generic Bluetooth battery-cache readings and support for selected VGN, DELUX, EWEADN, AJAZZ, Veekos and Logitech devices.
-- Add daily silent update checks, separate download and installation confirmations, and an optional About review link for Store installations.
-- Enable in-app feedback without a GitHub account, including screenshots, maintainer replies and follow-ups, and fix relay submission failures.
+- Store installations show update prompts on Home. Choose Update now to download, install and reopen the app.
+- Add battery support for selected GANSS, LANGTU, CHERRY, HyperX, AKG, THUNDEROBOT, MCHOSE and SteelSeries models, and improve four Razer receiver paths.
+- Add communication capture to device feedback, with action markers, previews, local export and attachment uploads without a GitHub account.
+- Fix capture results and upload controls, and simplify update and feedback text.
 
 Portable users can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store updates become available after Store review. See the [full changelog](CHANGELOG.md).
 
