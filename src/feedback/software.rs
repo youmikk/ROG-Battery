@@ -381,7 +381,7 @@ mod tests {
     fn draft(diagnostics: String) -> super::super::client::Draft {
         super::super::client::Draft {
             category: "other".into(), device: device(),
-            description: "Settings could not be saved.".into(), diagnostics: Some(diagnostics), images: Vec::new(),
+            description: "Settings could not be saved.".into(), diagnostics: Some(diagnostics), images: Vec::new(), capture: None,
         }
     }
 

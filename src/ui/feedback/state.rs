@@ -47,6 +47,8 @@ pub(super) struct Model {
     pub(super) category: usize,
     pub(super) attach_diagnostics: bool,
     pub(super) images: Vec<client::Image>,
+    pub(super) capture: Option<client::Capture>,
+    pub(super) attach_capture: bool,
     pub(super) entries: Vec<client::Entry>,
     pub(super) current: Option<client::Entry>,
     pub(super) thread: Option<client::Thread>,
@@ -58,6 +60,7 @@ pub(super) struct Model {
     pub(super) inventory_report: Option<String>,
     pub(super) inventory_generation: u64,
     pub(super) restored_draft: Option<client::Draft>,
+    pub(super) restored_device: Option<client::Device>,
     pub(super) reply_drafts: std::collections::BTreeMap<u64, String>,
     generation: u64,
 }
@@ -77,6 +80,8 @@ impl Default for Model {
             category: 0,
             attach_diagnostics: true,
             images: Vec::new(),
+            capture: None,
+            attach_capture: true,
             entries: Vec::new(),
             current: None,
             thread: None,
@@ -88,6 +93,7 @@ impl Default for Model {
             inventory_report: None,
             inventory_generation: 0,
             restored_draft: None,
+            restored_device: None,
             reply_drafts: Default::default(),
             generation: 0,
         }
@@ -133,11 +139,14 @@ impl Model {
         self.submitted = false;
         self.draft_retry = None;
         self.restored_draft = None;
+        self.restored_device = None;
         self.diagnostics_override = None;
         self.inventory_report = None;
         self.inventory_generation = self.inventory_generation.wrapping_add(1);
         self.error.clear();
         self.images.clear();
+        self.capture = None;
+        self.attach_capture = true;
         self.current = None;
         self.thread = None;
         self.menu = false;

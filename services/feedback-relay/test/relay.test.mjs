@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import worker, { FeedbackCoordinator } from "../src/index.mjs";
 import { Github } from "../src/github.mjs";
 import { feedback, reply } from "../src/validation.mjs";
-import { readJson, MAX_REQUEST_BYTES, MAX_IMAGE_BYTES, checkGithubUrl } from "../src/security.mjs";
+import { readJson, MAX_REQUEST_BYTES, MAX_IMAGE_BYTES, MAX_CAPTURE_BYTES, checkGithubUrl, digestSecret } from "../src/security.mjs";
 
 const KEY = "23".repeat(32);
 const IP = "ab".repeat(32);
@@ -100,6 +100,31 @@ function body(changes = {}) {
   return { schema: 1, requestId: UUID, replyKey: KEY, category: "battery", appVersion: "1.4.9-beta.1",
     device: { name: "示例鼠标", family: "mouse", connection: "2.4GHz", brand: "示例品牌", model: "M1" },
     description: "电量更新后出现未知，请检查。", ...changes };
+}
+
+function captureRecords() {
+  return [
+    { schema: 1, app: "1.4.9-beta.1", started_unix_ms: 1, vendor_id: 0x0b05, product_id: 0x1a18,
+      usage_page: 0xff00, usage: 1, input_bytes: 64, output_bytes: 64, feature_bytes: 0,
+      scope: "one interface; all receiver slots; existing application I/O only; timestamps are completion times",
+      privacy: "LOCAL RAW DATA: may contain device identifiers or input data. Review before sharing. Not attached to feedback." },
+    { kind: "step", elapsed_ms: 0, step: 0, label: "Normal use" },
+    { kind: "transfer", elapsed_ms: 400001, api: "input", success: true, hex: "00ABff12" },
+    { kind: "end", reason: "stopped", transfers: 1 },
+  ];
+}
+
+function captureSource(records = captureRecords()) {
+  return records.map(record => JSON.stringify(record)).join("\n") + "\n";
+}
+
+function captureFile(source = captureSource()) {
+  return { name: "raw.jsonl", mimeType: "application/x-ndjson", dataBase64: Buffer.from(source).toString("base64") };
+}
+
+function maximumCapture() {
+  const source = captureSource();
+  return captureFile(" ".repeat(MAX_CAPTURE_BYTES - Buffer.byteLength(source)) + source);
 }
 
 function setup() {
@@ -1006,4 +1031,341 @@ test("one alarm bounds recovery to three records and five pages per record", asy
   assert.ok(records.every(record => record.state === "pending"));
   assert.equal(state.storage.scheduled, state.now() + 5000);
   assert.equal(state.posts().length, 4);
+});
+
+test("health advertises capture attachments without contacting GitHub", async () => {
+  const state = setup();
+  const result = await worker.fetch(request("/health"), state.env);
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { status: "ok", schema: 1, captureAttachments: true });
+  assert.equal(state.github.calls.length, 0);
+});
+
+test("capture-free fingerprints match the original schema 1 implementation", async () => {
+  const legacy = body({ device: { name: "Legacy mouse", family: "mouse", connection: "2.4GHz" },
+    description: "Legacy capture-free feedback." });
+  for (const changes of [{}, { images: [] }, { capture: undefined }]) {
+    const normalized = await feedback({ ...legacy, ...changes });
+    assert.equal(normalized.fingerprint, "285dad108f94419c39e88e5efffb964dce653c203ae8cfc9176fd9dde730d751");
+    assert.equal(Object.hasOwn(normalized, "capture"), false);
+  }
+  const normalized = await feedback({ ...legacy, images: [{ name: "legacy.png", mimeType: "image/png", dataBase64: PNG }] });
+  assert.equal(normalized.fingerprint, "1aab10739d6e8f76d8d16d16274548ebac7d07cc3cb5baf6c2b048f642bb41de");
+});
+
+for (const stateName of ["uploading", "prepared", "pending", "complete"]) {
+  test(`pre-capture ${stateName} journal and R2 image survive an upgrade`, async () => {
+    const state = setup();
+    const value = body({ device: { name: "Legacy mouse", family: "mouse", connection: "2.4GHz" },
+      description: "Legacy capture-free feedback.", images: [{ name: "legacy.png", mimeType: "image/png", dataBase64: PNG }] });
+    const attachment = { id: "ab".repeat(24), mimeType: "image/png",
+      digest: "cb483be67e3c4c7ac569fb601d2179a65b1a5f1cf2c727d4257fc9350bbedf25" };
+    const receipt = { number: 123, url: "https://github.com/youmikk/X-Battery/issues/123", replyAccess: true };
+    const marker = `<!-- r-battery-feedback:${"ab".repeat(32)} -->`;
+    await state.bucket.put(`attachments/${attachment.id}`, Buffer.from(PNG, "base64"), { httpMetadata: { contentType: "image/png" } });
+    await state.storage.put(`request:${UUID}`, { kind: "issue", state: stateName,
+      owner: await digestSecret(state.env.FEEDBACK_SECRET, "reply-key", KEY), marker,
+      fingerprint: "1aab10739d6e8f76d8d16d16274548ebac7d07cc3cb5baf6c2b048f642bb41de",
+      attachments: [attachment], createdAt: BASE_TIME, nextCheckAt: 0, checks: 0,
+      ...(stateName === "prepared" ? { title: "Legacy prepared issue", body: marker } : {}),
+      ...(stateName === "complete" ? { receipt } : {}) });
+    if (stateName === "pending") state.github.issues.push({ number: 123, html_url: receipt.url,
+      body: marker, user: { login: "relay-bot" }, created_at: "2026-11-23T00:00:00Z" });
+    const restarted = new FeedbackCoordinator({ storage: state.storage }, state.env, { fetch: state.github.fetch, now: state.now });
+    const result = await restarted.fetch(request("/feedback", value));
+    const creates = ["uploading", "prepared"].includes(stateName);
+    assert.equal(result.status, creates ? 201 : 200);
+    assert.deepEqual(await result.json(), receipt);
+    assert.equal((await restarted.fetch(request("/feedback", value))).status, 200);
+    assert.equal(state.github.calls.filter(call => call.method === "POST").length, creates ? 1 : 0);
+    assert.equal(state.bucket.puts, stateName === "uploading" ? 2 : 1);
+    assert.deepEqual([...state.bucket.data.keys()], [`attachments/${attachment.id}`]);
+    const image = await worker.fetch(request(`/attachments/${attachment.id}`), state.env);
+    assert.equal(image.headers.get("Content-Type"), "image/png");
+    assert.equal(image.headers.get("Content-Disposition"), "inline");
+    assert.deepEqual(Buffer.from(await image.arrayBuffer()), Buffer.from(PNG, "base64"));
+  });
+}
+
+test("capture validates all APIs and preserves bytes, bounded metadata, timestamps and stop reasons", async () => {
+  const [header, step, transfer] = captureRecords();
+  const apis = ["write", "input", "input-timeout", "get-feature", "get-input", "set-output", "set-feature"];
+  const records = [header, ...apis.map((api, index) => ({ ...transfer, api,
+    elapsed_ms: Number.MAX_SAFE_INTEGER - index, success: false, hex: index === 2 ? "" : "00ABff12" })), step,
+  { kind: "end", reason: "Stopped by user / 已停止", transfers: apis.length }];
+  header.started_unix_ms = 0;
+  header.scope = "One selected interface; timestamps record completed I/O.";
+  header.privacy = "Raw data may contain device identifiers or input information. Included captures are shared publicly with feedback.";
+  step.label = "正常使用";
+  for (const source of [captureSource(), captureSource(records), captureSource(records).trimEnd(),
+    captureSource(records).replaceAll("\n", "\r\n")]) {
+    const normalized = await feedback(body({ capture: captureFile(source) }));
+    assert.deepEqual(Buffer.from(normalized.capture.bytes), Buffer.from(source));
+    assert.equal(normalized.capture.name, "raw.jsonl");
+    assert.equal(normalized.capture.mimeType, "application/x-ndjson");
+    assert.equal(normalized.images.length, 0);
+  }
+  const normalized = await feedback(body({ capture: captureFile(captureSource(records)) }));
+  assert.equal(normalized.capture.transfers, 7);
+  assert.equal(normalized.capture.steps, 1);
+});
+
+test("capture rejects malformed envelope, base64, UTF8 and JSONL before attachment or GitHub writes", async () => {
+  const file = captureFile();
+  const source = captureSource();
+  const invalid = [null, [], {}, { ...file, name: "../raw.jsonl" }, { ...file, name: "RAW.JSONL" },
+    { ...file, mimeType: "application/json" }, { ...file, mimeType: "application/x-ndjson; charset=utf-8" },
+    { ...file, path: "C:/private/raw.jsonl" }, { ...file, dataBase64: "" }, { ...file, dataBase64: "Zg" },
+    { ...file, dataBase64: "Zh==" }, { ...file, dataBase64: "____" }, { ...file, dataBase64: "AAAA=AAA" },
+    { ...file, dataBase64: file.dataBase64 + "\n" }, { ...file, dataBase64: "data:application/x-ndjson;base64," + file.dataBase64 },
+    captureFile(Buffer.from([0xff])), captureFile(Buffer.from([0xc3, 0x28])), captureFile("\ufeff" + source),
+    captureFile("not json"), captureFile(source + "\n"), captureFile(source.replace("\n", "\n\n")),
+    captureFile(captureSource([{ schema: 1 }])), captureFile(source + "{}\n"),
+    captureFile(Buffer.alloc(MAX_CAPTURE_BYTES + 1, 32)), captureFile(Buffer.alloc(MAX_CAPTURE_BYTES + 4, 32))];
+  for (const capture of invalid) {
+    const state = setup();
+    const result = await state.coordinator.fetch(request("/feedback", body({ capture })));
+    assert.equal(result.status, 400);
+    assert.equal((await result.json()).error.code, "validation");
+    assert.equal(state.bucket.puts, 0);
+    assert.equal(state.github.calls.length, 0);
+    assert.equal(await state.storage.get(`request:${UUID}`), undefined);
+  }
+  for (const key of ["name", "mimeType", "dataBase64"]) {
+    const incomplete = { ...file };
+    delete incomplete[key];
+    await assert.rejects(feedback(body({ capture: incomplete })), { code: "validation" });
+  }
+});
+
+test("capture rejects unexpected and missing header, transfer, step and end fields", async () => {
+  for (const [position, record] of captureRecords().entries()) {
+    for (const field of Object.keys(record)) {
+      const records = captureRecords();
+      delete records[position][field];
+      await assert.rejects(feedback(body({ capture: captureFile(captureSource(records)) })), { code: "validation" });
+    }
+    for (const field of ["path", "serial", "device", "extra", "__proto__"]) {
+      const records = captureRecords();
+      records[position] = { ...record, [field]: "private metadata" };
+      await assert.rejects(feedback(body({ capture: captureFile(captureSource(records)) })), { code: "validation" });
+    }
+    for (const invalid of [null, [], 1, "record"]) {
+      const records = captureRecords();
+      records[position] = invalid;
+      await assert.rejects(feedback(body({ capture: captureFile(captureSource(records)) })), { code: "validation" });
+    }
+  }
+});
+
+test("capture rejects invalid scalar bounds, record kinds, hex and final transfer counts", async () => {
+  const changes = [[0, "schema", 2], [0, "schema", "1"], [0, "vendor_id", -1], [0, "product_id", 65536],
+    [0, "usage", 1.5], [0, "input_bytes", 65536], [0, "app", ""], [0, "app", "x".repeat(81)],
+    [0, "scope", "x".repeat(513)], [0, "privacy", "x".repeat(1025)], [0, "privacy", "a\u0000b"],
+    [0, "started_unix_ms", -1], [0, "started_unix_ms", Number.MAX_SAFE_INTEGER + 1],
+    [1, "step", 5], [1, "step", -1], [1, "label", ""], [1, "label", "x".repeat(121)],
+    [1, "elapsed_ms", -1], [2, "elapsed_ms", Number.MAX_SAFE_INTEGER + 1], [2, "elapsed_ms", 0.5],
+    [2, "api", "feature"], [2, "success", "true"], [2, "hex", "F"], [2, "hex", "GG"], [2, "hex", "FF FF"],
+    [2, "hex", "FF".repeat(4097)], [2, "kind", "end"], [3, "kind", "transfer"], [3, "transfers", 2],
+    [3, "transfers", "1"], [3, "reason", null], [3, "reason", ""], [3, "reason", "x".repeat(81)]];
+  for (const [position, field, invalid] of changes) {
+    const records = captureRecords();
+    records[position][field] = invalid;
+    await assert.rejects(feedback(body({ capture: captureFile(captureSource(records)) })), { code: "validation" }, `${position}.${field}`);
+  }
+});
+
+test("steps, input timeouts and empty transfers alone cannot masquerade as captured data", async () => {
+  const [header, step, transfer] = captureRecords();
+  for (const records of [[header, step, { kind: "end", reason: "stopped", transfers: 0 }],
+    [header, { ...transfer, hex: "" }, { kind: "end", reason: "stopped", transfers: 1 }],
+    [header, step, { ...transfer, api: "input-timeout", success: false, hex: "" }, { kind: "end", reason: "stopped", transfers: 1 }]]) {
+    const state = setup();
+    const result = await state.coordinator.fetch(request("/feedback", body({ capture: captureFile(captureSource(records)) })));
+    assert.equal(result.status, 400);
+    assert.equal(state.bucket.puts, 0);
+    assert.equal(state.github.calls.length, 0);
+  }
+});
+
+test("capture accepts exact record, transfer length and byte limits but rejects overflow", async () => {
+  const [header, step, transfer] = captureRecords();
+  const records = [header, ...Array.from({ length: 1023 }, () => step), transfer,
+    { kind: "end", reason: "size-limit", transfers: 1 }];
+  const atLimit = await feedback(body({ capture: captureFile(captureSource(records)) }));
+  assert.equal(atLimit.capture.steps + atLimit.capture.transfers, 1024);
+  records.splice(1, 0, transfer);
+  records.at(-1).transfers++;
+  await assert.rejects(feedback(body({ capture: captureFile(captureSource(records)) })), { code: "validation" });
+  transfer.hex = "ff".repeat(4096);
+  assert.equal((await feedback(body({ capture: captureFile(captureSource([header, transfer,
+    { kind: "end", reason: "stopped", transfers: 1 }])) }))).capture.transfers, 1);
+  assert.equal((await feedback(body({ capture: maximumCapture() }))).capture.bytes.length, MAX_CAPTURE_BYTES);
+});
+
+test("capture is downloadable with exact bytes while screenshots remain inline", async () => {
+  const state = setup();
+  const records = captureRecords();
+  records[1].label = "正常使用";
+  const source = captureSource(records).replaceAll("\n", "\r\n");
+  const value = body({ capture: captureFile(source), images: [{ name: "screen.png", mimeType: "image/png", dataBase64: PNG }] });
+  assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 201);
+  const journal = await state.storage.get(`request:${UUID}`);
+  const [image, capture] = journal.attachments;
+  const issue = state.github.issues[0];
+  assert.ok(issue.body.includes(`![截图 1](https://feedback.example.org/attachments/${image.id})`));
+  assert.ok(issue.body.includes(`### 采集记录\n\n[下载 raw.jsonl](https://feedback.example.org/attachments/${capture.id})`));
+  assert.ok(issue.body.includes("传输记录：1；步骤记录：1。"));
+  assert.ok(!issue.body.includes(records[2].hex));
+  assert.ok(!issue.body.includes(value.capture.dataBase64));
+  assert.ok(!issue.body.includes("![下载"));
+  for (const method of ["GET", "HEAD"]) {
+    const response = await worker.fetch(request(`/attachments/${capture.id}`, undefined, { method }), state.env);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Content-Type"), "application/octet-stream");
+    assert.equal(response.headers.get("Content-Disposition"), 'attachment; filename="raw.jsonl"');
+    assert.equal(response.headers.get("Content-Length"), String(Buffer.byteLength(source)));
+    assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
+    assert.equal(response.headers.get("Referrer-Policy"), "no-referrer");
+    assert.ok(response.headers.get("Content-Security-Policy").includes("sandbox"));
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(method === "GET" ? source : ""));
+    const screenshot = await worker.fetch(request(`/attachments/${image.id}`, undefined, { method }), state.env);
+    assert.equal(screenshot.headers.get("Content-Type"), "image/png");
+    assert.equal(screenshot.headers.get("Content-Disposition"), "inline");
+  }
+  assert.equal((await worker.fetch(request(`/attachments/${"cd".repeat(24)}`), state.env)).status, 404);
+  assert.ok(!JSON.stringify([...state.storage.data.values()]).includes(value.capture.dataBase64));
+  assert.ok(!JSON.stringify(journal).includes(records[2].hex));
+});
+
+for (const failure of ["capture upload", "upload response", "upload checkpoint", "prepared checkpoint"]) {
+  test(`capture resumes after ${failure} failure with reserved keys and no repeated image upload`, async () => {
+    const state = setup();
+    const value = body({ capture: captureFile(), images: [{ name: "screen.png", mimeType: "image/png", dataBase64: PNG }] });
+    let fail = true;
+    const putFile = state.bucket.put.bind(state.bucket);
+    state.bucket.put = async (key, bytes, metadata) => {
+      const capture = metadata.httpMetadata.contentDisposition !== undefined;
+      if (capture && fail && failure === "capture upload") { fail = false; throw new Error("R2 unavailable"); }
+      await putFile(key, bytes, metadata);
+      if (capture && fail && failure === "upload response") { fail = false; throw new Error("R2 response lost"); }
+    };
+    const putRecord = state.storage.put.bind(state.storage);
+    state.storage.put = async (key, record) => {
+      if (key === `request:${UUID}` && fail && ((failure === "upload checkpoint" && record.state === "uploading"
+        && record.attachments.at(-1).uploaded) || (failure === "prepared checkpoint" && record.state === "prepared"))) {
+        fail = false;
+        throw new Error("Journal checkpoint failed");
+      }
+      return putRecord(key, record);
+    };
+    assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 503);
+    assert.equal(fail, false);
+    assert.equal(state.github.calls.length, 0);
+    const uploading = await state.storage.get(`request:${UUID}`);
+    assert.equal(uploading.state, "uploading");
+    assert.equal(uploading.attachments[0].uploaded, true);
+    const restarted = new FeedbackCoordinator({ storage: state.storage }, state.env, { fetch: state.github.fetch, now: state.now });
+    assert.equal((await restarted.fetch(request("/feedback", value))).status, 201);
+    assert.equal((await restarted.fetch(request("/feedback", value))).status, 200);
+    assert.deepEqual([...state.bucket.data.keys()], uploading.attachments.map(attachment => `attachments/${attachment.id}`));
+    assert.equal(state.bucket.puts, ["upload response", "upload checkpoint"].includes(failure) ? 3 : 2);
+    assert.equal(state.github.calls.filter(call => call.method === "POST").length, 1);
+  });
+}
+
+test("pending capture retries reject changed bytes or removed attachments then recover without reuploading", async () => {
+  const state = setup();
+  state.github.loseIssueResponse = true;
+  const source = captureSource();
+  const value = body({ capture: captureFile(source) });
+  assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 202);
+  assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 202);
+  for (const capture of [undefined, captureFile(source.replace("00ABff12", "00ABff13")),
+    captureFile(source.replace("\n", " \n")), captureFile(source.replaceAll("\n", "\r\n"))]) {
+    assert.equal((await state.coordinator.fetch(request("/feedback", body({ capture })))).status, 409);
+  }
+  const restarted = new FeedbackCoordinator({ storage: state.storage }, state.env, { fetch: state.github.fetch, now: state.now });
+  state.advance(6000);
+  await restarted.alarm();
+  assert.equal((await restarted.fetch(request("/feedback", value))).status, 200);
+  assert.equal(state.bucket.puts, 1);
+  assert.equal(state.bucket.data.size, 1);
+  assert.equal(state.github.calls.filter(call => call.method === "POST").length, 1);
+});
+
+test("adding capture to an existing legacy request is a content conflict", async () => {
+  const state = setup();
+  assert.equal((await state.coordinator.fetch(request("/feedback", body()))).status, 201);
+  assert.equal((await state.coordinator.fetch(request("/feedback", body({ capture: captureFile() })))).status, 409);
+  assert.equal(state.bucket.puts, 0);
+});
+
+test("maximum capture and three maximum images fit the 21 MiB request without persisting raw data", async () => {
+  const state = setup();
+  assert.equal(MAX_REQUEST_BYTES, 21 * 1024 * 1024);
+  const payload = Buffer.alloc(MAX_IMAGE_BYTES);
+  Buffer.from(PNG, "base64").copy(payload);
+  const dataBase64 = payload.toString("base64");
+  const value = body({ capture: maximumCapture(), images: [0, 1, 2].map(index => ({ name: `screen-${index}.png`, mimeType: "image/png", dataBase64 })) });
+  assert.ok(Buffer.byteLength(JSON.stringify(value)) < MAX_REQUEST_BYTES);
+  assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 201);
+  assert.equal(state.bucket.data.size, 4);
+  for (const record of state.storage.data.values()) assert.ok(Buffer.byteLength(JSON.stringify(record)) < 2000);
+  assert.ok(state.github.issues[0].body.length < 2000);
+});
+
+for (const stateName of ["uploading", "prepared", "rejected"]) {
+  test(`${stateName} capture and image cleanup retain the idempotency tombstone`, async () => {
+    const state = setup();
+    const value = body({ capture: captureFile(), images: [{ name: "screen.png", mimeType: "image/png", dataBase64: PNG }] });
+    if (stateName === "uploading") {
+      const put = state.bucket.put.bind(state.bucket);
+      state.bucket.put = async (...args) => { await put(...args); if (state.bucket.data.size === 2) throw new Error("R2 response lost"); };
+    } else if (stateName === "prepared") {
+      const put = state.storage.put.bind(state.storage);
+      state.storage.put = async (key, record) => { if (record.state === "sending") throw new Error("Journal write failed"); return put(key, record); };
+    } else state.github.reject = 422;
+    assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, stateName === "rejected" ? 502 : 503);
+    assert.equal((await state.storage.get(`request:${UUID}`)).state, stateName);
+    assert.equal(state.bucket.data.size, 2);
+    const puts = state.bucket.puts;
+    const posts = state.github.calls.filter(call => call.method === "POST").length;
+    state.advance(25 * 3600000);
+    await state.coordinator.alarm();
+    assert.equal(state.bucket.data.size, 0);
+    const record = await state.storage.get(`request:${UUID}`);
+    assert.equal(record.state, "rejected");
+    assert.deepEqual(record.attachments, []);
+    assert.equal(record.body, undefined);
+    assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 502);
+    assert.equal(state.bucket.puts, puts);
+    assert.equal(state.github.calls.filter(call => call.method === "POST").length, posts);
+  });
+}
+
+test("uncertain GitHub submissions retain capture attachments beyond abandoned-upload cleanup", async () => {
+  const state = setup();
+  state.github.noIssueCreated = true;
+  const value = body({ capture: captureFile() });
+  assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 202);
+  state.advance(25 * 3600000);
+  await state.coordinator.alarm();
+  assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 202);
+  assert.equal((await state.storage.get(`request:${UUID}`)).state, "pending");
+  assert.equal(state.bucket.data.size, 1);
+  assert.equal(state.bucket.puts, 1);
+  assert.equal(state.github.calls.filter(call => call.method === "POST").length, 1);
+});
+
+test("capture submissions share feedback quotas and replays do not consume new issue slots", async () => {
+  const state = setup();
+  for (let index = 0; index < 3; index++) {
+    const value = body({ requestId: `45a526bf-b747-4d42-81e8-d1036d01f98${index}`, capture: captureFile() });
+    assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 201);
+    assert.equal((await state.coordinator.fetch(request("/feedback", value))).status, 200);
+  }
+  assert.equal((await state.coordinator.fetch(request("/feedback", body({ capture: captureFile() })))).status, 429);
+  assert.equal(state.bucket.puts, 3);
+  assert.equal(state.github.issues.length, 3);
 });

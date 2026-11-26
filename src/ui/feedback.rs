@@ -58,6 +58,7 @@ enum Action {
     CaptureSave,
     CaptureClear,
     CaptureFolder,
+    ToggleCapture,
     ToggleDiagnostics,
     AddImage,
     RemoveImage(usize),
@@ -73,6 +74,12 @@ enum Action {
 impl Action {
     fn enabled(&self, model: &Model) -> bool {
         if model.task == Some(Task::CaptureExport) { return matches!(self, Self::Close); }
+        if matches!(self, Self::Capture) && (model.software || (model.capture.is_none()
+            && !model.selected.and_then(|index| model.devices.get(index))
+                .is_some_and(|device| device.capture_interface.is_some()))) { return false; }
+        if matches!(self, Self::CaptureStart) && (model.software
+            || !model.selected.and_then(|index| model.devices.get(index))
+                .is_some_and(|device| device.capture_interface.is_some())) { return false; }
         if matches!(self, Self::History) && model.task == Some(Task::History) {
             return false;
         }
@@ -357,13 +364,14 @@ impl Controls {
         if let Some(draft) = &s.restored_draft {
             let mut draft = draft.clone();
             draft.images = s.images.clone();
+            draft.capture = s.attach_capture.then(|| s.capture.clone()).flatten();
             return draft;
         }
         let mut device = if s.software {
             crate::feedback::software::device()
-        } else { s
+        } else { s.restored_device.clone().or_else(|| s
             .selected
-            .and_then(|i| s.devices.get(i).map(|d| d.device.clone()))
+            .and_then(|i| s.devices.get(i).map(|d| d.device.clone())))
             .unwrap_or_else(|| client::Device {
                 name: format!("{} {}", self.brand.text().trim(), self.model.text().trim())
                     .trim()
@@ -382,6 +390,7 @@ impl Controls {
             description: self.description.text().trim().to_string(),
             diagnostics: s.attach_diagnostics.then(|| self.diagnostics()),
             images: s.images.clone(),
+            capture: s.attach_capture.then(|| s.capture.clone()).flatten(),
         }
     }
     fn rebuild(&self) {
@@ -461,16 +470,20 @@ impl Controls {
                 );
                 y += 27.0;
                 let device = s.selected.and_then(|i| s.devices.get(i));
+                let restored_device = s.restored_device.as_ref();
                 let device_kind = device
                     .map(|d| kind(&d.device.family))
+                    .or_else(|| restored_device.map(|device| kind(&device.family)))
                     .unwrap_or(crate::tray_prefs::TrayKind::Generic);
                 self.button(
                     Action::Devices,
                     device
                         .map(|d| d.label.as_str())
+                        .or_else(|| restored_device.map(|device| device.name.as_str()))
                         .unwrap_or(text("列表中没有我的设备", "My device is not listed")),
                     device.map(device_note).unwrap_or_else(|| {
-                        text("手动填写品牌和型号", "Enter the brand and model").into()
+                        if restored_device.is_some() { text("来自待提交反馈", "From the pending report").into() }
+                        else { text("手动填写品牌和型号", "Enter the brand and model").into() }
                     }),
                     R::new(25.0, y, 610.0, 62.0),
                     Style::Device(device_kind),
@@ -506,7 +519,7 @@ impl Controls {
                     );
                     y += 39.0;
                 }
-                if device.is_none() {
+                if device.is_none() && restored_device.is_none() {
                     y += 10.0;
                     self.label(text("设备品牌（必填）", "Brand (required)"), 25.0, y, 300.0, 20.0, 11.0, true, false);
                     self.label(text("完整型号（必填）", "Full model (required)"), 335.0, y, 300.0, 20.0, 11.0, true, false);
@@ -722,6 +735,7 @@ impl Controls {
                     false,
                 );
                 y += 85.0;
+                if !s.software { y = self.capture_form_layout(&s, y); }
                 if !s.error.is_empty() {
                     self.button(
                         Action::Fallback,
@@ -735,12 +749,6 @@ impl Controls {
                 }
             }
             View::Diagnostics => {
-                if !s.software && s.selected.and_then(|index| s.devices.get(index))
-                    .is_some_and(|device| device.capture_interface.is_some()) {
-                    self.button(Action::Capture, text("本地分步骤采集", "Local guided capture"), "",
-                        R::new(25.0, y, 280.0, 34.0), Style::Card, false);
-                    y += 48.0;
-                }
                 self.tag(
                     if s.software { text("软件诊断", "Software diagnostics") }
                         else { text("设备诊断", "Device diagnostics") },
@@ -805,10 +813,10 @@ impl Controls {
                 }
                 self.label(
                     text(
-                        if s.software { "附带近期事件摘要与 HID 接口清单，不上传原始日志。" }
-                            else { "包含采样时间、状态变化及 HID 接口清单，不含原始报文。" },
-                        if s.software { "Recent event summaries and HID interfaces; no raw logs." }
-                            else { "Sample timing, state changes and HID interfaces; no raw packets." },
+                        if s.software { "近期运行记录摘要与设备接口信息。" }
+                            else { "设备接口信息、电量采样及状态变化。" },
+                        if s.software { "Recent activity summary and device interface information." }
+                            else { "Device interfaces, battery samples and state changes." },
                     ),
                     25.0,
                     y,
@@ -819,7 +827,7 @@ impl Controls {
                     true,
                 );
                 y += 46.0;
-                self.decorations.borrow_mut().push(Decoration::Note(text("不包含序列号、电脑用户名、本机完整路径或个人配置。提交时仅附带你在此看到的内容。","No serials, account names, full local paths or personal settings. Only the details shown here are attached.").into(),R::new(25.0,y,610.0,60.0)));
+                self.decorations.borrow_mut().push(Decoration::Note(text("提交前可在这里查看将附带的诊断内容。","Review the diagnostics to include with your feedback here.").into(),R::new(25.0,y,610.0,60.0)));
                 y += 80.0;
             }
             View::Capture => { y = self.capture_layout(); }
@@ -1347,7 +1355,10 @@ impl Controls {
         );
     }
     fn set_view(&self, view: View) {
-        if view != View::Capture { self.stop_capture_timer(); }
+        if view != View::Capture {
+            if self.state.borrow().view == View::Capture { self.finish_capture(); }
+            else { self.stop_capture_timer(); }
+        }
         self.state.borrow_mut().view = view;
         self.scroll.set(0.0);
         self.rebuild();
@@ -1444,6 +1455,7 @@ impl Controls {
                 | Action::Connection(_)
                 | Action::Category(_)
                 | Action::ToggleDiagnostics
+                | Action::ToggleCapture
                 | Action::Example
                 | Action::RemoveImage(_)
         ) {
@@ -1453,7 +1465,7 @@ impl Controls {
         }
         match action {
             Action::Close => {
-                self.stop_capture_timer();
+                self.finish_capture();
                 self.remember_reply();
                 self.window.set_visible(false);
                 self.overlay.set_visible(false);
@@ -1487,6 +1499,9 @@ impl Controls {
                 *self.capture_folder.borrow_mut() = None;
                 let mut s = self.state.borrow_mut();
                 s.selected = Some(i);
+                s.restored_device = None;
+                s.capture = None;
+                s.attach_capture = true;
                 s.connection = connection_index(&s.devices[i].device.connection);
                 s.diagnostics_override = None;
                 s.draft_retry = None;
@@ -1499,6 +1514,9 @@ impl Controls {
                 *self.capture_folder.borrow_mut() = None;
                 let mut s = self.state.borrow_mut();
                 s.selected = None;
+                s.restored_device = None;
+                s.capture = None;
+                s.attach_capture = true;
                 s.diagnostics_override = None;
                 s.draft_retry = None;
                 s.menu = false;
@@ -1526,6 +1544,12 @@ impl Controls {
                 self.set_view(View::Diagnostics);
             }
             Action::Capture => { self.set_view(View::Capture); }
+            Action::ToggleCapture => {
+                let mut state = self.state.borrow_mut();
+                state.attach_capture = !state.attach_capture;
+                drop(state);
+                self.rebuild();
+            }
             Action::CaptureStart | Action::CaptureMark(_) | Action::CaptureStop
                 | Action::CaptureSave | Action::CaptureClear | Action::CaptureFolder => {
                 self.capture_action(action);
@@ -1550,6 +1574,7 @@ impl Controls {
                 if !self.state.borrow().software
                     && self.state.borrow().draft_retry.is_none()
                     && self.state.borrow().selected.is_none()
+                    && self.state.borrow().restored_device.is_none()
                     && (self.brand.text().trim().is_empty() || self.model.text().trim().is_empty())
                 {
                     self.error(text(
@@ -1569,7 +1594,7 @@ impl Controls {
                     return;
                 }
                 let Some(submit) = submit else {
-                    self.error(text("应用内提交尚未启用。内容已保留，可复制后前往 GitHub 提交。","In-app submission is not enabled. Your draft is preserved; copy it and submit on GitHub."));
+                    self.error(text("应用内反馈尚未启用，请复制内容后前往 GitHub 提交。","In-app feedback is not enabled. Copy the report and submit it on GitHub."));
                     return;
                 };
                 let retry = self.state.borrow().draft_retry.clone();
@@ -1764,13 +1789,17 @@ impl Controls {
                         s.record_entry(outcome.entry);
                         if outcome.pending {
                             s.draft_retry = Some(request_id);
-                            s.error=text("服务正在确认结果，请稍后重试。重试不会重复创建反馈。","The service is confirming the result. Retry shortly; the same request will be reused.").into();
+                            s.error=text("反馈结果暂未确认，请稍后重试。","The feedback result is not confirmed yet. Please retry shortly.").into();
                         } else {
                             s.view = View::Success;
                             s.submitted = true;
                             s.draft_retry = None;
                             s.restored_draft = None;
+                            s.restored_device = None;
                             s.images.clear();
+                            s.capture = None;
+                            crate::capture::clear();
+                            *self.capture_folder.borrow_mut() = None;
                             self.scroll.set(0.0);
                         }
                     }
@@ -1812,15 +1841,17 @@ impl Controls {
                             .set_text(draft.device.model.as_deref().unwrap_or(&draft.device.name));
                         self.updating.set(false);
                         let images = std::mem::take(&mut draft.images);
+                        let capture = draft.capture.take();
+                        self.stop_capture_timer();
+                        crate::capture::clear();
+                        *self.capture_folder.borrow_mut() = None;
                         self.state.borrow_mut().restored_draft = Some(draft.clone());
                         let mut s = self.state.borrow_mut();
                         s.draft_retry = Some(id);
                         s.software = crate::feedback::software::is_device(&draft.device);
                         s.latest_software = s.software;
-                        s.selected = s
-                            .devices
-                            .iter()
-                            .position(|d| d.device.name == draft.device.name);
+                        s.selected = None;
+                        s.restored_device = Some(draft.device.clone());
                         s.connection = connection_index(&draft.device.connection);
                         s.category = ["device", "battery", "dpi", "other"]
                             .iter()
@@ -1831,6 +1862,8 @@ impl Controls {
                         s.inventory_report = None;
                         s.inventory_generation = s.inventory_generation.wrapping_add(1);
                         s.images = images;
+                        s.capture = capture;
+                        s.attach_capture = true;
                         s.submitted = false;
                         s.view = View::Form;
                     }
@@ -1852,11 +1885,11 @@ impl Controls {
                 ResultMessage::Fallback(result) => match result {
                     Ok(fallback) => {
                         let error = if !copy_report(self.window.handle, &fallback.markdown) {
-                            text("剪贴板暂时不可用，请重试。内容仍保留在窗口中。", "The clipboard is unavailable. Retry; your report is still in this window.")
+                            text("暂时无法复制，请重试。", "Could not copy the report. Please retry.")
                         } else if crate::dynlight::shell_open(&fallback.url).is_err() {
                             text("内容已复制，但无法打开浏览器。", "Report copied, but the browser could not be opened.")
-                        } else if fallback.images_omitted {
-                            text("内容已复制。请在 GitHub 粘贴，并手动添加所选截图。", "Report copied. Paste it on GitHub and attach your screenshots manually.")
+                        } else if fallback.images_omitted || fallback.capture_omitted {
+                            text("内容已复制。请在 GitHub 粘贴，并手动添加截图或采集文件。", "Report copied. Paste it on GitHub and attach your screenshots or capture file manually.")
                         } else {
                             text("内容已复制，请在 GitHub 确认并提交。", "Report copied. Review and submit it on GitHub.")
                         };
@@ -1865,7 +1898,7 @@ impl Controls {
                     Err(error) => self.state.borrow_mut().error = error,
                 },
                 ResultMessage::Failed => {
-                    self.state.borrow_mut().error = text("反馈任务未完成，内容已保留，请重试。", "The feedback task did not complete. Your draft is preserved; please retry.").into();
+                    self.state.borrow_mut().error = text("反馈处理未完成，请重试。", "Feedback processing did not finish. Please retry.").into();
                 }
             }
             if !self.state.borrow().error.is_empty() {
@@ -2246,7 +2279,7 @@ mod tests {
     }
 
     #[test]
-    fn local_capture_keeps_raw_bytes_out_of_feedback_and_stops_on_back() {
+    fn local_capture_is_visible_on_form_and_submits_as_optional_attachment() {
         let (_owner, _notice, dialog) = regression_dialog();
         let controls = &dialog.controls;
         let interface = crate::hid::HidInterface { path: "capture-regression-path".into(),
@@ -2258,9 +2291,15 @@ mod tests {
                 connection: "USB".into(), brand: None, model: None } };
         controls.state.borrow_mut().reopen(vec![candidate], false);
         controls.state.borrow_mut().inventory_report = Some("HID interface inventory\n".into());
+        controls.set_description("Battery does not update after charging.");
         let before = controls.diagnostics();
-        controls.action(Action::Diagnostics);
-        assert!(controls.items.borrow().iter().any(|item| matches!(item.action, Action::Capture)));
+        controls.rebuild();
+        {
+            let items = controls.items.borrow();
+            let diagnostics = items.iter().find(|item| matches!(item.action, Action::Diagnostics)).unwrap();
+            let capture = items.iter().find(|item| matches!(item.action, Action::Capture)).unwrap();
+            assert!(capture.rect.y > diagnostics.rect.bottom());
+        }
         controls.action(Action::Capture);
         controls.action(Action::CaptureStart);
         assert!(crate::capture::status().running);
@@ -2276,8 +2315,107 @@ mod tests {
         assert!(!crate::capture::status().running);
         assert_eq!(controls.diagnostics(), before);
         assert_eq!(controls.draft().diagnostics.as_deref(), Some(before.as_str()));
+        let capture = controls.draft().capture.unwrap();
+        assert_eq!(capture.name, "raw.jsonl");
+        assert!(client::validate_draft(&controls.draft()).is_ok());
+        controls.action(Action::ToggleCapture);
+        assert!(controls.draft().capture.is_none());
+        controls.action(Action::ToggleCapture);
+        assert_eq!(controls.draft().capture.as_ref(), Some(&capture));
+        controls.action(Action::ToggleDiagnostics);
+        let submitted = submit_offline(controls);
+        assert_eq!(submitted.capture, Some(capture));
+        assert!(submitted.diagnostics.is_none());
+        assert!(controls.state.borrow().capture.is_none());
+        assert!(!crate::capture::status().started);
         controls.action(Action::New);
         assert!(!crate::capture::status().started);
+    }
+
+    #[test]
+    fn empty_capture_is_omitted_and_device_switch_clears_attachment() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        let interface = crate::hid::HidInterface { path: "capture-first-device".into(),
+            vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
+            input_len: 64, output_len: 64, feature_len: 0, product: "Test".into(), serial: String::new() };
+        let candidate = Candidate { capture_interface: Some(interface.clone()),
+            label: "Test".into(), battery: "50%".into(), diagnostics: "Model: Test\n".into(),
+            device: client::Device { name: "Test".into(), family: "mouse".into(),
+                connection: "USB".into(), brand: None, model: None } };
+        controls.state.borrow_mut().reopen(vec![candidate.clone(), candidate], false);
+        controls.state.borrow_mut().inventory_report = Some("HID interface inventory\n".into());
+        controls.action(Action::Capture);
+        controls.action(Action::CaptureStart);
+        crate::capture::record(&interface.path, "input-timeout", &[], false);
+        controls.action(Action::Back);
+        assert!(controls.draft().capture.is_none());
+        controls.action(Action::Capture);
+        controls.action(Action::CaptureClear);
+        controls.action(Action::CaptureStart);
+        crate::capture::record(&interface.path, "input", &[1, 2], true);
+        controls.action(Action::Close);
+        assert!(controls.draft().capture.is_some());
+        controls.action(Action::Back);
+        controls.action(Action::Device(1));
+        assert!(controls.draft().capture.is_none());
+        assert!(!crate::capture::status().started);
+        controls.action(Action::Manual);
+        assert!(!Action::Capture.enabled(&controls.state.borrow()));
+    }
+
+    #[test]
+    fn restored_capture_survives_edits_and_can_be_excluded_or_cleared() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(Vec::new(), false);
+        controls.brand.set_text("Example");
+        controls.model.set_text("Mouse");
+        controls.set_description("Device battery is not displayed.");
+        let interface = crate::hid::HidInterface { path: "capture-restored".into(),
+            vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
+            input_len: 64, output_len: 64, feature_len: 0, product: String::new(), serial: String::new() };
+        crate::capture::start(&interface).unwrap();
+        crate::capture::record(&interface.path, "input", &[1, 2], true);
+        crate::capture::stop();
+        let raw = crate::capture::feedback_data(&interface.path).unwrap();
+        let capture = client::capture(raw.as_bytes()).unwrap();
+        let mut draft = controls.draft();
+        draft.device = client::Device { name: "Disconnected mouse".into(), family: "mouse".into(),
+            connection: "USB".into(), brand: None, model: None };
+        let original_device = draft.device.clone();
+        draft.capture = Some(capture.clone());
+        let generation = controls.state.borrow_mut().begin_task(Task::Draft).unwrap();
+        controls.results.lock().unwrap().push((generation,
+            ResultMessage::Draft("pending-capture".into(), Ok(draft))));
+        controls.complete();
+        assert!(!crate::capture::status().started);
+        assert_eq!(controls.draft().device, original_device);
+        assert!(controls.brand.text().is_empty());
+        assert!(!controls.edit_rects.borrow().iter().any(|(handle, _)| *handle == controls.brand.handle));
+        assert_eq!(controls.draft().capture.as_ref(), Some(&capture));
+        controls.set_description("Added details about the battery issue.");
+        controls.state.borrow_mut().edit_draft();
+        assert_eq!(controls.draft().capture.as_ref(), Some(&capture));
+        controls.action(Action::Capture);
+        assert!(controls.labels.borrow().iter().any(|label| label.text.contains("0102")));
+        controls.action(Action::Back);
+        controls.action(Action::ToggleCapture);
+        assert!(controls.draft().capture.is_none());
+        assert_eq!(controls.draft().device, original_device);
+        controls.action(Action::ToggleCapture);
+        assert_eq!(controls.draft().capture.as_ref(), Some(&capture));
+        assert_eq!(controls.draft().device, original_device);
+        controls.action(Action::Capture);
+        controls.action(Action::CaptureClear);
+        assert!(controls.draft().capture.is_none());
+        assert_eq!(controls.draft().device, original_device);
+        controls.action(Action::Back);
+        let submitted = submit_offline(controls);
+        assert_eq!(submitted.device, original_device);
+        assert!(submitted.capture.is_none());
+        controls.action(Action::New);
+        assert!(controls.state.borrow().restored_device.is_none());
     }
 
     #[test]
@@ -2631,10 +2769,10 @@ fn draw(c: &Controls, p: &mut Painter, body: bool, damage: R) {
                 "Read replies and add more device details.",
             ),
             View::Diagnostics => text(
-                if s.software { "已自动整理近期运行记录，不包含原始日志。" }
-                    else { "只包含这次反馈需要的设备信息。" },
-                if s.software { "Recent activity is summarized automatically. Raw logs are excluded." }
-                    else { "Only the device details needed for this report." },
+                if s.software { "本次反馈的运行记录摘要。" }
+                    else { "本次反馈的设备诊断信息。" },
+                if s.software { "Activity summary for this report." }
+                    else { "Device diagnostics for this report." },
             ),
             View::Thread => text("反馈详情", "Feedback details"),
             View::Success => "",
@@ -2656,7 +2794,7 @@ fn draw(c: &Controls, p: &mut Painter, body: bool, damage: R) {
         let fy = c.height.get() - FOOTER;
         p.hline(0.0, WIDTH, fy, t.border);
         let footer = match s.view {
-            View::Capture => text("原始数据仅保留在本机，不随反馈上传。", "Raw data stays local; it is not attached to feedback."),
+            View::Capture => text("采集完成后，返回反馈页面提交。", "After capture, return to the feedback form to submit."),
             View::Diagnostics => text(
                 if s.software { "可以在反馈窗口关闭“附带软件诊断”。" }
                     else { "可以在反馈窗口关闭“附带设备诊断”。" },
@@ -2705,7 +2843,7 @@ fn draw(c: &Controls, p: &mut Painter, body: bool, damage: R) {
 
 fn draw_button(p: &mut Painter, item: &Item, pressed: bool, focus: bool, enabled: bool) {
     let t = p.t;
-    if matches!(item.action, Action::Diagnostics | Action::ToggleDiagnostics) {
+    if matches!(item.action, Action::Diagnostics | Action::ToggleDiagnostics | Action::Capture | Action::ToggleCapture) {
         p.rect(R::new(0.0, 0.0, item.rect.w, item.rect.h), t.bg_sunken);
     }
     let r = R::new(1.0, 1.0, item.rect.w - 2.0, item.rect.h - 2.0);
@@ -3333,7 +3471,7 @@ impl Dialog {
                                         right: w,
                                         bottom: h,
                                     },
-                                    if matches!(item.action, Action::Diagnostics | Action::ToggleDiagnostics) {
+                                    if matches!(item.action, Action::Diagnostics | Action::ToggleDiagnostics | Action::Capture | Action::ToggleCapture) {
                                         colors.sunken_brush
                                     } else {
                                         colors.brush
@@ -3395,7 +3533,7 @@ impl Dialog {
                         }
                         wu::WM_TIMER if !body && wp == capture::TIMER => {
                             if c.state.borrow().view == View::Capture {
-                                if !crate::capture::status().running { c.stop_capture_timer(); }
+                                if !crate::capture::status().running { c.finish_capture(); }
                                 c.rebuild_position(false);
                             } else { c.stop_capture_timer(); }
                             Some(0)
@@ -3438,6 +3576,7 @@ impl Dialog {
     fn show_mode(&self, owner: &nwg::Window, devices: Vec<Candidate>, dark: bool, history: bool, software: bool) {
         let c = &self.controls;
         c.remember_reply();
+        if c.state.borrow().view == View::Capture { c.finish_capture(); }
         *c.colors.borrow_mut() = Colors::new(dark);
         c.update_input_prompts();
         let reset = if software { c.state.borrow_mut().reopen_software() }

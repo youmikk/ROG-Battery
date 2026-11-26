@@ -2535,7 +2535,7 @@ fn handle_act(a: Act, env: &UiEnv) {
                 return;
             }
             if ask_confirm_owned(env.window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as _, crate::ui::feedback::text("下载微软商店更新", "Download Microsoft Store update"),
-                crate::ui::feedback::text("是否通过微软商店下载更新？\n\n下载期间电量监测继续运行，下载完成后不会自动安装。", "Download the update through Microsoft Store?\n\nBattery monitoring continues during the download. Installation will not start automatically.")) {
+                crate::ui::feedback::text("下载微软商店中的新版本？", "Download the new version from Microsoft Store?")) {
                 env.store.controller.download();
                 env.canvas.repaint_now();
             }
@@ -2548,9 +2548,9 @@ fn handle_act(a: Act, env: &UiEnv) {
             let title = if install { crate::ui::feedback::text("安装更新", "Install update") }
                 else { crate::ui::feedback::text("退出并在微软商店更新", "Exit and update in Microsoft Store") };
             let message = if install {
-                crate::ui::feedback::text("开始安装更新？\n\n会先等待设备操作完成，保存设置和电量历史，再调用微软商店。安装可能关闭并重启软件，开机自启设置保持不变。", "Start installing the update?\n\nThe app waits for device operations and saves settings and battery history before calling Microsoft Store. Installation may close and restart the app. Your startup preference stays unchanged.")
+                crate::ui::feedback::text("现在安装更新？软件可能关闭或重启。", "Install the update now? The app may close or restart.")
             } else {
-                crate::ui::feedback::text("保存数据并退出 X-Battery，然后打开微软商店更新页面？\n\n退出后电量监测会暂停，请在商店更新完成后重新打开软件。开机自启设置不会被关闭。", "Save data and exit X-Battery, then open Microsoft Store updates?\n\nBattery monitoring pauses after exit. Reopen the app when the Store update finishes. Your startup preference will not be disabled.")
+                crate::ui::feedback::text("退出 X-Battery 并打开微软商店？\n\n退出后暂停电量监测，更新完成后请重新打开软件。", "Exit X-Battery and open Microsoft Store?\n\nBattery monitoring pauses after exit. Reopen the app when the update finishes.")
             };
             if ask_confirm_owned(env.window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as _, title, message) {
                 let action = if install { StorePreparationAction::Install } else { StorePreparationAction::ExitToStore };

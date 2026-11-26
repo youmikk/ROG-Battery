@@ -9,20 +9,22 @@ const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 const MAX_ACTIVE_REQUESTS = 16;
 const MAX_ACTIVE_PER_IP = 2;
+const CAPTURE_DISPOSITION = 'attachment; filename="raw.jsonl"';
 
 export default {
   async fetch(request, env) {
     try {
       configuration(env);
       const url = new URL(request.url);
-      if (url.pathname === "/health" && request.method === "GET") return json({ status: "ok", schema: 1 });
+      if (url.pathname === "/health" && request.method === "GET") return json({ status: "ok", schema: 1, captureAttachments: true });
       if (/^\/attachments\/[a-f0-9]{48}$/.test(url.pathname) && ["GET", "HEAD"].includes(request.method)) {
         const item = await env.ATTACHMENTS.get(url.pathname.slice(1));
         if (!item) throw new HttpError(404, "not_found", "Attachment not found.");
+        const capture = item.httpMetadata?.contentDisposition === CAPTURE_DISPOSITION;
         const headers = new Headers({
-          "Content-Type": item.httpMetadata?.contentType ?? "application/octet-stream",
+          "Content-Type": capture ? "application/octet-stream" : item.httpMetadata?.contentType ?? "application/octet-stream",
           "Content-Length": String(item.size),
-          "Content-Disposition": "inline",
+          "Content-Disposition": capture ? CAPTURE_DISPOSITION : "inline",
           "Cache-Control": "public, max-age=86400, immutable",
           "X-Content-Type-Options": "nosniff",
           "Content-Security-Policy": "default-src 'none'; sandbox",
@@ -180,18 +182,25 @@ export class FeedbackCoordinator {
       await this.limits([[`new:${ip}`, 3, HOUR], [`new-day:${ip}`, 8, DAY], ["new:global", 200, DAY]]);
       const marker = `<!-- r-battery-feedback:${await digestSecret(this.env.FEEDBACK_SECRET, "issue", data.requestId)} -->`;
       const attachments = data.images.map(image => ({ id: randomId(), mimeType: image.mimeType, digest: image.digest }));
+      if (data.capture) attachments.push({ id: randomId(), kind: "capture", mimeType: data.capture.mimeType, digest: data.capture.digest });
       record = { kind: "issue", state: "uploading", fingerprint: data.fingerprint, owner, marker,
         attachments, createdAt: this.now(), nextCheckAt: 0, checks: 0 };
       await this.storage.put(recordKey, record);
     }
     if (record.state === "uploading") {
-      for (let index = 0; index < data.images.length; index++) {
-        const image = data.images[index];
+      const files = [...data.images, ...(data.capture ? [data.capture] : [])];
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
         const saved = record.attachments[index];
-        await this.env.ATTACHMENTS.put(`attachments/${saved.id}`, image.bytes, {
-          httpMetadata: { contentType: image.mimeType },
+        if (saved.uploaded) continue;
+        const capture = saved.kind === "capture";
+        await this.env.ATTACHMENTS.put(`attachments/${saved.id}`, file.bytes, {
+          httpMetadata: { contentType: capture ? "application/octet-stream" : file.mimeType,
+            ...(capture ? { contentDisposition: CAPTURE_DISPOSITION } : {}) },
           customMetadata: { createdAt: String(record.createdAt) },
         });
+        saved.uploaded = true;
+        await this.storage.put(recordKey, record);
       }
       const { base } = configuration(this.env);
       const safe = value => publicText(value, data.replyKey);
@@ -205,8 +214,12 @@ export class FeedbackCoordinator {
       if (data.device.model) sections.push(`型号：${safe(data.device.model)}`);
       sections.push(`### 问题描述\n\n${safe(data.description)}`);
       if (data.diagnostics) sections.push(`### 诊断信息\n\n${diagnosticText(data.diagnostics, data.replyKey)}`);
-      if (record.attachments.length) sections.push("### 截图\n\n" + record.attachments.map((image, index) =>
+      const images = record.attachments.filter(attachment => attachment.kind !== "capture");
+      if (images.length) sections.push("### 截图\n\n" + images.map((image, index) =>
         `![截图 ${index + 1}](${base}/attachments/${image.id})`).join("\n\n"));
+      const capture = record.attachments.find(attachment => attachment.kind === "capture");
+      if (capture) sections.push(`### 采集记录\n\n[下载 raw.jsonl](${base}/attachments/${capture.id})`
+        + `\n\n传输记录：${data.capture.transfers}；步骤记录：${data.capture.steps}。`);
       sections.push(record.marker);
       record = { ...record, state: "prepared", title, body: sections.join("\n\n") };
       if (encoder.encode(record.body).byteLength > 60_000 || record.title.length > 250) {
@@ -364,7 +377,7 @@ export class FeedbackCoordinator {
             }
             if (["uploading", "prepared", "rejected"].includes(record.state) && record.createdAt + DAY < now
               && (record.state !== "rejected" || record.attachments?.length)) {
-              for (const image of record.attachments ?? []) await this.env.ATTACHMENTS.delete(`attachments/${image.id}`);
+              for (const attachment of record.attachments ?? []) await this.env.ATTACHMENTS.delete(`attachments/${attachment.id}`);
               const { title, body, ...minimal } = record;
               await this.storage.put(key, { ...minimal, state: "rejected", attachments: [] });
             }

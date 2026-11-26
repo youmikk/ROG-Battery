@@ -3488,7 +3488,7 @@ fn settings_about(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             tr("设备未识别、电量异常或其他使用问题", "Unrecognized devices, battery issues or other problems"),
             tr("反馈", "Feedback"), Act::DeviceFeedback),
         (FeedbackIcon::File, tr("反馈软件问题", "Software feedback"),
-            tr("快速描述问题，自动附带脱敏诊断摘要", "Describe the problem with an automatic, privacy-safe diagnostic summary"),
+            tr("描述软件问题，附带诊断摘要", "Describe the problem and include a diagnostic summary"),
             tr("反馈", "Feedback"), Act::SoftwareFeedback),
         (FeedbackIcon::History, tr("我的反馈", "My feedback"),
             tr("查看处理进度和回复，补充设备信息", "Track progress, read replies and add device details"),

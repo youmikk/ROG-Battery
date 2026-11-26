@@ -1,8 +1,8 @@
 # 本地分步骤采集 / Local guided capture
 
-用于排查已发现设备的电量变化：设置 → 反馈设备 → 查看诊断 → 本地分步骤采集。选择设备后开始，正常使用、接上充电线、拔掉充电线、关闭外设、重新开启外设，每完成一步点对应按钮；可跳过或重复。每步等待一次正常电量刷新。停止后查看最近记录，保存原始包和摘要，再打开保存文件夹检查完整文件。
+用于排查已发现设备的电量变化：设置 → 反馈设备 → “附带设备诊断”下方的“设备通信采集”。选择设备后开始，正常使用、接上充电线、拔掉充电线、关闭外设、重新开启外设，每完成一步点对应按钮；可跳过或重复。每步等待一次正常电量刷新。停止后查看最近记录，返回反馈页面提交；有数据时默认附带采集文件，也可关闭附带或另存到本机。
 
-This records changes for an already discovered device: Settings → Device feedback → View diagnostics → Local guided capture. Start, then mark normal use, connecting/disconnecting charging and powering the peripheral off/on. Steps can be skipped or repeated. Wait for an ordinary battery refresh between steps. Stop, review, save, then open the folder to inspect the complete files.
+This records changes for an already discovered device: Settings → Device feedback → Device traffic capture, below Include device diagnostics. Start, then mark normal use, connecting/disconnecting charging and powering the peripheral off/on. Steps can be skipped or repeated. Wait for an ordinary battery refresh between steps. Stop, review and return to the form. Captures containing data are included by default; they can be excluded or saved locally.
 
 - 只旁路记录本进程在所选厂商接口上的既有 `HidDevice` / `FeatureChannel` 传输，不打开第二个输入通道，不增加查询、改变轮询或运行未知命令。标准键鼠输入接口、蓝牙系统属性和 XInput 不提供这个入口。未识别设备仍先使用普通反馈；这不是全设备抓包工具。
 - Records existing `HidDevice` / `FeatureChannel` transfers on one selected vendor interface. It opens no extra handles, changes no polling interval and sends no additional commands. Standard input collections, Bluetooth OS properties and XInput are excluded. Unrecognized devices should use ordinary feedback first; this is not a universal capture tool.
@@ -11,10 +11,12 @@ This records changes for an already discovered device: Settings → Device feedb
 - 非零等待的 Input 超时记录为 `input-timeout`；零等待排空检查不算超时事件。Nonzero-wait Input timeouts are recorded; empty queue-drain checks are excluded.
 - 5 分钟、1024 条、512 KiB JSONL 记录，任一上限达到后停止。限制包括十六进制与 JSON 开销；导出头尾和摘要有额外的有界开销。返回或关闭窗口停止采集，清除记录或新建反馈释放内存。日常未启用采集时，仅检查原子标记，不保存报文。
 - Stops after 5 minutes, 1024 records or 512 KiB of JSONL records, including hex/JSON overhead. Headers, footer and summary add bounded overhead. Going back or closing stops collection; clear/new feedback releases memory. With capture disabled, the hook only checks an atomic flag.
-- 保存到用户可写的缓存目录 `captures/capture-…/raw.jsonl` 和 `summary.txt`。原始包不写入序列号或接口路径元数据，但原始字节仍可能包含身份或输入信息，不承诺匿名。分享前检查完整文件。两个文件均不自动附加到 GitHub 反馈，普通反馈仍走原有白名单。
-- Saves under the writable user cache directory in `captures/capture-…/raw.jsonl` and `summary.txt`. Raw bytes can contain identities or input even though metadata excludes serials and paths. Review before sharing. Neither file is automatically attached to GitHub; normal feedback retains its allowlist.
+- 点击“提交反馈”时，已勾选的 `raw.jsonl` 经现有免登录中继上传至附件存储，公开的 GitHub 议题包含下载链接。原始字节可能包含设备标识或输入信息，提交前可查看、关闭附带或清除记录。只有步骤标记或空超时记录时不附带文件。普通诊断摘要继续使用原有白名单，采集文件单独验证，最大 544 KiB（含头尾）。
+- Submitting feedback uploads the included `raw.jsonl` through the existing anonymous relay to attachment storage and adds a download link to the public GitHub issue. Bytes may contain identifiers or input information. Review, exclude or clear the capture before submitting. Marker-only or empty-timeout captures are omitted. Normal diagnostic summaries retain their allowlist; captures have separate validation and a 544 KiB whole-file limit.
+- 另存到本机时写入用户缓存目录 `captures/capture-…/raw.jsonl` 和 `summary.txt`。重试使用同一份采集附件，待提交草稿加密保存在本机；切换设备、新建反馈或提交成功会释放当前采集。采集动作本身不会立即发送反馈。
+- Local copies are saved under `captures/capture-…/raw.jsonl` and `summary.txt` in the user cache. Pending retries reuse the same capture, stored in encrypted local draft history. Changing devices, starting a new report or completing submission clears the current capture. Collection itself does not submit feedback.
 - 保存期间可关闭窗口，页面切换需等待保存结果，避免丢失错误或成功位置。保存失败清除本次创建的未完成文件；如果无法清除，会明确提示残留路径。Export completion is retained across closing; navigation waits for the result. Failed exports remove only newly created files and report the residual location if cleanup fails.
 
-设计参考 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723` 的分步骤标记；实现独立，采用现有通道旁路记录以避免新增读取竞争。本项目测试使用合成数据验证隔离、停止、容量、导出和反馈边界，不代表设备真机采集验收。
+设计参考 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723` 的分步骤标记；实现独立，采用现有通道旁路记录以避免新增读取竞争。本项目测试使用合成数据验证隔离、停止、容量、导出、可选附件和重试恢复，不代表设备真机采集验收。
 
-Inspired by VigilWatt's guided markers at the pinned commit above. Independently implemented as observation of existing channels to avoid additional read contention. Synthetic tests verify isolation, lifecycle, bounds, export and feedback separation; they do not constitute hardware validation.
+Inspired by VigilWatt's guided markers at the pinned commit above. Independently implemented as observation of existing channels to avoid additional read contention. Synthetic tests verify isolation, lifecycle, bounds, exports, optional feedback attachments and retry recovery; they do not constitute hardware validation.

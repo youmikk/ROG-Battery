@@ -6,7 +6,7 @@ X-Battery 的自有反馈中继：桌面客户端通过 HTTPS 提交设备反馈
 
 ## 文件和本地测试
 
-- `src/index.mjs`：HTTP 路由、限流、持久化请求记录和截图存储。
+- `src/index.mjs`：HTTP 路由、限流、持久化请求记录和截图／原始采集附件存储。
 - `src/github.mjs`：仅访问固定仓库的 GitHub API；创建议题、恢复提交结果、查看维护者回复。
 - `src/security.mjs` / `src/validation.mjs`：认证、输入限制、GitHub URL 校验、文件格式检查。
 - `test/relay.test.mjs`：原生 Node 测试；GitHub、R2、Durable Object 存储全部由内存模拟器替代。
@@ -55,7 +55,7 @@ node --test test/relay.test.mjs
    wrangler deploy
    ```
 
-7. 检查 `GET /health` 返回 `{"status":"ok","schema":1}`，再把同一个 HTTPS 源配置给桌面客户端。该接口只确认配置完整，不会调用 GitHub 或验证 Token 权限。真实发帖验收应使用清楚标注的维护者测试反馈，并在确认后自行关闭。
+7. 检查 `GET /health` 返回 `{"status":"ok","schema":1,"captureAttachments":true}`，再把同一个 HTTPS 源配置给桌面客户端。`captureAttachments` 表示服务支持原始采集附件。该接口只确认配置完整，不会调用 GitHub 或验证 Token 权限。真实发帖验收应使用清楚标注的维护者测试反馈，并在确认后自行关闭。
 
 使用自有域名时，先把域名绑定到此 Worker，再设置 `PUBLIC_BASE_URL`。截图永久引用这个源，部署后应保持域名稳定。
 
@@ -105,6 +105,7 @@ GitHub Token 可更换，但保持发帖账号与 `GITHUB_AUTHOR_LOGIN` 一致�
 | `description` | 去除首尾空白后 5–2000 字符，允许换行 |
 | `diagnostics` | 可选，UTF-8 不超过 20 KiB |
 | `images` | 可选，最多 3 张；字段见下文 |
+| `capture` | 可选，一份 `raw.jsonl` 原始采集附件，解码后最多 544 KiB；字段见下文；未附加时省略，不传 `null` |
 
 设备示例：
 
@@ -220,9 +221,32 @@ GitHub 没有面向创建议题的事务性幂等键：如果程序恰好在记�
 {"name":"截图.png","mimeType":"image/png","dataBase64":"标准base64内容，不带data:前缀"}
 ```
 
-仅接受 PNG、JPEG、WebP。每张解码后最多 5 MiB，最多三张，总 JSON 请求最多 22 MiB，读取上传正文限时 30 秒。服务检查 MIME 与二进制签名、帧尺寸、最大边长 16384、最大 6000 万像素；不允许 SVG、HTML 或任意附件。不压缩请求体。文件名最多 160 字符，禁止路径分隔符；存储键完全由服务端随机生成，文件名不参与 R2 路径。
+截图仅接受 PNG、JPEG、WebP。每张解码后最多 5 MiB，最多三张，总 JSON 请求最多 21 MiB，读取上传正文限时 30 秒。三张最大截图加一份最大采集附件仍在总预算内。服务检查 MIME 与二进制签名、帧尺寸、最大边长 16384、最大 6000 万像素；不允许 SVG、HTML 或任意附件。不压缩请求体。文件名最多 160 字符，禁止路径分隔符；存储键完全由服务端随机生成，文件名不参与 R2 路径。
 
 R2 保存原始图片，Worker 在 `/attachments/<48位随机hex>` 提供公开只读图片地址。议题中的 Markdown 图片引用这个地址，所以无需公开桶或 GitHub 附件上传权限。虽然地址难猜，**任何获得议题或图片链接的人都能查看图片**。地址和图片不带回复密钥。图片响应设置固定 MIME、`nosniff`、受限 CSP 和无 referrer；浏览器/ GitHub 可能缓存图片。
+
+### 原始引导采集附件
+
+在创建反馈的请求中，`capture` 与 `images` 并列，不占截图名额。对象必须恰好包含以下三个字段：
+
+```json
+{"name":"raw.jsonl","mimeType":"application/x-ndjson","dataBase64":"原始 UTF-8 JSONL 的标准 base64"}
+```
+
+文件名和 MIME 必须与示例完全一致。Base64 必须为标准字母表、规范填充，不接受空白、URL-safe 编码或 `data:` 前缀；解码后最多 `544 * 1024` 字节。UTF-8 必须有效，不接受 BOM。JSONL 允许 LF、CRLF 和一个可选的末尾换行，不允许空行。正文校验对应 `src/capture.rs` 的导出格式，每层都拒绝未知字段（包括文件路径、序列号等额外元数据）：
+
+| 行 | 必需字段与约束 |
+| --- | --- |
+| 首行 header | 恰好为 `schema`、`app`、`started_unix_ms`、`vendor_id`、`product_id`、`usage_page`、`usage`、`input_bytes`、`output_bytes`、`feature_bytes`、`scope`、`privacy`；`schema=1`，VID/PID、usage 和报文长度为 0–65535 的整数；`app`、`scope`、`privacy` 分别为 1–80、1–512、1–1024 字符的单行文本 |
+| transfer | 恰好为 `kind="transfer"`、`elapsed_ms`、`api`、`success`、`hex`；API 只接受 `write`、`input`、`input-timeout`、`get-feature`、`get-input`、`set-output`、`set-feature`；`success` 为布尔；`hex` 是最多 4096 字节的大小写十六进制、必须成对，可为空 |
+| step | 恰好为 `kind="step"`、`elapsed_ms`、`step`、`label`；`step` 为 0–4 整数，`label` 为 1–120 字符的单行文本 |
+| 最后一行 end | 恰好为 `kind="end"`、`reason`、`transfers`；`reason` 为 1–80 字符的非空单行文本，不限定停止原因枚举；`transfers` 必须等于 transfer 行数（包括空数据的 transfer） |
+
+`started_unix_ms` 和 `elapsed_ms` 为非负安全整数（不超过 `9007199254740991`），不限制日期窗口、时间单调性或 300 秒上限。transfer 和 step 合计最多 1024 行，且必须至少有一条 `hex` 非空的 transfer；仅有步骤、超时或空数据的文件不算有效采集。所有字段校验在写 R2 或创建 GitHub 议题前完成。
+
+采集附件在 R2 使用随机键保存原始字节；公开下载响应固定为 `application/octet-stream` 和 `Content-Disposition: attachment; filename="raw.jsonl"`，GET 和 HEAD 保留与图片相同的安全响应头。截图仍以 `inline` 显示，旧 R2 图片无需迁移。议题只写下载链接及传输／步骤数，不内嵌原始数据。**采集字节可能包含设备标识或输入数据，附件是公开的，不会自动脱敏**；用户应在确认分享后才附加。
+
+采集参与原有请求限流、上传预算、附件清理和持久化去重。上传前保存所有随机对象键，每次成功上传后保存进度；未确认上传重试仍使用原键，避免遗留新对象。已确认上传不会在后续文件重试时重传。GitHub 结果未确认时只核对旧议题，不重传附件或重复创建议题。未带 `capture` 的请求保持原 schema 1 指纹和旧待处理记录兼容；带附件时将原始字节摘要纳入指纹，即便只是 JSONL 空白或换行改变，也会对同一个请求编号返回 `409`。
 
 普通图片格式检查不是完整解码、病毒扫描或图片隐私清理。PNG/JPEG/WebP 的元数据不会重编码去除。客户端应在提交前让用户确认截图不含私密信息。
 
@@ -243,7 +267,7 @@ R2 保存原始图片，Worker 在 `/attachments/<48位随机hex>` 提供公开�
 | 全服务补充回复 | 每天 1000 次 |
 | 单 IP 同时处理的 API 请求 | 2 个，超出返回 `429` |
 | 全服务同时处理的 API 请求 | 16 个，超出返回 `503 service_busy` |
-| 在途请求已读取正文的累计预算 | 22 MiB，超出返回 `503 service_busy` |
+| 在途请求已读取正文的累计预算 | 21 MiB，超出返回 `503 service_busy` |
 
 已存在请求的重试仍计入总请求额度，不重复占新反馈额度。共享出口的用户共享 IP 配额。分布式滥用仍可能耗尽全局额度；正式运营时可在自己的 Cloudflare 账户上补充 WAF 和预算告警，不需给客户端添加第三方反馈接口。
 

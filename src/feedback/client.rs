@@ -22,6 +22,10 @@ use winapi::{
     },
 };
 
+#[path = "capture.rs"]
+mod capture_attachment;
+pub use capture_attachment::{capture, Capture};
+
 const REPOSITORY: &str = "https://github.com/youmikk/X-Battery";
 // Existing encrypted history and cached relay receipts use the former URL.
 const LEGACY_REPOSITORY: &str = "https://github.com/youmikk/ROG-Battery";
@@ -45,13 +49,12 @@ fn invalid() -> String {
 }
 
 fn damaged() -> String {
-    message("无法读取本地反馈记录，原文件已保留。",
-        "The local feedback history could not be read. The original file has been preserved.")
+    message("无法读取本地反馈记录。", "The local feedback history could not be read.")
 }
 
 fn storage_error() -> String {
-    message("无法安全保存反馈记录，本次操作尚未确认。内容已保留，请检查存储空间和目录权限后重试。",
-        "Feedback could not be saved securely. This operation is not confirmed. Your draft is preserved; check storage and directory permissions, then retry.")
+    message("反馈记录保存失败，提交结果暂未确认。请检查磁盘空间或权限后重试。",
+        "Feedback history could not be saved. The submission result is not confirmed. Check disk space or permissions and retry.")
 }
 
 pub(super) fn storage_event(operation: &str, error: &std::io::Error) -> String {
@@ -69,13 +72,13 @@ fn storage_io_error(operation: (&str, &str), error: std::io::Error) -> String {
 }
 
 fn service_error() -> String {
-    message("反馈服务返回了无效数据，待提交内容已保留。",
-        "The feedback service returned invalid data. Pending feedback has been preserved.")
+    message("反馈服务返回异常，请稍后重试。",
+        "The feedback service returned an unexpected response. Please retry later.")
 }
 
 fn network_error() -> String {
-    message("无法连接反馈服务，待提交内容已保留，请稍后重试。",
-        "The feedback service could not be reached. Pending feedback has been preserved; please retry later.")
+    message("无法连接反馈服务，请检查网络后重试。",
+        "The feedback service could not be reached. Check your network and retry.")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +111,8 @@ pub struct Draft {
     pub diagnostics: Option<String>,
     #[serde(default)]
     pub images: Vec<Image>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<Capture>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,7 +175,12 @@ pub struct ReplyReceipt { pub id: u64, pub url: String, pub created_at: String }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Fallback { pub markdown: String, pub url: String, pub images_omitted: bool }
+pub struct Fallback {
+    pub markdown: String,
+    pub url: String,
+    pub images_omitted: bool,
+    pub capture_omitted: bool,
+}
 
 // These types never leave local Rust state or the DPAPI-encrypted file.
 // In particular, reply_key is deliberately absent from the public Entry.
@@ -267,6 +277,7 @@ pub fn validate_details(draft: &Draft) -> Result<(), String> {
 pub fn validate_draft(draft: &Draft) -> Result<(), String> {
     validate_details(draft)?;
     for picture in &draft.images { validate_image(picture)?; }
+    if let Some(attachment) = &draft.capture { capture_attachment::validate(attachment)?; }
     Ok(())
 }
 
@@ -456,8 +467,8 @@ pub fn configured() -> bool { endpoint().is_some() }
 
 fn required_endpoint() -> Result<Endpoint, String> {
     option_env!("R_BATTERY_FEEDBACK_URL").and_then(parse_endpoint).ok_or_else(|| message(
-        "此版本尚未配置反馈服务。可以复制报告并前往 GitHub 提交；图片需要手动添加。",
-        "This build has no feedback service configured. Copy the report and submit it on GitHub; add images manually."))
+        "此版本尚未配置反馈服务。可以复制报告并前往 GitHub 提交；附件需要手动添加。",
+        "This build has no feedback service configured. Copy the report and submit it on GitHub; add attachments manually."))
 }
 
 fn wide(value: &str) -> Vec<u16> { value.encode_utf16().chain(Some(0)).collect() }
@@ -567,13 +578,12 @@ fn http_error(status: u32) -> String {
             "The feedback service did not accept this reply key. View or update the issue on GitHub."),
         404 => message("未找到这条反馈，请稍后重试或前往 GitHub 查看。",
             "This feedback could not be found. Retry later or view it on GitHub."),
-        409 => message("反馈请求尚在处理或内容冲突，原请求已保留，请稍后重试。",
-            "The feedback is being processed or conflicts with an earlier request. The original request is preserved; retry later."),
+        409 => message("反馈请求暂时无法完成，请稍后重试。",
+            "The feedback request cannot be completed right now. Please retry later."),
         413 => message("反馈附件超出服务限制，请通过 GitHub 提交。", "The attachments exceed the service limit. Submit them on GitHub."),
-        429 => message("提交过于频繁，待提交内容已保留，请稍后重试。",
-            "Too many requests. Pending feedback has been preserved; please retry later."),
-        400 | 422 => message("反馈服务未接受这份内容，原内容已保留。请检查后通过 GitHub 提交。",
-            "The service did not accept this feedback. The original is preserved. Check it and submit on GitHub."),
+        429 => message("提交过于频繁，请稍后重试。", "Too many requests. Please retry later."),
+        400 | 422 => message("反馈内容未被接受，请检查内容后重试。",
+            "The feedback was not accepted. Check the content and retry."),
         _ => network_error(),
     }
 }
@@ -588,14 +598,14 @@ fn rate_limit_error(retry_after: Option<&str>) -> String {
     } else {
         format!("{} {}", seconds, message("秒", "second(s)"))
     };
-    message(&format!("反馈请求较频繁，请在约 {wait}后重试。原反馈已保留，也可以先新建另一份反馈。"),
-        &format!("Too many feedback requests. Retry in about {wait}. Your original is preserved; you can start another draft meanwhile."))
+    message(&format!("提交过于频繁，请在约 {wait}后重试。"),
+        &format!("Too many requests. Retry in about {wait}."))
 }
 
 fn random<const N: usize>() -> Result<[u8; N], String> {
     let mut bytes = [0; N];
     if unsafe { BCryptGenRandom(null_mut(), bytes.as_mut_ptr(), N as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) } < 0 {
-        return Err(message("无法生成安全的反馈凭证，请重试。", "A secure feedback key could not be generated. Please retry."));
+        return Err(message("无法创建反馈请求，请重试。", "The feedback request could not be created. Please retry."));
     }
     Ok(bytes)
 }
@@ -842,8 +852,8 @@ fn send_entry(endpoint: &Endpoint, stored: &StoredEntry) -> Result<SubmitOutcome
         reply_key: &stored.reply_key, app_version: &stored.app_version, draft: &stored.draft }).map_err(|_| invalid())?;
     let (status, bytes) = http(endpoint, "POST", "/feedback", None, &body)?;
     if rejected(status, &bytes) {
-        return Err(message("GitHub 明确拒绝了这份反馈，原草稿已保留。请修改内容后重新提交或前往 GitHub。",
-            "GitHub rejected this feedback. The original draft is preserved. Edit it before resubmitting, or use GitHub."));
+        return Err(message("GitHub 未接受这份反馈，请检查内容后重试或前往 GitHub 提交。",
+            "GitHub did not accept this feedback. Check the content and retry, or submit on GitHub."));
     }
     if status == 202 {
         if !pending(&bytes) { return Err(service_error()); }
@@ -868,6 +878,7 @@ fn complete_entry(history: &mut History, stored: &StoredEntry, receipt: CreateRe
     // Images remain available for pending retries; completed receipts no
     // longer need large local attachment copies.
     item.draft.images.clear();
+    item.draft.capture = None;
     Ok(item.public())
 }
 
@@ -922,8 +933,8 @@ pub fn reply(number: u64, body: &str) -> Result<ReplyReceipt, String> {
             clear_rejected_reply(entry, &stored, pending_reply, status, &bytes);
             Ok(())
         })?;
-        return Err(message("GitHub 明确拒绝了这条回复，回复未发布。请修改内容后重新发送或前往 GitHub。",
-            "GitHub rejected this reply; it was not published. Edit the reply and send it again, or use GitHub."));
+        return Err(message("GitHub 未接受这条回复，请检查内容后重试或前往 GitHub 回复。",
+            "GitHub did not accept this reply. Check the content and retry, or reply on GitHub."));
     }
     if status == 202 {
         if !pending(&bytes) { return Err(service_error()); }
@@ -1020,9 +1031,14 @@ pub fn fallback(draft: &Draft) -> Result<Fallback, String> {
         let fence = "`".repeat((longest + 1).max(3));
         markdown.push_str(&format!("\n<details><summary>Diagnostics</summary>\n\n{fence}text\n{diagnostics}\n{fence}\n\n</details>\n"));
     }
-    let note = message("图片未通过此链接上传，请在 GitHub 页面手动添加。",
-        "Images are not uploaded through this link. Add them manually on GitHub.");
-    if !draft.images.is_empty() { markdown.push_str(&format!("\n{note}\n")); }
+    let note = if draft.capture.is_some() {
+        message("附件未通过此链接上传，请在 GitHub 页面手动添加图片和原始采集文件。",
+            "Attachments are not uploaded through this link. Add images and raw capture files manually on GitHub.")
+    } else {
+        message("图片未通过此链接上传，请在 GitHub 页面手动添加。",
+            "Images are not uploaded through this link. Add them manually on GitHub.")
+    };
+    if !draft.images.is_empty() || draft.capture.is_some() { markdown.push_str(&format!("\n{note}\n")); }
     let prefix = format!("{REPOSITORY}/issues/new?title={}&body=", encode(&title));
     let full_url = format!("{prefix}{}", encode(&markdown));
     let url = if full_url.len() <= MAX_PREFILL_URL { full_url } else {
@@ -1036,7 +1052,7 @@ pub fn fallback(draft: &Draft) -> Result<Fallback, String> {
         let description = encoded_prefix(&draft.description, budget - summary.len());
         format!("{prefix}{summary}{description}{footer}")
     };
-    Ok(Fallback { markdown, url, images_omitted: !draft.images.is_empty() })
+    Ok(Fallback { markdown, url, images_omitted: !draft.images.is_empty(), capture_omitted: draft.capture.is_some() })
 }
 
 #[cfg(test)]
@@ -1065,6 +1081,11 @@ mod tests {
         report.images.push(Image {
             name: "screenshot.png".into(), mime_type: "image/png".into(), data_base64: "invalid-base64".into(),
         });
+        assert!(validate_details(&report).is_ok());
+        assert!(validate_draft(&report).is_err());
+        report.images.clear();
+        report.capture = Some(Capture { name: "raw.jsonl".into(), mime_type: "application/x-ndjson".into(),
+            data_base64: "invalid-base64".into() });
         assert!(validate_details(&report).is_ok());
         assert!(validate_draft(&report).is_err());
         report.description = "no".into();
@@ -1115,7 +1136,23 @@ mod tests {
     fn draft() -> Draft {
         Draft { category: "battery".into(), device: Device { name: "Example mouse".into(), family: "mouse".into(),
             connection: "2.4 GHz".into(), brand: Some("Brand".into()), model: None },
-            description: "Battery reading is unavailable.".into(), diagnostics: None, images: vec![] }
+            description: "Battery reading is unavailable.".into(), diagnostics: None, images: vec![], capture: None }
+    }
+
+    fn raw_capture(hex: &str) -> Vec<u8> {
+        let header = serde_json::json!({"schema":1, "app":"1.4.10", "started_unix_ms":1795651200000u64,
+            "vendor_id":4660, "product_id":22136, "usage_page":65280, "usage":1,
+            "input_bytes":64, "output_bytes":64, "feature_bytes":0,
+            "scope":"one interface; all receiver slots; existing application I/O only; timestamps are completion times",
+            "privacy":"Raw data may contain device identifiers or input information. Included captures are shared publicly with feedback."});
+        let transfer = serde_json::json!({"kind":"transfer", "elapsed_ms":1, "api":"input", "success":true, "hex":hex});
+        let end = serde_json::json!({"kind":"end", "reason":"stopped", "transfers":1});
+        format!("{header}\n{transfer}\n{end}\n").into_bytes()
+    }
+
+    fn screenshot() -> Image {
+        let bytes = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=").unwrap();
+        image("screen.png", "image/png", &bytes).unwrap()
     }
 
     fn stored() -> StoredEntry {
@@ -1192,6 +1229,129 @@ mod tests {
         assert_eq!(request["appVersion"], "1.4.12"); assert_eq!(request["device"]["name"], "Example mouse");
         let public = serde_json::to_string(&entry.public()).unwrap();
         for private in [&entry.reply_key, "replyKey", "dataBase64", "serial", "config"] { assert!(!public.contains(private)); }
+    }
+
+    #[test]
+    fn schema_one_requests_and_encrypted_history_without_capture_stay_unchanged() {
+        let legacy = br#"{"category":"battery","device":{"name":"Example mouse","family":"mouse","connection":"2.4 GHz","brand":"Brand"},"description":"Battery reading is unavailable.","images":[]}"#;
+        let restored: Draft = serde_json::from_slice(legacy).unwrap();
+        assert!(restored.capture.is_none());
+        assert_eq!(serde_json::to_vec(&restored).unwrap(), legacy);
+        let mut entry = stored();
+        entry.draft = restored;
+        let request = serde_json::to_string(&CreateRequest { schema: 1, request_id: &entry.request_id,
+            reply_key: &entry.reply_key, app_version: &entry.app_version, draft: &entry.draft }).unwrap();
+        let expected = format!("{{\"schema\":1,\"requestId\":\"{REQUEST}\",\"replyKey\":\"{}\",\"appVersion\":\"1.4.12\",{}",
+            entry.reply_key, std::str::from_utf8(&legacy[1..]).unwrap());
+        assert_eq!(request, expected);
+        let mut explicit_null = serde_json::to_value(&entry.draft).unwrap();
+        explicit_null["capture"] = serde_json::Value::Null;
+        assert_eq!(serde_json::from_value::<Draft>(explicit_null).unwrap(), entry.draft);
+        let scratch = Scratch::new();
+        let plain = serde_json::to_vec(&History { schema: 1, entries: vec![entry] }).unwrap();
+        assert!(!String::from_utf8_lossy(&plain).contains("capture"));
+        let mut encrypted = HISTORY_MAGIC.to_vec();
+        encrypted.extend(crypt(&plain, true).unwrap());
+        fs::write(scratch.history(), &encrypted).unwrap();
+        let history = read_history(&scratch.history()).unwrap();
+        assert!(history.entries[0].draft.capture.is_none());
+        assert_eq!(serde_json::to_vec(&history).unwrap(), plain);
+        save_history(&scratch.history(), &history).unwrap();
+        assert_eq!(serde_json::to_vec(&read_history(&scratch.history()).unwrap()).unwrap(), plain);
+    }
+
+    #[test]
+    fn capture_serializes_separately_from_images_and_keeps_diagnostics_restricted() {
+        let mut entry = stored();
+        entry.draft.capture = Some(capture(&raw_capture("DEADBEEF00ABFF")).unwrap());
+        entry.draft.images = vec![screenshot(); 3];
+        entry.draft.diagnostics = Some("Battery: unknown; charging: no".into());
+        assert!(validate_draft(&entry.draft).is_ok());
+        let request = serde_json::to_value(&CreateRequest { schema: 1, request_id: &entry.request_id,
+            reply_key: &entry.reply_key, app_version: &entry.app_version, draft: &entry.draft }).unwrap();
+        assert_eq!(request["schema"], 1);
+        assert_eq!(request["images"].as_array().unwrap().len(), 3);
+        assert_eq!(request["capture"], serde_json::to_value(entry.draft.capture.as_ref().unwrap()).unwrap());
+        assert_eq!(request["capture"]["name"], "raw.jsonl");
+        assert_eq!(request["capture"]["mimeType"], "application/x-ndjson");
+        let public = serde_json::to_string(&entry.public()).unwrap();
+        for private in ["capture", "dataBase64", "DEADBEEF00ABFF", &entry.reply_key] {
+            assert!(!public.contains(private));
+        }
+        for diagnostics in ["serial:private", "path=C:\\private", "alias:private", "config:private",
+            "Authorization: Bearer secret"] {
+            entry.draft.diagnostics = Some(diagnostics.into());
+            assert!(validate_draft(&entry.draft).is_err());
+        }
+    }
+
+    #[test]
+    fn pending_capture_survives_encrypted_history_and_completion_discards_attachments() {
+        let scratch = Scratch::new();
+        let raw = raw_capture("DEADBEEF00ABFF");
+        let mut original = stored();
+        original.draft.capture = Some(capture(&raw).unwrap());
+        original.draft.images.push(screenshot());
+        let attachment = original.draft.capture.as_ref().unwrap();
+        let history = History { schema: 1, entries: vec![original.clone()] };
+        save_history(&scratch.history(), &history).unwrap();
+        let encrypted = fs::read(scratch.history()).unwrap();
+        for private in [raw.as_slice(), attachment.data_base64.as_bytes(), original.reply_key.as_bytes()] {
+            assert!(!encrypted.windows(private.len()).any(|window| window == private));
+        }
+        let mut restored = read_history(&scratch.history()).unwrap();
+        assert_eq!(restored.entries[0].draft, original.draft);
+        let retry = prepare_entry(&mut restored, original.draft.clone(), "1.4.13").unwrap();
+        assert_eq!(retry.request_id, original.request_id);
+        assert_eq!(retry.reply_key, original.reply_key);
+        assert_eq!(retry.app_version, original.app_version);
+        assert_eq!(retry.draft.capture.as_ref(), Some(attachment));
+        let mut invalid = read_history(&scratch.history()).unwrap();
+        invalid.entries[0].draft.capture.as_mut().unwrap().data_base64 = STANDARD.encode(b"{}\n");
+        assert!(save_history(&scratch.history(), &invalid).is_err());
+        assert_eq!(fs::read(scratch.history()).unwrap(), encrypted);
+        assert!(complete_entry(&mut restored, &retry, CreateReceipt {
+            number: 42, url: "https://example.com/issues/42".into(), reply_access: true,
+        }).is_err());
+        assert_eq!(restored.entries[0].draft, original.draft);
+        for _attempt in 0..2 {
+            complete_entry(&mut restored, &retry, CreateReceipt {
+                number: 42, url: format!("{REPOSITORY}/issues/42"), reply_access: true,
+            }).unwrap();
+            assert!(restored.entries[0].draft.capture.is_none());
+            assert!(restored.entries[0].draft.images.is_empty());
+        }
+        save_history(&scratch.history(), &restored).unwrap();
+        let completed = read_history(&scratch.history()).unwrap();
+        assert_eq!(completed.entries[0].status, Status::Completed);
+        assert!(completed.entries[0].draft.capture.is_none());
+        assert!(completed.entries[0].draft.images.is_empty());
+        assert!(!serde_json::to_string(&completed).unwrap().contains(&attachment.data_base64));
+    }
+
+    #[test]
+    fn pending_retry_identity_includes_capture_presence_and_exact_bytes() {
+        let mut history = History::default();
+        let mut initial = draft();
+        initial.capture = Some(capture(&raw_capture("ABCD")).unwrap());
+        let original = prepare_entry(&mut history, initial.clone(), "1.4.10").unwrap();
+        let retry = prepare_entry(&mut history, initial.clone(), "1.4.11").unwrap();
+        assert_eq!(retry.request_id, original.request_id);
+        assert_eq!(retry.reply_key, original.reply_key);
+        assert_eq!(retry.app_version, original.app_version);
+        assert_eq!(history.entries.len(), 1);
+        let mut changed = initial.clone();
+        changed.capture = Some(capture(&raw_capture("ABCE")).unwrap());
+        let changed = prepare_entry(&mut history, changed, "1.4.11").unwrap();
+        assert_ne!(changed.request_id, original.request_id);
+        assert_ne!(changed.reply_key, original.reply_key);
+        let omitted = prepare_entry(&mut history, draft(), "1.4.11").unwrap();
+        assert_ne!(omitted.request_id, original.request_id);
+        assert_ne!(omitted.request_id, changed.request_id);
+        assert_eq!(history.entries.len(), 3);
+        assert_eq!(history.entries[0].draft, initial);
+        assert!(history.entries.iter().all(|entry| entry.status == Status::Pending));
+        assert!(validate_history(&history).is_ok());
     }
 
     #[test]
@@ -1295,8 +1455,44 @@ mod tests {
         assert!(report.url.starts_with(&format!("{REPOSITORY}/issues/new?title=")));
         assert!(report.url.is_ascii() && report.url.len() <= 7500);
         assert!(report.markdown.contains(&draft.description)); assert!(!report.images_omitted);
+        assert!(!report.capture_omitted);
         assert!(!report.url.contains("replyKey"));
         assert_eq!(encode("中&\n"), "%E4%B8%AD%26%0A");
+    }
+
+    #[test]
+    fn fallback_warns_for_each_attachment_without_embedding_capture_bytes() {
+        let raw = String::from_utf8(raw_capture("DEADBEEF00ABFF")).unwrap();
+        let attachment = capture(raw.as_bytes()).unwrap();
+        for capture_included in [false, true] {
+            for images_included in [false, true] {
+                for long in [false, true] {
+                    let mut draft = draft();
+                    if capture_included { draft.capture = Some(attachment.clone()); }
+                    if images_included { draft.images.push(screenshot()); }
+                    if long { draft.description = "界".repeat(2000); }
+                    let report = fallback(&draft).unwrap();
+                    assert_eq!(report.capture_omitted, capture_included);
+                    assert_eq!(report.images_omitted, images_included);
+                    assert!(report.url.is_ascii() && report.url.len() <= MAX_PREFILL_URL);
+                    for private in [raw.as_str(), attachment.data_base64.as_str(), "DEADBEEF00ABFF", "dataBase64"] {
+                        assert!(!report.markdown.contains(private));
+                        assert!(!report.url.contains(private));
+                        assert!(!report.url.contains(&encode(private)));
+                    }
+                    if capture_included {
+                        assert!(report.markdown.contains("原始采集文件") || report.markdown.contains("raw capture files"));
+                        assert!(report.url.contains(&encode("原始采集文件")) || report.url.contains(&encode("raw capture files")));
+                    }
+                    if images_included || capture_included {
+                        assert!(report.markdown.contains("手动添加") || report.markdown.contains("manually on GitHub"));
+                    }
+                    let serialized = serde_json::to_value(&report).unwrap();
+                    assert_eq!(serialized["captureOmitted"], capture_included);
+                    assert_eq!(serialized["imagesOmitted"], images_included);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1559,7 +1755,9 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
         let scratch = Scratch::new();
         let path = scratch.history();
-        let original = stored();
+        let mut original = stored();
+        original.draft.capture = Some(capture(&raw_capture("DEADBEEF00ABFF")).unwrap());
+        original.draft.images.push(screenshot());
         let mut history = History { schema: 1, entries: vec![original.clone()] };
         let _lock = lock_history(&path).unwrap();
         save_history(&path, &history).unwrap();
@@ -1574,8 +1772,12 @@ mod tests {
         assert_eq!(restored.entries[0].status, Status::Pending);
         assert_eq!(restored.entries[0].request_id, original.request_id);
         assert_eq!(restored.entries[0].reply_key, original.reply_key);
+        assert_eq!(restored.entries[0].draft, original.draft);
         assert!(fs::read_dir(&scratch.0).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
         save_history(&path, &history).unwrap();
-        assert_eq!(read_history(&path).unwrap().entries[0].number, Some(42));
+        let completed = read_history(&path).unwrap();
+        assert_eq!(completed.entries[0].number, Some(42));
+        assert!(completed.entries[0].draft.capture.is_none());
+        assert!(completed.entries[0].draft.images.is_empty());
     }
 }

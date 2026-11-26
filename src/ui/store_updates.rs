@@ -50,18 +50,17 @@ fn description(view: &View) -> String {
             "应用内更新仅适用于微软商店安装版；绿色版和模拟设备模式不会自动检查。",
             "In-app updates require a Microsoft Store installation. Portable and simulated-device builds do not check automatically.",
         ),
-        Phase::Idle => text("可以手动检查；检查失败不会显示为最新版本。", "Check manually to confirm. A failed check is never treated as up to date."),
-        Phase::Checking => text("仅查询官方商店，不会自动下载或安装，也不会打断电量监测。", "Querying the official Store only. No automatic download or installation; battery monitoring continues."),
-        Phase::Available => text("确认后才下载，安装前会再次询问。更新说明请在微软商店产品页查看。", "Download only after confirmation; installation asks again. View release information on the Store product page."),
-        Phase::Current => text("以最近一次成功查询为准；商店审核、分发和设备可用性可能影响结果。", "Based on the last successful query. Store review, rollout and device availability can affect the result."),
+        Phase::Idle => text("点击“检查更新”获取更新状态。", "Select Check for updates to get the update status."),
+        Phase::Checking | Phase::Current => "",
+        Phase::Available => text("更新说明可在微软商店查看。", "View release information in Microsoft Store."),
         Phase::CheckFailed | Phase::UpdateFailed => text("请检查网络或稍后重试，也可以退出软件后在微软商店更新。", "Check your connection or try later. You can also exit the app and update in Microsoft Store."),
         Phase::WaitingToDownload => text("回到主窗口后才会调用商店下载；此时仍可取消。", "Store download starts only while the main window is active. You can still cancel."),
-        Phase::Downloading => text("下载由微软商店管理，电量监测继续运行。下载完成后不会自动安装。", "Microsoft Store manages the download. Battery monitoring continues; installation will not start automatically."),
-        Phase::ReadyToInstall => text("安装可能关闭并重启软件；开始前会保存设置和电量历史，开机自启设置保持不变。", "Installation may close and restart the app. Settings and battery history are saved first; your startup preference stays unchanged."),
-        Phase::Preparing => text("暂时不接收新的设备写入；保存失败或取消后会恢复，不会停止后台监测线程。", "New device writes are temporarily paused. A failed or canceled preparation restores normal operation without stopping monitoring workers."),
+        Phase::Downloading => text("下载完成后，可选择安装更新。", "You can install the update once the download finishes."),
+        Phase::ReadyToInstall => text("点击“安装更新”继续，软件可能关闭或重启。", "Select Install update to continue. The app may close or restart."),
+        Phase::Preparing => text("正在准备安装，请稍候。", "Preparing to install. Please wait."),
         Phase::Installing => text("请在微软商店的官方提示中确认或取消。Windows 可能关闭并重启软件。", "Confirm or cancel in the official Microsoft Store prompt. Windows may close and restart the app."),
         Phase::Installed => text("软件即将退出；如 Windows 未自动重启软件，请更新后重新打开。", "The app will exit. If Windows does not restart it, open it again after the update."),
-        Phase::Canceled => text("没有把取消当作更新成功。可以稍后重试，现有设置保持不变。", "Cancellation is not reported as success. You can retry later; existing settings remain unchanged."),
+        Phase::Canceled => text("已取消更新，可稍后重试。", "Update canceled. You can try again later."),
     };
     let detail = match view.failure {
         Some(Failure::Windows(code)) => format!(" (0x{:08X})", code as u32),
@@ -147,10 +146,11 @@ pub fn card(painter: &mut Painter, ui: &mut Ui, view: &View, area: R, home: bool
     }
     let theme = painter.t;
     let controls = actions(view, home);
+    let description = description(view);
     let text_width = (area.w - 36.0).max(100.0);
     let mut control_rects = Vec::new();
     let mut control_x = area.x + 18.0;
-    let mut control_y = area.y + 111.0;
+    let mut control_y = area.y + if description.is_empty() { 55.0 } else { 111.0 };
     for (label, action, primary) in controls {
         let width = (painter.measure(label, 12.5, primary).0 + 28.0)
             .max(72.0)
@@ -164,7 +164,7 @@ pub fn card(painter: &mut Painter, ui: &mut Ui, view: &View, area: R, home: bool
         control_x += width + 10.0;
     }
     let height = if control_rects.is_empty() {
-        112.0
+        if description.is_empty() { 56.0 } else { 112.0 }
     } else {
         control_y - area.y + 52.0
     };
@@ -188,7 +188,7 @@ pub fn card(painter: &mut Painter, ui: &mut Ui, view: &View, area: R, home: bool
         Align::Left,
     );
     painter.text_wrap(
-        &description(view),
+        &description,
         R::new(card.x + 18.0, card.y + 43.0, text_width, 56.0),
         12.0,
         theme.text2,

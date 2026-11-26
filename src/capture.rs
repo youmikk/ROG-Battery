@@ -45,6 +45,7 @@ struct Session {
     records: Vec<String>,
     bytes: usize,
     frames: usize,
+    data_frames: usize,
     steps: Vec<(u128, usize)>,
     stopped: Option<&'static str>,
 }
@@ -79,9 +80,9 @@ impl Session {
                 input_bytes: interface.input_len, output_bytes: interface.output_len,
                 feature_bytes: interface.feature_len,
                 scope: "one interface; all receiver slots; existing application I/O only; timestamps are completion times",
-                privacy: "LOCAL RAW DATA: may contain device identifiers or input data. Review before sharing. Not attached to feedback.",
+                privacy: "Raw data may contain device identifiers or input information. Included captures are shared publicly with feedback.",
             },
-            records: Vec::new(), bytes: 0, frames: 0, steps: Vec::new(), stopped: None,
+            records: Vec::new(), bytes: 0, frames: 0, data_frames: 0, steps: Vec::new(), stopped: None,
         }
     }
 
@@ -110,7 +111,10 @@ impl Session {
         let mut hex = String::with_capacity(data.len() * 2);
         for byte in data { let _ = write!(hex, "{byte:02X}"); }
         if self.append(serde_json::json!({"kind":"transfer", "elapsed_ms":now.duration_since(self.started).as_millis(),
-            "api":api, "success":success, "hex":hex}), now) { self.frames += 1; }
+            "api":api, "success":success, "hex":hex}), now) {
+            self.frames += 1;
+            if !data.is_empty() { self.data_frames += 1; }
+        }
     }
 
     fn mark(&mut self, step: usize, now: Instant) {
@@ -127,7 +131,6 @@ impl Session {
         for (elapsed, step) in &self.steps {
             let _ = writeln!(result, "{elapsed} ms: {}", STEPS[*step].1);
         }
-        result.push_str("No frames does not prove an unsupported protocol. Existing polling cadence is unchanged.\n");
         result
     }
 }
@@ -190,6 +193,19 @@ pub fn export() -> Option<Export> {
     stop();
     let guard = cell().lock().unwrap_or_else(|error| error.into_inner());
     let session = guard.as_ref()?;
+    export_session(session)
+}
+
+pub fn feedback_data(path: &str) -> Option<String> {
+    let guard = cell().lock().unwrap_or_else(|error| error.into_inner());
+    let session = guard.as_ref()?;
+    if session.stopped.is_none() || session.data_frames == 0 || !session.path.eq_ignore_ascii_case(path) {
+        return None;
+    }
+    Some(export_session(session)?.raw)
+}
+
+fn export_session(session: &Session) -> Option<Export> {
     let mut raw = serde_json::to_string(&session.metadata).ok()?;
     raw.push('\n');
     for record in &session.records { raw.push_str(record); raw.push('\n'); }
@@ -200,6 +216,15 @@ pub fn export() -> Option<Export> {
 }
 
 impl Export {
+    pub fn from_raw(raw: String) -> Option<Self> {
+        let metadata: serde_json::Value = serde_json::from_str(raw.lines().next()?).ok()?;
+        let timestamp = u128::from(metadata.get("started_unix_ms")?.as_u64()?);
+        let vendor = metadata.get("vendor_id")?.as_u64()?;
+        let product = metadata.get("product_id")?.as_u64()?;
+        let summary = format!("Feedback capture: {vendor:04X}:{product:04X}\nFile: raw.jsonl\n");
+        Some(Self { raw, summary, timestamp })
+    }
+
     pub fn save(self) -> Result<PathBuf, String> {
         self.save_in(&crate::paths::cache_dir().join("captures"))
     }
@@ -252,6 +277,28 @@ mod tests {
         for page in [1, 7, 12, 0x0d, 0xff] { candidate.usage_page = page; assert!(!eligible(&candidate)); }
         candidate.usage_page = 0xff90;
         assert!(eligible(&candidate));
+    }
+
+    #[test]
+    fn feedback_requires_data_a_stopped_session_and_the_same_interface() {
+        clear();
+        let source = interface("capture-feedback-a");
+        start(&source).unwrap();
+        record(&source.path, "input-timeout", &[], false);
+        stop();
+        assert!(feedback_data(&source.path).is_none());
+        clear();
+        start(&source).unwrap();
+        record(&source.path, "input", &[0, 0xab, 0xff], true);
+        assert!(feedback_data(&source.path).is_none());
+        stop();
+        assert!(feedback_data("capture-feedback-b").is_none());
+        let raw = feedback_data("CAPTURE-FEEDBACK-A").unwrap();
+        assert!(raw.contains("00ABFF"));
+        assert!(crate::feedback::client::capture(raw.as_bytes()).is_ok());
+        assert_eq!(Export::from_raw(raw.clone()).unwrap().raw, raw);
+        clear();
+        assert!(feedback_data(&source.path).is_none());
     }
 
     #[test]

@@ -241,7 +241,7 @@ mod tests {
                 name: "Unknown mouse".into(), family: "mouse".into(), connection: "unknown".into(),
                 brand: None, model: None,
             },
-            description: "Device is not recognized.".into(), diagnostics: Some(report.into()), images: Vec::new(),
+            description: "Device is not recognized.".into(), diagnostics: Some(report.into()), images: Vec::new(), capture: None,
         };
         assert!(crate::feedback::client::validate_details(&draft).is_ok(), "{report}");
         assert!(report.len() <= MAX_REPORT_BYTES);

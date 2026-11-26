@@ -1,8 +1,9 @@
-import { HttpError, MAX_IMAGE_BYTES, MAX_DIAGNOSTICS_BYTES, encoder, sha256 } from "./security.mjs";
+import { HttpError, MAX_IMAGE_BYTES, MAX_CAPTURE_BYTES, MAX_DIAGNOSTICS_BYTES, encoder, sha256 } from "./security.mjs";
 
 const categories = new Set(["device", "battery", "dpi", "other"]);
 const families = new Set(["mouse", "keyboard", "headset", "gamepad", "other"]);
 const mimes = new Set(["image/png", "image/jpeg", "image/webp"]);
+const captureApis = new Set(["write", "input", "input-timeout", "get-feature", "get-input", "set-output", "set-feature"]);
 
 function invalid(message) { throw new HttpError(400, "validation", message); }
 
@@ -96,8 +97,72 @@ async function image(value) {
   return { name, mimeType: value.mimeType, bytes, digest: await sha256(bytes) };
 }
 
+function integer(value, name, maximum = Number.MAX_SAFE_INTEGER) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) invalid(`${name} must be an unsigned integer in range.`);
+}
+
+async function capture(value) {
+  object(value, "capture", ["name", "mimeType", "dataBase64"]);
+  if (value.name !== "raw.jsonl" || value.mimeType !== "application/x-ndjson") invalid("Capture must be raw.jsonl with application/x-ndjson MIME type.");
+  const encoded = value.dataBase64;
+  if (typeof encoded !== "string" || encoded.length < 4 || encoded.length > 4 * Math.ceil(MAX_CAPTURE_BYTES / 3)
+    || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) invalid("Invalid or oversized base64 capture.");
+  let raw;
+  try { raw = atob(encoded); } catch { invalid("Invalid base64 capture."); }
+  if (raw.length > MAX_CAPTURE_BYTES || btoa(raw) !== encoded) invalid("Invalid or oversized base64 capture.");
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index++) bytes[index] = raw.charCodeAt(index);
+  let source;
+  try { source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch { invalid("Capture must contain valid UTF-8 JSONL."); }
+  const lines = source.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  if (lines.length < 3 || lines.length > 1026) invalid("Capture must contain a header, at most 1024 records and a final end record.");
+  let records;
+  try { records = lines.map(line => JSON.parse(line)); }
+  catch { invalid("Capture must contain valid UTF-8 JSONL without blank lines."); }
+  const header = records[0];
+  object(header, "capture header", ["schema", "app", "started_unix_ms", "vendor_id", "product_id", "usage_page",
+    "usage", "input_bytes", "output_bytes", "feature_bytes", "scope", "privacy"]);
+  if (header.schema !== 1) invalid("Capture schema must be 1.");
+  text(header.app, "capture.app", 1, 80);
+  text(header.scope, "capture.scope", 1, 512);
+  text(header.privacy, "capture.privacy", 1, 1024);
+  integer(header.started_unix_ms, "capture.started_unix_ms");
+  for (const field of ["vendor_id", "product_id", "usage_page", "usage", "input_bytes", "output_bytes", "feature_bytes"]) {
+    integer(header[field], `capture.${field}`, 65535);
+  }
+  let transfers = 0;
+  let steps = 0;
+  let hasData = false;
+  for (const record of records.slice(1, -1)) {
+    if (record?.kind === "transfer") {
+      object(record, "capture transfer", ["kind", "elapsed_ms", "api", "success", "hex"]);
+      integer(record.elapsed_ms, "capture.elapsed_ms");
+      if (!captureApis.has(record.api) || typeof record.success !== "boolean"
+        || typeof record.hex !== "string" || record.hex.length > 8192 || !/^(?:[0-9a-fA-F]{2})*$/.test(record.hex)) {
+        invalid("Invalid capture transfer.");
+      }
+      transfers++;
+      hasData ||= record.hex.length > 0;
+    } else if (record?.kind === "step") {
+      object(record, "capture step", ["kind", "elapsed_ms", "step", "label"]);
+      integer(record.elapsed_ms, "capture.elapsed_ms");
+      integer(record.step, "capture.step", 4);
+      text(record.label, "capture.label", 1, 120);
+      steps++;
+    } else invalid("Unknown capture record kind.");
+  }
+  const end = records.at(-1);
+  object(end, "capture end", ["kind", "reason", "transfers"]);
+  if (end.kind !== "end" || end.transfers !== transfers) invalid("Capture must end with the matching transfer count.");
+  text(end.reason, "capture.reason", 1, 80);
+  if (!hasData) invalid("Capture must contain at least one transfer with nonempty data.");
+  return { name: value.name, mimeType: value.mimeType, bytes, digest: await sha256(bytes), transfers, steps };
+}
+
 export async function feedback(value) {
-  object(value, "feedback", ["schema", "requestId", "replyKey", "category", "device", "description", "diagnostics", "images", "appVersion"]);
+  object(value, "feedback", ["schema", "requestId", "replyKey", "category", "device", "description", "diagnostics", "images", "appVersion", "capture"]);
   if (value.schema !== 1) invalid("schema must be 1.");
   const requestId = uuid(value.requestId);
   if (typeof value.replyKey !== "string" || !/^[a-f0-9]{64}$/i.test(value.replyKey)) invalid("replyKey must contain 32 random bytes encoded as hexadecimal.");
@@ -125,11 +190,14 @@ export async function feedback(value) {
   if (value.images !== undefined && (!Array.isArray(value.images) || value.images.length > 3)) invalid("At most three images are allowed.");
   const images = [];
   for (const item of value.images ?? []) images.push(await image(item));
+  const attachment = value.capture === undefined ? undefined : await capture(value.capture);
   const replyKey = value.replyKey.toLowerCase();
   const canonical = { schema: 1, requestId, category: value.category, device, description,
     appVersion: appVersion ?? null, diagnostics: diagnostics ?? null,
     images: images.map(({ name, mimeType, digest }) => ({ name, mimeType, digest })) };
-  return { ...canonical, replyKey, images, fingerprint: await sha256(JSON.stringify(canonical)) };
+  if (attachment) canonical.capture = { name: attachment.name, mimeType: attachment.mimeType, digest: attachment.digest };
+  return { ...canonical, replyKey, images, ...(attachment ? { capture: attachment } : {}),
+    fingerprint: await sha256(JSON.stringify(canonical)) };
 }
 
 export async function reply(value) {
