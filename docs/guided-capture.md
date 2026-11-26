@@ -4,8 +4,12 @@
 
 This records changes for an already discovered device: Settings → Device feedback → Device traffic capture, below Include device diagnostics. Start, then mark normal use, connecting/disconnecting charging and powering the peripheral off/on. Steps can be skipped or repeated. Wait for an ordinary battery refresh between steps. Stop, review and return to the form. Captures containing data are included by default; they can be excluded or saved locally.
 
-- 只旁路记录本进程在所选厂商接口上的既有 `HidDevice` / `FeatureChannel` 传输，不打开第二个输入通道，不增加查询、改变轮询或运行未知命令。标准键鼠输入接口、蓝牙系统属性和 XInput 不提供这个入口。未识别设备仍先使用普通反馈；这不是全设备抓包工具。
-- Records existing `HidDevice` / `FeatureChannel` transfers on one selected vendor interface. It opens no extra handles, changes no polling interval and sends no additional commands. Standard input collections, Bluetooth OS properties and XInput are excluded. Unrecognized devices should use ordinary feedback first; this is not a universal capture tool.
+采集到报文后再停止。只有操作标记或空超时时，表单显示“本次未采集到通信数据”，点击“查看结果”后可“重新采集”；不会出现上传开关。停止后显示实际采集时长，不再继续计时。
+
+Wait for captured traffic before stopping. Marker-only or empty-timeout captures show a no-data result on the form; open View result to try again. They have no upload toggle. The elapsed time stops when collection stops.
+
+- 旁路记录本进程在所选厂商接口上的既有 `HidDevice` / `FeatureChannel` 传输。开始或重新采集时请求一次正常后台刷新，后续按原轮询间隔读取；不打开第二个输入通道或运行未知命令。标准键鼠输入接口、蓝牙系统属性和 XInput 不提供这个入口。未识别设备仍先使用普通反馈；这不是全设备抓包工具。
+- Records existing `HidDevice` / `FeatureChannel` transfers on one selected vendor interface. Starting or retrying capture requests one ordinary background refresh; subsequent reads use the configured polling interval. It opens no extra handles and sends no unknown commands. Standard input collections, Bluetooth OS properties and XInput are excluded. Unrecognized devices should use ordinary feedback first; this is not a universal capture tool.
 - 一个接收器接口可能包含多个外设槽位，采集范围为整个接口。记录完成时间、未归一化字节、API、成功状态和用户步骤；不保证覆盖本程序之外的驱动流量、其他接口或后端直接调用的同步 HID API。充电导致接口切换时，不自动跟踪新接口，避免关联到错误设备。
 - One receiver interface can carry several slots. Captures cover that interface, with completion times, unnormalized bytes, API results and user markers. They do not capture other applications, other interfaces or backend-specific synchronous HID calls. Switching interfaces while charging does not automatically follow a different path.
 - 非零等待的 Input 超时记录为 `input-timeout`；零等待排空检查不算超时事件。Nonzero-wait Input timeouts are recorded; empty queue-drain checks are excluded.

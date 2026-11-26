@@ -47,7 +47,12 @@ struct Session {
     frames: usize,
     data_frames: usize,
     steps: Vec<(u128, usize)>,
-    stopped: Option<&'static str>,
+    stopped: Option<Stop>,
+}
+
+struct Stop {
+    reason: &'static str,
+    elapsed: Duration,
 }
 
 #[derive(Default)]
@@ -55,6 +60,7 @@ pub struct Status {
     pub started: bool,
     pub running: bool,
     pub frames: usize,
+    pub data_frames: usize,
     pub elapsed_seconds: u64,
     pub preview: Vec<String>,
     pub summary: String,
@@ -88,8 +94,19 @@ impl Session {
 
     fn expire(&mut self, now: Instant) {
         if self.stopped.is_none() && now.duration_since(self.started) >= Duration::from_secs(MAX_SECONDS) {
-            self.stopped = Some("time-limit");
+            self.stop("time-limit", now);
         }
+    }
+
+    fn stop(&mut self, reason: &'static str, now: Instant) {
+        if self.stopped.is_some() { return; }
+        let elapsed = now.duration_since(self.started);
+        let limit = Duration::from_secs(MAX_SECONDS);
+        self.stopped = Some(if elapsed >= limit {
+            Stop { reason: "time-limit", elapsed: limit }
+        } else {
+            Stop { reason, elapsed }
+        });
     }
 
     fn append(&mut self, value: serde_json::Value, now: Instant) -> bool {
@@ -97,12 +114,12 @@ impl Session {
         if self.stopped.is_some() { return false; }
         let line = value.to_string();
         if self.records.len() >= MAX_RECORDS || self.bytes + line.len() + 1 > MAX_BYTES {
-            self.stopped = Some("size-limit");
+            self.stop("size-limit", now);
             return false;
         }
         self.bytes += line.len() + 1;
         self.records.push(line);
-        if self.records.len() == MAX_RECORDS || self.bytes == MAX_BYTES { self.stopped = Some("size-limit"); }
+        if self.records.len() == MAX_RECORDS || self.bytes == MAX_BYTES { self.stop("size-limit", now); }
         true
     }
 
@@ -127,22 +144,41 @@ impl Session {
     fn summary(&self) -> String {
         let mut result = format!("Local capture summary: {:04X}:{:04X}, usage={:04X}:{:04X}\nTransfers: {}; result: {}\n",
             self.metadata.vendor_id, self.metadata.product_id, self.metadata.usage_page,
-            self.metadata.usage, self.frames, self.stopped.unwrap_or("running"));
+            self.metadata.usage, self.frames, self.stopped.as_ref().map_or("running", |stop| stop.reason));
         for (elapsed, step) in &self.steps {
             let _ = writeln!(result, "{elapsed} ms: {}", STEPS[*step].1);
         }
         result
     }
+
+    fn status(&mut self, now: Instant) -> Status {
+        self.expire(now);
+        let elapsed = self.stopped.as_ref().map_or_else(|| now.duration_since(self.started), |stop| stop.elapsed);
+        Status { started: true, running: self.stopped.is_none(), frames: self.frames, data_frames: self.data_frames,
+            elapsed_seconds: elapsed.as_secs(),
+            preview: self.records.iter().rev().take(6).rev().map(|line| {
+                let mut preview: String = line.chars().take(180).collect();
+                if line.len() > preview.len() { preview.push_str("…"); }
+                preview
+            }).collect(), summary: self.summary() }
+    }
+}
+
+fn start_session(current: &mut Option<Session>, interface: &HidInterface, now: Instant) -> Result<(), &'static str> {
+    if !eligible(interface) { return Err("此接口不支持原始采集 / Capture unavailable for this interface"); }
+    if current.as_ref().is_some_and(|session| session.stopped.is_none() || session.data_frames != 0
+        || !session.path.eq_ignore_ascii_case(&interface.path)) {
+        return Err("请先保存或清除上次采集 / Save or clear the previous capture first");
+    }
+    let mut session = Session::new(interface, now);
+    session.mark(0, now);
+    *current = Some(session);
+    Ok(())
 }
 
 pub fn start(interface: &HidInterface) -> Result<(), &'static str> {
-    if !eligible(interface) { return Err("此接口不支持原始采集 / Capture unavailable for this interface"); }
     let mut guard = cell().lock().unwrap_or_else(|error| error.into_inner());
-    if guard.is_some() { return Err("请先保存或清除上次采集 / Save or clear the previous capture first"); }
-    let now = Instant::now();
-    let mut session = Session::new(interface, now);
-    session.mark(0, now);
-    *guard = Some(session);
+    start_session(&mut guard, interface, Instant::now())?;
     ACTIVE.store(true, Ordering::Release);
     Ok(())
 }
@@ -163,7 +199,7 @@ pub fn mark(step: usize) {
 
 pub fn stop() {
     let mut guard = cell().lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(session) = guard.as_mut() { session.stopped.get_or_insert("stopped"); }
+    if let Some(session) = guard.as_mut() { session.stop("stopped", Instant::now()); }
     ACTIVE.store(false, Ordering::Release);
 }
 
@@ -176,15 +212,9 @@ pub fn clear() {
 pub fn status() -> Status {
     let mut guard = cell().lock().unwrap_or_else(|error| error.into_inner());
     let Some(session) = guard.as_mut() else { return Status::default(); };
-    session.expire(Instant::now());
-    if session.stopped.is_some() { ACTIVE.store(false, Ordering::Release); }
-    Status { started: true, running: session.stopped.is_none(), frames: session.frames,
-        elapsed_seconds: session.started.elapsed().as_secs().min(MAX_SECONDS),
-        preview: session.records.iter().rev().take(6).rev().map(|line| {
-            let mut preview: String = line.chars().take(180).collect();
-            if line.len() > preview.len() { preview.push_str("…"); }
-            preview
-        }).collect(), summary: session.summary() }
+    let status = session.status(Instant::now());
+    if !status.running { ACTIVE.store(false, Ordering::Release); }
+    status
 }
 
 pub struct Export { raw: String, summary: String, timestamp: u128 }
@@ -209,7 +239,7 @@ fn export_session(session: &Session) -> Option<Export> {
     let mut raw = serde_json::to_string(&session.metadata).ok()?;
     raw.push('\n');
     for record in &session.records { raw.push_str(record); raw.push('\n'); }
-    raw.push_str(&serde_json::json!({"kind":"end", "reason":session.stopped,
+    raw.push_str(&serde_json::json!({"kind":"end", "reason":session.stopped.as_ref().map(|stop| stop.reason),
         "transfers":session.frames}).to_string());
     raw.push('\n');
     Some(Export { raw, summary: session.summary(), timestamp: session.metadata.started_unix_ms })
@@ -287,9 +317,10 @@ mod tests {
         record(&source.path, "input-timeout", &[], false);
         stop();
         assert!(feedback_data(&source.path).is_none());
-        clear();
+        assert_eq!(status().data_frames, 0);
         start(&source).unwrap();
         record(&source.path, "input", &[0, 0xab, 0xff], true);
+        assert_eq!(status().data_frames, 1);
         assert!(feedback_data(&source.path).is_none());
         stop();
         assert!(feedback_data("capture-feedback-b").is_none());
@@ -318,24 +349,200 @@ mod tests {
     }
 
     #[test]
+    fn stopped_elapsed_is_frozen_and_repeated_stop_preserves_the_first_stop() {
+        let now = Instant::now();
+        let mut session = Session::new(&interface("one"), now);
+        session.frame("one", "input-timeout", &[], false, now + Duration::from_secs(1));
+        session.frame("one", "input", &[1], true, now + Duration::from_secs(2));
+        let running = session.status(now + Duration::from_secs(3));
+        assert!(running.running);
+        assert_eq!(running.elapsed_seconds, 3);
+        assert_eq!(running.frames, 2);
+        assert_eq!(running.data_frames, 1);
+        let elapsed = Duration::from_millis(7500);
+        session.stop("stopped", now + elapsed);
+        let raw = export_session(&session).unwrap().raw;
+        let end: serde_json::Value = serde_json::from_str(raw.lines().last().unwrap()).unwrap();
+        assert_eq!(end, serde_json::json!({"kind":"end", "reason":"stopped", "transfers":2}));
+        for seconds in [8, MAX_SECONDS, MAX_SECONDS + 30] {
+            let later = now + Duration::from_secs(seconds);
+            session.stop("stopped", later);
+            session.mark(1, later);
+            session.frame("one", "input", &[2], true, later);
+            let status = session.status(later);
+            assert!(status.started);
+            assert!(!status.running);
+            assert_eq!(status.elapsed_seconds, 7);
+            assert_eq!(status.frames, 2);
+            assert_eq!(status.data_frames, 1);
+            let stopped = session.stopped.as_ref().unwrap();
+            assert_eq!(stopped.reason, "stopped");
+            assert_eq!(stopped.elapsed, elapsed);
+            assert_eq!(export_session(&session).unwrap().raw, raw);
+        }
+    }
+
+    #[test]
+    fn time_limit_freezes_at_the_deadline_even_when_observed_late() {
+        let now = Instant::now();
+        let limit = Duration::from_secs(MAX_SECONDS);
+        for delay in [Duration::ZERO, Duration::from_secs(37)] {
+            let mut session = Session::new(&interface("one"), now);
+            let before = session.status(now + limit - Duration::from_millis(1));
+            assert!(before.running);
+            assert_eq!(before.elapsed_seconds, MAX_SECONDS - 1);
+            let stopped = session.status(now + limit + delay);
+            assert!(!stopped.running);
+            assert_eq!(stopped.elapsed_seconds, MAX_SECONDS);
+            session.stop("stopped", now + limit + Duration::from_secs(60));
+            let stop = session.stopped.as_ref().unwrap();
+            assert_eq!(stop.reason, "time-limit");
+            assert_eq!(stop.elapsed, limit);
+            assert_eq!(session.status(now + limit + Duration::from_secs(90)).elapsed_seconds, MAX_SECONDS);
+        }
+    }
+
+    #[test]
+    fn explicit_stop_at_or_after_the_deadline_uses_the_time_limit() {
+        let now = Instant::now();
+        for seconds in [MAX_SECONDS, MAX_SECONDS + 37] {
+            let mut session = Session::new(&interface("one"), now);
+            session.stop("stopped", now + Duration::from_secs(seconds));
+            let stop = session.stopped.as_ref().unwrap();
+            assert_eq!(stop.reason, "time-limit");
+            assert_eq!(stop.elapsed, Duration::from_secs(MAX_SECONDS));
+            assert_eq!(session.status(now + Duration::from_secs(seconds + 1)).elapsed_seconds, MAX_SECONDS);
+        }
+    }
+
+    #[test]
+    fn stopped_empty_and_timeout_only_sessions_can_restart_on_the_same_path() {
+        let now = Instant::now();
+        for timeout_count in [0, 2] {
+            let mut current = None;
+            start_session(&mut current, &interface("receiver-a"), now).unwrap();
+            let session = current.as_mut().unwrap();
+            for _iteration in 0..timeout_count {
+                session.frame("receiver-a", "input-timeout", &[], false, now + Duration::from_secs(1));
+            }
+            session.mark(1, now + Duration::from_secs(2));
+            session.stop("stopped", now + Duration::from_secs(3));
+            let stopped = session.status(now + Duration::from_secs(4));
+            assert!(!stopped.running);
+            assert_eq!(stopped.frames, timeout_count);
+            assert_eq!(stopped.data_frames, 0);
+            let restarted = now + Duration::from_secs(10);
+            start_session(&mut current, &interface("RECEIVER-A"), restarted).unwrap();
+            let session = current.as_mut().unwrap();
+            let status = session.status(restarted);
+            assert!(status.started);
+            assert!(status.running);
+            assert_eq!(status.frames, 0);
+            assert_eq!(status.data_frames, 0);
+            assert_eq!(status.elapsed_seconds, 0);
+            assert_eq!(session.started, restarted);
+            assert_eq!(session.path, "receiver-a");
+            assert_eq!(session.steps, vec![(0, 0)]);
+            assert_eq!(session.records.len(), 1);
+            assert_eq!(session.bytes, session.records[0].len() + 1);
+        }
+    }
+
+    #[test]
+    fn running_empty_and_timeout_only_sessions_reject_restart_without_losing_records() {
+        let now = Instant::now();
+        for timeout_count in [0, 2] {
+            let mut current = None;
+            start_session(&mut current, &interface("receiver-a"), now).unwrap();
+            let session = current.as_mut().unwrap();
+            for _iteration in 0..timeout_count {
+                session.frame("receiver-a", "input-timeout", &[], false, now + Duration::from_secs(1));
+            }
+            let raw = export_session(session).unwrap().raw;
+            for path in ["RECEIVER-A", "receiver-b"] {
+                assert!(start_session(&mut current, &interface(path), now + Duration::from_secs(2)).is_err());
+                let session = current.as_ref().unwrap();
+                assert_eq!(session.path, "receiver-a");
+                assert_eq!(session.started, now);
+                assert!(session.stopped.is_none());
+                assert_eq!(session.frames, timeout_count);
+                assert_eq!(export_session(session).unwrap().raw, raw);
+            }
+        }
+    }
+
+    #[test]
+    fn stopped_nonempty_sessions_reject_restart_without_losing_records() {
+        let now = Instant::now();
+        for success in [false, true] {
+            let mut current = None;
+            start_session(&mut current, &interface("receiver-a"), now).unwrap();
+            let session = current.as_mut().unwrap();
+            session.frame("receiver-a", "input", &[0, 0xab, 0xff], success, now + Duration::from_secs(1));
+            session.stop("stopped", now + Duration::from_secs(2));
+            let raw = export_session(session).unwrap().raw;
+            for path in ["RECEIVER-A", "receiver-b"] {
+                assert!(start_session(&mut current, &interface(path), now + Duration::from_secs(3)).is_err());
+                let session = current.as_mut().unwrap();
+                assert_eq!(session.path, "receiver-a");
+                assert_eq!(session.started, now);
+                let status = session.status(now + Duration::from_secs(4));
+                assert!(!status.running);
+                assert_eq!(status.frames, 1);
+                assert_eq!(status.data_frames, 1);
+                assert_eq!(status.elapsed_seconds, 2);
+                assert_eq!(export_session(session).unwrap().raw, raw);
+            }
+        }
+    }
+
+    #[test]
+    fn stopped_empty_and_timeout_only_sessions_cannot_be_replaced_by_another_device() {
+        let now = Instant::now();
+        for timeout_count in [0, 2] {
+            let mut current = None;
+            start_session(&mut current, &interface("receiver-a"), now).unwrap();
+            let session = current.as_mut().unwrap();
+            for _iteration in 0..timeout_count {
+                session.frame("receiver-a", "input-timeout", &[], false, now + Duration::from_secs(1));
+            }
+            session.stop("stopped", now + Duration::from_secs(2));
+            let raw = export_session(session).unwrap().raw;
+            assert!(start_session(&mut current, &interface("receiver-b"), now + Duration::from_secs(3)).is_err());
+            let session = current.as_mut().unwrap();
+            assert_eq!(session.path, "receiver-a");
+            assert_eq!(session.started, now);
+            let status = session.status(now + Duration::from_secs(4));
+            assert!(!status.running);
+            assert_eq!(status.frames, timeout_count);
+            assert_eq!(status.data_frames, 0);
+            assert_eq!(status.elapsed_seconds, 2);
+            assert_eq!(export_session(session).unwrap().raw, raw);
+        }
+    }
+
+    #[test]
     fn bounded_capture_expires_and_does_not_refresh_on_more_frames() {
         let now = Instant::now();
         let mut session = Session::new(&interface("one"), now);
         session.mark(2, now + Duration::from_secs(1));
         session.frame("one", "input", &[1], true, now + Duration::from_secs(MAX_SECONDS));
-        assert_eq!(session.stopped, Some("time-limit"));
+        assert_eq!(session.stopped.as_ref().unwrap().reason, "time-limit");
         assert_eq!(session.frames, 0);
         assert_eq!(session.steps, vec![(1000, 2)]);
         session.mark(0, now + Duration::from_secs(MAX_SECONDS + 1));
         assert_eq!(session.steps.len(), 1);
+        assert_eq!(session.status(now + Duration::from_secs(MAX_SECONDS + 2)).elapsed_seconds, MAX_SECONDS);
     }
 
     #[test]
     fn byte_budget_accounts_for_hex_and_json_overhead() {
         let now = Instant::now();
         let mut session = Session::new(&interface("one"), now);
-        for _iteration in 0..1000 { session.frame("one", "input", &[255;4096], true, now); }
-        assert_eq!(session.stopped, Some("size-limit"));
+        for _iteration in 0..1000 { session.frame("one", "input", &[255;4096], true, now + Duration::from_secs(2)); }
+        session.stop("stopped", now + Duration::from_secs(MAX_SECONDS + 1));
+        assert_eq!(session.stopped.as_ref().unwrap().reason, "size-limit");
+        assert_eq!(session.status(now + Duration::from_secs(MAX_SECONDS + 2)).elapsed_seconds, 2);
         assert!(session.bytes <= MAX_BYTES);
         assert!(session.frames < MAX_RECORDS);
         assert_eq!(session.bytes, session.records.iter().map(|line| line.len() + 1).sum::<usize>());
@@ -388,6 +595,6 @@ mod tests {
         for _iteration in 0..MAX_RECORDS + 10 { session.mark(0, now); }
         assert_eq!(session.records.len(), MAX_RECORDS);
         assert_eq!(session.steps.len(), MAX_RECORDS);
-        assert_eq!(session.stopped, Some("size-limit"));
+        assert_eq!(session.stopped.as_ref().unwrap().reason, "size-limit");
     }
 }

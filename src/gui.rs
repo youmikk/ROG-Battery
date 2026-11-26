@@ -3817,7 +3817,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     let audio = crate::audio::Controls::new(move || sender.notice());
     let popup = Rc::new(crate::ui::tray_popup::Popup::new(sender, audio.clone())?);
     let name_dialog = crate::ui::device_name::Dialog::new(&window, sender)?;
-    let feedback_dialog = crate::ui::feedback::Dialog::new(&window, sender)?;
+    let capture_signal = Arc::clone(&signal);
+    let feedback_dialog = crate::ui::feedback::Dialog::new(&window, sender,
+        move || capture_signal.request_refresh())?;
 
     {
         let shared_a = Arc::clone(&shared);
@@ -4858,7 +4860,7 @@ mod config_action_tests {
                 shared: Arc::new(Mutex::new(shared)), signal, tray,
                 taskbar: crate::taskbar_widget::TaskbarWidget::new(hwnd, 0),
                 name_dialog: crate::ui::device_name::Dialog::new(&window, notice.sender()).unwrap(),
-                feedback_dialog: crate::ui::feedback::Dialog::new(&window, notice.sender()).unwrap(),
+                feedback_dialog: crate::ui::feedback::Dialog::new(&window, notice.sender(), || {}).unwrap(),
                 store: StoreUpdates {
                     controller: crate::store::Controller::for_test(),
                     preparation: RefCell::new(None), writes_blocked: Cell::new(false),

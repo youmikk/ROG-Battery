@@ -228,6 +228,7 @@ struct Controls {
     scrollbar: Cell<Option<(i32, u32, i32)>>,
     inventory_working: Cell<bool>,
     capture_folder: RefCell<Option<std::path::PathBuf>>,
+    request_capture_refresh: Box<dyn Fn()>,
 }
 pub struct Dialog {
     controls: Rc<Controls>,
@@ -2072,13 +2073,17 @@ mod tests {
     use super::*;
 
     fn regression_dialog() -> (nwg::Window, nwg::Notice, Dialog) {
+        regression_dialog_with_capture_refresh(|| {})
+    }
+
+    fn regression_dialog_with_capture_refresh(refresh: impl Fn() + 'static) -> (nwg::Window, nwg::Notice, Dialog) {
         nwg::init().unwrap();
         let mut owner = nwg::Window::default();
         nwg::Window::builder().title("Feedback regression")
             .flags(nwg::WindowFlags::POPUP).size((760, 680)).build(&mut owner).unwrap();
         let mut notice = nwg::Notice::default();
         nwg::Notice::builder().parent(&owner).build(&mut notice).unwrap();
-        let dialog = Dialog::new(&owner, notice.sender()).unwrap();
+        let dialog = Dialog::new(&owner, notice.sender(), refresh).unwrap();
         (owner, notice, dialog)
     }
 
@@ -2280,7 +2285,13 @@ mod tests {
 
     #[test]
     fn local_capture_is_visible_on_form_and_submits_as_optional_attachment() {
-        let (_owner, _notice, dialog) = regression_dialog();
+        let requests = Rc::new(Cell::new(0));
+        let refresh_requests = requests.clone();
+        let (_owner, _notice, dialog) = regression_dialog_with_capture_refresh(move || {
+            assert!(crate::capture::status().running);
+            refresh_requests.set(refresh_requests.get() + 1);
+            crate::capture::record("capture-regression-path", "input", &[0xde, 0xad, 0xbe, 0xef], true);
+        });
         let controls = &dialog.controls;
         let interface = crate::hid::HidInterface { path: "capture-regression-path".into(),
             vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
@@ -2301,9 +2312,10 @@ mod tests {
             assert!(capture.rect.y > diagnostics.rect.bottom());
         }
         controls.action(Action::Capture);
+        assert_eq!(requests.get(), 0);
         controls.action(Action::CaptureStart);
+        assert_eq!(requests.get(), 1);
         assert!(crate::capture::status().running);
-        crate::capture::record(&interface.path, "input", &[0xde, 0xad, 0xbe, 0xef], true);
         controls.action(Action::CaptureMark(1));
         controls.window.set_position(185, 163);
         let position = controls.window.position();
@@ -2312,11 +2324,15 @@ mod tests {
         assert_eq!(crate::capture::status().frames, 1);
         assert!(controls.labels.borrow().iter().any(|label| label.text.contains("DEADBEEF")));
         controls.action(Action::Back);
+        assert_eq!(requests.get(), 1);
         assert!(!crate::capture::status().running);
         assert_eq!(controls.diagnostics(), before);
         assert_eq!(controls.draft().diagnostics.as_deref(), Some(before.as_str()));
         let capture = controls.draft().capture.unwrap();
         assert_eq!(capture.name, "raw.jsonl");
+        assert!(controls.items.borrow().iter().any(|item| matches!(item.action, Action::ToggleCapture)));
+        assert!(controls.items.borrow().iter().any(|item| matches!(item.action, Action::Capture)
+            && item.label == text("查看记录", "View capture")));
         assert!(client::validate_draft(&controls.draft()).is_ok());
         controls.action(Action::ToggleCapture);
         assert!(controls.draft().capture.is_none());
@@ -2333,8 +2349,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_capture_is_omitted_and_device_switch_clears_attachment() {
-        let (_owner, _notice, dialog) = regression_dialog();
+    fn empty_capture_shows_its_result_and_can_retry_before_attaching_data() {
+        let requests = Rc::new(Cell::new(0));
+        let refresh_requests = requests.clone();
+        let (_owner, _notice, dialog) = regression_dialog_with_capture_refresh(move || {
+            assert!(crate::capture::status().running);
+            refresh_requests.set(refresh_requests.get() + 1);
+        });
         let controls = &dialog.controls;
         let interface = crate::hid::HidInterface { path: "capture-first-device".into(),
             vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
@@ -2347,13 +2368,32 @@ mod tests {
         controls.state.borrow_mut().inventory_report = Some("HID interface inventory\n".into());
         controls.action(Action::Capture);
         controls.action(Action::CaptureStart);
-        crate::capture::record(&interface.path, "input-timeout", &[], false);
-        controls.action(Action::Back);
-        assert!(controls.draft().capture.is_none());
-        controls.action(Action::Capture);
-        controls.action(Action::CaptureClear);
-        controls.action(Action::CaptureStart);
+        assert_eq!(requests.get(), 1);
+        for timeout in [false, true] {
+            if timeout { crate::capture::record(&interface.path, "input-timeout", &[], false); }
+            controls.action(Action::CaptureStop);
+            assert!(controls.items.borrow().iter().any(|item| matches!(item.action, Action::CaptureStart)
+                && item.label == text("重新采集", "Try capture again")));
+            controls.action(Action::Back);
+            assert!(controls.draft().capture.is_none());
+            assert!(!controls.items.borrow().iter().any(|item| matches!(item.action, Action::ToggleCapture)));
+            assert!(controls.labels.borrow().iter().any(|label|
+                label.text == text("本次未采集到通信数据，可重新采集", "No traffic was captured; try again")));
+            assert!(controls.items.borrow().iter().any(|item| matches!(item.action, Action::Capture)
+                && item.label == text("查看结果", "View result")));
+            controls.action(Action::Capture);
+            *controls.capture_folder.borrow_mut() = Some(std::path::PathBuf::from("previous-empty-capture"));
+            controls.action(Action::CaptureStart);
+            assert!(controls.state.borrow().error.is_empty());
+            assert!(crate::capture::status().running);
+            assert_eq!(crate::capture::status().frames, 0);
+            assert!(controls.capture_folder.borrow().is_none());
+        }
+        assert_eq!(requests.get(), 3);
         crate::capture::record(&interface.path, "input", &[1, 2], true);
+        controls.action(Action::CaptureStart);
+        assert_eq!(requests.get(), 3);
+        assert_eq!(crate::capture::status().data_frames, 1);
         controls.action(Action::Close);
         assert!(controls.draft().capture.is_some());
         controls.action(Action::Back);
@@ -2399,6 +2439,7 @@ mod tests {
         assert_eq!(controls.draft().capture.as_ref(), Some(&capture));
         controls.action(Action::Capture);
         assert!(controls.labels.borrow().iter().any(|label| label.text.contains("0102")));
+        assert!(!controls.items.borrow().iter().any(|item| matches!(item.action, Action::CaptureStart)));
         controls.action(Action::Back);
         controls.action(Action::ToggleCapture);
         assert!(controls.draft().capture.is_none());
@@ -3145,7 +3186,8 @@ fn draw_button(p: &mut Painter, item: &Item, pressed: bool, focus: bool, enabled
     }
 }
 impl Dialog {
-    pub fn new(owner: &nwg::Window, notice: nwg::NoticeSender) -> Result<Self, String> {
+    pub fn new(owner: &nwg::Window, notice: nwg::NoticeSender,
+        request_capture_refresh: impl Fn() + 'static) -> Result<Self, String> {
         let scale = crate::dwm::system_scale();
         let px = |v: f32| (v * scale).round() as i32;
         let mut overlay = nwg::Window::default();
@@ -3268,6 +3310,7 @@ impl Dialog {
             scrollbar: Cell::new(None),
             inventory_working: Cell::new(false),
             capture_folder: RefCell::new(None),
+            request_capture_refresh: Box::new(request_capture_refresh),
         });
         let callback = c.clone();
         let handler = nwg::full_bind_event_handler(&c.window.handle, move |event, data, handle| {
