@@ -15,6 +15,7 @@ use winapi::um::winuser as wu;
 
 mod layout;
 mod state;
+mod capture;
 use state::{DiagnosticReport, Model, Task, View};
 
 pub fn text<'a>(zh: &'a str, en: &'a str) -> &'a str {
@@ -50,6 +51,13 @@ enum Action {
     Connection(usize),
     Category(usize),
     Diagnostics,
+    Capture,
+    CaptureStart,
+    CaptureMark(usize),
+    CaptureStop,
+    CaptureSave,
+    CaptureClear,
+    CaptureFolder,
     ToggleDiagnostics,
     AddImage,
     RemoveImage(usize),
@@ -137,6 +145,7 @@ enum ResultMessage {
     Images(Result<Vec<client::Image>, String>),
     Fallback(Result<client::Fallback, String>),
     SoftwareDiagnostics(String),
+    CaptureSaved(Result<std::path::PathBuf, String>),
     DeviceInventory(String),
     Failed,
 }
@@ -210,6 +219,7 @@ struct Controls {
     applied: RefCell<std::collections::BTreeMap<usize, layout::NativeState>>,
     scrollbar: Cell<Option<(i32, u32, i32)>>,
     inventory_working: Cell<bool>,
+    capture_folder: RefCell<Option<std::path::PathBuf>>,
 }
 pub struct Dialog {
     controls: Rc<Controls>,
@@ -391,7 +401,7 @@ impl Controls {
             Style::Close,
             true,
         );
-        let is_sub = matches!(s.view, View::Diagnostics | View::History | View::Thread);
+        let is_sub = matches!(s.view, View::Diagnostics | View::Capture | View::History | View::Thread);
         if is_sub {
             self.button(
                 Action::Back,
@@ -720,6 +730,12 @@ impl Controls {
                 }
             }
             View::Diagnostics => {
+                if !s.software && s.selected.and_then(|index| s.devices.get(index))
+                    .is_some_and(|device| device.capture_interface.is_some()) {
+                    self.button(Action::Capture, text("本地分步骤采集", "Local guided capture"), "",
+                        R::new(25.0, y, 280.0, 34.0), Style::Card, false);
+                    y += 48.0;
+                }
                 self.tag(
                     if s.software { text("软件诊断", "Software diagnostics") }
                         else { text("设备诊断", "Device diagnostics") },
@@ -801,6 +817,7 @@ impl Controls {
                 self.decorations.borrow_mut().push(Decoration::Note(text("不包含序列号、电脑用户名、本机完整路径或个人配置。提交时仅附带你在此看到的内容。","No serials, account names, full local paths or personal settings. Only the details shown here are attached.").into(),R::new(25.0,y,610.0,60.0)));
                 y += 80.0;
             }
+            View::Capture => { y = self.capture_layout(); }
             View::History => {
                 if s.entries.is_empty() {
                     self.decorations.borrow_mut().push(Decoration::Center(
@@ -1074,7 +1091,7 @@ impl Controls {
                     text("提交反馈", "Submit feedback")
                 },
             ),
-            View::Diagnostics => (Action::Back, text("返回反馈", "Back to feedback")),
+            View::Diagnostics | View::Capture => (Action::Back, text("返回反馈", "Back to feedback")),
             View::History => (Action::New, text("新建反馈", "New feedback")),
             View::Thread => (
                 Action::Reply,
@@ -1102,7 +1119,7 @@ impl Controls {
             true,
         );
         let secondary = match s.view {
-            View::Diagnostics => None,
+            View::Diagnostics | View::Capture => None,
             View::History => Some((Action::History, text("刷新", "Refresh"), Style::Card)),
             View::Thread => Some((
                 Action::OpenIssue,
@@ -1325,6 +1342,7 @@ impl Controls {
         );
     }
     fn set_view(&self, view: View) {
+        if view != View::Capture { self.stop_capture_timer(); }
         self.state.borrow_mut().view = view;
         self.scroll.set(0.0);
         self.rebuild();
@@ -1430,6 +1448,7 @@ impl Controls {
         }
         match action {
             Action::Close => {
+                self.stop_capture_timer();
                 self.remember_reply();
                 self.window.set_visible(false);
                 self.overlay.set_visible(false);
@@ -1439,6 +1458,7 @@ impl Controls {
                 }
             }
             Action::Back => {
+                crate::capture::stop();
                 let view = self.state.borrow().view;
                 self.remember_reply();
                 let target = back_view(view, self.state.borrow().submitted);
@@ -1458,6 +1478,8 @@ impl Controls {
                 self.rebuild();
             }
             Action::Device(i) => {
+                crate::capture::clear();
+                *self.capture_folder.borrow_mut() = None;
                 let mut s = self.state.borrow_mut();
                 s.selected = Some(i);
                 s.connection = connection_index(&s.devices[i].device.connection);
@@ -1468,6 +1490,8 @@ impl Controls {
                 self.set_view(View::Form);
             }
             Action::Manual => {
+                crate::capture::clear();
+                *self.capture_folder.borrow_mut() = None;
                 let mut s = self.state.borrow_mut();
                 s.selected = None;
                 s.diagnostics_override = None;
@@ -1495,6 +1519,11 @@ impl Controls {
             }
             Action::Diagnostics => {
                 self.set_view(View::Diagnostics);
+            }
+            Action::Capture => { self.set_view(View::Capture); }
+            Action::CaptureStart | Action::CaptureMark(_) | Action::CaptureStop
+                | Action::CaptureSave | Action::CaptureClear | Action::CaptureFolder => {
+                self.capture_action(action);
             }
             Action::Example => {
                 let software = self.state.borrow().software;
@@ -1619,6 +1648,8 @@ impl Controls {
                 }
             }
             Action::New => {
+                crate::capture::clear();
+                *self.capture_folder.borrow_mut() = None;
                 self.state.borrow_mut().new_form();
                 self.reset_inputs();
                 self.set_view(View::Form);
@@ -1713,6 +1744,10 @@ impl Controls {
                 continue;
             }
             match message {
+                ResultMessage::CaptureSaved(result) => match result {
+                    Ok(path) => *self.capture_folder.borrow_mut() = Some(path),
+                    Err(error) => self.state.borrow_mut().error = error,
+                },
                 ResultMessage::History(result) => match result {
                     Ok(entries) => self.state.borrow_mut().entries = entries,
                     Err(e) => self.state.borrow_mut().error = e,
@@ -2206,10 +2241,43 @@ mod tests {
     }
 
     #[test]
+    fn local_capture_keeps_raw_bytes_out_of_feedback_and_stops_on_back() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        let interface = crate::hid::HidInterface { path: "capture-regression-path".into(),
+            vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
+            input_len: 64, output_len: 64, feature_len: 0, product: "Test".into(), serial: "private".into() };
+        let candidate = Candidate { capture_interface: Some(interface.clone()),
+            label: "Test".into(), battery: "50%".into(), diagnostics: "Model: Test\n".into(),
+            device: client::Device { name: "Test".into(), family: "mouse".into(),
+                connection: "USB".into(), brand: None, model: None } };
+        controls.state.borrow_mut().reopen(vec![candidate], false);
+        controls.state.borrow_mut().inventory_report = Some("HID interface inventory\n".into());
+        let before = controls.diagnostics();
+        controls.action(Action::Diagnostics);
+        assert!(controls.items.borrow().iter().any(|item| matches!(item.action, Action::Capture)));
+        controls.action(Action::Capture);
+        controls.action(Action::CaptureStart);
+        assert!(crate::capture::status().running);
+        crate::capture::record(&interface.path, "input", &[0xde, 0xad, 0xbe, 0xef], true);
+        controls.action(Action::CaptureMark(1));
+        controls.rebuild();
+        assert_eq!(crate::capture::status().frames, 1);
+        assert!(controls.labels.borrow().iter().any(|label| label.text.contains("DEADBEEF")));
+        controls.action(Action::Back);
+        assert!(!crate::capture::status().running);
+        assert_eq!(controls.diagnostics(), before);
+        assert_eq!(controls.draft().diagnostics.as_deref(), Some(before.as_str()));
+        controls.action(Action::New);
+        assert!(!crate::capture::status().started);
+    }
+
+    #[test]
     fn detected_device_feedback_also_includes_other_hid_interfaces() {
         let (_owner, _notice, dialog) = regression_dialog();
         let controls = &dialog.controls;
         let candidate = Candidate {
+            capture_interface: None,
             label: "Detected mouse".into(), battery: "75%".into(),
             diagnostics: "Model: Detected mouse\nVID/PID: 24AE:1415\n".into(),
             device: client::Device { name: "Detected mouse".into(), family: "mouse".into(),
@@ -2496,10 +2564,11 @@ fn draw(c: &Controls, p: &mut Painter, body: bool, damage: R) {
         }
     } else {
         let s = c.state.borrow();
-        let sub = matches!(s.view, View::Diagnostics | View::History | View::Thread);
+        let sub = matches!(s.view, View::Diagnostics | View::Capture | View::History | View::Thread);
         let title = match s.view {
             View::History => text("我的反馈", "My feedback").into(),
             View::Diagnostics => text("附带的诊断内容", "Included diagnostics").into(),
+            View::Capture => text("本地分步骤采集", "Local guided capture").into(),
             View::Thread => s
                 .current
                 .as_ref()
@@ -2523,6 +2592,7 @@ fn draw(c: &Controls, p: &mut Painter, body: bool, damage: R) {
             Align::Left,
         );
         let subtitle = match s.view {
+            View::Capture => text("按步骤记录变化，结束后检查并保存。", "Mark each change, then review and save."),
             View::History => text(
                 "查看回复，也可以继续补充设备信息。",
                 "Read replies and add more device details.",
@@ -2553,6 +2623,7 @@ fn draw(c: &Controls, p: &mut Painter, body: bool, damage: R) {
         let fy = c.height.get() - FOOTER;
         p.hline(0.0, WIDTH, fy, t.border);
         let footer = match s.view {
+            View::Capture => text("原始数据仅保留在本机，不随反馈上传。", "Raw data stays local; it is not attached to feedback."),
             View::Diagnostics => text(
                 if s.software { "可以在反馈窗口关闭“附带软件诊断”。" }
                     else { "可以在反馈窗口关闭“附带设备诊断”。" },
@@ -3025,6 +3096,7 @@ impl Dialog {
             applied: RefCell::new(Default::default()),
             scrollbar: Cell::new(None),
             inventory_working: Cell::new(false),
+            capture_folder: RefCell::new(None),
         });
         let callback = c.clone();
         let handler = nwg::full_bind_event_handler(&c.window.handle, move |event, data, handle| {
@@ -3288,6 +3360,13 @@ impl Dialog {
                             c.layout(false);
                             Some(0)
                         }
+                        wu::WM_TIMER if !body && wp == capture::TIMER => {
+                            if c.state.borrow().view == View::Capture {
+                                if !crate::capture::status().running { c.stop_capture_timer(); }
+                                c.rebuild();
+                            } else { c.stop_capture_timer(); }
+                            Some(0)
+                        }
                         wu::WM_NCHITTEST if !body => {
                             let mut point = winapi::shared::windef::POINT {
                                 x: lp as i16 as i32,
@@ -3331,6 +3410,9 @@ impl Dialog {
         let reset = if software { c.state.borrow_mut().reopen_software() }
             else { c.state.borrow_mut().reopen(devices, history) };
         if reset {
+            c.stop_capture_timer();
+            crate::capture::clear();
+            *c.capture_folder.borrow_mut() = None;
             c.reset_inputs();
         }
         let hwnd = c.window.handle.hwnd().unwrap() as _;
@@ -3384,6 +3466,8 @@ impl Dialog {
 }
 impl Drop for Dialog {
     fn drop(&mut self) {
+        self.controls.stop_capture_timer();
+        crate::capture::clear();
         for raw in self.raw.drain(..) {
             let _ = nwg::unbind_raw_event_handler(&raw);
         }

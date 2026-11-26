@@ -7,6 +7,7 @@ mod audio;
 mod backup;
 mod backends;
 mod chart;
+mod capture;
 mod cli;
 mod commands;
 mod devices;

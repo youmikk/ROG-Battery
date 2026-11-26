@@ -382,6 +382,7 @@ pub fn query_report(iface: &HidInterface, report_id: u8, feature: bool, timeout_
 
 /// 一个已打开的命令通道。读写分别使用可取消的 overlapped 句柄。
 pub struct HidDevice {
+    capture_path: String,
     /// 写句柄，用于 WriteFile 或 HID Output Report 控制传输。
     write_handle: Handle,
     /// overlapped 读句柄
@@ -476,7 +477,9 @@ impl HidDevice {
             }
         };
         // SET_OUTPUT_REPORT 成功可以返回零字节；WriteFile 仍要求实际写入。
-        if !self.finish_output(ok, written, timeout_ms, control) {
+        let success = self.finish_output(ok, written, timeout_ms, control);
+        crate::capture::record(&self.capture_path, if control { "set-output" } else { "write" }, &padded, success);
+        if !success {
             return None;
         }
         while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
@@ -588,6 +591,7 @@ impl HidDevice {
         }
 
         Ok(HidDevice {
+            capture_path: iface.path.clone(),
             write_handle,
             write_event,
             write_ov: Overlapped {
@@ -687,6 +691,16 @@ impl HidDevice {
     }
 
     fn finish_read_checked(&mut self, timeout_ms: u32) -> Result<Option<Vec<u8>>, ()> {
+        let result = self.finish_read_result(timeout_ms);
+        if let Ok(Some(frame)) = &result {
+            crate::capture::record(&self.capture_path, "input", frame, true);
+        } else if result.is_err() {
+            crate::capture::record(&self.capture_path, "input", &[], false);
+        }
+        result
+    }
+
+    fn finish_read_result(&mut self, timeout_ms: u32) -> Result<Option<Vec<u8>>, ()> {
         if self.read_completed_sync {
             let n = self.sync_read_len as usize;
             if n == 0 || n > self.read_buf.len() {
@@ -794,7 +808,9 @@ impl HidDevice {
                 &mut self.write_ov,
             )
         };
-        if !self.finish_write(ok, written, timeout_ms) {
+        let success = self.finish_write(ok, written, timeout_ms);
+        crate::capture::record(&self.capture_path, "write", &pkt, success);
+        if !success {
             return Err(());
         }
 

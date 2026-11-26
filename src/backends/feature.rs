@@ -6,6 +6,7 @@ const GET_FEATURE: u32 = 0x000b_0192;
 const SET_FEATURE: u32 = 0x000b_0191;
 
 pub(super) struct FeatureChannel {
+    capture_path: String,
     handle: Handle,
     event: Handle,
     length: usize,
@@ -49,6 +50,7 @@ impl FeatureChannel {
             return Err(crate::tr!("无法创建设备通信事件").into());
         }
         Ok(Self {
+            capture_path: interface.path.clone(),
             handle,
             event,
             length,
@@ -98,7 +100,9 @@ impl FeatureChannel {
         }
         let mut request = vec![0; self.length];
         request[..packet.len()].copy_from_slice(packet);
-        self.transfer(SET_FEATURE, &mut request, timeout)?;
+        let result = self.transfer(SET_FEATURE, &mut request, timeout);
+        crate::capture::record(&self.capture_path, "set-feature", &request, result.is_ok());
+        result?;
         Ok(())
     }
 
@@ -115,12 +119,15 @@ impl FeatureChannel {
     pub(super) fn receive_raw(&mut self, report_id: u8, timeout: u32) -> Result<Vec<u8>, String> {
         let mut response = vec![0; self.length];
         response[0] = report_id;
-        let length = self.transfer(GET_FEATURE, &mut response, timeout)?;
+        let result = self.transfer(GET_FEATURE, &mut response, timeout);
+        if result.is_err() { crate::capture::record(&self.capture_path, "get-feature", &[], false); }
+        let length = result?;
         let length = length + usize::from(report_id == 0);
         if length == 0 || length > self.length {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
         response.truncate(length);
+        crate::capture::record(&self.capture_path, "get-feature", &response, true);
         Ok(response)
     }
 
@@ -133,7 +140,9 @@ impl FeatureChannel {
             return Err(crate::tr!("设备功能报告长度无效").into());
         }
         let mut request = packet.to_vec();
-        self.transfer(winapi::shared::hidclass::IOCTL_HID_SET_OUTPUT_REPORT, &mut request, timeout)?;
+        let result = self.transfer(winapi::shared::hidclass::IOCTL_HID_SET_OUTPUT_REPORT, &mut request, timeout);
+        crate::capture::record(&self.capture_path, "set-output", &request, result.is_ok());
+        result?;
         Ok(())
     }
 

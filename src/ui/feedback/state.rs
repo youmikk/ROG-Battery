@@ -4,6 +4,7 @@ use crate::feedback::{client, Candidate};
 pub(super) enum View {
     Form,
     Diagnostics,
+    Capture,
     History,
     Thread,
     Success,
@@ -19,6 +20,7 @@ pub(super) enum Task {
     Images,
     Fallback,
     SoftwareDiagnostics,
+    CaptureExport,
 }
 
 impl Task {

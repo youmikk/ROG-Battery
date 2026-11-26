@@ -23,6 +23,7 @@ pub fn with_inventory(summary: &str, inventory: &str) -> String {
 
 #[derive(Clone)]
 pub struct Candidate {
+    pub capture_interface: Option<crate::hid::HidInterface>,
     /// Display-only name; the report uses the original device name below.
     pub label: String,
     pub device: client::Device,
@@ -50,6 +51,7 @@ pub fn candidate(label: String, reading: &crate::device::DeviceReading,
     }
     diagnostics.push_str(&crate::diagnostics::readings::report(reading, measured, lifetime));
     Candidate { label, battery: reading.battery_text(true), diagnostics,
+        capture_interface: interface.filter(|interface| crate::capture::eligible(interface)).cloned(),
         device: client::Device { name, family: family.into(), connection: connection.into(), brand: None, model: None } }
 }
 

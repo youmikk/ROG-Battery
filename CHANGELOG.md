@@ -4,6 +4,7 @@
 
 ### 适配与优化
 
+- 反馈诊断新增可主动开启的本地分步骤原始采集，复用设备现有通信，支持操作标记、预览及分开导出原始包/摘要；限制时长和容量，不自动上传原始数据。
 - 新增 CHERRY PIXIU75 有线与 2.4G 只读电量、充电适配，独立校验块协议，保留原 MX 2.0S WL Pro 路径。
 - 新增 HyperX Cloud II Wireless 两种 HP 接收器的只读电量、充电与电压查询，保留 Cloud Alpha 2 行为及旧设备偏好。
 - 补齐雷蛇 Naga V2 HyperSpeed、Basilisk V3 X HyperSpeed、DeathAdder V3 HyperSpeed、Basilisk V3 Pro 35K 接收器的只读电量接口，保留原有接口读取能力。
