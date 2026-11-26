@@ -2,6 +2,16 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: LANGTU T98 (unreleased)
+
+Pinned VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`: [hardware records](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/langtu.md), [plugin](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Langtu/LangtuT98Plugin.cs), [codec](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Langtu/LangtuT98Codec.cs). Upstream contributors are YyingnLL / haloneko; MIT attribution is in THIRD_PARTY_NOTICES.md. This implementation independently encodes protocol facts without running upstream programs or hardware scripts.
+
+The known `1A2C:8FFF / MI_00 / FF02:0002` receiver has 65-byte input/output capacities and passively emits input Report 0 about every 5.5 seconds. Recorded prefixes are `00 AA 55 CC 33 0E 4E 01` (78), `...57 01` (87) and `...FF 01` (invalid); documented tails are zero. Full local vectors reconstruct those prefixes and are not full captures. Runtime descriptor proof requires a sole input report; the generic product name does not establish other models. Notification/system-key collections on MI_03 are excluded.
+
+Only passive reads are used, validating length, fixed header, command and zero tail. Unverified zero is excluded, narrowing acceptance to 1–100; FF and other out-of-range values produce no measurement. Byte 7 remains constant across charging changes, so charging stays unknown. The voltage-derived interpretation comes from upstream observations and is displayed as an estimate, not a precise fuel-gauge reading.
+
+Each receiver shares a seven-second deadline and 32-frame cap; measurements retain actual read times, while silence cannot renew them. Sleep can remain silent for four minutes, so timeout is not power-off evidence. Samples independently expire after 120 seconds; enumeration detects receiver removal, and fresh frames restore readings. Firmware variants, real zero, identical instances and official-software coexistence require hardware validation.
+
 ## 2026-11-26: AKG N9 Hybrid (unreleased)
 
 Pinned VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`: [AKG source](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Akg), [hardware evidence](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/akg.md), [full 50% fixture/tests](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/tests/VigilWatt.Core.Tests/AkgN9Tests.cs). Upstream credits endermiteDOTcn / PR44; MIT notice is retained in THIRD_PARTY_NOTICES.md. No upstream software or hardware scripts were executed.

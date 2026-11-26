@@ -8,6 +8,7 @@ This index covers protocols followed from VigilWatt in this iteration, not the c
 
 | 型号与模式 / Device and mode | 状态 / Status | 上游硬件证据 / Upstream hardware | 本项目验证 / Local validation | 未确认 / Outstanding |
 | --- | --- | --- | --- | --- |
+| 狼途 LANGTU T98，接收器 `1A2C:8FFF` | 已实现，未发布 / Implemented, unreleased | 单台 Windows 接口观测、78/87/FF 前缀及休眠观察 / One-unit Windows interface, prefixes and sleep observations | 前缀重建、合成解析及生命周期回归 / Reconstructed prefixes, synthetic parser and lifecycle regressions | 本项目真机、描述符、其他固件、0%、同型号双实例及驱动共存 / Local hardware, descriptor, firmware, zero, dual instances, coexistence |
 | CHERRY PIXIU75，USB `046A:01E2` / 2.4G `046A:01E4` | 已实现，未发布 / Implemented, unreleased | Windows 接口与官方软件对照 / Windows interface and official-app comparison | 前轮 10 项解析、通道及旧 MX Pro 回归；前缀重建 / 10 earlier regressions, reconstructed prefixes | 本项目真机、0%、长休眠、多实例、充电及跨模式身份 / Local hardware, zero, sleep, instances, charging, cross-mode identity |
 | 雷神 ML903 NearLink Se，接收器 `369B:0234` | 已实现，未发布 / Implemented, unreleased | 35% 前缀；27%、关机静默及恢复观察 / 35% prefix, 27%, power-cycle observations | 14 项实帧前缀回放与合成回归 / 14 prefix replay and synthetic tests | 实际描述符、不同固件、充电、双实例及官方驱动共存 / Descriptor, firmware, charging, dual instances, coexistence |
 | AKG N9 Hybrid，接收器 `0ECB:20D9` | 已实现，未发布 / Implemented, unreleased | 完整 62 字节 50% 帧及六轮自然轮询 100% / Full 50% frame, six natural 100% polls | 19 项实帧、分片、ACK、旧缓存及实例回归 / 19 frame, fragmentation, ACK, stale-tail and instance tests | 本项目真机、持续放电、关机、官方软件并发；无事务号 / Local hardware, discharge, power-off, coexistence; no transaction ID |
@@ -15,9 +16,9 @@ This index covers protocols followed from VigilWatt in this iteration, not the c
 
 ## 本地采集的使用边界 / Local capture scope
 
-新增的 [分步骤采集](docs/guided-capture.md) 只旁路记录已发现设备的既有通信，可帮助用户按正常使用、充电、关机、恢复提供带时间标记的证据。它不会主动探测未适配设备，也不会自动把原始字节发布到反馈。采集成功不等于协议已经解释正确。
+新增的 [分步骤采集](docs/guided-capture.md) 旁路记录已发现设备的既有通信，可帮助用户按正常使用、充电、关机、恢复提供带时间标记的证据；不主动探测未适配设备。有数据时默认附带到用户提交的反馈，提交前可关闭，公开议题提供下载链接。采集成功不等于协议已经解释正确。
 
-[Guided capture](docs/guided-capture.md) observes existing communication for a discovered device and adds action markers. It does not probe unsupported devices or automatically publish raw bytes. Capturing a frame does not establish its meaning.
+[Guided capture](docs/guided-capture.md) observes existing communication for a discovered device and adds action markers. It does not probe unsupported devices. Nonempty recordings are attached by default when the user submits feedback; this can be disabled before submission. Public issues provide a download link. Capturing a frame does not establish its meaning.
 
 ## 后续准入条件 / Acceptance criteria
 

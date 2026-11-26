@@ -69,6 +69,7 @@ pub mod xinput;
 pub mod xiberia;
 pub mod thunderobot;
 pub mod akg;
+pub mod langtu;
 
 pub use crate::device::{Battery, BatteryLevel, Dpi};
 use crate::{device::DeviceFamily, hid::HidInterface, win32::HidApi};
@@ -137,9 +138,10 @@ pub enum BackendId {
     StandardHid,
     Thunderobot,
     Akg,
+    LangtuT98,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 61] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 62] = [
     BackendId::Logitech, BackendId::LogitechHeadset, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
@@ -149,7 +151,7 @@ pub const ADDITIONAL_BACKENDS: [BackendId; 61] = [
     BackendId::AtkHoltek, BackendId::FifineHt6, BackendId::MchoseK87s,
     BackendId::Lingbao, BackendId::AulaF108,
     BackendId::RapooMt560, BackendId::MchoseR9, BackendId::AulaV9Pro,
-    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::Akg, BackendId::StandardHid,
+    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::Akg, BackendId::LangtuT98, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -217,11 +219,12 @@ impl BackendId {
             Self::StandardHid => "Standard HID",
             Self::Thunderobot => "THUNDEROBOT ML903 NearLink Se",
             Self::Akg => "AKG N9 Hybrid",
+            Self::LangtuT98 => "LANGTU T98",
         }
     }
 
     pub fn precedes_standard(self) -> bool {
-        if matches!(self, Self::Thunderobot | Self::Akg) { return true; }
+        if matches!(self, Self::Thunderobot | Self::Akg | Self::LangtuT98) { return true; }
         if matches!(self, Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
             | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
             | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
@@ -236,7 +239,7 @@ impl BackendId {
 
     pub fn sample_lifetime(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
-            Self::Thunderobot => 120,
+            Self::Thunderobot | Self::LangtuT98 => 120,
             Self::Akg => 180,
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
@@ -269,7 +272,7 @@ impl BackendId {
                 | Self::VeekosShine60
                 | Self::DareuEm901 => Some(10_000),
             Self::EweadnX23 => Some(5_000),
-            Self::AulaF108 => Some(15_000),
+            Self::AulaF108 | Self::LangtuT98 => Some(15_000),
             Self::AulaHfdMechanical => Some(30_000),
             Self::Rapoo | Self::RapooMt560 | Self::DualSense | Self::XInput => Some(2_000),
             Self::Bluetooth => Some(30_000),
@@ -565,6 +568,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::Nova => &steelseries::Nova,
         BackendId::Inzone => &inzone::Inzone,
         BackendId::HyperX => &hyperx::HyperX,
+        BackendId::LangtuT98 => &langtu::LangtuT98,
         BackendId::DualSense => &sony::DualSense,
         BackendId::XInput => unreachable!("XInput does not enumerate HID interfaces"),
         BackendId::Bluetooth => unreachable!("Bluetooth does not enumerate HID interfaces"),

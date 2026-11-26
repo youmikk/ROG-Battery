@@ -4,6 +4,16 @@
 
 Implementation status, upstream records and remaining hardware checks for this VigilWatt iteration are in the [evidence index](ADAPTATION_EVIDENCE.md).
 
+## Unreleased: LANGTU T98
+
+Only the known 2.4 GHz receiver `1A2C:8FFF / MI_00 / FF02:0002` with product string `2.4 Wireless Device` is matched. Windows input/output capacities must both be 65 bytes, with runtime descriptor proof of sole input Report ID 0. Ambiguous management collections are not read. `1A2C:7FFF`, other models, wired USB and Bluetooth modes are excluded.
+
+A read-only input handle receives complete 65-byte status reports: `00 AA 55 CC 33 0E <battery> 01` followed by zeros. Accepts 1–100; rejects unverified zero, invalid sentinel FF and malformed frames. Upstream observations show voltage and charging affect the value, so it is displayed as an estimate with `≈`; byte 7 is not a charging flag. Silence does not renew samples or establish disconnection. Old levels disappear after 120 seconds and valid reports restore them after wake.
+
+The background interval is capped at 15 seconds; each receiver read waits up to 7 seconds or handles 32 frames. Identical receivers are read sequentially, so their delays add up; other brands use independent workers. Discovery and sampling send no device commands.
+
+Evidence comes from pinned VigilWatt documentation for one physical unit and recorded 78/87/FF prefixes. Local validation uses reconstructed prefixes and synthetic tests, not this project's hardware. Actual descriptors, dual receivers, sleep/wake, power-off and official-software coexistence require hardware validation. See [protocol evidence](PROTOCOLS.en.md).
+
 ## Unreleased: AKG N9 Hybrid
 
 Receiver `0ECB:20D9 / MI_03 / Col02 / FF13:0001` only, 62-byte numbered input/output reports and no Feature report. The descriptor must prove sole Input07/Output06. Ambiguous management collections are rejected; receiver instances retain separate keys.

@@ -6186,6 +6186,118 @@ mod backend_tests {
     }
 
     #[test]
+    fn identical_headset_receivers_keep_battery_charge_and_taskbar_lifecycles_independent() {
+        let backend = BackendId::HyperX;
+        let now = std::time::Instant::now();
+        let headset = |instance: &str, percent| {
+            let mut sample = snapshot(backend, instance, percent);
+            let interface = sample.target.hid_mut();
+            interface.path = format!(r"\\?\hid#vid_03f0&pid_0696&mi_00#synthetic-{instance}#{{test}}");
+            interface.serial = "same-receiver-serial".into();
+            interface.product = "HyperX Cloud II Wireless".into();
+            interface.vendor_id = 0x03f0; interface.product_id = 0x0696;
+            interface.usage_page = 0xff90; interface.usage = 0x0303;
+            interface.input_len = 20; interface.output_len = 52;
+            sample.target = Target::new(backend, interface, 0);
+            sample.target.family = DeviceFamily::Headset;
+            sample.battery_at = Some(now);
+            sample
+        };
+        let mut first = headset("first", 20);
+        let mut second = headset("second", 80);
+        let mut other = snapshot(BackendId::Logitech, "other-brand", 55);
+        other.battery_at = Some(now);
+        let first_key = first.target.key.clone();
+        let second_key = second.target.key.clone();
+        assert_ne!(first_key, second_key);
+        let mut shared = Shared::new(Settings::default());
+        shared.cfg.device_order = vec![first_key.clone(), second_key.clone(), "other-brand".into()];
+        let poll = |samples: Vec<Snapshot>, both_present| crate::backends::Poll {
+            snapshots: samples,
+            present_channels: Some(if both_present {
+                [first.target.channel_key(), second.target.channel_key()].into_iter().collect()
+            } else { [second.target.channel_key()].into_iter().collect() }),
+            ..Default::default()
+        };
+        let strip = |shared: &Shared| taskbar_strip_content(&shared.readings, &shared.cfg).unwrap()
+            .items.into_iter().map(|item| (item.level.unwrap().value, item.charging)).collect::<Vec<_>>();
+        merge_additional_at(&mut shared, backend, poll(vec![first.clone(), second.clone()], true), now);
+        merge_additional_at(&mut shared, BackendId::Logitech, vec![other.clone()].into(), now);
+        assert_eq!(strip(&shared), vec![(20, false), (80, false), (55, false)]);
+
+        let next = now + Duration::from_secs(10);
+        second.battery_at = Some(next);
+        second.battery.as_mut().unwrap().percent = Some(79);
+        second.battery.as_mut().unwrap().charging = Some(true);
+        merge_additional_at(&mut shared, backend, poll(vec![second.clone()], true), next);
+        assert_eq!(shared.devices[&first_key].basic_status.as_ref().unwrap().measured_at, Some(now));
+        assert_eq!(shared.devices[&first_key].reading.quality, crate::device::ReadingQuality::Cached);
+        assert_eq!(strip(&shared), vec![(20, false), (79, true), (55, false)]);
+
+        let expired = now + backend.sample_lifetime();
+        second.battery_at = Some(expired);
+        other.battery_at = Some(expired);
+        merge_additional_at(&mut shared, backend, poll(vec![second.clone()], true), expired);
+        merge_additional_at(&mut shared, BackendId::Logitech, vec![other].into(), expired);
+        shared.expire_readings_at(expired);
+        assert!(shared.devices[&first_key].reading.connected);
+        assert_eq!(shared.devices[&first_key].reading.battery_text(true), "—");
+        assert_eq!(strip(&shared), vec![(79, true), (55, false)]);
+
+        second.battery_at = Some(expired + Duration::from_secs(1));
+        merge_additional_at(&mut shared, backend, poll(vec![second.clone()], false), expired + Duration::from_secs(1));
+        assert!(!shared.devices[&first_key].reading.connected);
+        assert!(shared.devices[&second_key].reading.connected);
+        assert!(shared.devices["other-brand"].reading.connected);
+        assert_eq!(strip(&shared), vec![(79, true), (55, false)]);
+
+        let restored = expired + Duration::from_secs(2);
+        first.battery_at = Some(restored);
+        first.battery.as_mut().unwrap().percent = Some(21);
+        second.battery_at = Some(restored);
+        merge_additional_at(&mut shared, backend, poll(vec![first.clone(), second.clone()], true), restored);
+        assert_eq!(shared.devices.len(), 3);
+        assert_eq!(shared.devices[&first_key].reading.quality, crate::device::ReadingQuality::Live);
+        assert_eq!(strip(&shared), vec![(21, false), (79, true), (55, false)]);
+    }
+
+    #[test]
+    fn langtu_silent_receiver_keeps_sample_age_and_wake_restores_estimated_taskbar_level() {
+        let backend = BackendId::LangtuT98;
+        let now = std::time::Instant::now();
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 15000);
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(backend, "langtu", 78);
+        sample.target.family = DeviceFamily::Keyboard;
+        sample.battery_at = Some(now);
+        sample.battery = Some(Battery { percent: None, estimated_percent: Some(78),
+            charging: None, voltage_mv: None, approximate: true, level: None });
+        merge_additional_at(&mut shared, backend, vec![sample.clone()].into(), now);
+        assert_eq!(shared.readings[0].battery_text(true), "≈78%");
+        for seconds in [15, 60, 119, 120, 240] {
+            let time = now + Duration::from_secs(seconds);
+            merge_additional_at(&mut shared, backend, crate::backends::Poll {
+                snapshots: Vec::new(), present_channels: Some(["langtu".into()].into_iter().collect()),
+                ..Default::default()
+            }, time);
+            shared.expire_readings_at(time);
+            assert!(shared.readings[0].connected);
+            assert_eq!(shared.devices["langtu"].basic_status.as_ref().unwrap().measured_at, Some(now));
+            assert_eq!(shared.readings[0].battery_text(true), if seconds < 120 { "≈78%" } else { "—" });
+            assert_eq!(taskbar_strip_content(&shared.readings, &shared.cfg).is_some(), seconds < 120);
+        }
+        let woke = now + Duration::from_secs(241);
+        sample.battery_at = Some(woke);
+        sample.battery.as_mut().unwrap().estimated_percent = Some(77);
+        merge_additional_at(&mut shared, backend, vec![sample].into(), woke);
+        assert_eq!(shared.readings[0].battery_text(true), "≈77%");
+        let item = &taskbar_strip_content(&shared.readings, &shared.cfg).unwrap().items[0];
+        assert_eq!(item.level.unwrap().label(true), "≈77%");
+        assert!(!item.charging);
+        assert_eq!(item.kind, crate::tray_prefs::TrayKind::Keyboard);
+    }
+
+    #[test]
     fn headset_query_timeouts_expire_and_explicit_offline_clears_before_wake() {
         for backend in [BackendId::Inzone, BackendId::HyperX] {
         let now = std::time::Instant::now();

@@ -2,6 +2,16 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：狼途 LANGTU T98（未发布）
+
+固定 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`：[硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/langtu.md)、[插件](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Langtu/LangtuT98Plugin.cs)、[解析器](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Langtu/LangtuT98Codec.cs)。上游贡献者 YyingnLL / haloneko，MIT 许可见 THIRD_PARTY_NOTICES.md。依据协议事实独立实现，未运行上游程序或硬件脚本。
+
+已知接收器 `1A2C:8FFF` 的 `MI_00 / FF02:0002` 输入输出均 65 字节，约每 5.5 秒被动推送输入 Report 0。记录前缀分别为 `00 AA 55 CC 33 0E 4E 01`（78）、`...57 01`（87）和 `...FF 01`（无效）；文档说明其后补零。本地完整测试向量按此前缀重建，不称为完整抓包。运行时要求唯一输入报告，不依赖产品泛化名称推断其他型号，也不触碰 `MI_03` 通知和系统键集合。
+
+仅被动读取，固定长度、头部、命令及零尾部全部校验。0 尚无实测，因此本实现比上游收窄为 1–100；FF 及其他越界值不产生测量。byte 7 已在插拔充电线时证实恒定，充电保持未知。电压换算含义来自上游变化曲线观察，作为估算显示，不声称库仑计精度。
+
+每目标共用 7 秒截止时间、最多 32 帧；延迟样本使用实际读取时间，空读不续期。休眠可连续四分钟静音，故不把超时等同关机，样本独立在 120 秒过期。接收器拔出由枚举判定，恢复收到新帧后更新。不同固件、真实零电量、同型号多实例及官方软件共存仍需真机验证。
+
 ## 2026-11-26：AKG N9 Hybrid（未发布）
 
 固定 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`：[AKG 源码](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Akg)、[硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/akg.md)、[完整 50% 样本及测试](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/tests/VigilWatt.Core.Tests/AkgN9Tests.cs)。原作者 endermiteDOTcn / PR44，MIT 许可见 THIRD_PARTY_NOTICES.md。未运行上游程序或硬件脚本。
