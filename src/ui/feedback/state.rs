@@ -163,6 +163,7 @@ impl Model {
     }
 
     fn reopen_mode(&mut self, devices: Vec<Candidate>, history: bool, software: bool) -> bool {
+        if self.task == Some(Task::CaptureExport) { return false; }
         self.latest_devices = devices;
         if !history {
             self.latest_software = software;

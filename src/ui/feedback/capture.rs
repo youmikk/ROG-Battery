@@ -6,10 +6,10 @@ impl Controls {
     pub(super) fn capture_layout(&self) -> f32 {
         let status = crate::capture::status();
         let mut y = 0.0;
-        self.label(text("仅记录这台设备现有查询的原始数据，不额外发送命令。一般键鼠输入接口不能采集。",
-            "Records this interface's existing queries only. No extra commands. General keyboard/mouse input is excluded."),
-            25.0, y, 610.0, 52.0, 12.0, false, true);
-        y += 60.0;
+        self.label(text("记录所选接口的现有通信；如果接收器连接多个外设，会包含该接口上所有槽位的数据。不额外发送命令，一般键鼠输入接口不能采集。",
+            "Records existing traffic on the selected interface, including all receiver slots if it serves multiple peripherals. No extra commands. General keyboard/mouse input is excluded."),
+            25.0, y, 610.0, 72.0, 12.0, false, true);
+        y += 80.0;
         self.label(text("原始数据可能包含设备标识或输入信息，不保证匿名。只保存在本机，不会随反馈上传；分享前请检查 raw.jsonl。",
             "Raw bytes may contain identifiers or input data and are not anonymous. Saved locally, never attached to feedback. Review raw.jsonl before sharing."),
             25.0, y, 610.0, 68.0, 12.0, false, false);
@@ -37,7 +37,9 @@ impl Controls {
                 self.button(Action::CaptureStop, text("停止并预览", "Stop and review"), "",
                     R::new(25.0, y, 285.0, 36.0), Style::Card, false);
             } else {
-                self.button(Action::CaptureSave, text("保存原始包和摘要", "Save raw data and summary"), "",
+                let saving = self.state.borrow().task == Some(Task::CaptureExport);
+                self.button(Action::CaptureSave, if saving { text("正在保存…", "Saving…") }
+                    else { text("保存原始包和摘要", "Save raw data and summary") }, "",
                     R::new(25.0, y, 300.0, 36.0), Style::Card, false);
                 self.button(Action::CaptureClear, text("清除内存记录", "Clear memory"), "",
                     R::new(340.0, y, 295.0, 36.0), Style::Card, false);

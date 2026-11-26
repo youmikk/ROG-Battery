@@ -8,10 +8,12 @@ This records changes for an already discovered device: Settings → Device feedb
 - Records existing `HidDevice` / `FeatureChannel` transfers on one selected vendor interface. It opens no extra handles, changes no polling interval and sends no additional commands. Standard input collections, Bluetooth OS properties and XInput are excluded. Unrecognized devices should use ordinary feedback first; this is not a universal capture tool.
 - 一个接收器接口可能包含多个外设槽位，采集范围为整个接口。记录完成时间、未归一化字节、API、成功状态和用户步骤；不保证覆盖本程序之外的驱动流量、其他接口或后端直接调用的同步 HID API。充电导致接口切换时，不自动跟踪新接口，避免关联到错误设备。
 - One receiver interface can carry several slots. Captures cover that interface, with completion times, unnormalized bytes, API results and user markers. They do not capture other applications, other interfaces or backend-specific synchronous HID calls. Switching interfaces while charging does not automatically follow a different path.
+- 非零等待的 Input 超时记录为 `input-timeout`；零等待排空检查不算超时事件。Nonzero-wait Input timeouts are recorded; empty queue-drain checks are excluded.
 - 5 分钟、1024 条、512 KiB JSONL 记录，任一上限达到后停止。限制包括十六进制与 JSON 开销；导出头尾和摘要有额外的有界开销。返回或关闭窗口停止采集，清除记录或新建反馈释放内存。日常未启用采集时，仅检查原子标记，不保存报文。
 - Stops after 5 minutes, 1024 records or 512 KiB of JSONL records, including hex/JSON overhead. Headers, footer and summary add bounded overhead. Going back or closing stops collection; clear/new feedback releases memory. With capture disabled, the hook only checks an atomic flag.
 - 保存到用户可写的缓存目录 `captures/capture-…/raw.jsonl` 和 `summary.txt`。原始包不写入序列号或接口路径元数据，但原始字节仍可能包含身份或输入信息，不承诺匿名。分享前检查完整文件。两个文件均不自动附加到 GitHub 反馈，普通反馈仍走原有白名单。
 - Saves under the writable user cache directory in `captures/capture-…/raw.jsonl` and `summary.txt`. Raw bytes can contain identities or input even though metadata excludes serials and paths. Review before sharing. Neither file is automatically attached to GitHub; normal feedback retains its allowlist.
+- 保存期间可关闭窗口，页面切换需等待保存结果，避免丢失错误或成功位置。保存失败清除本次创建的未完成文件；如果无法清除，会明确提示残留路径。Export completion is retained across closing; navigation waits for the result. Failed exports remove only newly created files and report the residual location if cleanup fails.
 
 设计参考 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723` 的分步骤标记；实现独立，采用现有通道旁路记录以避免新增读取竞争。本项目测试使用合成数据验证隔离、停止、容量、导出和反馈边界，不代表设备真机采集验收。
 

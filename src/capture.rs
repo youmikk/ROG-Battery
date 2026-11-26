@@ -101,6 +101,7 @@ impl Session {
         }
         self.bytes += line.len() + 1;
         self.records.push(line);
+        if self.records.len() == MAX_RECORDS || self.bytes == MAX_BYTES { self.stopped = Some("size-limit"); }
         true
     }
 
@@ -204,15 +205,33 @@ impl Export {
     }
 
     fn save_in(self, root: &Path) -> Result<PathBuf, String> {
+        self.save_with(root, |file, bytes| file.write_all(bytes).and_then(|_| file.sync_all()))
+    }
+
+    fn save_with(self, root: &Path,
+        mut write: impl FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>) -> Result<PathBuf, String> {
         std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = root.join(format!("capture-{}-{}-{}", self.timestamp, std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir(&path).map_err(|error| error.to_string())?;
-        for (name, contents) in [("raw.jsonl", self.raw), ("summary.txt", self.summary)] {
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path.join(name))
-                .map_err(|error| error.to_string())?;
-            file.write_all(contents.as_bytes()).and_then(|_| file.sync_all()).map_err(|error| error.to_string())?;
+        let mut created = Vec::new();
+        let result = (|| -> std::io::Result<()> {
+            for (name, contents) in [("raw.jsonl", self.raw), ("summary.txt", self.summary)] {
+                let target = path.join(name);
+                let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)?;
+                created.push(target);
+                write(&mut file, contents.as_bytes())?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            for file in created { let _ = std::fs::remove_file(file); }
+            return if std::fs::remove_dir(&path).is_ok() {
+                Err(format!("保存失败，已清除未完成文件 / Export failed; partial files removed: {error}"))
+            } else {
+                Err(format!("保存失败，可能残留原始数据，请检查 / Export failed; check remaining raw data in {}: {error}", path.display()))
+            };
         }
         Ok(path)
     }
@@ -289,6 +308,27 @@ mod tests {
             for name in ["raw.jsonl", "summary.txt"] { std::fs::remove_file(folder.join(name)).unwrap(); }
             std::fs::remove_dir(folder).unwrap();
         }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn failed_export_cleans_only_its_new_bundle_and_keeps_existing_files() {
+        let root = std::env::temp_dir().join(format!("x-battery-capture-failure-{}-{}",
+            std::process::id(), crate::diagnostics::unix_millis()));
+        std::fs::create_dir(&root).unwrap();
+        let existing = root.join("keep.txt");
+        std::fs::write(&existing, b"original").unwrap();
+        let mut writes = 0;
+        let result = Export { raw: "sensitive raw bytes".into(), summary: "summary".into(), timestamp: 2 }
+            .save_with(&root, |file, bytes| {
+                file.write_all(bytes)?;
+                writes += 1;
+                if writes == 2 { Err(std::io::Error::other("simulated disk failure")) } else { Ok(()) }
+            });
+        assert!(result.unwrap_err().contains("partial files removed"));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"original");
+        std::fs::remove_file(existing).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 

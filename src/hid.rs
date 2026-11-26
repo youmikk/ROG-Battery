@@ -702,11 +702,7 @@ impl HidDevice {
 
     fn finish_read_checked(&mut self, timeout_ms: u32) -> Result<Option<Vec<u8>>, ()> {
         let result = self.finish_read_result(timeout_ms);
-        if let Ok(Some(frame)) = &result {
-            crate::capture::record(&self.capture_path, "input", frame, true);
-        } else if result.is_err() {
-            crate::capture::record(&self.capture_path, "input", &[], false);
-        }
+        capture_input_result(&self.capture_path, timeout_ms, &result);
         result
     }
 
@@ -875,6 +871,15 @@ fn align_reply(report_id: u8, cmd: u8, sub: u8, r: &[u8]) -> Option<Vec<u8>> {
         return Some(m);
     }
     None
+}
+
+fn capture_input_result(path: &str, timeout_ms: u32, result: &Result<Option<Vec<u8>>, ()>) {
+    match result {
+        Ok(Some(frame)) => crate::capture::record(path, "input", frame, true),
+        Err(()) => crate::capture::record(path, "input", &[], false),
+        Ok(None) if timeout_ms > 0 => crate::capture::record(path, "input-timeout", &[], false),
+        Ok(None) => (),
+    }
 }
 
 impl Drop for HidDevice {
@@ -1459,6 +1464,25 @@ mod enumeration_tests {
 #[cfg(test)]
 mod input_tests {
     use super::protocol_input;
+
+    #[test]
+    fn capture_records_wait_timeouts_but_excludes_empty_queue_checks() {
+        let interface = super::HidInterface { path: "timeout-capture-test".into(), vendor_id: 0x1234,
+            product_id: 0x5678, usage_page: 0xff00, usage: 1, input_len: 64,
+            output_len: 64, feature_len: 0, product: String::new(), serial: String::new() };
+        crate::capture::clear();
+        crate::capture::start(&interface).unwrap();
+        super::capture_input_result(&interface.path, 0, &Ok(None));
+        assert_eq!(crate::capture::status().frames, 0);
+        super::capture_input_result(&interface.path, 500, &Ok(None));
+        super::capture_input_result(&interface.path, 500, &Err(()));
+        super::capture_input_result(&interface.path, 500, &Ok(Some(vec![1, 2])));
+        let status = crate::capture::status();
+        assert_eq!(status.frames, 3);
+        assert!(status.preview.iter().any(|line| line.contains("input-timeout") && line.contains("\"success\":false")));
+        assert!(status.preview.iter().any(|line| line.contains("0102")));
+        crate::capture::clear();
+    }
 
     #[test]
     fn windows_unnumbered_input_removes_id_only_after_receiving_full_buffer() {

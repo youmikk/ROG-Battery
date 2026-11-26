@@ -72,6 +72,7 @@ enum Action {
 }
 impl Action {
     fn enabled(&self, model: &Model) -> bool {
+        if model.task == Some(Task::CaptureExport) { return matches!(self, Self::Close); }
         if matches!(self, Self::History) && model.task == Some(Task::History) {
             return false;
         }
@@ -384,6 +385,10 @@ impl Controls {
         }
     }
     fn rebuild(&self) {
+        self.rebuild_position(true);
+    }
+
+    fn rebuild_position(&self, recenter: bool) {
         self.items.borrow_mut().clear();
         self.labels.borrow_mut().clear();
         self.edit_rects.borrow_mut().clear();
@@ -1143,7 +1148,7 @@ impl Controls {
         self.content_height.set(y.max(self.body_height()));
         drop(s);
         self.layout(true);
-        self.center();
+        if recenter { self.center(); }
         self.window.invalidate();
     }
     fn update_frame(&self) {
@@ -2261,7 +2266,10 @@ mod tests {
         assert!(crate::capture::status().running);
         crate::capture::record(&interface.path, "input", &[0xde, 0xad, 0xbe, 0xef], true);
         controls.action(Action::CaptureMark(1));
-        controls.rebuild();
+        controls.window.set_position(185, 163);
+        let position = controls.window.position();
+        unsafe { wu::SendMessageW(controls.window.handle.hwnd().unwrap(), wu::WM_TIMER, capture::TIMER, 0); }
+        assert_eq!(controls.window.position(), position);
         assert_eq!(crate::capture::status().frames, 1);
         assert!(controls.labels.borrow().iter().any(|label| label.text.contains("DEADBEEF")));
         controls.action(Action::Back);
@@ -2270,6 +2278,31 @@ mod tests {
         assert_eq!(controls.draft().diagnostics.as_deref(), Some(before.as_str()));
         controls.action(Action::New);
         assert!(!crate::capture::status().started);
+    }
+
+    #[test]
+    fn capture_export_cannot_be_detached_by_navigation_or_reopening() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(Vec::new(), false);
+        controls.set_view(View::Capture);
+        let generation = controls.state.borrow_mut().begin_task(Task::CaptureExport).unwrap();
+        for action in [Action::Back, Action::New, Action::History] {
+            controls.action(action);
+            assert_eq!(controls.state.borrow().view, View::Capture);
+            assert_eq!(controls.state.borrow().task, Some(Task::CaptureExport));
+        }
+        assert!(Action::Close.enabled(&controls.state.borrow()));
+        assert!(!controls.state.borrow_mut().reopen_software());
+        assert!(!controls.state.borrow().software);
+        controls.results.lock().unwrap().push((generation,
+            ResultMessage::CaptureSaved(Err("Export failed; partial files removed".into()))));
+        controls.complete();
+        assert!(!controls.state.borrow().busy());
+        assert!(controls.state.borrow().error.contains("Export failed"));
+        controls.action(Action::Back);
+        assert_eq!(controls.state.borrow().view, View::Form);
+        assert!(controls.state.borrow().error.contains("Export failed"));
     }
 
     #[test]
@@ -3363,7 +3396,7 @@ impl Dialog {
                         wu::WM_TIMER if !body && wp == capture::TIMER => {
                             if c.state.borrow().view == View::Capture {
                                 if !crate::capture::status().running { c.stop_capture_timer(); }
-                                c.rebuild();
+                                c.rebuild_position(false);
                             } else { c.stop_capture_timer(); }
                             Some(0)
                         }
