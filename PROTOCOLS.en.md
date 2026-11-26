@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: Corsair Bragi receiver integration deferred
+
+Rechecked the [IRONCLAW capture](https://github.com/OpenMouse-Project/mouse-protocol/blob/5a4f6433da3d70865d008874c7055016b336c197/captures/corsair-ironclaw-rgb-wireless/README.md) and [SCIMITAR capture](https://github.com/OpenMouse-Project/mouse-protocol/blob/5a4f6433da3d70865d008874c7055016b336c197/captures/corsair-scimitar-rgb-elite/README.md) at OpenMouse `5a4f6433da3d70865d008874c7055016b336c197`. The Windows capture for `1B1C:1BDC` contains DPI writes and acknowledgements while iCUE was running, without GET replies, HID report descriptors, or hardware-mode battery evidence. That source has no traffic from receiver `1B66`. Catalog entries do not establish a verified battery channel.
+
+The descriptor-proven `1BE3` is a wired SCIMITAR: `FF42:0001`, unnumbered 128-byte protocol reports, requiring a 129-byte Windows buffer including the zero ID slot. Its battery property returns unsupported. Neither this interface nor its input-only notification collection establishes wireless-receiver compatibility.
+
+[ckb-next `e22eaf2fba7f93764b4c6d4413bb83eeca75d10a`](https://github.com/ckb-next/ckb-next/blob/e22eaf2fba7f93764b4c6d4413bb83eeca75d10a/src/daemon/device_bragi.c) actively switches receivers into software mode during initialization. It does not establish battery access without changing mode. Bragi GET replies echo neither property nor transaction ID; local serialization cannot fully distinguish another application's GET on the same slot. No backend or probe commands are added. Receiver descriptors and battery, charging, offline, slot, and multiple-receiver captures without mode changes are still required. The inspected sources are AGPL-3.0 and GPL-2.0 respectively; no implementation code is imported.
+
 ## 2026-11-26: Razer receiver battery interfaces (unreleased)
 
 Pinned OpenRazer `ea55c1b5bda0b4112fcef91dd38395675151af33`: [razermouse_driver.h](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razermouse_driver.h), [razermouse_driver.c](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razermouse_driver.c), and [razerchromacommon.c](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razerchromacommon.c), GPL-2.0-or-later. Model and packet facts extend the existing local Feature transport and codec; upstream implementation code is not bundled.

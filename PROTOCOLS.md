@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：Corsair Bragi 接收器暂缓接入
+
+复核 OpenMouse `5a4f6433da3d70865d008874c7055016b336c197` 的 [IRONCLAW 抓取说明](https://github.com/OpenMouse-Project/mouse-protocol/blob/5a4f6433da3d70865d008874c7055016b336c197/captures/corsair-ironclaw-rgb-wireless/README.md) 与 [SCIMITAR 抓取说明](https://github.com/OpenMouse-Project/mouse-protocol/blob/5a4f6433da3d70865d008874c7055016b336c197/captures/corsair-scimitar-rgb-elite/README.md)。`1B1C:1BDC` 的 Windows 抓取只有运行 iCUE 时的 DPI 写入及确认，没有 GET 回复、HID 报告描述符或硬件模式电量证据；`1B66` 接收器没有该来源的流量记录。不能将型号目录当成已验证的电量通道。
+
+有完整描述符的 `1BE3` 是有线 SCIMITAR：`FF42:0001`、无编号 128 字节协议报告，对应 Windows 容量 129 字节；电量属性返回不支持。其 input-only 通知集合也不是命令通道，均不能外推到无线接收器。
+
+[ckb-next `e22eaf2fba7f93764b4c6d4413bb83eeca75d10a`](https://github.com/ckb-next/ckb-next/blob/e22eaf2fba7f93764b4c6d4413bb83eeca75d10a/src/daemon/device_bragi.c) 的接收器初始化主动切换软件模式，不能证明保持设备模式时也可读取电量。Bragi GET 回复不回显属性或事务号，进程内串行仍不能完全区分其他程序对同槽位的 GET 回复。本轮不增加后端或探测命令；后续需无线接收器描述符及不切模式的电量、充电、离线、槽位和多接收器实帧。所查上游分别为 AGPL-3.0 与 GPL-2.0，未引入其代码。
+
 ## 2026-11-26：雷蛇接收器电量接口（未发布）
 
 核对 OpenRazer `ea55c1b5bda0b4112fcef91dd38395675151af33` 的 [razermouse_driver.h](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razermouse_driver.h)、[razermouse_driver.c](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razermouse_driver.c) 与 [razerchromacommon.c](https://github.com/openrazer/openrazer/blob/ea55c1b5bda0b4112fcef91dd38395675151af33/driver/razerchromacommon.c)。所查文件为 GPL-2.0-or-later；本次仅使用型号、命令和字段事实，复用项目现有 Feature 传输及解析器，未引入第三方实现。
