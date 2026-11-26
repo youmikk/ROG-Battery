@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: THUNDEROBOT ML903 NearLink Se (unreleased)
+
+Pinned VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`: [implementation and codec](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Thunderobot), [hardware record](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/ak870-ml903.md). Attribution/MIT terms are in THIRD_PARTY_NOTICES.md and embedded through the `licenses` command.
+
+The only interrupt-output request is `A0 02`, padded to 64 bytes. The public 35% prefix is retained in the regression fixture. Known tags `0204/0211/0213/0225/0226` have payload lengths 2/4/6/1/1; `0225` is percent and `0226` is work mode, not charging. Parsing follows field boundaries and rejects unknown/duplicate tags, nonzero padding and invalid percent. It does not impose the sample's field order or search inside field contents.
+
+Upstream specifies `FFA0:2`, 64/64 and output `A0`; recorded input starts with `A1`. MI01/Col04 and Feature0 only appear in a synthetic fixture, so they are not treated as hardware invariants. Runtime descriptor proof remains mandatory. There is no local hardware validation or transaction ID; bounded draining and in-process locking cannot guarantee attribution against another driver's late traffic. Tests distinguish recorded data from synthetic cases.
+
 ## 2026-11-26: CHERRY PIXIU75 (unreleased)
 
 Pinned VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`: [CHERRY hardware notes](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/cherry.md), [CherryCodec.cs](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Cherry/CherryCodec.cs), and [CherryPlugin.cs](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Cherry/CherryPlugin.cs). The repository is MIT. This addition uses protocol facts, public response prefixes, and local transport without importing upstream implementation code.

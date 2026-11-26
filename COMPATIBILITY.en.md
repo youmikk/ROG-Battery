@@ -2,6 +2,14 @@
 
 [简体中文](COMPATIBILITY.md)
 
+## Unreleased: THUNDEROBOT ML903 NearLink Se
+
+Receiver `369B:0234 / FFA0:0002` only. Windows input/output lengths are 64 bytes; the runtime descriptor must prove sole input `A1` and output `A0`. Synthetic upstream MI/collection numbers are not treated as hardware evidence. Ambiguous collections are rejected and separate receiver instances retain separate identities.
+
+Sends only `A0 02`, parses battery tag `0225` at known field boundaries, and preserves unknown charging (`0226` is work mode). Invalid frames or silence do not imply offline or renew old measurements. Exchanges have a 1.5-second I/O budget and 32-frame cap, with existing safe cancellation cleanup.
+
+Upstream contributor evidence includes a recorded 35% prefix, 27% readings and off/on observations. Local validation is replay/synthetic only. There is no complete captured descriptor; hardware must satisfy the runtime gate. Without a transaction identifier, unrelated late replies cannot be ruled out. Firmware variants, sleep, dual receivers and official-software coexistence need hardware validation. See [protocol evidence](PROTOCOLS.en.md).
+
 ## Unreleased: CHERRY PIXIU75
 
 Adds 2.4 GHz `046A:01E4 / PIXIU75 Dongle` and wired `046A:01E2 / PIXIU 75`. Matching requires `MI_01/Col04 / FF1C:0092`, no Feature report, and descriptor proof of a single bidirectional Report `04`, 64 bytes including its ID. Ambiguous management collections are not queried; separate receivers retain independent samples.

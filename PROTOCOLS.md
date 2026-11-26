@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：雷神 ML903 NearLink Se（未发布）
+
+固定来源 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`：[实现与标签解析](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Thunderobot)、[硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/ak870-ml903.md)。MIT 归属和许可保存在 THIRD_PARTY_NOTICES.md 并通过 `licenses` 内嵌到程序。
+
+只用 64 字节中断 OUT `A0 02`。已公开输入前缀 `A1 02 04 01 11 02 11 E3 01 9B 36 02 13 31 32 33 34 35 36 02 25 23 02 26 01`，余下零填充：`0204/0211/0213/0225/0226` 长度分别 2/4/6/1/1；`0225` 为百分比，`0226` 不是充电。按字段边界解析，拒绝未知或重复标签、非零尾部及越界，不强制样本的排列顺序。标签内出现相同字节不作为新标签。
+
+上游插件声明 `FFA0:2`、64/64、输出 `A0`，实帧证明输入 `A1`；`MI01/Col04` 与 Feature0 只见合成测试，不将其作为硬件必需条件。加入独立运行时报告证明；尚无本项目真机验证。正常回复无事务号，有限排空和本进程锁不能保证与其他驱动并发时回复归属。测试分别标明公开帧和合成边界。
+
 ## 2026-11-26：CHERRY PIXIU75（未发布）
 
 固定核对 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723` 的 [CHERRY 实测记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/cherry.md)、[CherryCodec.cs](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Cherry/CherryCodec.cs) 与 [CherryPlugin.cs](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Cherry/CherryPlugin.cs)。仓库为 MIT；本次只使用协议事实、公开报文前缀和本项目既有传输，不引入上游实现。

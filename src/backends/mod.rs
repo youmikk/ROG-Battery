@@ -67,6 +67,7 @@ pub mod vgn_keyboard;
 pub mod veekos;
 pub mod xinput;
 pub mod xiberia;
+pub mod thunderobot;
 
 pub use crate::device::{Battery, BatteryLevel, Dpi};
 use crate::{device::DeviceFamily, hid::HidInterface, win32::HidApi};
@@ -133,9 +134,10 @@ pub enum BackendId {
     Xiberia,
     FifineHt6,
     StandardHid,
+    Thunderobot,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 59] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 60] = [
     BackendId::Logitech, BackendId::LogitechHeadset, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
@@ -145,7 +147,7 @@ pub const ADDITIONAL_BACKENDS: [BackendId; 59] = [
     BackendId::AtkHoltek, BackendId::FifineHt6, BackendId::MchoseK87s,
     BackendId::Lingbao, BackendId::AulaF108,
     BackendId::RapooMt560, BackendId::MchoseR9, BackendId::AulaV9Pro,
-    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::StandardHid,
+    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -211,10 +213,12 @@ impl BackendId {
             Self::Xiberia => "XIBERIA K06S",
             Self::FifineHt6 => "FIFINE HT6",
             Self::StandardHid => "Standard HID",
+            Self::Thunderobot => "THUNDEROBOT ML903 NearLink Se",
         }
     }
 
     pub fn precedes_standard(self) -> bool {
+        if self == Self::Thunderobot { return true; }
         if matches!(self, Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
             | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
             | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
@@ -229,6 +233,7 @@ impl BackendId {
 
     pub fn sample_lifetime(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
+            Self::Thunderobot => 120,
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
                 | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
@@ -250,6 +255,7 @@ impl BackendId {
     /// 被动状态采样需要及时发布到界面，不能沿用主动查询的长间隔。
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
+            Self::Thunderobot => Some(10_000),
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
                 | Self::AtkNano | Self::EweadnX87 | Self::Xiberia
@@ -560,6 +566,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::StandardHid => &standard::StandardHid,
         BackendId::Xiberia => &xiberia::Xiberia,
         BackendId::FifineHt6 => &fifine_ht6::FifineHt6,
+        BackendId::Thunderobot => &thunderobot::Thunderobot,
     };
     let mut poll = Poll { present_channels: Some(present_channels),
         ..Default::default() };

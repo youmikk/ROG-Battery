@@ -225,6 +225,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::Lingbao => &super::backends::lingbao::Lingbao,
             super::backends::BackendId::Xiberia => &super::backends::xiberia::Xiberia,
             super::backends::BackendId::FifineHt6 => &super::backends::fifine_ht6::FifineHt6,
+            super::backends::BackendId::Thunderobot => &super::backends::thunderobot::Thunderobot,
             super::backends::BackendId::Cherry => &super::backends::cherry::Cherry,
             super::backends::BackendId::Lofree => &super::backends::lofree::Lofree,
             super::backends::BackendId::Nova => &super::backends::steelseries::Nova,

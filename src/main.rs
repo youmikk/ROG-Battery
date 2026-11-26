@@ -43,6 +43,7 @@ const USAGE: &str = r#"x-battery.exe —— X-Battery 外设电量与 ROG 鼠标
 
 用法：
   x-battery.exe version                       打印版本号（和 GitHub tag 一致）
+  x-battery.exe licenses                      显示随程序内嵌的第三方许可
   x-battery.exe devices                       多品牌只读设备与电量列表
   x-battery.exe device-report                 输出不含序列号与接口路径的适配报告
   x-battery.exe device-report --probe         只读探测电量/DPI并导出同次运行的脱敏报告
@@ -139,6 +140,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let cmd = pos[0];
+    if cmd == "licenses" {
+        print!("{}", include_str!("../THIRD_PARTY_NOTICES.md"));
+        return ExitCode::SUCCESS;
+    }
     if cmd == "device-report" {
         return match if args.iter().any(|arg| arg == "--probe") { feedback::collect_probe() } else { feedback::collect() } {
             Ok(report) => { print!("{report}"); ExitCode::SUCCESS }
