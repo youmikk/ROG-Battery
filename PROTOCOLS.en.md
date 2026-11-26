@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: HyperX Cloud II Wireless (unreleased)
+
+[HeadsetControl `32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a`](https://github.com/Sapd/HeadsetControl/blob/32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a/lib/devices/hyperx_cloud_2_wireless.hpp) supplies both HP product IDs, interface 0, `FF90:0303`, Report `06`, 52-byte requests, 20-byte replies, commands, and fields. Its buffer sizes are not a Windows descriptor capture for this project. Runtime per-report descriptor checks independently require those exact capacities before sending queries.
+
+[HyperHeadset `3652a5de38c100842e4b2f882af0e04897804638`](https://github.com/LennardKittner/HyperHeadset/blob/3652a5de38c100842e4b2f882af0e04897804638/src/devices/cloud_ii_wireless_dts.rs) corroborates queries `02/03` and explicitly records that connection query `01` resets mute and other state; that command is excluded. Charging values 0/1/2 come from [devices/mod.rs](https://github.com/LennardKittner/HyperHeadset/blob/3652a5de38c100842e4b2f882af0e04897804638/src/devices/mod.rs) at the same commit. Unknown values remain unknown; independently confirmed charging can be displayed when percentage retrieval fails.
+
+The inspected sources are GPL-3.0 and MIT respectively. Protocol facts extend this project's existing HID transport, state, and diagnostics without importing upstream implementation code. Synthetic tests do not establish Windows hardware compatibility. Requiring non-placeholder voltage alongside zero percent protects against zero-filled ambiguity; it is not a verified offline code. The existing Alpha 2 path is retained, and the expanded provider display name keeps the persistent `HyperX Alpha 2` key prefix.
+
 ## 2026-11-26: Corsair Bragi receiver integration deferred
 
 Rechecked the [IRONCLAW capture](https://github.com/OpenMouse-Project/mouse-protocol/blob/5a4f6433da3d70865d008874c7055016b336c197/captures/corsair-ironclaw-rgb-wireless/README.md) and [SCIMITAR capture](https://github.com/OpenMouse-Project/mouse-protocol/blob/5a4f6433da3d70865d008874c7055016b336c197/captures/corsair-scimitar-rgb-elite/README.md) at OpenMouse `5a4f6433da3d70865d008874c7055016b336c197`. The Windows capture for `1B1C:1BDC` contains DPI writes and acknowledgements while iCUE was running, without GET replies, HID report descriptors, or hardware-mode battery evidence. That source has no traffic from receiver `1B66`. Catalog entries do not establish a verified battery channel.

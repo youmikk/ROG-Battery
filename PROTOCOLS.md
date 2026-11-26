@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：HyperX Cloud II Wireless（未发布）
+
+核对 [HeadsetControl `32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a`](https://github.com/Sapd/HeadsetControl/blob/32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a/lib/devices/hyperx_cloud_2_wireless.hpp) 的两个 HP PID、接口 0、`FF90:0303`、Report `06`、52 字节请求及 20 字节回复、命令和字段。该实现的缓冲区长度不是本项目的 Windows 描述符抓取，因此运行时另用逐报告描述符证明精确容量；不兼容的集合不发送查询。
+
+[HyperHeadset `3652a5de38c100842e4b2f882af0e04897804638`](https://github.com/LennardKittner/HyperHeadset/blob/3652a5de38c100842e4b2f882af0e04897804638/src/devices/cloud_ii_wireless_dts.rs) 交叉核对 `02/03` 查询，并明确记录 `01` 连接查询会重置静音等状态，故排除该命令。充电 0/1/2 的含义来自同提交的 [devices/mod.rs](https://github.com/LennardKittner/HyperHeadset/blob/3652a5de38c100842e4b2f882af0e04897804638/src/devices/mod.rs)。未知值不推断为未充电，百分比回复不成功时独立的明确充电状态仍可显示。
+
+所查源码分别为 GPL-3.0 与 MIT。本次复用本项目 HID 传输、状态和诊断层，独立编码协议事实，没有引入上游实现。合成测试不证明 Windows 接收器实机兼容；零百分比的非占位电压门禁是本项目对零填充歧义的保护，不是已验证的离线编码。旧 Alpha 2 路径保留，后端显示名扩展但持久键仍使用 `HyperX Alpha 2`。
+
 ## 2026-11-26：Corsair Bragi 接收器暂缓接入
 
 复核 OpenMouse `5a4f6433da3d70865d008874c7055016b336c197` 的 [IRONCLAW 抓取说明](https://github.com/OpenMouse-Project/mouse-protocol/blob/5a4f6433da3d70865d008874c7055016b336c197/captures/corsair-ironclaw-rgb-wireless/README.md) 与 [SCIMITAR 抓取说明](https://github.com/OpenMouse-Project/mouse-protocol/blob/5a4f6433da3d70865d008874c7055016b336c197/captures/corsair-scimitar-rgb-elite/README.md)。`1B1C:1BDC` 的 Windows 抓取只有运行 iCUE 时的 DPI 写入及确认，没有 GET 回复、HID 报告描述符或硬件模式电量证据；`1B66` 接收器没有该来源的流量记录。不能将型号目录当成已验证的电量通道。

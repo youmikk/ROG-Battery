@@ -2,6 +2,14 @@
 
 [简体中文](COMPATIBILITY.md)
 
+## Unreleased: HyperX Cloud II Wireless
+
+Adds read-only battery and charging queries for HP receivers `03F0:0696/018B`. Matching requires `MI_00 / FF90:0303` and descriptor proof of a single Report `06`, 20-byte input and 52-byte output, both including the report ID. Ambiguous control collections are not probed; separate receivers retain independent identities and samples.
+
+Only battery `06 FF BB 02` and charging `06 FF BB 03` are sent. Connection command `01`, which can change mute state, and audio settings are excluded. Percentage is byte 7 and voltage is big-endian bytes 5/6; zero percent also requires non-placeholder voltage. Zero-filled or invalid replies do not renew measurements. Charging values 0/1/2 mean not charging, charging, and fully charged; other values remain unknown. A confirmed charging report without a usable percentage produces charging-only state, never an invented full battery.
+
+Silence does not establish disconnection. Samples expire after 120 seconds; removal and recovery use the common lifecycle. Cloud Alpha 2 queries and existing preference/history keys remain unchanged. Upstream implementations establish protocol facts, but this project has no Windows descriptor capture or hardware test for either receiver. Descriptor eligibility, real zero percent, power-off caching, mute preservation, charging, and multiple devices still require hardware validation. See [protocol evidence](PROTOCOLS.en.md).
+
 ## Unreleased: battery interface additions for four Razer receivers
 
 Adds a read-only battery path when Windows advertises no Feature report length:

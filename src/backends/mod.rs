@@ -204,7 +204,7 @@ impl BackendId {
             Self::Lofree => "Lofree HYZEN",
             Self::Nova => "SteelSeries Arctis",
             Self::Inzone => "Sony INZONE",
-            Self::HyperX => "HyperX Alpha 2",
+            Self::HyperX => "HyperX headset",
             Self::DualSense => "Sony DualSense",
             Self::XInput => "XInput",
             Self::Bluetooth => "Bluetooth",
@@ -347,6 +347,7 @@ impl Target {
         let key_prefix = match backend {
             BackendId::VgnDragonfly3 => "VGN Dragonfly3 SE",
             BackendId::Nova => "Arctis Nova",
+            BackendId::HyperX => "HyperX Alpha 2",
             _ => backend.name(),
         };
         Self {
@@ -844,6 +845,7 @@ mod tests {
         for (backend, prefix) in [
             (BackendId::Nova, "Arctis Nova"),
             (BackendId::VgnDragonfly3, "VGN Dragonfly3 SE"),
+            (BackendId::HyperX, "HyperX Alpha 2"),
         ] {
             let mut target = reading(backend).target;
             target.hid_mut().path = "HID#Existing-Receiver".into();

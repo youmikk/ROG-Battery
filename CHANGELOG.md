@@ -4,6 +4,7 @@
 
 ### 适配与优化
 
+- 新增 HyperX Cloud II Wireless 两种 HP 接收器的只读电量、充电与电压查询，保留 Cloud Alpha 2 行为及旧设备偏好。
 - 补齐雷蛇 Naga V2 HyperSpeed、Basilisk V3 X HyperSpeed、DeathAdder V3 HyperSpeed、Basilisk V3 Pro 35K 接收器的只读电量接口，保留原有接口读取能力。
 - 新增赛睿 Arctis 7+、7P+、7X+ 只读电量适配，五档电量显示为估算值。
 - 新增迈从 V7 Pro 接收器只读电量适配，补齐 A7 V3 Ultra+ 接收器的 Windows 描述符兼容。
