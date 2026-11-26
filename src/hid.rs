@@ -343,7 +343,6 @@ fn read_hid_string_with(which: u8, read: impl FnOnce(u8, &mut [u16], u32) -> u8)
 /// 查询描述符公开的 Feature/Input report，使用零访问权限与可取消的 I/O。
 /// 不需要取得系统键盘/鼠标的输入流访问权限，也不会写 Output report。
 pub fn query_report(iface: &HidInterface, report_id: u8, feature: bool, timeout_ms: u32) -> Option<Vec<u8>> {
-    use winapi::shared::hidclass::{IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_INPUT_REPORT};
     let length = if feature { iface.feature_len } else { iface.input_len } as usize;
     if length == 0 { return None; }
     let path = to_wide(&iface.path);
@@ -352,6 +351,18 @@ pub fn query_report(iface: &HidInterface, report_id: u8, feature: bool, timeout_
     if handle.is_null() || handle == INVALID_HANDLE_VALUE { return None; }
     let event = unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) };
     if event.is_null() || event == INVALID_HANDLE_VALUE { unsafe { CloseHandle(handle); } return None; }
+    let result = query_report_with_handles(handle, event, length, report_id, feature, timeout_ms);
+    unsafe { CloseHandle(event); CloseHandle(handle); }
+    crate::capture::record(&iface.path, if feature { "get-feature" } else { "get-input" },
+        result.as_deref().unwrap_or_default(), result.is_some());
+    result
+}
+
+pub(crate) fn query_report_with_handles(handle: Handle, event: Handle, length: usize,
+    report_id: u8, feature: bool, timeout_ms: u32) -> Option<Vec<u8>> {
+    use winapi::shared::hidclass::{IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_INPUT_REPORT};
+    if length == 0 || handle.is_null() || handle == INVALID_HANDLE_VALUE
+        || event.is_null() || event == INVALID_HANDLE_VALUE { return None; }
     let mut report = vec![0u8; length];
     report[0] = report_id;
     let mut overlapped = Overlapped { h_event: event, ..Default::default() };
@@ -376,7 +387,6 @@ pub fn query_report(iface: &HidInterface, report_id: u8, feature: bool, timeout_
         report.truncate(actual);
         Some(report)
     })();
-    unsafe { CloseHandle(event); CloseHandle(handle); }
     result
 }
 

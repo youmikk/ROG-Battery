@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：AKG N9 Hybrid（未发布）
+
+固定 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`：[AKG 源码](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Akg)、[硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/akg.md)、[完整 50% 样本及测试](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/tests/VigilWatt.Core.Tests/AkgN9Tests.cs)。原作者 endermiteDOTcn / PR44，MIT 许可见 THIRD_PARTY_NOTICES.md。未运行上游程序或硬件脚本。
+
+62 字节固定请求 `06 07 80 05 5A 03 00 D6 0C 00`，后补零。控制输入为 `07 <有效长度0–59> 80 <片段> <旧尾部>`；RACE 消息 `05 <5B/5C/5D> <长度LE16> <命令LE16> <参数>`，总长 6–1024。成功 ACK 为 `05 5B 03 00 D6 0C 00`；结果 `05 5D 05 00 D6 0C 00 00 <百分比>`。要求当前阶段 ACK、状态0、角色0，不把 ACK 或尾部缓存读成电量。
+
+共享控制读取实现支持复用句柄；AKG 整次空闲检测、写入、响应读取共用自身句柄/事件，避免每 50ms 重开。普通 `query_report` 包装层仍保持原有生命周期。分片和 ACK 状态每次查询重置，重复快照只比较有效字节；没有事务号，连续相同分片和迟到结果存在固有限制。公开样本证明特定硬件的行为，不将 GET_INPUT_REPORT 普遍当消息队列。
+
 ## 2026-11-26：雷神 ML903 NearLink Se（未发布）
 
 固定来源 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`：[实现与标签解析](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Thunderobot)、[硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/ak870-ml903.md)。MIT 归属和许可保存在 THIRD_PARTY_NOTICES.md 并通过 `licenses` 内嵌到程序。

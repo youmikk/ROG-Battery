@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: AKG N9 Hybrid (unreleased)
+
+Pinned VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`: [AKG source](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Akg), [hardware evidence](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/akg.md), [full 50% fixture/tests](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/tests/VigilWatt.Core.Tests/AkgN9Tests.cs). Upstream credits endermiteDOTcn / PR44; MIT notice is retained in THIRD_PARTY_NOTICES.md. No upstream software or hardware scripts were executed.
+
+Fixed 62-byte request: `06 07 80 05 5A 03 00 D6 0C 00`, zero padded. Control input: `07 <valid length 0–59> 80 <fragment> <stale tail>`. RACE messages: `05 <5B/5C/5D> <length LE16> <command LE16> <parameters>`, total size 6–1024. ACK: `05 5B 03 00 D6 0C 00`; result: `05 5D 05 00 D6 0C 00 00 <percent>`. Requires this phase's ACK, zero status and target role; ACKs and stale tails are never battery readings.
+
+The shared control-read implementation accepts retained handles. AKG uses the same owned handle/event for idle detection, output and responses instead of reopening every 50ms; the existing `query_report` wrapper retains its original lifetime. Fragment and ACK state reset per query; only valid bytes participate in duplicate detection. Identical fragments and late results remain ambiguous without transaction identifiers. Device-specific observations do not make GET_INPUT_REPORT a universal message queue.
+
 ## 2026-11-26: THUNDEROBOT ML903 NearLink Se (unreleased)
 
 Pinned VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`: [implementation and codec](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Thunderobot), [hardware record](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/ak870-ml903.md). Attribution/MIT terms are in THIRD_PARTY_NOTICES.md and embedded through the `licenses` command.

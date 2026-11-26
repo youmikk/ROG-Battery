@@ -2,6 +2,16 @@
 
 [简体中文](COMPATIBILITY.md)
 
+## Unreleased: AKG N9 Hybrid
+
+Receiver `0ECB:20D9 / MI_03 / Col02 / FF13:0001` only, 62-byte numbered input/output reports and no Feature report. The descriptor must prove sole Input07/Output06. Ambiguous management collections are rejected; receiver instances retain separate keys.
+
+Uses a retained handle for control `GET_INPUT_REPORT(07)` to establish idle, followed by one fixed interrupt-output battery query. Ordinary interrupt input is not a substitute. Parses declared fragments, ignores stale tails, requires the current query's successful ACK before a `0CD6` result, accepts 0–100%, and leaves charging unknown. Invalid or silent queries do not publish stale readings or guessed offline states.
+
+Normal default polling is once per minute; user refresh, configured cadence or wake probing may shorten it. Measurements expire after 180 seconds. Idle is bounded by 1 second/20 reads; response by 3 seconds/60 reads; each native I/O wait by 500ms, messages by 1024 bytes. Cancellation cleanup is not a hard real-time guarantee.
+
+Upstream evidence includes a full recorded 50% report and six natural polls at 100%. All 19 local replay/synthetic tests pass, but no local hardware validation exists. No transaction number distinguishes old results after a new ACK. Official-software coexistence, discharge, power cycling and dual receivers need hardware checks. Wired USB and Bluetooth modes remain outside scope. See [protocol evidence](PROTOCOLS.en.md).
+
 ## Unreleased: THUNDEROBOT ML903 NearLink Se
 
 Receiver `369B:0234 / FFA0:0002` only. Windows input/output lengths are 64 bytes; the runtime descriptor must prove sole input `A1` and output `A0`. Synthetic upstream MI/collection numbers are not treated as hardware evidence. Ambiguous collections are rejected and separate receiver instances retain separate identities.
