@@ -2,6 +2,8 @@
 
 [English](COMPATIBILITY.en.md)
 
+本轮 VigilWatt 来源适配的实现、上游记录与实机待验项目见 [适配证据索引](ADAPTATION_EVIDENCE.md)。
+
 ## 未发布：AKG N9 Hybrid
 
 仅接收器 `0ECB:20D9 / MI_03 / Col02 / FF13:0001`。输入输出都是包含 ID 的 62 字节，Feature0；运行时描述符证明唯一 Input07/Output06。多管理集合有歧义时拒绝查询，同型号接收器按 Windows 实例隔离。

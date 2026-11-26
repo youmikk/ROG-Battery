@@ -2,6 +2,8 @@
 
 [简体中文](COMPATIBILITY.md)
 
+Implementation status, upstream records and remaining hardware checks for this VigilWatt iteration are in the [evidence index](ADAPTATION_EVIDENCE.md).
+
 ## Unreleased: AKG N9 Hybrid
 
 Receiver `0ECB:20D9 / MI_03 / Col02 / FF13:0001` only, 62-byte numbered input/output reports and no Feature report. The descriptor must prove sole Input07/Output06. Ambiguous management collections are rejected; receiver instances retain separate keys.
