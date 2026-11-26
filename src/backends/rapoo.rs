@@ -630,7 +630,8 @@ mod tests {
         assert_eq!(state.recent(started + Duration::from_secs(3)).unwrap().1.as_ref().unwrap().0.percent, Some(75));
         state.receive(&report(), started + Duration::from_secs(3));
         assert!(state.recent(started + Duration::from_secs(10)).is_some());
-        assert!(state.recent(started + Duration::from_secs(11)).is_none());
+        assert!(state.recent(started + Duration::from_secs(3) + SAMPLE_LIFETIME - Duration::from_secs(1)).is_some());
+        assert!(state.recent(started + Duration::from_secs(3) + SAMPLE_LIFETIME).is_none());
     }
 
     #[test]
