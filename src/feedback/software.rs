@@ -69,6 +69,13 @@ fn operation(value: &str) -> &'static str {
         "store_update_save_failed" => "store_update_save_failed",
         "store_update_cache_failed" => "store_update_cache_failed",
         "store_restart_registration_failed" => "store_restart_registration_failed",
+        "store_update_started" => "store_update_started",
+        "store_update_installed" => "store_update_installed",
+        "store_update_canceled" => "store_update_canceled",
+        "store_update_failed" => "store_update_failed",
+        "store_restart_failed" => "store_restart_failed",
+        "store_restart_activated" => "store_restart_activated",
+        "store_restart_helper_failed" => "store_restart_helper_failed",
         "low_battery_notification_failed" => "low_battery_notification_failed",
         "taskbar_widget_unavailable" => "taskbar_widget_unavailable",
         "taskbar_widget_position_failed" => "taskbar_widget_position_failed",
@@ -131,7 +138,7 @@ fn known_source(path: &str) -> bool {
         "src/feedback" => &["client", "inventory", "software"],
         "src/diagnostics" => &["readings"],
         "src/history" => &["devices", "format", "predict", "store", "tracker"],
-        "src/store" => &["api", "mod", "state"],
+        "src/store" => &["api", "mod", "restart", "state"],
         "src/autostart" => &["startup"],
         "src/cli" => &["quick"],
         "src/i18n" => &["catalog"],
@@ -476,7 +483,8 @@ mod tests {
     fn every_current_event_call_has_an_explicit_operation() {
         for source in [include_str!("../gui.rs"), include_str!("../settings.rs"),
             include_str!("client.rs"), include_str!("../taskbar_widget.rs"),
-            include_str!("../store/api.rs"), include_str!("../store/mod.rs")] {
+            include_str!("../store/api.rs"), include_str!("../store/mod.rs"),
+            include_str!("../store/restart.rs"), include_str!("../main.rs")] {
             for call in source.split("diagnostics::event").skip(1) {
                 let argument = call.split_once('(').unwrap().1.trim_start().strip_prefix('"').unwrap();
                 let name = argument.split_once('"').unwrap().0;

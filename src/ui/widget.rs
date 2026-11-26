@@ -226,8 +226,8 @@ pub enum Act {
     OpenRepo,
     /// 设置页「关于」：检查更新入口。
     CheckUpdate,
-    DownloadUpdate,
-    InstallUpdate,
+    UpdateNow,
+    RestartUpdatedApp,
     DismissUpdate,
     CancelUpdate,
     ExitToStoreUpdate,
@@ -474,6 +474,7 @@ pub struct Ui {
     pub hover_btn: Option<crate::ui::titlebar::Btn>,
     /// 是否弹出「关闭窗口」确认对话框。
     pub show_close_dialog: bool,
+    pub show_update_dialog: bool,
     /// 关闭对话框里的单选项。
     pub close_choice: CloseChoice,
     /// 关闭对话框里的「记住我的选择」复选框。
@@ -546,6 +547,7 @@ impl Default for Ui {
             custom_hue: 0.0,
             hover_btn: None,
             show_close_dialog: false,
+            show_update_dialog: false,
             close_choice: CloseChoice::Minimize,
             close_remember: false,
             locked: false,
@@ -557,6 +559,17 @@ impl Default for Ui {
 impl Ui {
     pub fn show_home_update(&self, view: &crate::store::View) -> bool {
         self.page == Page::Home && view.home_visible
+    }
+
+    pub fn can_prompt_update(&self, main_active: bool) -> bool {
+        main_active && self.page == Page::Home && !self.show_close_dialog
+            && !self.show_update_dialog && self.focus.is_none()
+            && self.open_drop.is_none() && self.pressed.is_none() && self.device_drag.is_none()
+    }
+
+    pub fn open_after_update(&mut self) {
+        self.page = Page::Home;
+        self.initial_route_done = true;
     }
 
     pub fn sync_devices(&mut self, devices: &[crate::device::DeviceReading]) {
@@ -817,7 +830,7 @@ impl Ui {
 
     pub fn hit(&self, x: f32, y: f32, scroll: f32) -> Option<Act> {
         // 关闭确认模态对话框优先独占所有交互
-        if self.show_close_dialog {
+        if self.show_close_dialog || self.show_update_dialog {
             for h in self.dialog_hots.iter().rev() {
                 if h.rect.contains(x, y) {
                     return Some(h.act);
@@ -868,6 +881,7 @@ impl Ui {
     /// 返回是否需要重绘。滚动量夹在 `[0, content_h - view_h]` ——
     /// 不夹的话能滚出一片空白，看起来像程序没画完。
     pub fn wheel(&mut self, delta_ticks: f32, view_h: f32) -> bool {
+        if self.show_update_dialog { return false; }
         let p = self.page;
         let max = (self.content_h(p) - view_h).max(0.0);
         let s = self.scroll_mut(p);
@@ -1132,8 +1146,53 @@ mod drag_tests {
     }
 
     #[test]
+    fn update_prompt_requires_an_idle_foreground_home_page() {
+        let mut ui = Ui::default();
+        assert!(ui.can_prompt_update(true));
+        assert!(!ui.can_prompt_update(false));
+        for page in [Page::Battery, Page::Perf, Page::Light, Page::Keys, Page::Settings] {
+            ui.page = page;
+            assert!(!ui.can_prompt_update(true));
+        }
+        ui.page = Page::Home;
+        ui.show_close_dialog = true;
+        assert!(!ui.can_prompt_update(true));
+        ui.show_close_dialog = false;
+        ui.locked = true;
+        assert!(ui.can_prompt_update(true));
+        ui.locked = false;
+        ui.pressed = Some(Act::UpdateNow);
+        assert!(!ui.can_prompt_update(true));
+        ui.pressed = None;
+        ui.show_update_dialog = true;
+        assert!(!ui.can_prompt_update(true));
+    }
+
+    #[test]
+    fn update_dialog_consumes_clicks_and_scroll_outside_its_buttons() {
+        let mut ui = Ui::default();
+        ui.show_update_dialog = true;
+        ui.dialog_hot(R::new(100.0, 100.0, 100.0, 32.0), Act::UpdateNow);
+        assert_eq!(ui.hit(120.0, 110.0, 500.0), Some(Act::UpdateNow));
+        assert_eq!(ui.hit(10.0, 10.0, 500.0), Some(Act::None));
+        assert!(!ui.wheel(-1.0, 100.0));
+        ui.on_press(120.0, 110.0, 0.0);
+        assert_eq!(ui.on_release(10.0, 10.0, 0.0), None);
+    }
+
+    #[test]
+    fn updated_launch_stays_on_home_when_a_single_device_arrives_later() {
+        let mut ui = Ui::default();
+        ui.open_after_update();
+        ui.sync_devices(&[]);
+        ui.sync_devices(&readings(&["mouse"]));
+        assert_eq!(ui.page, Page::Home);
+        assert!(ui.initial_route_done);
+    }
+
+    #[test]
     fn update_and_review_actions_work_without_a_device() {
-        for action in [Act::CheckUpdate, Act::DownloadUpdate, Act::InstallUpdate,
+        for action in [Act::CheckUpdate, Act::UpdateNow, Act::RestartUpdatedApp,
             Act::CancelUpdate, Act::DismissUpdate, Act::ExitToStoreUpdate, Act::ReviewStore] {
             assert!(!action.needs_device());
         }

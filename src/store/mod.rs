@@ -1,17 +1,19 @@
 mod api;
 mod state;
+pub mod restart;
 
 use api::{Api, Completion, Pending};
 use state::{local_day, CheckKind, Record, State};
 pub use state::{Failure, Phase, View};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Services::Store::StorePackageUpdate;
 
 pub const PRODUCT_URL: &str = "ms-windows-store://pdp/?ProductId=9NRC8HCD4BZ7";
 pub const REVIEW_URL: &str = "ms-windows-store://review/?ProductId=9NRC8HCD4BZ7";
 pub const UPDATES_URL: &str = "ms-windows-store://downloadsandupdates";
+pub const RESTART_ARG: &str = "--updated";
 
 struct Inner {
     state: State,
@@ -26,6 +28,8 @@ pub struct Controller {
     api: RefCell<Option<Api>>,
     in_api: Cell<bool>,
     started: Cell<bool>,
+    created_at: Instant,
+    restart: RefCell<Option<restart::Job>>,
 }
 
 fn load_record(path: &std::path::Path, version: &str) -> Record {
@@ -42,6 +46,13 @@ fn load_record(path: &std::path::Path, version: &str) -> Record {
 
 impl Controller {
     #[cfg(test)]
+    pub(crate) fn for_test_phase(phase: Phase) -> Self {
+        let controller = Self::for_test();
+        controller.inner.borrow_mut().state.phase = phase;
+        controller
+    }
+
+    #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         Self {
             hwnd: std::ptr::null_mut(),
@@ -57,6 +68,8 @@ impl Controller {
             api: RefCell::new(None),
             in_api: Cell::new(false),
             started: Cell::new(false),
+            created_at: Instant::now() - Duration::from_secs(60),
+            restart: RefCell::new(None),
         }
     }
 
@@ -82,6 +95,8 @@ impl Controller {
             api: RefCell::new(None),
             in_api: Cell::new(false),
             started: Cell::new(false),
+            created_at: Instant::now(),
+            restart: RefCell::new(None),
         }
     }
 
@@ -143,31 +158,27 @@ impl Controller {
         self.start_check(CheckKind::Manual);
     }
 
-    pub fn download(&self) {
-        self.start_check(CheckKind::BeforeDownload);
+    pub fn update(&self) {
+        if !self.view().available { return; }
+        self.start_check(CheckKind::BeforeUpdate);
     }
 
-    fn start_transfer(&self, install: bool) {
+    fn start_transfer(&self) {
         let updates = {
             let mut inner = self.inner.borrow_mut();
-            inner.state.phase = if install {
-                Phase::Installing
-            } else {
-                Phase::Downloading
-            };
+            inner.state.phase = Phase::Installing;
             inner.state.failure = None;
             inner.updates.clone()
         };
-        match self.with_api(|api| api.transfer(&updates, install)) {
+        match self.with_api(|api| api.update(&updates)) {
             Ok(pending) => self.inner.borrow_mut().pending = Some(pending),
             Err(error) => {
+                crate::diagnostics::event("store_update_failed", &error.diagnostic());
                 let mut inner = self.inner.borrow_mut();
                 inner.state.phase = Phase::UpdateFailed;
                 inner.state.failure = Some(error);
                 drop(inner);
-                if install {
-                    api::unregister_restart();
-                }
+                api::unregister_restart();
             }
         }
     }
@@ -177,7 +188,7 @@ impl Controller {
             return false;
         }
         let mut inner = self.inner.borrow_mut();
-        if inner.state.phase != Phase::ReadyToInstall || inner.updates.is_empty() {
+        if inner.state.phase != Phase::AwaitingPreparation || inner.updates.is_empty() {
             return false;
         }
         inner.state.phase = Phase::Preparing;
@@ -185,27 +196,67 @@ impl Controller {
     }
 
     pub fn install(&self) {
-        if self.inner.borrow().state.phase != Phase::Preparing {
+        if self.inner.borrow().state.phase != Phase::Preparing || !self.restart_ready() {
             return;
         }
-        api::register_restart();
-        self.start_transfer(true);
+        if let Err(error) = api::register_restart() {
+            crate::diagnostics::event("store_restart_registration_failed", &error.diagnostic());
+            let mut inner = self.inner.borrow_mut();
+            inner.state.phase = Phase::UpdateFailed;
+            inner.state.failure = Some(error);
+            return;
+        }
+        self.start_transfer();
+    }
+
+    pub fn restart_ready(&self) -> bool {
+        self.created_at.elapsed() >= Duration::from_secs(60)
     }
 
     pub fn preparation_failed(&self) {
-        self.inner.borrow_mut().state.phase = Phase::ReadyToInstall;
+        self.inner.borrow_mut().state.phase = Phase::UpdateFailed;
+    }
+
+    pub fn preparation_canceled(&self) {
+        crate::diagnostics::event("store_update_canceled", "preparation");
+        self.inner.borrow_mut().state.phase = Phase::Canceled;
+    }
+
+    pub fn restart(&self) {
+        if !matches!(self.view().phase, Phase::Installed | Phase::RestartFailed)
+            || self.restart.borrow().is_some() { return; }
+        let result = restart::Job::start();
+        match result {
+            Ok(job) => {
+                self.restart.replace(Some(job));
+                self.inner.borrow_mut().state.phase = Phase::Installed;
+            }
+            Err(error) => self.restart_failed(&error),
+        }
+    }
+
+    fn restart_failed(&self, error: &str) {
+        crate::diagnostics::event("store_restart_failed", error);
+        self.inner.borrow_mut().state.phase = Phase::RestartFailed;
+        api::unregister_restart();
     }
 
     pub fn installing(&self) -> bool {
         matches!(
             self.inner.borrow().state.phase,
-            Phase::Preparing | Phase::Installing
+            Phase::Preparing | Phase::Installing | Phase::Installed | Phase::Restarting
         )
     }
 
     pub fn dismiss(&self) {
         self.inner.borrow_mut().state.dismiss(local_day());
         self.save();
+    }
+
+    pub fn take_prompt(&self, home_active: bool) -> bool {
+        let show = self.inner.borrow_mut().state.take_prompt(home_active, local_day());
+        if show { self.save(); }
+        show
     }
 
     pub fn cancel(&self) {
@@ -222,7 +273,7 @@ impl Controller {
         inner.state.failure = None;
     }
 
-    pub fn tick(&self, main_active: bool) -> bool {
+    pub fn tick(&self) -> bool {
         if self.in_api.get() {
             return false;
         }
@@ -241,17 +292,17 @@ impl Controller {
                     drop(inner);
                     self.save();
                 }
-                Ok(Some(Completion::Downloaded)) => {
-                    self.inner.borrow_mut().state.phase = Phase::ReadyToInstall
-                }
                 Ok(Some(Completion::Installed)) => {
+                    crate::diagnostics::event("store_update_installed", "Store operation completed");
                     let mut inner = self.inner.borrow_mut();
                     inner.state.phase = Phase::Installed;
                     inner.state.record.available = false;
                     drop(inner);
                     self.save();
+                    self.restart();
                 }
                 Ok(Some(Completion::Canceled)) => {
+                    crate::diagnostics::event("store_update_canceled", "Store operation canceled");
                     let installing = self.installing();
                     let mut inner = self.inner.borrow_mut();
                     inner.state.phase = Phase::Canceled;
@@ -263,6 +314,7 @@ impl Controller {
                     }
                 }
                 Err(error) => {
+                    crate::diagnostics::event("store_update_failed", &error.diagnostic());
                     let mut inner = self.inner.borrow_mut();
                     let installing = inner.state.phase == Phase::Installing;
                     if inner.state.phase == Phase::Checking {
@@ -281,13 +333,22 @@ impl Controller {
         if self.inner.borrow().state.retry_due(Instant::now()) {
             self.start_check(CheckKind::Automatic);
         }
-        if main_active && self.inner.borrow().state.phase == Phase::WaitingToDownload {
-            self.start_transfer(false);
+        let restart = self.restart.borrow_mut().take();
+        if let Some(mut job) = restart {
+            match job.poll() {
+                Ok(false) => { self.restart.replace(Some(job)); }
+                Ok(true) => {
+                    api::unregister_restart();
+                    self.inner.borrow_mut().state.phase = Phase::Restarting;
+                }
+                Err(error) => self.restart_failed(&error),
+            }
         }
         before != self.view()
     }
 
     pub fn shutdown(&self) {
+        self.restart.replace(None);
         let pending = self.inner.borrow_mut().pending.take();
         if let Some(pending) = pending {
             if !self.installing() {
@@ -321,5 +382,17 @@ mod tests {
             "ms-windows-store://review/?ProductId=9NRC8HCD4BZ7"
         );
         assert_eq!(UPDATES_URL, "ms-windows-store://downloadsandupdates");
+    }
+
+    #[test]
+    fn installation_waits_for_restart_manager_minimum_runtime() {
+        let mut controller = Controller::for_test_phase(Phase::Preparing);
+        controller.created_at = Instant::now();
+        assert!(!controller.restart_ready());
+        controller.install();
+        assert_eq!(controller.view().phase, Phase::Preparing);
+        assert!(controller.inner.borrow().pending.is_none());
+        controller.created_at -= Duration::from_secs(60);
+        assert!(controller.restart_ready());
     }
 }

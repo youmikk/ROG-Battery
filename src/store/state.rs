@@ -11,12 +11,12 @@ pub enum Phase {
     Available,
     Current,
     CheckFailed,
-    WaitingToDownload,
-    Downloading,
-    ReadyToInstall,
+    AwaitingPreparation,
     Preparing,
     Installing,
     Installed,
+    Restarting,
+    RestartFailed,
     Canceled,
     UpdateFailed,
 }
@@ -26,10 +26,11 @@ impl Phase {
         matches!(
             self,
             Self::Checking
-                | Self::WaitingToDownload
-                | Self::Downloading
+                | Self::AwaitingPreparation
                 | Self::Preparing
                 | Self::Installing
+                | Self::Installed
+                | Self::Restarting
         )
     }
 }
@@ -42,6 +43,15 @@ pub enum Failure {
     WifiRecommended,
     WifiRequired,
     Unexpected,
+}
+
+impl Failure {
+    pub fn diagnostic(self) -> String {
+        match self {
+            Self::Windows(code) => format!("HRESULT=0x{:08X}", code as u32),
+            _ => format!("{self:?}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +72,7 @@ pub struct Record {
     pub last_checked_day: Option<u32>,
     pub available: bool,
     pub dismissed_day: Option<u32>,
+    pub prompted_day: Option<u32>,
 }
 
 impl Record {
@@ -82,7 +93,7 @@ impl Record {
 pub enum CheckKind {
     Automatic,
     Manual,
-    BeforeDownload,
+    BeforeUpdate,
 }
 
 pub struct State {
@@ -141,11 +152,15 @@ impl State {
         self.failure = None;
         self.phase = if !available {
             Phase::Current
-        } else if self.check_kind == CheckKind::BeforeDownload {
-            Phase::WaitingToDownload
+        } else if self.check_kind == CheckKind::BeforeUpdate {
+            Phase::AwaitingPreparation
         } else {
             Phase::Available
         };
+        if self.check_kind == CheckKind::Manual {
+            self.record.dismissed_day = None;
+            self.record.prompted_day = None;
+        }
     }
 
     pub fn check_failed(&mut self, failure: Failure, now: Instant) {
@@ -174,8 +189,17 @@ impl State {
         self.record.dismissed_day = Some(day);
     }
 
+    pub fn take_prompt(&mut self, home_active: bool, day: u32) -> bool {
+        if !home_active || self.phase != Phase::Available || !self.view(day).home_visible
+            || self.record.prompted_day == Some(day) {
+            return false;
+        }
+        self.record.prompted_day = Some(day);
+        true
+    }
+
     pub fn view(&self, day: u32) -> View {
-        let home_visible = self.record.available
+        let home_visible = (self.record.available || self.phase == Phase::RestartFailed)
             && self.record.dismissed_day != Some(day)
             && self.phase != Phase::Unsupported
             && self.phase != Phase::Installed;
@@ -323,11 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn download_intent_requires_a_fresh_successful_query() {
+    fn update_intent_requires_a_fresh_successful_query() {
         let mut state = State::new(record(), true);
-        assert!(state.begin_check(CheckKind::BeforeDownload, 20261125));
+        assert!(state.begin_check(CheckKind::BeforeUpdate, 20261125));
         state.checked(true, 20261125);
-        assert_eq!(state.phase, Phase::WaitingToDownload);
+        assert_eq!(state.phase, Phase::AwaitingPreparation);
     }
 
     #[test]
@@ -335,7 +359,7 @@ mod tests {
         let mut state = State::new(record(), true);
         state.record.available = true;
         state.phase = Phase::Available;
-        assert!(state.begin_check(CheckKind::BeforeDownload, 20261125));
+        assert!(state.begin_check(CheckKind::BeforeUpdate, 20261125));
         state.checked(false, 20261125);
         assert!(!state.view(20261125).home_visible);
         assert_eq!(state.phase, Phase::Current);
@@ -351,10 +375,11 @@ mod tests {
     #[test]
     fn transfer_and_install_phases_are_busy() {
         for phase in [
-            Phase::Downloading,
             Phase::Preparing,
             Phase::Installing,
-            Phase::WaitingToDownload,
+            Phase::Installed,
+            Phase::Restarting,
+            Phase::AwaitingPreparation,
         ] {
             let mut state = State::new(record(), true);
             state.phase = phase;
@@ -372,5 +397,33 @@ mod tests {
         assert_eq!(serde_json::from_str::<Record>(&json).unwrap(), cached);
         assert!(!json.contains("device"));
         assert!(!json.contains("token"));
+    }
+
+    #[test]
+    fn prompt_waits_for_home_and_is_consumed_before_reentry_or_restart() {
+        let mut state = State::new(record(), true);
+        state.checked(true, 20261126);
+        assert!(!state.take_prompt(false, 20261126));
+        assert!(state.take_prompt(true, 20261126));
+        assert!(!state.take_prompt(true, 20261126));
+        let mut restarted = State::new(state.record.clone(), true);
+        assert!(!restarted.take_prompt(true, 20261126));
+        assert!(restarted.take_prompt(true, 20261127));
+    }
+
+    #[test]
+    fn later_suppresses_automatic_prompts_but_manual_check_can_offer_again() {
+        let mut state = State::new(record(), true);
+        state.checked(true, 20261126);
+        state.dismiss(20261126);
+        assert!(!state.take_prompt(true, 20261126));
+        assert!(state.begin_check(CheckKind::Manual, 20261126));
+        state.checked(true, 20261126);
+        assert!(state.take_prompt(true, 20261126));
+        for phase in [Phase::Checking, Phase::AwaitingPreparation, Phase::Preparing,
+            Phase::Installing, Phase::Installed, Phase::Canceled, Phase::UpdateFailed] {
+            state.phase = phase;
+            assert!(!state.take_prompt(true, 20261127));
+        }
     }
 }

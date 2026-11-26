@@ -18,27 +18,13 @@ fn title(phase: Phase) -> &'static str {
             "No updates available in Microsoft Store",
         ),
         Phase::CheckFailed => text("暂时无法检查更新", "Unable to check for updates"),
-        Phase::WaitingToDownload => text(
-            "更新已确认，等待开始下载",
-            "Update confirmed; waiting to download",
-        ),
-        Phase::Downloading => text(
-            "正在通过微软商店下载…",
-            "Downloading through Microsoft Store…",
-        ),
-        Phase::ReadyToInstall => text(
-            "更新已下载，可以安装",
-            "Update downloaded and ready to install",
-        ),
-        Phase::Preparing => text(
-            "正在等待设备操作完成并保存数据…",
-            "Waiting for device operations and saving data…",
-        ),
+        Phase::AwaitingPreparation | Phase::Preparing => text("正在准备更新…", "Preparing update…"),
         Phase::Installing => text(
-            "正在通过微软商店安装…",
-            "Installing through Microsoft Store…",
+            "正在下载并安装更新…",
+            "Downloading and installing update…",
         ),
-        Phase::Installed => text("更新已安装", "Update installed"),
+        Phase::Installed | Phase::Restarting => text("正在重启…", "Restarting…"),
+        Phase::RestartFailed => text("更新已安装，重启失败", "Update installed; restart failed"),
         Phase::Canceled => text("本次更新操作已取消", "Update operation canceled"),
         Phase::UpdateFailed => text("本次更新未完成", "Update did not complete"),
     }
@@ -46,21 +32,12 @@ fn title(phase: Phase) -> &'static str {
 
 fn description(view: &View) -> String {
     let message = match view.phase {
-        Phase::Unsupported => text(
-            "应用内更新仅适用于微软商店安装版；绿色版和模拟设备模式不会自动检查。",
-            "In-app updates require a Microsoft Store installation. Portable and simulated-device builds do not check automatically.",
-        ),
+        Phase::Unsupported => "",
         Phase::Idle => text("点击“检查更新”获取更新状态。", "Select Check for updates to get the update status."),
         Phase::Checking | Phase::Current => "",
-        Phase::Available => text("更新说明可在微软商店查看。", "View release information in Microsoft Store."),
-        Phase::CheckFailed | Phase::UpdateFailed => text("请检查网络或稍后重试，也可以退出软件后在微软商店更新。", "Check your connection or try later. You can also exit the app and update in Microsoft Store."),
-        Phase::WaitingToDownload => text("回到主窗口后才会调用商店下载；此时仍可取消。", "Store download starts only while the main window is active. You can still cancel."),
-        Phase::Downloading => text("下载完成后，可选择安装更新。", "You can install the update once the download finishes."),
-        Phase::ReadyToInstall => text("点击“安装更新”继续，软件可能关闭或重启。", "Select Install update to continue. The app may close or restart."),
-        Phase::Preparing => text("正在准备安装，请稍候。", "Preparing to install. Please wait."),
-        Phase::Installing => text("请在微软商店的官方提示中确认或取消。Windows 可能关闭并重启软件。", "Confirm or cancel in the official Microsoft Store prompt. Windows may close and restart the app."),
-        Phase::Installed => text("软件即将退出；如 Windows 未自动重启软件，请更新后重新打开。", "The app will exit. If Windows does not restart it, open it again after the update."),
-        Phase::Canceled => text("已取消更新，可稍后重试。", "Update canceled. You can try again later."),
+        Phase::Available => text("更新完成后自动重启。", "Restarts automatically after updating."),
+        Phase::CheckFailed | Phase::UpdateFailed | Phase::RestartFailed => text("请稍后重试。", "Try again later."),
+        Phase::AwaitingPreparation | Phase::Preparing | Phase::Installing | Phase::Installed | Phase::Restarting | Phase::Canceled => "",
     };
     let detail = match view.failure {
         Some(Failure::Windows(code)) => format!(" (0x{:08X})", code as u32),
@@ -90,26 +67,24 @@ fn actions(view: &View, home: bool) -> Vec<(&'static str, Act, bool)> {
         return actions;
     }
     match view.phase {
+        Phase::RestartFailed => actions.push((text("重启软件", "Restart app"), Act::RestartUpdatedApp, true)),
         Phase::Available | Phase::Canceled | Phase::CheckFailed | Phase::UpdateFailed
             if view.available =>
         {
             actions.push((
-                text("下载更新", "Download update"),
-                Act::DownloadUpdate,
+                text("立即更新", "Update now"),
+                Act::UpdateNow,
                 true,
             ));
         }
-        Phase::ReadyToInstall => {
-            actions.push((text("安装更新", "Install update"), Act::InstallUpdate, true))
-        }
-        Phase::Checking | Phase::WaitingToDownload | Phase::Downloading | Phase::Preparing => {
+        Phase::Checking | Phase::AwaitingPreparation | Phase::Preparing => {
             actions.push((text("取消", "Cancel"), Act::CancelUpdate, false));
         }
         _ => {}
     }
     if !matches!(
         view.phase,
-        Phase::Preparing | Phase::Installing | Phase::Installed
+        Phase::Preparing | Phase::Installing | Phase::Installed | Phase::Restarting
     ) {
         actions.push((
             text("商店更新说明", "Store release information"),
@@ -124,7 +99,6 @@ fn actions(view: &View, home: bool) -> Vec<(&'static str, Act, bool)> {
             Phase::Available
                 | Phase::CheckFailed
                 | Phase::UpdateFailed
-                | Phase::ReadyToInstall
                 | Phase::Canceled
         )
     {
@@ -134,10 +108,36 @@ fn actions(view: &View, home: bool) -> Vec<(&'static str, Act, bool)> {
             false,
         ));
     }
-    if home && view.home_visible {
-        actions.push((text("稍后提醒", "Later today"), Act::DismissUpdate, false));
+    if home && view.home_visible && !view.phase.busy() && view.phase != Phase::Installed {
+        actions.push((text("稍后", "Later"), Act::DismissUpdate, false));
     }
     actions
+}
+
+pub fn dialog(painter: &mut Painter, ui: &mut Ui, width: f32, height: f32) {
+    let theme = painter.t;
+    painter.rect(R::new(0.0, 0.0, width, height), 0x7500_0000);
+    let dialog_width = if crate::i18n::english() { 480.0 } else { 400.0 };
+    let area = R::new((width - dialog_width) / 2.0, (height - 190.0) / 2.0, dialog_width, 190.0);
+    painter.card(area, 12.0, theme.card, theme.border);
+    painter.text(text("发现新版本", "Update available"),
+        R::new(area.x + 24.0, area.y + 22.0, area.w - 48.0, 26.0),
+        16.0, true, theme.text, Align::Left);
+    painter.text_wrap(text("立即更新 X-Battery，完成后自动重启。", "Update X-Battery and restart automatically."),
+        R::new(area.x + 24.0, area.y + 60.0, area.w - 48.0, 48.0),
+        13.0, theme.text2);
+    let update = R::new(area.right() - 140.0, area.bottom() - 58.0, 116.0, 34.0);
+    let later = R::new(update.x - 100.0, update.y, 88.0, update.h);
+    for (rect, label, action, primary) in [
+        (later, text("稍后", "Later"), Act::DismissUpdate, false),
+        (update, text("立即更新", "Update now"), Act::UpdateNow, true),
+    ] {
+        painter.round(rect, 6.0, if primary { theme.accent } else { theme.card });
+        if !primary { painter.round_stroke(rect, 6.0, theme.border, 1.0); }
+        painter.text(label, rect, 13.0, primary,
+            if primary { 0xFFFF_FFFF } else { theme.text }, Align::Center);
+        ui.dialog_hot(rect, action);
+    }
 }
 
 pub fn card(painter: &mut Painter, ui: &mut Ui, view: &View, area: R, home: bool) -> f32 {
@@ -234,21 +234,15 @@ mod tests {
     }
 
     #[test]
-    fn download_and_install_are_separate_explicit_actions() {
+    fn available_update_has_one_action_and_no_second_install_step() {
         let offered = actions(&view(Phase::Available, true), true);
         assert!(offered
             .iter()
-            .any(|(_, action, _)| *action == Act::DownloadUpdate));
-        assert!(!offered
-            .iter()
-            .any(|(_, action, _)| *action == Act::InstallUpdate));
-        let downloaded = actions(&view(Phase::ReadyToInstall, true), true);
-        assert!(downloaded
-            .iter()
-            .any(|(_, action, _)| *action == Act::InstallUpdate));
-        assert!(!downloaded
-            .iter()
-            .any(|(_, action, _)| *action == Act::DownloadUpdate));
+            .any(|(_, action, _)| *action == Act::UpdateNow));
+        for phase in [Phase::AwaitingPreparation, Phase::Preparing, Phase::Installing, Phase::Installed] {
+            assert!(!actions(&view(phase, true), true).iter()
+                .any(|(_, action, _)| matches!(action, Act::UpdateNow | Act::DismissUpdate)));
+        }
     }
 
     #[test]
@@ -261,7 +255,7 @@ mod tests {
         ] {
             assert!(!actions(&view(phase, false), false)
                 .iter()
-                .any(|(_, action, _)| *action == Act::DownloadUpdate));
+                .any(|(_, action, _)| *action == Act::UpdateNow));
         }
     }
 

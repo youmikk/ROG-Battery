@@ -1899,6 +1899,7 @@ impl std::ops::Drop for TrayCtl {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StorePreparationAction {
     Install,
+    Restart,
     ExitToStore,
 }
 
@@ -1911,9 +1912,8 @@ struct StorePreparation {
 }
 
 impl StorePreparation {
-    fn can_finish(&self, main_active: bool) -> bool {
-        let complete = self.canceled || self.result.as_ref().is_some_and(Result::is_err)
-            || self.result.is_some() && (main_active || self.action == StorePreparationAction::ExitToStore);
+    fn can_finish(&self) -> bool {
+        let complete = self.canceled || self.result.is_some();
         complete && (self.worker.is_none() || self.result.is_some())
     }
 }
@@ -1980,6 +1980,8 @@ impl StoreUpdates {
             if !self.controller.begin_install() {
                 return false;
             }
+        } else if action == StorePreparationAction::Restart {
+            if self.controller.view().phase != crate::store::Phase::RestartFailed { return false; }
         } else {
             self.controller.cancel();
         }
@@ -2008,18 +2010,23 @@ impl StoreUpdates {
         self.controller.cancel();
     }
 
-    fn tick(&self, main_active: bool, shared: &Arc<Mutex<Shared>>, signal: &Signal) -> (bool, Option<String>) {
+    fn tick(&self, shared: &Arc<Mutex<Shared>>, signal: &Signal) -> (bool, Option<String>) {
         if self.ticking.replace(true) {
             return (false, None);
         }
         let before = self.view();
-        self.controller.tick(main_active);
+        self.controller.tick();
+        if self.controller.view().phase == crate::store::Phase::AwaitingPreparation {
+            self.begin(StorePreparationAction::Install, shared);
+        }
         let mut error = None;
         let preparation = self.preparation.borrow_mut().take();
         if let Some(mut job) = preparation {
             if job.worker.is_none() && job.result.is_none() {
                 if job.canceled {
                     job.result = Some(Ok(()));
+                } else if job.action == StorePreparationAction::Install && !self.controller.restart_ready() {
+                    job.started = std::time::Instant::now();
                 } else if lock_shared(shared).writes_pending() {
                     if job.started.elapsed() >= Duration::from_secs(30) {
                         job.result = Some(Err(crate::ui::feedback::text(
@@ -2046,15 +2053,21 @@ impl StoreUpdates {
                     }
                 }
             }
-            if job.can_finish(main_active) {
+            if job.can_finish() {
                 let result = job.result.take().unwrap_or(Ok(()));
                 if job.canceled || result.is_err() {
                     if job.action == StorePreparationAction::Install {
-                        self.controller.preparation_failed();
+                        if job.canceled { self.controller.preparation_canceled(); }
+                        else { self.controller.preparation_failed(); }
                     }
                     error = result.err();
+                    if let Some(error) = &error {
+                        crate::diagnostics::event("store_update_prepare_failed", error);
+                    }
                 } else if job.action == StorePreparationAction::Install {
                     self.controller.install();
+                } else if job.action == StorePreparationAction::Restart {
+                    self.controller.restart();
                 } else if let Err(open_error) = crate::dynlight::shell_open(crate::store::UPDATES_URL) {
                     error = Some(open_error);
                 } else {
@@ -2065,11 +2078,11 @@ impl StoreUpdates {
                 self.preparation.replace(Some(job));
             }
         }
-        if self.view().phase == crate::store::Phase::Installed {
+        if self.view().phase == crate::store::Phase::Restarting {
             signal.request_quit();
             nwg::stop_thread_dispatch();
         }
-        if !self.busy() && self.view().phase != crate::store::Phase::Installed && self.writes_blocked.replace(false) {
+        if !self.busy() && self.writes_blocked.replace(false) {
             let mut state = lock_shared(shared);
             state.store_update_pending = false;
             state.observe_history();
@@ -2530,36 +2543,26 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.store.controller.check();
             env.canvas.repaint_now();
         }
-        Act::DownloadUpdate => {
+        Act::UpdateNow => {
             if !env.store.view().available || env.store.view().phase.busy() {
                 return;
             }
-            if ask_confirm_owned(env.window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as _, crate::ui::feedback::text("下载微软商店更新", "Download Microsoft Store update"),
-                crate::ui::feedback::text("下载微软商店中的新版本？", "Download the new version from Microsoft Store?")) {
-                env.store.controller.download();
+            env.canvas.with_ui_mut(|ui| ui.show_update_dialog = false);
+            env.store.controller.update();
+            env.canvas.repaint_now();
+        }
+        Act::ExitToStoreUpdate => {
+            if env.store.begin(StorePreparationAction::ExitToStore, env.shared) {
                 env.canvas.repaint_now();
             }
         }
-        Act::InstallUpdate | Act::ExitToStoreUpdate => {
-            let install = a == Act::InstallUpdate;
-            if install && env.store.view().phase != crate::store::Phase::ReadyToInstall {
-                return;
-            }
-            let title = if install { crate::ui::feedback::text("安装更新", "Install update") }
-                else { crate::ui::feedback::text("退出并在微软商店更新", "Exit and update in Microsoft Store") };
-            let message = if install {
-                crate::ui::feedback::text("现在安装更新？软件可能关闭或重启。", "Install the update now? The app may close or restart.")
-            } else {
-                crate::ui::feedback::text("退出 X-Battery 并打开微软商店？\n\n退出后暂停电量监测，更新完成后请重新打开软件。", "Exit X-Battery and open Microsoft Store?\n\nBattery monitoring pauses after exit. Reopen the app when the update finishes.")
-            };
-            if ask_confirm_owned(env.window.handle.hwnd().unwrap_or(std::ptr::null_mut()) as _, title, message) {
-                let action = if install { StorePreparationAction::Install } else { StorePreparationAction::ExitToStore };
-                if env.store.begin(action, env.shared) {
-                    env.canvas.repaint_now();
-                }
+        Act::RestartUpdatedApp => {
+            if env.store.begin(StorePreparationAction::Restart, env.shared) {
+                env.canvas.repaint_now();
             }
         }
         Act::DismissUpdate => {
+            env.canvas.with_ui_mut(|ui| ui.show_update_dialog = false);
             env.store.controller.dismiss();
             env.canvas.repaint_now();
         }
@@ -3625,7 +3628,7 @@ fn ask_confirm_owned(hwnd: win32::Handle, title: &str, text: &str) -> bool {
 // ==================== 入口 ====================
 
 /// 启动 GUI。返回时进程就要退出了。
-pub fn run(start_hidden: bool) -> Result<(), String> {
+pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
     crate::diagnostics::install_panic_hook(APP_VERSION);
     let cfg = settings::load();
     crate::i18n::apply(cfg.language);
@@ -3851,6 +3854,9 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
     canvas.with_ui_mut(|u| {
         u.mode = mode;
         u.theme_pref = theme_pref;
+        if after_update {
+            u.open_after_update();
+        }
     });
 
     {
@@ -4210,7 +4216,17 @@ pub fn run(start_hidden: bool) -> Result<(), String> {
                         win32::IsWindowVisible(hwnd) != 0 && win32::IsIconic(hwnd) == 0
                             && win32::GetForegroundWindow() == hwnd
                     };
-                    let (changed, error) = store_min.tick(main_active, &shared_language, &signal_min);
+                    let (changed, error) = store_min.tick(&shared_language, &signal_min);
+                    let home_active = canvas_min.with_ui(|ui| ui.can_prompt_update(main_active));
+                    if store_min.controller.take_prompt(home_active) {
+                        canvas_min.with_ui_mut(|ui| {
+                            ui.cancel_press();
+                            ui.dialog_hots.clear();
+                            ui.show_update_dialog = true;
+                        });
+                        canvas_min.focus();
+                        canvas_min.invalidate();
+                    }
                     if let Some(error) = error {
                         canvas_min.with_ui_mut(|ui| ui.set_status(format!("{} {error}", crate::ui::feedback::text("✘ 更新准备失败：", "✘ Update preparation failed:"))));
                         canvas_min.set_animating(true);
@@ -5512,6 +5528,29 @@ mod backend_tests {
     }
 
     #[test]
+    fn restart_retry_waits_for_device_writes_and_remains_cancelable() {
+        let shared = Arc::new(Mutex::new(Shared::new(Settings::default())));
+        let signal = Signal::new(60);
+        let updates = StoreUpdates {
+            controller: crate::store::Controller::for_test_phase(crate::store::Phase::RestartFailed),
+            ..dormant_store_updates()
+        };
+        lock_shared(&shared).pending.push_back((Cmd::Stage(0), None));
+        assert!(updates.begin(StorePreparationAction::Restart, &shared));
+        assert!(lock_shared(&shared).store_update_pending);
+        assert!(updates.tick(&shared, &signal).1.is_none());
+        assert!(updates.preparation.borrow().as_ref().unwrap().worker.is_none());
+        assert_eq!(lock_shared(&shared).pending.len(), 1);
+        assert!(!signal.shutdown.load(Ordering::Relaxed));
+        updates.cancel();
+        updates.tick(&shared, &signal);
+        assert_eq!(updates.view().phase, crate::store::Phase::RestartFailed);
+        assert!(!updates.busy());
+        assert!(!lock_shared(&shared).store_update_pending);
+        assert!(!signal.shutdown.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn store_preparation_waits_for_queued_and_in_flight_device_writes() {
         let mut state = Shared::new(Settings::default());
         assert!(!state.writes_pending());
@@ -5539,7 +5578,7 @@ mod backend_tests {
         updates.writes_blocked.set(true);
         updates.preparation.replace(Some(preparation(StorePreparationAction::ExitToStore)));
         updates.cancel();
-        assert!(updates.tick(false, &shared, &signal).1.is_none());
+        assert!(updates.tick(&shared, &signal).1.is_none());
         assert!(!updates.busy());
         assert!(!lock_shared(&shared).store_update_pending);
         assert!(!signal.shutdown.load(Ordering::Relaxed));
@@ -5558,20 +5597,19 @@ mod backend_tests {
         updates.preparation.replace(Some(job));
         updates.writes_blocked.set(true);
         lock_shared(&shared).store_update_pending = true;
-        assert_eq!(updates.tick(false, &shared, &signal).1.as_deref(), Some("save failed"));
+        assert_eq!(updates.tick(&shared, &signal).1.as_deref(), Some("save failed"));
         assert!(!updates.busy());
         assert!(!lock_shared(&shared).store_update_pending);
         assert!(!signal.shutdown.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn installation_waits_for_main_window_activation_after_a_successful_checkpoint() {
+    fn accepted_update_continues_after_a_successful_checkpoint() {
         let mut job = preparation(StorePreparationAction::Install);
         job.result = Some(Ok(()));
-        assert!(!job.can_finish(false));
-        assert!(job.can_finish(true));
+        assert!(job.can_finish());
         job.canceled = true;
-        assert!(job.can_finish(false));
+        assert!(job.can_finish());
     }
 
     #[test]
@@ -5580,9 +5618,9 @@ mod backend_tests {
         let (_sender, receiver) = std::sync::mpsc::channel();
         job.worker = Some(receiver);
         job.canceled = true;
-        assert!(!job.can_finish(false));
+        assert!(!job.can_finish());
         job.result = Some(Ok(()));
-        assert!(job.can_finish(false));
+        assert!(job.can_finish());
     }
 
     #[test]
@@ -5598,7 +5636,7 @@ mod backend_tests {
         state.store_update_pending = true;
         state.pending.push_back((Cmd::Stage(0), None));
         drop(state);
-        assert!(updates.tick(false, &shared, &signal).1.is_some());
+        assert!(updates.tick(&shared, &signal).1.is_some());
         assert_eq!(lock_shared(&shared).pending.len(), 1);
         assert!(!lock_shared(&shared).store_update_pending);
         assert!(!signal.shutdown.load(Ordering::Relaxed));

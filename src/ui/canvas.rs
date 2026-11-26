@@ -411,7 +411,7 @@ pub fn draw_frame(
     );
 
     // ⑤ 模态弹窗（若有）
-    if ui.show_close_dialog {
+    if ui.show_close_dialog || ui.show_update_dialog {
         inner.paint(
             fonts,
             theme,
@@ -420,7 +420,11 @@ pub fn draw_frame(
             a.view_w,
             a.view_h,
             |p: &mut Painter| {
-                pages::draw_close_dialog(p, ui, a.view_w, a.view_h);
+                if ui.show_close_dialog {
+                    pages::draw_close_dialog(p, ui, a.view_w, a.view_h);
+                } else {
+                    crate::ui::store_updates::dialog(p, ui, a.view_w, a.view_h);
+                }
             },
         );
     }
@@ -696,6 +700,10 @@ impl Canvas {
     /// 留一份句柄，供「显示窗口前先画首帧」用。
     pub fn hwnd(&self) -> Handle {
         self.hwnd
+    }
+
+    pub fn focus(&self) {
+        unsafe { SetFocus(self.hwnd()); }
     }
 }
 
@@ -1339,6 +1347,13 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, wp: usize, lp: isize)
 
         WM_KEYDOWN => {
             if let Some(c) = ctx_of(hwnd) {
+                if c.ui.borrow().show_update_dialog && !c.ui.borrow().show_close_dialog {
+                    if wp == VK_ESCAPE || wp == VK_RETURN {
+                        c.acts.borrow_mut().push(if wp == VK_ESCAPE { Act::DismissUpdate } else { Act::UpdateNow });
+                        (c.damage)();
+                    }
+                    return 0;
+                }
                 let mut changed = false;
                 match wp {
                     VK_BACK => changed = c.ui.borrow_mut().backspace(),

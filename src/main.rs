@@ -101,19 +101,29 @@ fn main() -> ExitCode {
     win32::attach_console();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|argument| argument == store::restart::HELPER_ARG) {
+        return match store::restart::helper(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                diagnostics::event("store_restart_helper_failed", &error);
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     // 无参数和自启参数进入 GUI；帮助请求留在 CLI。
     let wants_help = matches!(args.first().map(|s| s.as_str()), Some("-h" | "--help" | "help"));
     let wants_autostart = args.len() == 1 && args[0] == autostart::RUN_ARG;
+    let after_update = args.len() == 1 && args[0] == store::RESTART_ARG;
 
-    if args.is_empty() || wants_autostart {
+    if args.is_empty() || wants_autostart || after_update {
         // SAFETY: `FreeConsole` 只影响本进程的控制台关联，无指针参数。
         unsafe {
             win32::FreeConsole();
         }
         // 绿色版自启携带参数；MSIX 由启动环境判断是否隐藏。
-        let start_hidden = wants_autostart || autostart::launched_at_logon();
-        return run_gui(start_hidden);
+        let start_hidden = !after_update && (wants_autostart || autostart::launched_at_logon());
+        return run_gui(start_hidden, after_update);
     }
     let _ = wants_help; // 参数非空时由下面的 CLI 分支统一处理
 
@@ -269,7 +279,7 @@ fn check_instance_named(mutex_name: &str) -> Instance {
 
 /// GUI 入口。控制台已经在上面的 [`main`] 里脱离干净，这里**不能**再 `println!`
 /// —— 没有地方会接住它。需要日志就写 [`paths::cache_dir`] 下的文件。
-fn run_gui(start_hidden: bool) -> ExitCode {
+fn run_gui(start_hidden: bool, after_update: bool) -> ExitCode {
     // 单实例互斥锁：防止多开造成 HID 设备冲突与多托盘图标堆叠
     let _guard = match check_single_instance() {
         Instance::Owner(g) => Some(g),
@@ -283,7 +293,7 @@ fn run_gui(start_hidden: bool) -> ExitCode {
     // 创建窗口前声明 DPI 感知，失败时允许系统缩放。
     let _ = dwm::enable_dpi_awareness();
 
-    match gui::run(start_hidden) {
+    match gui::run(start_hidden, after_update) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // GUI 起不来时控制台已经没了，唯一的告知途径是消息框 + 日志文件。

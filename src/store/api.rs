@@ -15,7 +15,6 @@ use windows_future::AsyncStatus;
 
 pub enum Completion {
     Checked(Vec<StorePackageUpdate>),
-    Downloaded,
     Installed,
     Canceled,
 }
@@ -60,13 +59,9 @@ fn failure(error: windows::core::Error) -> Failure {
     Failure::Windows(error.code().0)
 }
 
-fn transfer_result(state: StorePackageUpdateState, install: bool) -> Result<Completion, Failure> {
+fn transfer_result(state: StorePackageUpdateState) -> Result<Completion, Failure> {
     match state {
-        StorePackageUpdateState::Completed => Ok(if install {
-            Completion::Installed
-        } else {
-            Completion::Downloaded
-        }),
+        StorePackageUpdateState::Completed => Ok(Completion::Installed),
         StorePackageUpdateState::Canceled => Ok(Completion::Canceled),
         StorePackageUpdateState::ErrorLowBattery => Err(Failure::LowBattery),
         StorePackageUpdateState::ErrorWiFiRecommended => Err(Failure::WifiRecommended),
@@ -116,19 +111,20 @@ impl Api {
         })
     }
 
-    pub fn transfer(
+    pub fn update(
         &self,
         updates: &[StorePackageUpdate],
-        install: bool,
     ) -> Result<Pending, Failure> {
         let packages: IIterable<StorePackageUpdate> =
             updates.iter().cloned().map(Some).collect::<Vec<_>>().into();
-        let operation = if install {
+        let silent = self.context.CanSilentlyDownloadStorePackageUpdates().unwrap_or(false);
+        crate::diagnostics::event("store_update_started", if silent { "silent" } else { "interactive" });
+        let operation = if silent {
             self.context
-                .RequestDownloadAndInstallStorePackageUpdatesAsync(&packages)
+                .TrySilentDownloadAndInstallStorePackageUpdatesAsync(&packages)
         } else {
             self.context
-                .RequestDownloadStorePackageUpdatesAsync(&packages)
+                .RequestDownloadAndInstallStorePackageUpdatesAsync(&packages)
         }
         .map_err(failure)?;
         let cancellation = operation.clone();
@@ -140,7 +136,7 @@ impl Api {
                     _ => {}
                 }
                 let result = operation.GetResults().map_err(failure)?;
-                transfer_result(result.OverallState().map_err(failure)?, install).map(Some)
+                transfer_result(result.OverallState().map_err(failure)?).map(Some)
             }),
             cancel: Box::new(move || {
                 let _ = cancellation.Cancel();
@@ -150,19 +146,14 @@ impl Api {
     }
 }
 
-pub fn register_restart() {
-    let arguments = crate::win32::to_wide(crate::autostart::RUN_ARG);
-    if let Err(error) = unsafe {
+pub fn register_restart() -> Result<(), Failure> {
+    let arguments = crate::win32::to_wide(super::RESTART_ARG);
+    unsafe {
         RegisterApplicationRestart(
             PCWSTR(arguments.as_ptr()),
             RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT,
         )
-    } {
-        crate::diagnostics::event_once(
-            "store_restart_registration_failed",
-            &format!("0x{:08X}", error.code().0 as u32),
-        );
-    }
+    }.map_err(failure)
 }
 
 pub fn installed_version() -> Result<String, Failure> {
@@ -187,13 +178,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn download_completion_is_not_install_completion() {
+    fn combined_update_completion_means_installed() {
         assert!(matches!(
-            transfer_result(StorePackageUpdateState::Completed, false),
-            Ok(Completion::Downloaded)
-        ));
-        assert!(matches!(
-            transfer_result(StorePackageUpdateState::Completed, true),
+            transfer_result(StorePackageUpdateState::Completed),
             Ok(Completion::Installed)
         ));
     }
@@ -201,7 +188,7 @@ mod tests {
     #[test]
     fn store_cancellation_is_not_reported_as_success() {
         assert!(matches!(
-            transfer_result(StorePackageUpdateState::Canceled, true),
+            transfer_result(StorePackageUpdateState::Canceled),
             Ok(Completion::Canceled)
         ));
     }
@@ -216,7 +203,7 @@ mod tests {
             StorePackageUpdateState::Pending,
             StorePackageUpdateState::Deploying,
         ] {
-            assert!(transfer_result(state, true).is_err());
+            assert!(transfer_result(state).is_err());
         }
     }
 }

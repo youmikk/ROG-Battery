@@ -11,6 +11,7 @@ base64 = "0.22"
 windows = { version = "0.61.3", features = [
     "ApplicationModel", "Services_Store", "Win32_Foundation", "Data_Xml_Dom", "UI_Notifications",
     "Win32_System_Recovery", "Win32_System_WinRT", "Win32_UI_Shell",
+    "Win32_Storage_Packaging_Appx", "Win32_System_Com",
 ] }
 windows-collections = "0.2.0"
 windows-future = "0.2.1"
