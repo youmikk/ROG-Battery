@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：CHERRY PIXIU75（未发布）
+
+固定核对 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723` 的 [CHERRY 实测记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/cherry.md)、[CherryCodec.cs](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Cherry/CherryCodec.cs) 与 [CherryPlugin.cs](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Cherry/CherryPlugin.cs)。仓库为 MIT；本次只使用协议事实、公开报文前缀和本项目既有传输，不引入上游实现。
+
+两种 PID 的实测接口都是 `MI_01/Col04 / FF1C:0092`，编号 Report `04`、输入输出各 64 字节。固定令牌 0、块号 `1A`、长度 4、偏移 0；上游确认 WriteFile 中断 OUT 能回包，控制端点 SetOutputReport 无回包。信息块 `1D` 在会话建立后可能长期回零，不作为新增查询或识别条件。
+
+公开前缀 `04 00 00 1A 04 00 00 00 30 00 00 00` 对应 48% 放电，后续 `31/32/33` 配合充电值 1 对应 49/50/51%。测试将前缀重建为 64 字节，尾部零填充和 100% 用例不是原始捕获。相较上游宽松解析，本实现要求完整头部、精确长度和百分比范围；充电高位未验证，保留未知。0 与请求回显有歧义，本轮不发布，不把它解释成离线；超时也不作为断连证据。原 MX Pro 的 `20` 令牌、长度 6 和解析路径保持不变，两种回复不可互用。
+
 ## 2026-11-26：HyperX Cloud II Wireless（未发布）
 
 核对 [HeadsetControl `32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a`](https://github.com/Sapd/HeadsetControl/blob/32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a/lib/devices/hyperx_cloud_2_wireless.hpp) 的两个 HP PID、接口 0、`FF90:0303`、Report `06`、52 字节请求及 20 字节回复、命令和字段。该实现的缓冲区长度不是本项目的 Windows 描述符抓取，因此运行时另用逐报告描述符证明精确容量；不兼容的集合不发送查询。

@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: CHERRY PIXIU75 (unreleased)
+
+Pinned VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`: [CHERRY hardware notes](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/cherry.md), [CherryCodec.cs](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Cherry/CherryCodec.cs), and [CherryPlugin.cs](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Cherry/CherryPlugin.cs). The repository is MIT. This addition uses protocol facts, public response prefixes, and local transport without importing upstream implementation code.
+
+Both product IDs have documented `MI_01/Col04 / FF1C:0092` interfaces, numbered Report `04`, and 64-byte input/output capacities. The request uses token 0, block `1A`, length 4, and offset 0. Upstream verified interrupt OUT via WriteFile; control-endpoint SetOutputReport received no reply. Information block `1D` can keep returning zeros after session setup, so it is neither queried nor required for this addition.
+
+The public prefix `04 00 00 1A 04 00 00 00 30 00 00 00` means 48% discharging; subsequent `31/32/33` with charging flag 1 mean 49/50/51%. Tests reconstruct 64-byte reports from these prefixes: trailing padding and the 100% case are synthetic. Unlike the upstream permissive parser, this implementation requires a full matching header, exact length, and a valid percentage range. Unverified high charging bits remain unknown. Zero is ambiguous with a request echo and is not published; neither zero nor timeout establishes disconnection. The existing MX Pro token `20`, length 6, and parsing path are retained; replies cannot cross between the two protocols.
+
 ## 2026-11-26: HyperX Cloud II Wireless (unreleased)
 
 [HeadsetControl `32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a`](https://github.com/Sapd/HeadsetControl/blob/32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a/lib/devices/hyperx_cloud_2_wireless.hpp) supplies both HP product IDs, interface 0, `FF90:0303`, Report `06`, 52-byte requests, 20-byte replies, commands, and fields. Its buffer sizes are not a Windows descriptor capture for this project. Runtime per-report descriptor checks independently require those exact capacities before sending queries.

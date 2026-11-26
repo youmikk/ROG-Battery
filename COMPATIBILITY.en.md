@@ -2,6 +2,14 @@
 
 [简体中文](COMPATIBILITY.md)
 
+## Unreleased: CHERRY PIXIU75
+
+Adds 2.4 GHz `046A:01E4 / PIXIU75 Dongle` and wired `046A:01E2 / PIXIU 75`. Matching requires `MI_01/Col04 / FF1C:0092`, no Feature report, and descriptor proof of a single bidirectional Report `04`, 64 bytes including its ID. Ambiguous management collections are not queried; separate receivers retain independent samples.
+
+Each poll sends only `04 00 00 1A 04 00 00 00…` over interrupt OUT to read the battery block. It sends no device-information, lighting, or key-map commands. Replies must match the full eight-byte header. Byte 8 supplies percentage; only byte 9 values 0/1 establish charging state. Unknown charging flags preserve a valid percentage; ambiguous zero, short frames, and invalid echoes do not renew measurements. Each exchange is bounded to 1.7 seconds and 32 frames; discovery reuses the short-lived enumeration cache.
+
+All 10 CHERRY module tests pass, including four existing MX 2.0S WL Pro regressions. VigilWatt publishes Windows interface evidence and readings compared with the official application. This project has reconstructed public response prefixes and synthetic tests, not hardware validation. Long sleep, real zero percent, official-software coexistence, and multiple keyboards still need hardware checks. Wired and wireless histories remain separate without a verified pairing identity. See [protocol evidence](PROTOCOLS.en.md).
+
 ## Unreleased: HyperX Cloud II Wireless
 
 Adds read-only battery and charging queries for HP receivers `03F0:0696/018B`. Matching requires `MI_00 / FF90:0303` and descriptor proof of a single Report `06`, 20-byte input and 52-byte output, both including the report ID. Ambiguous control collections are not probed; separate receivers retain independent identities and samples.
