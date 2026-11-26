@@ -4,6 +4,16 @@
 
 Implementation status, upstream records and remaining hardware checks for this VigilWatt iteration are in the [evidence index](ADAPTATION_EVIDENCE.md).
 
+## Unreleased: HyperX Cloud Alpha Wireless
+
+Adds original Cloud Alpha Wireless `03F0:098D / MI_03 / Col01 / FF43:0202`. Windows input/output capacities are 31 bytes, Feature length is zero, and the runtime descriptor must prove sole bidirectional Report `21`. Ambiguous management collections are not queried; identical receivers retain separate path identities. Cloud II and Alpha 2 keep their existing adapters.
+
+Each poll uses only connection `21 BB 03`, battery `21 BB 0B` and charging `21 BB 0C`, then reconfirms connection before publication. Replies must be complete and match the current command; notifications and exact request echoes are not query replies. Connection values 1/2 mean offline/online, battery accepts 1–100, and charging accepts only 0/1. Zero percent is excluded because it cannot be distinguished reliably from a request echo; a not-charging report identical to the request also stays unknown. Confirmed charging without a valid percentage produces charging-only state, never a reused percentage.
+
+Protocol waits share a three-second budget, with at most two seconds per exchange; handle opening, process locks and Windows cancellation cleanup are not hard real-time guarantees. Unconfirmed completion produces no fresh battery. Silence does not imply offline; samples expire after 120 seconds. The protocol has no transaction ID, so late replies from other software or prior requests cannot be fully excluded.
+
+HyperX regression coverage includes synthetic replies, exact echoes, existing models, dual receivers, mixed brands and taskbar lifecycles. Public Windows implementations establish interface and protocol evidence; this project has no hardware validation. Actual descriptors, true zero, charging percentage freeze, mute preservation, power cycles, dual receivers and NGENUITY coexistence need hardware checks. Cloud III Wireless is deferred. See [protocol evidence](PROTOCOLS.en.md).
+
 ## Unreleased: LANGTU T98
 
 Only the known 2.4 GHz receiver `1A2C:8FFF / MI_00 / FF02:0002` with product string `2.4 Wireless Device` is matched. Windows input/output capacities must both be 65 bytes, with runtime descriptor proof of sole input Report ID 0. Ambiguous management collections are not read. `1A2C:7FFF`, other models, wired USB and Bluetooth modes are excluded.

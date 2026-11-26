@@ -2,6 +2,22 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: HyperX Cloud Alpha Wireless (unreleased)
+
+Cross-checked pinned sources:
+
+- [HeadsetControl `32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a`](https://github.com/Sapd/HeadsetControl/blob/32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a/lib/devices/hyperx_cloud_alpha_wireless.hpp): `03F0:098D`, 31-byte interrupt requests, commands 03/0B/0C and byte 3. It skips percentage queries while charging and does not independently establish Windows collections or capacities.
+- [HyperXBatteryMonitor `9d01847913f4947de77e56bb05347dffc19937cd`](https://github.com/davidsantanaalves/HyperXBatteryMonitor/blob/9d01847913f4947de77e56bb05347dffc19937cd/Devices/CloudAlphaWirelessDevice.cs): MI_03/Col01, Report21/markerBB, direct 0B/0C replies versus 25/26 notifications. Its `Hid/HidConnection.cs` and `Devices/HyperXBatteryDeviceBase.cs` establish Windows interrupt transport and independent battery/charging queries.
+- [HaloBattery `15a73ac4d88435a771b0060b28171733a43dab06`](https://github.com/HeyOkay/HaloBattery/blob/15a73ac4d88435a771b0060b28171733a43dab06/providers/hyperx_alpha_wireless.py): FF43:0202/interface3, current-selector matching, and percentage queries during charging.
+- [MyFinder `3d8958f734a67f8598ae39687517c2e9182830bf`](https://github.com/wushuai0802/myfinder-device-battery/blob/3d8958f734a67f8598ae39687517c2e9182830bf/scripts/HeadsetBattery.cs): exact Windows input/output capacities of 31, Feature0, collection scope and connection values 1/2. Its pinned `docs/compatibility.md` records upstream hardware checks.
+- [HyperHeadset `3652a5de38c100842e4b2f882af0e04897804638`](https://github.com/LennardKittner/HyperHeadset/blob/3652a5de38c100842e4b2f882af0e04897804638/src/devices/cloud_alpha_wireless.rs): corroborates online value 2 and direct/notification distinctions; larger buffers are not treated as Windows report capacities.
+
+Protocol facts are independently implemented using this project's transport, descriptor, locking and state layers; GPL/AGPL implementations were not copied. Per-report runtime validation is stricter than upstream collection-capacity checks and needs hardware verification. All new vectors are synthetic, without a recorded Windows descriptor or traffic capture.
+
+Only 1–100% is published: zero is indistinguishable from a request echo without an independent validity field. This safeguard is not an offline code. Charging replies identical to the request are ignored while waiting continues; a valid percentage does not resolve their ambiguity. This conservatively rejects legitimate not-charging replies with identical bytes too. Without a later valid response, charging remains unknown; Charging1 can produce a fresh percentage-free sample. Actual battery timestamps survive later queries, and connection is reconfirmed before publication. Failure, notifications, mismatched commands and repeated publication of old results cannot refresh old sample times.
+
+Cloud III is deferred: the pinned HeadsetControl `hyperx_cloud_3.hpp` controls sidetone on wired 089D/03CC, not wireless battery. HyperHeadset separately describes 05B7/0C9D using protocol66, but this iteration did not establish per-PID Windows Feature fallback and descriptor evidence.
+
 ## 2026-11-26: LANGTU T98 (unreleased)
 
 Pinned VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`: [hardware records](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/langtu.md), [plugin](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Langtu/LangtuT98Plugin.cs), [codec](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Langtu/LangtuT98Codec.cs). Upstream contributors are YyingnLL / haloneko; MIT attribution is in THIRD_PARTY_NOTICES.md. This implementation independently encodes protocol facts without running upstream programs or hardware scripts.

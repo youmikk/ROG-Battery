@@ -2,6 +2,22 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：HyperX Cloud Alpha Wireless（未发布）
+
+固定来源交叉核对：
+
+- [HeadsetControl `32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a`](https://github.com/Sapd/HeadsetControl/blob/32facec14215d3fb6c4b1db0d3b28e0b8d20aa5a/lib/devices/hyperx_cloud_alpha_wireless.hpp)：型号 `03F0:098D`，31 字节中断请求、命令 03/0B/0C 与 byte 3。该来源充电时跳过电量，单独不足以证明 Windows 集合或容量。
+- [HyperXBatteryMonitor `9d01847913f4947de77e56bb05347dffc19937cd`](https://github.com/davidsantanaalves/HyperXBatteryMonitor/blob/9d01847913f4947de77e56bb05347dffc19937cd/Devices/CloudAlphaWirelessDevice.cs)：`MI_03/Col01`、Report21/markerBB、直接回复 0B/0C 与通知 25/26 的区别；同版本 `Hid/HidConnection.cs` 和 `Devices/HyperXBatteryDeviceBase.cs` 证明 Windows 中断收发与独立电量、充电查询。
+- [HaloBattery `15a73ac4d88435a771b0060b28171733a43dab06`](https://github.com/HeyOkay/HaloBattery/blob/15a73ac4d88435a771b0060b28171733a43dab06/providers/hyperx_alpha_wireless.py)：集合 `FF43:0202`、interface3、按本次 selector 匹配直接回复，充电时继续查询百分比。
+- [MyFinder `3d8958f734a67f8598ae39687517c2e9182830bf`](https://github.com/wushuai0802/myfinder-device-battery/blob/3d8958f734a67f8598ae39687517c2e9182830bf/scripts/HeadsetBattery.cs)：Windows 精确输入输出容量 31、Feature0、集合匹配及连接值 1/2；同版本 `docs/compatibility.md` 记有上游实机条目。
+- [HyperHeadset `3652a5de38c100842e4b2f882af0e04897804638`](https://github.com/LennardKittner/HyperHeadset/blob/3652a5de38c100842e4b2f882af0e04897804638/src/devices/cloud_alpha_wireless.rs)：补证连接在线值 2 及直接回复/通知差异；其较大传输缓冲不作为 Windows 报告容量。
+
+本项目独立编码公开协议事实，复用自有传输、描述符、锁及状态层，没有复制 GPL/AGPL 实现。运行时逐报告校验比上游集合容量检查更严格，仍需真实描述符验收。测试全部为合成向量，没有原始 Windows 抓包。
+
+仅发布 1–100%；0 与请求回显相同，缺少独立有效标志，因此不把保护解释为离线编码。充电回复与请求完全相同时忽略并继续等待，不因本轮已有有效百分比而推断未充电；这也会保守丢弃同样字节的合法未充电回复。没有后续有效回复则保持未知，充电1可构成不含百分比的新样本。保留实际电量采样时间，后续查询不推迟时间；发布前再次确认在线。失败、通知、错误命令和旧结果重复发布不能刷新旧采样时间。
+
+Cloud III 暂缓：同固定 HeadsetControl 的 `hyperx_cloud_3.hpp` 是有线 `089D/03CC` 的侧音设置，不是无线电量。HyperHeadset 另有 `05B7/0C9D` 的 `66` 协议，但各 PID 的 Windows Feature 后备传输和描述符证据仍未在本轮确认，不从其他型号外推。
+
 ## 2026-11-26：狼途 LANGTU T98（未发布）
 
 固定 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`：[硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/devices/langtu.md)、[插件](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Langtu/LangtuT98Plugin.cs)、[解析器](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Langtu/LangtuT98Codec.cs)。上游贡献者 YyingnLL / haloneko，MIT 许可见 THIRD_PARTY_NOTICES.md。依据协议事实独立实现，未运行上游程序或硬件脚本。

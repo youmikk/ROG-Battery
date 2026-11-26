@@ -1,13 +1,14 @@
 # 适配证据索引 / Adaptation evidence
 
-本表覆盖本次从 VigilWatt 跟进的协议，不代表全项目型号清单。完整兼容范围见 [兼容性](COMPATIBILITY.md) / [compatibility](COMPATIBILITY.en.md)，固定来源及边界见 [协议研究](PROTOCOLS.md) / [protocol evidence](PROTOCOLS.en.md)。实现、合成测试、上游硬件记录和本项目真机验收是不同证据。
+本表覆盖近期跟进的协议，不代表全项目型号清单。完整兼容范围见 [兼容性](COMPATIBILITY.md) / [compatibility](COMPATIBILITY.en.md)，固定来源及边界见 [协议研究](PROTOCOLS.md) / [protocol evidence](PROTOCOLS.en.md)。实现、合成测试、上游硬件记录和本项目真机验收是不同证据。
 
-This index covers protocols followed from VigilWatt in this iteration, not the complete device catalog. Implementation, synthetic tests, upstream hardware records and local hardware validation are separate evidence levels.
+This index covers recently followed protocols, not the complete device catalog. Implementation, synthetic tests, upstream hardware records and local hardware validation are separate evidence levels.
 
-来源固定为 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`；固件版本未明确记录时，不能推断所有固件兼容。许可见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+VigilWatt 来源固定为 `c97adc389b60b0e945a62cddacbaaace39887723`；HyperX 的交叉来源与固定提交见协议研究。固件版本未明确记录时，不能推断所有固件兼容。许可见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
 | 型号与模式 / Device and mode | 状态 / Status | 上游硬件证据 / Upstream hardware | 本项目验证 / Local validation | 未确认 / Outstanding |
 | --- | --- | --- | --- | --- |
+| HyperX Cloud Alpha Wireless，接收器 `03F0:098D` | 已实现，未发布 / Implemented, unreleased | 多个 Windows 开源实现的接口、容量和命令证据 / Windows implementations establish interface, capacities and commands | 合成回复、回显、旧型号及多设备回归 / Synthetic replies, echoes, existing models and multi-device regressions | 本项目真机、逐报告描述符、0%、充电冻结、关机缓存及驱动共存 / Local hardware, per-report descriptor, zero, charging freeze, off-state caching, coexistence |
 | 狼途 LANGTU T98，接收器 `1A2C:8FFF` | 已实现，未发布 / Implemented, unreleased | 单台 Windows 接口观测、78/87/FF 前缀及休眠观察 / One-unit Windows interface, prefixes and sleep observations | 前缀重建、合成解析及生命周期回归 / Reconstructed prefixes, synthetic parser and lifecycle regressions | 本项目真机、描述符、其他固件、0%、同型号双实例及驱动共存 / Local hardware, descriptor, firmware, zero, dual instances, coexistence |
 | CHERRY PIXIU75，USB `046A:01E2` / 2.4G `046A:01E4` | 已实现，未发布 / Implemented, unreleased | Windows 接口与官方软件对照 / Windows interface and official-app comparison | 前轮 10 项解析、通道及旧 MX Pro 回归；前缀重建 / 10 earlier regressions, reconstructed prefixes | 本项目真机、0%、长休眠、多实例、充电及跨模式身份 / Local hardware, zero, sleep, instances, charging, cross-mode identity |
 | 雷神 ML903 NearLink Se，接收器 `369B:0234` | 已实现，未发布 / Implemented, unreleased | 35% 前缀；27%、关机静默及恢复观察 / 35% prefix, 27%, power-cycle observations | 14 项实帧前缀回放与合成回归 / 14 prefix replay and synthetic tests | 实际描述符、不同固件、充电、双实例及官方驱动共存 / Descriptor, firmware, charging, dual instances, coexistence |

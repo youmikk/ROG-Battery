@@ -3,6 +3,8 @@ use super::*;
 use crate::hid::HidDevice;
 use std::time::Instant;
 
+mod alpha_wireless;
+
 pub struct HyperX;
 
 fn control(i: &HidInterface) -> bool {
@@ -105,11 +107,13 @@ impl DeviceBackend for HyperX {
             target
         }).collect();
         targets.extend(cloud_ii::discover_with(interfaces, |interface| cloud_ii::proven(api, interface)));
+        targets.extend(alpha_wireless::discover(api, interfaces));
         Ok(targets)
     }
 
     fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
         let interface = target.hid()?;
+        if alpha_wireless::control_group(interface).is_some() { return alpha_wireless::read(api, target); }
         if cloud_ii::control_group(interface).is_some() { return cloud_ii::read(api, target); }
         if !control(interface) { return Err(crate::i18n::translate("设备无有效状态回报").into()); }
         let lock = channel::lock(&interface.path);
