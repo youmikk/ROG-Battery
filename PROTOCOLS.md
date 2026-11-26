@@ -2,6 +2,14 @@
 
 [English](PROTOCOLS.en.md) · [已实现兼容性](COMPATIBILITY.md)
 
+## 2026-11-26：高斯 GANSS GS3104T-Pro（未发布）
+
+来源为 MIT 许可的 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`：[GANSS 硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/ganss.md)、[解析器](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Ganss/GanssCodec.cs)。上游 luze258 在 PR #15 提供官方软件捕获，维护者未复测。精确接收器产品串另由 Linux [提交说明 `0eda44edbc17d4f821690d1dc7765f14a28e4550`](https://github.com/torvalds/linux/commit/0eda44edbc17d4f821690d1dc7765f14a28e4550) 交叉确认；只使用身份事实，没有移植该驱动实现。
+
+准入为 `GS3104T-PRO 2.4G`、`05AC:024F / MI_03 / FF60:0061`、输入输出 33 字节和两方向唯一 Report0。只发固定电量读取请求 `00 20 01 00…21`，750ms / 32帧；复用原 F108 通道锁和轮询生命周期。纯 payload 必须32字节、头 `20 01 00`、byte3为2–100且末字节等于前31字节和的低字节。GANSS校验与原F108的1–100及不要求响应校验和的规则分开。
+
+上游完整97% payload 为 `2001006100000000000000000000000000000000000000000000000000000082`。其他边界、损坏及双实例向量为合成测试。无响应、错误校验、0/1、越界或短帧不产生新电量；充电、电压保持未知。产品串和捕获来自不同上游设备记录，仍需本项目真机联合验证描述符、低电量、休眠与驱动共存；不由同VID/PID推断其他模式或型号。
+
 ## 2026-11-26：HyperX Cloud Alpha Wireless（未发布）
 
 固定来源交叉核对：

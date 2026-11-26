@@ -4,6 +4,12 @@
 
 本轮 VigilWatt 来源适配的实现、上游记录与实机待验项目见 [适配证据索引](ADAPTATION_EVIDENCE.md)。
 
+## 未发布：高斯 GANSS GS3104T-Pro
+
+新增产品串 `GS3104T-PRO 2.4G` 的接收器：`05AC:024F / MI_03 / FF60:0061`，输入输出均为 33 字节、唯一 Report ID 0。与原版 AULA F108 Pro 共用已证实的状态查询；GANSS 单独校验响应累加和，仅发布 2–100%，充电状态未知。同型号接收器按实例路径隔离。
+
+依据 VigilWatt 的公开 97% 捕获及 Linux 提交说明中的接收器身份，完成回放、边界值及双设备合成测试。本项目尚无对应真机验收；1%、休眠、其他固件、Windows 描述符和驱动共存待验证。USB、蓝牙与其他产品串未扩展，详见 [协议研究](PROTOCOLS.md)。
+
 ## 未发布：HyperX Cloud Alpha Wireless
 
 新增第一代 Cloud Alpha Wireless `03F0:098D / MI_03 / Col01 / FF43:0202`。Windows 输入输出各 31 字节、Feature 长度 0，运行时须证明双向唯一 Report `21`；歧义管理集合不查询，同型号接收器按路径分别管理。Cloud II 与 Alpha 2 沿用各自适配。

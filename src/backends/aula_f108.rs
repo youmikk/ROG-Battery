@@ -1,4 +1,4 @@
-//! Original AULA F108 Pro receiver, using its native driver's battery command.
+//! AULA F108 Pro and GANSS GS3104T-Pro receiver battery queries.
 //! This is not the HFD info-page protocol used by F99 MAX or F108 Pro V2.
 use super::*;
 use crate::hid::HidDevice;
@@ -7,6 +7,7 @@ use std::time::Instant;
 pub struct AulaF108;
 
 const PRODUCT: &str = "F108Pro Dongle";
+const GANSS_PRODUCT: &str = "GS3104T-PRO 2.4G";
 const REPORT_BYTES: u16 = 33;
 const PAYLOAD_BYTES: usize = 32;
 const TIMEOUT_MS: u32 = 600;
@@ -43,7 +44,7 @@ fn receiver_group(i: &HidInterface) -> Option<String> {
 }
 
 fn control(i: &HidInterface) -> bool {
-    management(i) && i.product == PRODUCT && i.input_len == REPORT_BYTES
+    management(i) && matches!(i.product.as_str(), PRODUCT | GANSS_PRODUCT) && i.input_len == REPORT_BYTES
         && i.output_len == REPORT_BYTES && receiver_group(i).is_some()
 }
 
@@ -54,13 +55,17 @@ fn candidates(interfaces: &[HidInterface]) -> Vec<&HidInterface> {
 }
 
 fn proven(api: &HidApi, i: &HidInterface) -> bool {
-    control(i) && descriptor::Descriptor::open(api, i)
-        .is_some_and(|d| d.only_reports(i, 0, REPORT_BYTES, 0, REPORT_BYTES))
+    proven_with(i, || descriptor::Descriptor::open(api, i)
+        .and_then(|descriptor| descriptor.single_input_output_report_ids(i, REPORT_BYTES, REPORT_BYTES)))
+}
+
+fn proven_with(interface: &HidInterface, reports: impl FnOnce() -> Option<(u8, u8)>) -> bool {
+    control(interface) && reports() == Some((0, 0))
 }
 
 fn target(i: &HidInterface) -> Target {
     let mut t = Target::new(BackendId::AulaF108, i, 0);
-    t.name = "AULA F108 Pro".into();
+    t.name = if i.product == GANSS_PRODUCT { "GANSS GS3104T-Pro" } else { "AULA F108 Pro" }.into();
     t.family = DeviceFamily::Keyboard;
     t
 }
@@ -83,11 +88,20 @@ fn percent(r: &[u8]) -> Option<u8> {
     Some(r[3])
 }
 
+fn model_percent(interface: &HidInterface, report: &[u8]) -> Option<u8> {
+    let value = percent(report)?;
+    if interface.product == GANSS_PRODUCT && (value < 2 || report[PAYLOAD_BYTES - 1]
+        != report[..PAYLOAD_BYTES - 1].iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))) {
+        return None;
+    }
+    Some(value)
+}
+
 fn read_with(t: &Target, exchange: impl FnOnce(&[u8]) -> Option<Vec<u8>>) -> Result<Snapshot, String> {
     let i = t.hid()?;
-    if t.backend != BackendId::AulaF108 || !control(i) { return Err(UNAVAILABLE.into()); }
+    if t.backend != BackendId::AulaF108 || t.address != 0 || !control(i) { return Err(UNAVAILABLE.into()); }
     let response = exchange(&request()).ok_or(UNAVAILABLE)?;
-    let value = percent(&response).ok_or(UNAVAILABLE)?;
+    let value = model_percent(i, &response).ok_or(UNAVAILABLE)?;
     let mut target = target(i);
     target.verified_identity = true;
     Ok(Snapshot {
@@ -109,14 +123,15 @@ impl DeviceBackend for AulaF108 {
 
     fn read(&self, api: &HidApi, t: &Target, _: bool) -> Result<Snapshot, String> {
         let i = t.hid()?;
-        if t.backend != BackendId::AulaF108 || !proven(api, i) { return Err(UNAVAILABLE.into()); }
+        if t.backend != BackendId::AulaF108 || t.address != 0 || !proven(api, i) { return Err(UNAVAILABLE.into()); }
         let lock = channel::lock(&receiver_group(i).ok_or(UNAVAILABLE)?);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut device = HidDevice::open(i)?;
         read_with(t, |request| {
             let started = Instant::now();
             let mut remaining = 32;
-            let response = device.transact_with_input_report(request, 0, TIMEOUT_MS, |r| {
+            let timeout = if i.product == GANSS_PRODUCT { 750 } else { TIMEOUT_MS };
+            let response = device.transact_with_input_report(request, 0, timeout, |r| {
                 remaining -= 1;
                 // A matching zero/invalid value ends the exchange; never wait
                 // for an older valid report to substitute for the current one.
@@ -124,7 +139,7 @@ impl DeviceBackend for AulaF108 {
             });
             trace::record(i, BackendId::AulaF108, "query-battery", 0, 0x20, request.len(),
                 response.as_ref().map_or(0, Vec::len), started, match response.as_deref() {
-                    Some(r) if percent(r).is_some() => trace::Outcome::Ok,
+                    Some(r) if model_percent(i, r).is_some() => trace::Outcome::Ok,
                     Some(_) => trace::Outcome::InvalidData,
                     None => trace::Outcome::NoReply,
                 });
@@ -248,5 +263,134 @@ mod tests {
         assert!(read_with(&wrong, |_| panic!("foreign backend queried")).is_err());
         wrong = t; wrong.hid_mut().product = "F99 MAX Dongle".into();
         assert!(read_with(&wrong, |_| panic!("foreign product queried")).is_err());
+    }
+
+    fn ganss_interface(instance: &str) -> HidInterface {
+        let mut receiver = interface(instance);
+        receiver.product = GANSS_PRODUCT.into();
+        receiver
+    }
+
+    fn synthetic_ganss_response(value: u8) -> Vec<u8> {
+        let mut report = response(value);
+        report[31] = 0x21u8.wrapping_add(value);
+        report
+    }
+
+    #[test]
+    fn ganss_upstream_capture_yields_97_percent_with_unknown_charging() {
+        let upstream_capture = [
+            0x20, 1, 0, 0x61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x82,
+        ];
+        let receiver = ganss_interface("one");
+        let candidate = target(&receiver);
+        assert!(!candidate.verified_identity);
+        let snapshot = read_with(&candidate, |packet| {
+            assert_eq!(packet, request());
+            Some(upstream_capture.to_vec())
+        }).unwrap();
+        assert_eq!(snapshot.target.name, "GANSS GS3104T-Pro");
+        assert_eq!(snapshot.target.family, DeviceFamily::Keyboard);
+        assert!(snapshot.connected && snapshot.target.verified_identity && snapshot.battery_at.is_some());
+        assert!(!snapshot.battery_unavailable && !snapshot.dpi.writable && !snapshot.polling_rate.writable);
+        let battery = snapshot.battery.unwrap();
+        assert_eq!((battery.percent, battery.charging, battery.voltage_mv), (Some(97), None, None));
+        assert_eq!(battery.estimated_percent, None);
+        assert!(!battery.approximate);
+    }
+
+    #[test]
+    fn ganss_requires_the_exact_receiver_identity_and_proven_reports() {
+        let receiver = ganss_interface("one");
+        assert!(proven_with(&receiver, || Some((0, 0))));
+        for reports in [None, Some((1, 0)), Some((0, 1)), Some((1, 1))] {
+            assert!(!proven_with(&receiver, || reports));
+        }
+        for product in ["GANSS", "GS3104T", "GANSS GS3104T-Pro", "GS3104T PRO",
+            "HFD GS3104T PRO", "GS3104T-PRO 2.4G ", "GS3104T-PRO 2.4G V2",
+            "gs3104t-pro 2.4g", "2.4G Wireless Receiver", ""] {
+            let mut wrong = receiver.clone();
+            wrong.product = product.into();
+            assert!(!proven_with(&wrong, || panic!("unknown product opened")));
+            assert!(read_with(&target(&wrong), |_| panic!("unknown product queried")).is_err());
+        }
+        for mutate in [
+            |receiver: &mut HidInterface| receiver.vendor_id = 0x0c45,
+            |receiver: &mut HidInterface| receiver.product_id = 0x0256,
+            |receiver: &mut HidInterface| receiver.usage_page = 1,
+            |receiver: &mut HidInterface| receiver.usage = 6,
+            |receiver: &mut HidInterface| receiver.input_len = 32,
+            |receiver: &mut HidInterface| receiver.output_len = 65,
+            |receiver: &mut HidInterface| receiver.path = receiver.path.replace("mi_03", "mi_00"),
+            |receiver: &mut HidInterface| receiver.path = receiver.path.replace("mi_03", "mi_04"),
+            |receiver: &mut HidInterface| receiver.path = receiver.path.replace("mi_03", "mi_030"),
+        ] {
+            let mut wrong = receiver.clone();
+            mutate(&mut wrong);
+            assert!(!proven_with(&wrong, || panic!("wrong interface opened")));
+            assert!(read_with(&target(&wrong), |_| panic!("wrong interface queried")).is_err());
+        }
+        let mut wrong = target(&receiver);
+        wrong.address = 1;
+        assert!(read_with(&wrong, |_| panic!("wrong address queried")).is_err());
+    }
+
+    #[test]
+    fn ganss_synthetic_corruption_and_unavailable_values_never_create_samples() {
+        let receiver = ganss_interface("one");
+        let candidate = target(&receiver);
+        for value in [2, 37, 97, 100] {
+            assert_eq!(model_percent(&receiver, &synthetic_ganss_response(value)), Some(value));
+        }
+        for value in [0, 1, 101, 127, 128, 255] {
+            assert!(read_with(&candidate, |_| Some(synthetic_ganss_response(value))).is_err());
+        }
+        assert!(read_with(&candidate, |_| None).is_err());
+        for index in 0..PAYLOAD_BYTES {
+            let mut corrupt = synthetic_ganss_response(97);
+            corrupt[index] ^= 1;
+            assert!(read_with(&candidate, |_| Some(corrupt)).is_err());
+        }
+        let valid = synthetic_ganss_response(97);
+        for length in 0..PAYLOAD_BYTES {
+            assert!(read_with(&candidate, |_| Some(valid[..length].to_vec())).is_err());
+        }
+        for prefix in [0, 1] {
+            let mut prefixed = vec![prefix];
+            prefixed.extend_from_slice(&valid);
+            assert!(model_percent(&receiver, &prefixed).is_none());
+        }
+        let mut padded = valid.clone();
+        padded.push(0);
+        assert!(model_percent(&receiver, &padded).is_none());
+        let mut overflow = valid;
+        overflow[4..31].fill(0xff);
+        overflow[31] = overflow[..31].iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        assert_eq!(model_percent(&receiver, &overflow), Some(97));
+        assert_eq!(model_percent(&interface("aula"), &response(1)), Some(1));
+    }
+
+    #[test]
+    fn ganss_same_model_receivers_keep_separate_channels_and_samples() {
+        let first = ganss_interface("one");
+        let second = ganss_interface("two");
+        assert_eq!(first.serial, second.serial);
+        assert_eq!(candidates(&[first.clone(), second.clone()]).len(), 2);
+        assert_ne!(receiver_group(&first), receiver_group(&second));
+        let first_target = target(&first);
+        let second_target = target(&second);
+        assert_ne!(first_target.key, second_target.key);
+        assert!(!first_target.same_channel(&second_target));
+        let first_sample = read_with(&first_target, |_| Some(synthetic_ganss_response(37))).unwrap();
+        let second_sample = read_with(&second_target, |_| Some(synthetic_ganss_response(97))).unwrap();
+        assert_eq!(first_sample.battery.unwrap().percent, Some(37));
+        assert_eq!(second_sample.battery.unwrap().percent, Some(97));
+        assert!(read_with(&first_target, |_| None).is_err());
+        let mut duplicate = first.clone();
+        duplicate.path = duplicate.path.replace("col01", "col02").replace("&0000#", "&0001#");
+        duplicate.product = "unknown".into();
+        assert!(candidates(&[first, duplicate]).is_empty());
+        assert_eq!(candidates(&[second, interface("aula")]).len(), 2);
     }
 }

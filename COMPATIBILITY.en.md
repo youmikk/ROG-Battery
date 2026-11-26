@@ -4,6 +4,12 @@
 
 Implementation status, upstream records and remaining hardware checks for this VigilWatt iteration are in the [evidence index](ADAPTATION_EVIDENCE.md).
 
+## Unreleased: GANSS GS3104T-Pro
+
+Added the receiver with exact product string `GS3104T-PRO 2.4G`: `05AC:024F / MI_03 / FF60:0061`, 33-byte input/output and sole report ID 0. It shares the established status query with the original AULA F108 Pro; GANSS separately checks the response sum and accepts 2–100%. Charging remains unknown. Same-model receivers retain separate instance-path identities.
+
+Evidence combines VigilWatt's public 97% capture with the receiver identity recorded in a Linux commit message. Replay, boundary and dual-device tests are synthetic local validation. Physical hardware, 1%, sleep, firmware differences, Windows descriptors and driver coexistence remain unverified locally. USB, Bluetooth and other product strings are outside this addition. See [protocol evidence](PROTOCOLS.en.md).
+
 ## Unreleased: HyperX Cloud Alpha Wireless
 
 Adds original Cloud Alpha Wireless `03F0:098D / MI_03 / Col01 / FF43:0202`. Windows input/output capacities are 31 bytes, Feature length is zero, and the runtime descriptor must prove sole bidirectional Report `21`. Ambiguous management collections are not queried; identical receivers retain separate path identities. Cloud II and Alpha 2 keep their existing adapters.

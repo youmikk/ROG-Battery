@@ -9,6 +9,8 @@ Protocol parsing/transport research and recorded regression fixtures for THUNDER
 
 LANGTU T98 protocol research and reconstructed battery prefixes refer to VigilWatt's Langtu module and hardware documentation, credited upstream to YyingnLL / haloneko. The local Rust adapter and lifecycle integration are independently implemented; reconstructed vectors are distinguished from complete recorded frames.
 
+GANSS GS3104T-Pro protocol research and the recorded 97% regression fixture refer to VigilWatt's Ganss module and hardware documentation, credited upstream to luze258 (PR #15). The local adapter extends the existing independently implemented AULA status transport.
+
 MIT License
 
 Copyright (c) 2026 evren

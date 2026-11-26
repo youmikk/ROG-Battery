@@ -202,7 +202,7 @@ impl BackendId {
             Self::AulaHfdMechanical => "AULA HFD mechanical keyboard",
             Self::AulaV9Pro => "AULA V9Pro+",
             Self::AulaF99 => "AULA F99 MAX",
-            Self::AulaF108 => "AULA F108 Pro",
+            Self::AulaF108 => "AULA F108 Pro / GANSS GS3104T-Pro",
             Self::AtkNano => "ATK / VXE NANO",
             Self::AtkHoltek => "ATK 8K Nano",
             Self::Lingbao => "Lingbao M1 Pro",

@@ -2,6 +2,14 @@
 
 [简体中文](PROTOCOLS.md) · [Implemented compatibility](COMPATIBILITY.en.md)
 
+## 2026-11-26: GANSS GS3104T-Pro (unreleased)
+
+MIT-licensed VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`, `docs/hardware/brands/ganss.md` and `GanssCodec.cs`, supplies the protocol and luze258's PR #15 capture. Linux commit message `0eda44edbc17d4f821690d1dc7765f14a28e4550` independently identifies receiver product string `GS3104T-PRO 2.4G`. No Linux driver implementation was ported.
+
+Admission requires that exact name, `05AC:024F / MI_03 / FF60:0061`, 33-byte input/output and sole report0 in both directions. Only the fixed battery request `00 20 01 00…21` is sent, with a 750ms / 32-frame limit. The 32-byte payload must have header `20 01 00`, percentage2–100 at byte3 and a valid low-byte sum at byte31. GANSS validation is separate from the original F108 response rules.
+
+The published 97% payload is `2001006100000000000000000000000000000000000000000000000000000082`; other bounds, corruption and dual-instance vectors are synthetic. Missing or invalid replies never create samples; charging and voltage remain unknown. Product identity and capture come from separate upstream records. Local hardware, descriptors, 1%, sleep, firmware and driver coexistence still need validation. Other USB/Bluetooth modes and shared-ID models are not inferred compatible.
+
 ## 2026-11-26: HyperX Cloud Alpha Wireless (unreleased)
 
 Cross-checked pinned sources:
