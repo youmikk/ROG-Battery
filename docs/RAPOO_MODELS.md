@@ -86,4 +86,4 @@ VID: `24AE` · 77 model entries · 146 product IDs
 | VT9S PRO V2 | `0x46aa / 0x14aa` |
 | VT9S V2 | `0x4653 / 0x1453` |
 
-资料 / Reference: [Rapoo A HUB](https://hub.rapoo.cn/) · [设备兼容性](COMPATIBILITY.md) · [Device compatibility](COMPATIBILITY.en.md)
+资料 / Reference: [Rapoo A HUB](https://hub.rapoo.cn/) · [设备兼容性](../COMPATIBILITY.md) · [Device compatibility](../COMPATIBILITY.en.md)

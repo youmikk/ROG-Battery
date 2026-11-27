@@ -2,7 +2,7 @@
 
 [简体中文](ROG_MODELS.md) | **English**
 
-[Back to the project](README.en.md) · [Multi-brand compatibility](COMPATIBILITY.en.md)
+[Back to the project](../README.en.md) · [Multi-brand compatibility](../COMPATIBILITY.en.md)
 
 This page records the built-in ASUS / ROG identification catalogue. Other brands and per-model capabilities are documented in the compatibility notes. A catalogue entry means that the app can identify the model; it does not mean that every feature has been verified on that hardware.
 

@@ -27,7 +27,7 @@ Runs as a single executable without administrator rights or a separate backgroun
 | Battery history and estimates | Supported devices from all brands keep separate 48-hour battery charts. Continuous valid samples provide remaining runtime or charging estimates; coarse readings retain the `≈` indicator. |
 | Detailed ROG settings | Supported mice retain DPI, polling rate, debounce, button mappings, sleep settings and configuration backups. |
 | Low-battery notifications | Windows notifications are available in the Store edition, not the portable build. They use valid, precise readings rather than estimates or expired cache entries. |
-| Store updates and reviews | Store installations check silently on the first launch each day and remind only on Home. Downloads and installation require separate confirmation; About includes the official Store review link. |
+| Store updates and reviews | Store installations check silently on the first launch each day and remind only on Home. Confirm once to download, install and restart automatically; About includes the official Store review link. |
 | Appearance and language | Light and dark themes, system preferences, Simplified Chinese and English, plus startup, close behavior and refresh settings. |
 
 Mouse controls depend on the model, firmware and connection. Hardware DPI stages and software presets are presented separately; presets do not enable writes on read-only devices. Supported Logitech onboard profiles retain their actual stages, including a fifth stage. The 1–4 software preset limit does not change those hardware stages.
@@ -49,7 +49,7 @@ The table groups implemented integrations by device type. **Coverage is limited 
 
 Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard generations can use different protocols. A similar name or shared receiver ID does not establish compatibility. The generic Bluetooth path only displays a level that Windows already exposes; charging remains unknown when the Bluetooth cache has no charging state. BLE-only / GATT devices may require a separate integration. Many new integrations have passed protocol tests but still need validation on the corresponding hardware.
 
-Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
+Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](docs/ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](docs/RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
 
 ## Latest release: 1.5.0
 
@@ -90,7 +90,7 @@ Microsoft Store installations silently query the official Store on the first lau
 
 Available-update reminders appear only within the **Home device list**, never as popups over hidden windows, tray quick view or device detail pages. Later today hides the Home card for the rest of the day. **Settings → About → Check for updates** bypasses the daily limit. Failures show an error rather than incorrectly reporting that the app is up to date.
 
-Downloading and installing require separate user confirmation. A completed download never installs automatically. Before installation, the app waits for existing device writes, temporarily blocks new writes, and saves settings and battery history before calling the official Microsoft installation API. Failed or canceled preparation restores normal operation without changing the startup preference. Windows may close and restart the app; reopen it after updating if it does not restart. Exit and update in Store remains available as a fallback.
+Choose Update now to wait for device writes, save settings and battery history, then download, install and restart on Home through Microsoft's official APIs. Windows presents any required system authorization. Failures show the cause and offer a retry. See [Store update implementation (Chinese)](docs/store-updates.md) for details.
 
 Release information opens the Microsoft Store product page. The app does not scrape undocumented release-note fields or use GitHub or a third-party automatic updater. **Settings → About → Review X-Battery** opens the official Store review entry when clicked. Honest reviews are welcome, entirely optional, and never affect any feature.
 
@@ -109,6 +109,10 @@ If readings remain unavailable, use **Settings → About → Device feedback** t
 ## Feedback and privacy
 
 Open **Settings → About → Device feedback**, choose a device and category, and describe the issue. You can preview or disable Include device diagnostics and select up to three screenshots.
+
+The device list shows VID/PID values and other devices enumerated by Windows. Add the brand and full model when reporting an unrecognized device. Included diagnostics contain the selected device's interface details and the complete HID interface inventory.
+
+Device traffic capture appears below Include device diagnostics. Recordings containing traffic can be uploaded with feedback. Right-click a local feedback entry to export, delete or resend it. See [Device traffic capture](docs/guided-capture.md) for the steps.
 
 **Official releases use the feedback service and can submit in the app without a GitHub account.** Screenshots, maintainer replies and follow-ups are supported; feedback and selected attachments are public. Self-built versions without a configured service provide Copy report & open GitHub instead. Add screenshots manually; browser submissions do not appear in My feedback. See the [feedback service guide](services/feedback-relay/README.md) for deployment.
 
@@ -171,6 +175,14 @@ powershell -File tools/build-release.ps1
 Outputs are collected in `dist/version/`. Development uses `main`; pushing source and a matching version tag triggers the GitHub Actions portable release. For a build-only check, run the portable workflow manually with an empty tag.
 
 MSIX packaging and Microsoft Store submission use a separate manual workflow, with Store submission disabled by default. `Cargo.toml`, `msix/package.props.psd1`, the tag and executable version must agree. After stability acceptance, enable Store submission as needed and configure the required credentials and product ID.
+
+### Interface translations
+
+The `language` key in `settings.ini` accepts `system`, `zh-CN` and `en`, defaulting to the system language when absent. `system` reads the Windows display language with `GetUserDefaultUILanguage`, selecting Simplified Chinese for Chinese locales and English otherwise. Manual changes apply after the setting is saved.
+
+Chinese and English strings live in `src/i18n/catalog.rs`. Use `tr!` for static text and `trf!` for complete sentences with parameters; Rust checks format arguments in both languages. Add both translations together and avoid sentence concatenation. `translate` handles known protocol labels and cache descriptions, not device names, paths or user input.
+
+Dropdowns cache translated labels while retaining the same values and order. Battery estimates keep raw data and format it in the active language when drawn. Device communication and configuration keys remain language-independent; Windows controls file-dialog and system-error languages.
 
 ## License
 

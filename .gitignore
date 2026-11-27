@@ -36,7 +36,15 @@ msix/store-credentials.psd1
 /HANDOFF.md
 /AGENTS.md
 /.agents/
-/docs/
+/AUDIT_REPORT.md
+/DEVICE_DETECTION_AUDIT.md
+/DEVICE_DETECTION_REGRESSION_REVIEW.md
+/docs/*
+!/docs/guided-capture.md
+!/docs/store-updates.md
+!/docs/ROG_MODELS.md
+!/docs/ROG_MODELS.en.md
+!/docs/RAPOO_MODELS.md
 /tests/
 /test-results/
 /mock-devices.txt
