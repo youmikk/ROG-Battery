@@ -18,6 +18,8 @@ use crate::ui::canvas::{self, Canvas};
 use crate::ui::widget::{Act, Drop, Edit, Page, Pref, Slide};
 use crate::win32;
 
+mod rapoo_devices;
+
 /// 托盘图标。**编进 exe**，不是运行时读文件。
 ///
 /// 三个理由：绿色版是单文件发布（旁边不会有 `assets\`）、MSIX 里 exe 所在的
@@ -669,137 +671,37 @@ fn legacy_rog_history_owner(
 }
 
 fn coalesce_rapoo_paired_poll(shared: &mut Shared, poll: &mut crate::backends::Poll) {
-    use crate::backends::rapoo::{LinkRole, device_signature};
-    use std::collections::BTreeMap;
-
-    // 仅当同一型号与非空序列号同时各存在唯一 2.4G 与有线端点时合并为单台实体鼠标。
-    // 双 2.4G 接收器（即使序列号相同）不会被合并，继续保持独立设备隔离。
-    #[derive(Default)]
-    struct Group {
-        receivers: Vec<usize>,
-        wired: Vec<usize>,
-        others: usize,
-    }
-
-    let mut groups: BTreeMap<(&'static str, String), Group> = BTreeMap::new();
-    for (idx, snap) in poll.snapshots.iter().enumerate() {
-        let Some(sig) = device_signature(&snap.target) else { continue; };
-        if sig.serial.is_empty() { continue; }
-        let entry = groups.entry((sig.model, sig.serial)).or_default();
-        match sig.role {
-            LinkRole::Receiver => entry.receivers.push(idx),
-            LinkRole::Wired => entry.wired.push(idx),
-        }
-    }
-    for device in shared.devices.values() {
-        let Some(basic) = &device.basic else { continue; };
-        let Some(sig) = device_signature(&basic.target) else { continue; };
-        if sig.serial.is_empty() { continue; }
-        if let Some(entry) = groups.get_mut(&(sig.model, sig.serial)) {
-            let key = &basic.target.key;
-            let known_in_poll = entry.receivers.iter().chain(entry.wired.iter())
-                .any(|&idx| poll.snapshots[idx].target.key == *key);
-            if !known_in_poll
-                && poll.present_channels.as_ref().is_some_and(|paths| paths.contains(&basic.target.channel_key()))
-            {
-                entry.others += 1;
-            }
-        }
-    }
-
-    let mut remove_indices = Vec::new();
-    for group in groups.into_values() {
-        if group.others > 0 || group.receivers.len() != 1 || group.wired.len() != 1 {
-            continue;
-        }
-        let rx_idx = group.receivers[0];
-        let wired_idx = group.wired[0];
-        let rx_key = poll.snapshots[rx_idx].target.key.clone();
-        let wired_key = poll.snapshots[wired_idx].target.key.clone();
-        if rx_key == wired_key { continue; }
-
-        let canonical_target = match (shared.devices.contains_key(&rx_key), shared.devices.contains_key(&wired_key)) {
-            (true, true) => {
-                if shared.promote_device_key(&wired_key, &rx_key) {
-                    shared.device_keys_dirty = true;
+    let existing = shared.devices.keys().cloned().collect();
+    let changes = shared.rapoo_devices.coalesce(poll, &existing);
+    if !changes.retired_keys.is_empty() {
+        shared.history_epoch = shared.history_epoch.wrapping_add(1);
+        shared.key_aliases.retain(|old, _| !changes.retired_keys.contains(old));
+        let (samples, mut aliases) = shared.history_tracker.take_pending();
+        aliases.retain(|(old, _)| !changes.retired_keys.contains(old));
+        shared.history_tracker.retry(samples, aliases);
+        for key in &changes.interrupted_keys { shared.history_tracker.interrupt(key); }
+        shared.devices.retain(|key, device| !device.basic.as_ref().is_some_and(|basic|
+            shared.rapoo_devices.card_key(&basic.target).is_some_and(|owner| owner != key.as_str())));
+        if let Some(queue) = shared.source_pending.get_mut(&crate::backends::BackendId::Rapoo) {
+            queue.retain(|cmd| {
+                let changed = cmd.basic_target().is_some_and(|target|
+                    shared.rapoo_devices.card_key(target).is_some_and(|owner| owner != target.key.as_str()));
+                if changed {
+                    shared.results.push_back(CmdResult { label: cmd.label(), ok: None,
+                        err: Some("设备关联已变化，请重新选择后重试".into()), hint: "" });
                 }
-                shared.devices.remove(&wired_key);
-                poll.snapshots[rx_idx].target.clone()
-            }
-            (true, false) => poll.snapshots[rx_idx].target.clone(),
-            (false, true) => poll.snapshots[wired_idx].target.clone(),
-            (false, false) => poll.snapshots[rx_idx].target.clone(),
-        };
-
-        let rx = &poll.snapshots[rx_idx];
-        let wired = &poll.snapshots[wired_idx];
-        let wired_wins = (wired.connected, wired.battery.is_some(), wired.battery_at, true)
-            >= (rx.connected, rx.battery.is_some(), rx.battery_at, false);
-        let mut merged = if wired_wins { wired.clone() } else { rx.clone() };
-        if merged.target.key != canonical_target.key {
-            merged.disable_writes();
-        }
-        merged.target = canonical_target.clone();
-
-        let keep_idx = if canonical_target.key == wired_key { wired_idx } else { rx_idx };
-        let drop_idx = if keep_idx == rx_idx { wired_idx } else { rx_idx };
-        poll.snapshots[keep_idx] = merged;
-        remove_indices.push(drop_idx);
-    }
-
-    if !remove_indices.is_empty() {
-        remove_indices.sort_unstable();
-        for idx in remove_indices.into_iter().rev() {
-            poll.snapshots.remove(idx);
+                !changed
+            });
         }
     }
-}
-
-fn find_unplugged_rapoo_replacement(
-    shared: &Shared,
-    present: Option<&std::collections::BTreeSet<String>>,
-    snapshots: &[crate::backends::Snapshot],
-    current_idx: usize,
-) -> Option<String> {
-    use crate::backends::rapoo::device_signature;
-    let present = present?;
-    let target = &snapshots[current_idx].target;
-    let sig = device_signature(target)?;
-    let serial_compatible = |a: &str, b: &str| a.is_empty() || b.is_empty() || a == b;
-
-    let competing = snapshots.iter().enumerate().any(|(idx, other)| {
-        idx != current_idx
-            && device_signature(&other.target).is_some_and(|osig| {
-                osig.model == sig.model
-                    && serial_compatible(&osig.serial, &sig.serial)
-                    && !shared.devices.values().any(|d| d.basic.as_ref().is_some_and(|b| b.target.same_channel(&other.target)))
-            })
-    });
-    if competing {
-        return None;
+    for (old, new) in changes.migrations {
+        if shared.promote_device_key(&old, &new) { shared.device_keys_dirty = true; }
+        if let Some(mut device) = shared.devices.remove(&old) {
+            device.reading.key = new.clone();
+            if let Some(basic) = &mut device.basic { basic.target.key = new.clone(); }
+            shared.devices.entry(new).or_insert(device);
+        }
     }
-
-    let mut candidates = shared.devices.iter().filter_map(|(old_key, device)| {
-        let basic = device.basic.as_ref()?;
-        if device.reading.connected || *old_key == target.key {
-            return None;
-        }
-        let old_sig = device_signature(&basic.target)?;
-        if old_sig.model != sig.model || !serial_compatible(&old_sig.serial, &sig.serial) {
-            return None;
-        }
-        if present.contains(&basic.target.channel_key())
-            || snapshots.iter().any(|s| s.target.same_channel(&basic.target))
-        {
-            return None;
-        }
-        Some(old_key.clone())
-    });
-    let first = candidates.next()?;
-    if candidates.next().is_some() {
-        return None;
-    }
-    Some(first)
 }
 
 fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, mut poll: crate::backends::Poll,
@@ -823,8 +725,13 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
     for device in shared.devices.values_mut() {
         if let Some(basic) = &mut device.basic {
             if basic.target.backend != backend { continue; }
-            let connection = poll.present_channels.as_ref().and_then(|paths|
-                (!paths.contains(&basic.target.channel_key())).then_some(false));
+            let connection = poll.present_channels.as_ref().and_then(|paths| {
+                let present = if backend == crate::backends::BackendId::Rapoo {
+                    shared.rapoo_devices.is_present(&device.reading.key)
+                        .unwrap_or_else(|| paths.contains(&basic.target.channel_key()))
+                } else { paths.contains(&basic.target.channel_key()) };
+                (!present).then_some(false)
+            });
             let status = device.basic_status.get_or_insert_with(Default::default);
             status.observe(connection, None, now, backend.sample_lifetime());
             if backend == crate::backends::BackendId::XInput && connection == Some(false) {
@@ -840,28 +747,7 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
             device.reading.quality = status.quality;
         }
     }
-    let present_channels = poll.present_channels.take();
-    let replacements: Vec<Option<String>> = if backend == crate::backends::BackendId::Rapoo {
-        (0..poll.snapshots.len()).map(|idx| {
-            let has_previous = shared.devices.values().any(|device| {
-                device.basic.as_ref().is_some_and(|other| other.target.same_channel(&poll.snapshots[idx].target))
-            });
-            if has_previous {
-                None
-            } else {
-                find_unplugged_rapoo_replacement(shared, present_channels.as_ref(), &poll.snapshots, idx)
-            }
-        }).collect()
-    } else {
-        vec![None; poll.snapshots.len()]
-    };
-    for (mut snapshot, replacement) in poll.snapshots.into_iter().zip(replacements) {
-        if let Some(old_key) = replacement {
-            if shared.promote_device_key(&old_key, &snapshot.target.key) {
-                shared.device_keys_dirty = true;
-            }
-            shared.devices.remove(&old_key);
-        }
+    for mut snapshot in poll.snapshots {
         if backend == crate::backends::BackendId::Bluetooth
             && shared.devices.values().any(|device| {
                 device.basic.as_ref().is_some_and(|other| {
@@ -981,6 +867,7 @@ struct Shared {
     source_pending: BTreeMap<crate::backends::BackendId, VecDeque<Cmd>>,
     source_busy: std::collections::BTreeSet<crate::backends::BackendId>,
     devices: std::collections::BTreeMap<String, DeviceSnapshot>,
+    rapoo_devices: rapoo_devices::Devices,
     key_aliases: std::collections::BTreeMap<String, String>,
     active_key: Option<String>,
     primary_key: Option<String>,
@@ -1217,6 +1104,7 @@ impl Shared {
             source_pending: Default::default(),
             source_busy: Default::default(),
             devices: Default::default(),
+            rapoo_devices: Default::default(),
             key_aliases: Default::default(),
             active_key: None,
             primary_key: None,
@@ -7214,11 +7102,502 @@ mod backend_tests {
 
         shared.publish_additional(BackendId::Rapoo, vec![rx_b], 0, 4);
         assert_eq!(shared.readings.len(), 1);
-        assert_eq!(shared.readings[0].key, rx_b_key);
+        assert_eq!(shared.readings[0].key, rx_a_key);
         assert!(shared.readings[0].connected);
         assert_eq!(shared.readings[0].percent(), Some(60));
-        assert_eq!(shared.cfg.device_names.get(&rx_b_key).map(String::as_str), Some("My VT1"));
-        assert_eq!(shared.cfg.device_order, vec![rx_b_key]);
+        assert_eq!(shared.cfg.device_names.get(&rx_a_key).map(String::as_str), Some("My VT1"));
+        assert_eq!(shared.cfg.device_order, vec![rx_a_key.clone()]);
+        assert_eq!(shared.key_aliases.get(&rx_b_key), Some(&rx_a_key));
+    }
+
+    fn rapoo_endpoint(pid: u16, path: &str, serial: &str, connected: bool) -> Snapshot {
+        let interface = hid::HidInterface {
+            vendor_id: 0x24ae, product_id: pid, usage_page: 0xff00, usage: 2,
+            input_len: 19, output_len: 0, feature_len: 0, serial: serial.into(),
+            product: "Rapoo VT1".into(), path: path.into(),
+        };
+        let mut sample = snapshot(BackendId::Rapoo, path, 58);
+        sample.target = Target::new(BackendId::Rapoo, &interface, 0);
+        sample.connected = connected;
+        sample.dpi = Dpi {
+            current: Some(800), current_y: Some(900), profile: Some(1),
+            configuration_token: Some(u64::from(pid)), active_stage: Some(0),
+            stages: vec![crate::device::DpiStage { index: 0, value: 800 }],
+            stage_y: [(0, 900)].into(), stage_writable: connected, stage_editable: connected,
+            max_stages: 7, ..Default::default()
+        };
+        sample.polling_rate = crate::device::PollingRate {
+            current: Some(1000), values: vec![500, 1000], writable: connected, ..Default::default()
+        };
+        if !connected {
+            sample.battery = None;
+            sample.battery_at = None;
+            sample.battery_unavailable = true;
+        }
+        sample
+    }
+
+    fn rapoo_poll(snapshots: Vec<Snapshot>, present: &[&Snapshot]) -> crate::backends::Poll {
+        let mut poll = crate::backends::Poll::from_snapshots(present.iter().map(|sample| (*sample).clone()).collect());
+        poll.snapshots = snapshots;
+        poll
+    }
+
+    #[test]
+    fn rapoo_pair_survives_alternating_read_failures_and_recovery() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let key = receiver.target.key.clone();
+        let now = std::time::Instant::now();
+        let mut shared = Shared::new(Settings::default());
+        for (step, samples) in [
+            vec![receiver.clone(), wired.clone()], vec![wired.clone()],
+            vec![receiver.clone()], Vec::new(), vec![receiver.clone(), wired.clone()],
+        ].into_iter().enumerate() {
+            merge_additional_at(&mut shared, BackendId::Rapoo,
+                rapoo_poll(samples, &[&receiver, &wired]), now + Duration::from_secs(step as u64));
+            assert_eq!(shared.devices.len(), 1);
+            assert_eq!(shared.readings[0].key, key);
+            assert!(shared.readings[0].connected);
+            let basic = shared.devices[&key].basic.as_ref().unwrap();
+            assert_eq!(basic.dpi.stage_editable, step != 3);
+            assert_eq!(basic.polling_rate.writable, step != 3);
+            if step == 1 { assert_eq!(basic.target.channel_key(), "wired"); }
+            if step == 2 { assert_eq!(basic.target.channel_key(), "receiver"); }
+        }
+    }
+
+    #[test]
+    fn rapoo_pair_keeps_writable_endpoint_and_configuration_for_each_arrival_order() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", false);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        for first in [None, Some(receiver.clone()), Some(wired.clone())] {
+            let mut shared = Shared::new(Settings::default());
+            let key = first.as_ref().unwrap_or(&receiver).target.key.clone();
+            if let Some(first) = first { merge_additional(&mut shared, BackendId::Rapoo, vec![first].into()); }
+            merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+            assert_eq!(shared.devices.len(), 1);
+            let basic = shared.devices[&key].basic.as_ref().unwrap();
+            assert_eq!(basic.target.key, key);
+            assert!(basic.target.same_channel(&wired.target));
+            assert_eq!(basic.target.hid().unwrap().product_id, 0x4615);
+            assert_eq!(basic.dpi, wired.dpi);
+            assert_eq!(basic.polling_rate, wired.polling_rate);
+            let command = Cmd::BasicDpiStage {
+                target: basic.target.clone(), stage: basic.dpi.stages[0],
+                context: basic.dpi.stage_context().unwrap(),
+            };
+            let Cmd::BasicDpiStage { target, context, .. } = command else { unreachable!() };
+            assert!(target.same_channel(&wired.target));
+            assert_eq!(context, wired.dpi.stage_context().unwrap());
+        }
+    }
+
+    #[test]
+    fn rapoo_pair_switches_writes_on_unplug_and_never_reuses_failed_endpoint_writes() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        let key = shared.readings[0].key.clone();
+        for endpoint in [&receiver, &wired, &receiver] {
+            merge_additional(&mut shared, BackendId::Rapoo, vec![endpoint.clone()].into());
+            let basic = shared.devices[&key].basic.as_ref().unwrap();
+            assert_eq!(shared.devices.len(), 1);
+            assert!(basic.target.same_channel(&endpoint.target));
+            assert_eq!(basic.dpi, endpoint.dpi);
+        }
+        merge_additional(&mut shared, BackendId::Rapoo, rapoo_poll(Vec::new(), &[&wired]));
+        assert!(shared.readings[0].connected);
+        assert!(!shared.devices[&key].basic.as_ref().unwrap().dpi.stage_editable);
+        merge_additional(&mut shared, BackendId::Rapoo, Vec::new().into());
+        assert!(!shared.readings[0].connected);
+        merge_additional(&mut shared, BackendId::Rapoo, vec![wired.clone()].into());
+        assert_eq!(shared.devices.len(), 1);
+        assert_eq!(shared.devices[&key].basic.as_ref().unwrap().dpi, wired.dpi);
+    }
+
+    #[test]
+    fn rapoo_offline_receiver_does_not_clear_failed_wired_sample() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", false);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        let key = shared.readings[0].key.clone();
+        let measured = shared.devices[&key].battery_at;
+        merge_additional(&mut shared, BackendId::Rapoo, rapoo_poll(vec![receiver.clone()], &[&receiver, &wired]));
+        assert_eq!(shared.devices.len(), 1);
+        assert!(shared.readings[0].connected);
+        assert_eq!(shared.devices[&key].battery_at, measured);
+        let basic = shared.devices[&key].basic.as_ref().unwrap();
+        assert!(basic.target.same_channel(&wired.target));
+        assert!(!basic.dpi.stage_editable);
+        assert!(!basic.polling_rate.writable);
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver].into());
+        assert!(!shared.readings[0].connected);
+    }
+
+    #[test]
+    fn rapoo_unknown_or_different_serial_never_inherits_preferences_or_history() {
+        for (old_serial, new_serial) in [("known", ""), ("", "known"), ("", ""), ("known", "other"), (" ", " ")] {
+            let old = rapoo_endpoint(0x1415, "old", old_serial, true);
+            let next = rapoo_endpoint(0x1415, "next", new_serial, true);
+            let old_key = old.target.key.clone();
+            let next_key = next.target.key.clone();
+            let mut shared = Shared::new(Settings::default());
+            shared.cfg.device_names.insert(old_key.clone(), "Mouse A".into());
+            shared.cfg.device_order = vec![old_key.clone()];
+            shared.cfg.device_tray.insert(old_key.clone(), Default::default());
+            shared.cfg.tray_device = Some(old_key.clone());
+            shared.cfg.dpi_presets.insert(old_key.clone(), Default::default());
+            merge_additional(&mut shared, BackendId::Rapoo, vec![old].into());
+            shared.history_tracker.take_pending();
+            merge_additional(&mut shared, BackendId::Rapoo, vec![next].into());
+            assert_eq!(shared.devices.len(), 2);
+            assert_eq!(shared.cfg.device_names[&old_key], "Mouse A");
+            assert_eq!(shared.cfg.device_order, vec![old_key.clone()]);
+            assert_eq!(shared.cfg.tray_device.as_ref(), Some(&old_key));
+            assert!(!shared.cfg.device_names.contains_key(&next_key));
+            assert!(!shared.cfg.device_tray.contains_key(&next_key));
+            assert!(!shared.cfg.dpi_presets.contains_key(&next_key));
+            assert!(!shared.key_aliases.contains_key(&old_key));
+            assert!(shared.history_tracker.take_pending().1.is_empty());
+        }
+    }
+
+    #[test]
+    fn rapoo_unknown_serial_never_pairs_wired_and_receiver() {
+        for (receiver_serial, wired_serial) in [("known", ""), ("", "known"), ("", "")] {
+            let receiver = rapoo_endpoint(0x1415, "receiver", receiver_serial, false);
+            let wired = rapoo_endpoint(0x4615, "wired", wired_serial, true);
+            let mut shared = Shared::new(Settings::default());
+            merge_additional(&mut shared, BackendId::Rapoo, vec![receiver, wired].into());
+            assert_eq!(shared.devices.len(), 2);
+            assert!(shared.key_aliases.is_empty());
+        }
+    }
+
+    #[test]
+    fn rapoo_identical_receivers_block_pairing_even_after_one_disappears() {
+        let first = rapoo_endpoint(0x1415, "first", "duplicate", true);
+        let second = rapoo_endpoint(0x1415, "second", "duplicate", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "duplicate", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![first.clone(), second.clone()].into());
+        merge_additional(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![first.clone(), wired.clone()], &[&first, &second, &wired]));
+        assert_eq!(shared.devices.len(), 3);
+        merge_additional(&mut shared, BackendId::Rapoo, vec![first.clone(), wired.clone()].into());
+        assert_eq!(shared.devices.len(), 3);
+        assert!(shared.key_aliases.is_empty());
+        let moved = rapoo_endpoint(0x1415, "moved", "duplicate", true);
+        merge_additional(&mut shared, BackendId::Rapoo, vec![moved].into());
+        assert_eq!(shared.devices.len(), 4);
+        assert!(shared.key_aliases.is_empty());
+    }
+
+    #[test]
+    fn rapoo_unread_second_receiver_blocks_first_pairing() {
+        let first = rapoo_endpoint(0x1415, "first", "duplicate", true);
+        let second = rapoo_endpoint(0x1415, "second", "duplicate", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "duplicate", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![first.clone(), wired.clone()], &[&first, &second, &wired]));
+        assert_eq!(shared.devices.len(), 2);
+        assert!(shared.key_aliases.is_empty());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![first, second, wired].into());
+        assert_eq!(shared.devices.len(), 3);
+        assert!(shared.key_aliases.is_empty());
+    }
+
+    #[test]
+    fn rapoo_pair_separates_when_second_identical_receiver_arrives() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let other = rapoo_endpoint(0x1415, "other", "pair", true);
+        let key = receiver.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        shared.cfg.device_names.insert(key.clone(), "Receiver A".into());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        shared.histories.insert(key.clone(), crate::history::HistoryView { rows: 7, ..Default::default() });
+        merge_additional(&mut shared, BackendId::Rapoo,
+            vec![receiver.clone(), wired.clone(), other.clone()].into());
+        let wired_key = shared.rapoo_devices.card_key(&wired.target).unwrap().to_string();
+        assert_eq!(shared.devices.len(), 3);
+        assert_ne!(wired_key, wired.target.key);
+        assert_ne!(wired_key, key);
+        assert!(shared.devices.contains_key(&key));
+        assert!(shared.devices.contains_key(&other.target.key));
+        assert_eq!(shared.devices[&wired_key].basic.as_ref().unwrap().dpi, wired.dpi);
+        assert_eq!(shared.devices[&key].basic.as_ref().unwrap().dpi, receiver.dpi);
+        assert_eq!(shared.cfg.device_names[&key], "Receiver A");
+        assert!(!shared.cfg.device_names.contains_key(&wired_key));
+        assert_eq!(shared.histories[&key].rows, 7);
+        assert!(!shared.histories.contains_key(&wired_key));
+        assert!(!shared.key_aliases.contains_key(&wired.target.key));
+        assert!(!shared.key_aliases.contains_key(&other.target.key));
+        assert!(shared.history_tracker.take_pending().1.is_empty());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver, wired.clone()].into());
+        assert_eq!(shared.devices.len(), 3);
+        assert_eq!(shared.rapoo_devices.card_key(&wired.target), Some(wired_key.as_str()));
+    }
+
+    #[test]
+    fn rapoo_unread_second_receiver_revokes_pair_and_discards_misowned_cache() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", false);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let other = rapoo_endpoint(0x1415, "other", "pair", true);
+        let key = receiver.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        shared.active_key = Some(key.clone());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        assert!(shared.devices[&key].basic.as_ref().unwrap().target.same_channel(&wired.target));
+        merge_additional(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![wired.clone()], &[&receiver, &wired, &other]));
+        let wired_key = shared.rapoo_devices.card_key(&wired.target).unwrap().to_string();
+        assert_eq!(shared.devices.len(), 1);
+        assert_eq!(shared.active_key.as_ref(), Some(&key));
+        assert!(!shared.devices.contains_key(&key));
+        assert!(!shared.devices.contains_key(&other.target.key));
+        assert!(!shared.readings.iter().any(|reading| reading.key == key));
+        assert_eq!(shared.devices[&wired_key].basic.as_ref().unwrap().dpi, wired.dpi);
+        assert!(shared.key_aliases.is_empty());
+        assert!(shared.history_tracker.take_pending().1.is_empty());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver, wired.clone(), other].into());
+        assert_eq!(shared.devices.len(), 3);
+        assert_eq!(shared.rapoo_devices.card_key(&wired.target), Some(wired_key.as_str()));
+    }
+
+    #[test]
+    fn rapoo_separation_without_selected_endpoint_sample_never_reuses_its_configuration() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", false);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let other = rapoo_endpoint(0x1415, "other", "pair", true);
+        let key = receiver.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        shared.active_key = Some(key.clone());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        merge_additional(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![other.clone()], &[&receiver, &wired, &other]));
+        let wired_key = shared.rapoo_devices.card_key(&wired.target).unwrap().to_string();
+        assert!(!shared.devices.contains_key(&key));
+        assert!(!shared.devices.contains_key(&wired_key));
+        assert_eq!(shared.devices.len(), 1);
+        let mut partial_receiver = receiver.clone();
+        partial_receiver.connected = true;
+        partial_receiver.dpi = Dpi::default();
+        partial_receiver.polling_rate = Default::default();
+        merge_additional(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![partial_receiver, other.clone()], &[&receiver, &wired, &other]));
+        let basic = shared.devices[&key].basic.as_ref().unwrap();
+        assert!(basic.target.same_channel(&receiver.target));
+        assert_eq!(basic.dpi, Dpi::default());
+        assert_eq!(basic.polling_rate, crate::device::PollingRate::default());
+        assert!(shared.devices[&key].reading.battery.is_none());
+        assert!(!shared.devices.contains_key(&wired_key));
+        assert_eq!(shared.active_key.as_ref(), Some(&key));
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver, wired.clone(), other].into());
+        assert_eq!(shared.devices.len(), 3);
+        assert_eq!(shared.devices[&wired_key].basic.as_ref().unwrap().dpi, wired.dpi);
+    }
+
+    #[test]
+    fn rapoo_old_and_new_ports_returning_together_revoke_the_port_alias() {
+        let old = rapoo_endpoint(0x1415, "old-port", "same", true);
+        let moved = rapoo_endpoint(0x1415, "new-port", "same", true);
+        let key = old.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![old.clone()].into());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![moved.clone()].into());
+        assert_eq!(shared.devices.len(), 1);
+        assert_eq!(shared.key_aliases.get(&moved.target.key), Some(&key));
+        merge_additional(&mut shared, BackendId::Rapoo, rapoo_poll(vec![moved.clone()], &[&old, &moved]));
+        let moved_key = shared.rapoo_devices.card_key(&moved.target).unwrap().to_string();
+        assert_ne!(moved_key, moved.target.key);
+        assert_ne!(moved_key, key);
+        assert!(!shared.devices.contains_key(&key));
+        assert!(shared.devices.contains_key(&moved_key));
+        assert!(shared.key_aliases.is_empty());
+        assert!(shared.history_tracker.take_pending().1.is_empty());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![old.clone(), moved.clone()].into());
+        assert_eq!(shared.devices.len(), 2);
+        assert!(shared.devices[&key].basic.as_ref().unwrap().target.same_channel(&old.target));
+        assert!(shared.devices[&moved_key].basic.as_ref().unwrap().target.same_channel(&moved.target));
+        merge_additional(&mut shared, BackendId::Rapoo, vec![moved.clone()].into());
+        assert_eq!(shared.devices.len(), 2);
+        assert_eq!(shared.rapoo_devices.card_key(&moved.target), Some(moved_key.as_str()));
+    }
+
+    #[test]
+    fn rapoo_detached_samples_use_fresh_keys_despite_in_flight_history_aliases() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", false);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let other = rapoo_endpoint(0x1415, "other", "pair", true);
+        let key = receiver.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        let (old_samples, in_flight_aliases) = shared.history_tracker.take_pending();
+        assert!(in_flight_aliases.contains(&(wired.target.key.clone(), key.clone())));
+        merge_additional(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![wired.clone(), other.clone()], &[&receiver, &wired, &other]));
+        let independent = shared.rapoo_devices.card_key(&wired.target).unwrap().to_string();
+        assert_ne!(independent, wired.target.key);
+        assert_ne!(independent, key);
+        assert!(!in_flight_aliases.iter().any(|(from, to)| from == &independent || to == &independent));
+        let (new_samples, new_aliases) = shared.history_tracker.take_pending();
+        assert!(new_aliases.is_empty());
+        assert!(new_samples.iter().any(|(sample_key, _)| sample_key == &independent));
+        shared.history_tracker.retry(old_samples, in_flight_aliases);
+        shared.history_tracker.retry(new_samples, new_aliases);
+        let (retried_samples, retried_aliases) = shared.history_tracker.take_pending();
+        assert!(retried_samples.iter().any(|(sample_key, _)| sample_key == &independent));
+        assert!(!retried_aliases.iter().any(|(from, to)| from == &independent || to == &independent));
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver, wired.clone(), other].into());
+        assert_eq!(shared.rapoo_devices.card_key(&wired.target), Some(independent.as_str()));
+    }
+
+    #[test]
+    fn rapoo_incomplete_discovery_does_not_permanently_mark_a_unique_pair_ambiguous() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        let mut incomplete = rapoo_poll(vec![receiver.clone(), wired.clone()], &[&receiver, &wired]);
+        incomplete.legacy_key_migrations.clear();
+        merge_additional(&mut shared, BackendId::Rapoo, incomplete);
+        assert_eq!(shared.devices.len(), 2);
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        assert_eq!(shared.devices.len(), 1);
+        assert_eq!(shared.rapoo_devices.card_key(&receiver.target), shared.rapoo_devices.card_key(&wired.target));
+        assert!(shared.readings[0].connected);
+    }
+
+    #[test]
+    fn rapoo_separation_cancels_only_queued_commands_with_changed_endpoint_ownership() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let other = rapoo_endpoint(0x1415, "other", "pair", true);
+        let key = receiver.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        let selected = shared.devices[&key].basic.as_ref().unwrap();
+        assert!(selected.target.same_channel(&wired.target));
+        let stale_stage = Cmd::BasicDpiStage {
+            target: selected.target.clone(), stage: selected.dpi.stages[0],
+            context: selected.dpi.stage_context().unwrap(),
+        };
+        let stale_rate = Cmd::BasicPollingRate { target: selected.target.clone(), hz: 500 };
+        let cancelled_labels = vec![stale_stage.label(), stale_rate.label()];
+        let anchor = Cmd::BasicDpiStage {
+            target: receiver.target.clone(), stage: receiver.dpi.stages[0],
+            context: receiver.dpi.stage_context().unwrap(),
+        };
+        let logitech = snapshot(BackendId::Logitech, "logitech", 70);
+        shared.source_pending.insert(BackendId::Rapoo, [stale_stage, anchor, stale_rate].into());
+        shared.source_pending.insert(BackendId::Logitech,
+            [Cmd::BasicDpi { target: logitech.target.clone(), dpi: 1600 }].into());
+        shared.source_write_gen.insert(BackendId::Rapoo, 3);
+        merge_additional(&mut shared, BackendId::Rapoo,
+            vec![receiver.clone(), wired.clone(), other].into());
+        let remaining = &shared.source_pending[&BackendId::Rapoo];
+        assert_eq!(remaining.len(), 1);
+        let target = remaining[0].basic_target().unwrap();
+        assert_eq!(target.key, key);
+        assert!(target.same_channel(&receiver.target));
+        assert_eq!(shared.source_pending[&BackendId::Logitech].len(), 1);
+        assert!(shared.source_pending[&BackendId::Logitech][0].basic_target().unwrap().same_channel(&logitech.target));
+        assert_eq!(shared.source_write_gen[&BackendId::Rapoo], 3);
+        assert_eq!(shared.results.iter().map(|result| result.label.clone()).collect::<Vec<_>>(), cancelled_labels);
+        assert!(shared.results.iter().all(|result| result.ok.is_none()
+            && result.err.as_deref() == Some("设备关联已变化，请重新选择后重试") && result.hint.is_empty()));
+    }
+
+    #[test]
+    fn rapoo_two_distinct_pairs_keep_endpoints_and_histories_separate() {
+        let first = rapoo_endpoint(0x1415, "first", "one", true);
+        let first_wired = rapoo_endpoint(0x4615, "first-wired", "one", true);
+        let second = rapoo_endpoint(0x1415, "second", "two", true);
+        let second_wired = rapoo_endpoint(0x4615, "second-wired", "two", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo,
+            vec![first.clone(), first_wired.clone(), second.clone(), second_wired.clone()].into());
+        merge_additional(&mut shared, BackendId::Rapoo, rapoo_poll(vec![first_wired.clone(), second.clone()],
+            &[&first, &first_wired, &second, &second_wired]));
+        assert_eq!(shared.devices.len(), 2);
+        assert!(shared.devices[&first.target.key].basic.as_ref().unwrap().target.same_channel(&first_wired.target));
+        assert!(shared.devices[&second.target.key].basic.as_ref().unwrap().target.same_channel(&second.target));
+        let aliases = shared.history_tracker.take_pending().1;
+        assert!(aliases.contains(&(first_wired.target.key, first.target.key)));
+        assert!(aliases.contains(&(second_wired.target.key, second.target.key)));
+        assert_eq!(aliases.len(), 2);
+    }
+
+    #[test]
+    fn rapoo_port_move_preserves_card_selection_preferences_and_history() {
+        let old = rapoo_endpoint(0x1415, "old", "unique", true);
+        let moved = rapoo_endpoint(0x1415, "moved", "unique", true);
+        let key = old.target.key.clone();
+        let mut shared = Shared::new(Settings::default());
+        shared.active_key = Some(key.clone());
+        shared.cfg.device_names.insert(key.clone(), "My mouse".into());
+        shared.cfg.tray_device = Some(key.clone());
+        shared.cfg.device_order = vec![key.clone()];
+        merge_additional(&mut shared, BackendId::Rapoo, vec![old.clone()].into());
+        shared.history_tracker.take_pending();
+        merge_additional(&mut shared, BackendId::Rapoo, vec![moved.clone()].into());
+        assert_eq!(shared.devices.len(), 1);
+        assert_eq!(shared.active_key.as_ref(), Some(&key));
+        assert_eq!(shared.cfg.device_names[&key], "My mouse");
+        assert_eq!(shared.cfg.tray_device.as_ref(), Some(&key));
+        assert_eq!(shared.cfg.device_order, vec![key.clone()]);
+        assert!(shared.devices[&key].basic.as_ref().unwrap().target.same_channel(&moved.target));
+        assert!(shared.history_tracker.take_pending().1.contains(&(moved.target.key.clone(), key.clone())));
+        merge_additional(&mut shared, BackendId::Rapoo, vec![old].into());
+        assert_eq!(shared.devices.len(), 1);
+        assert!(!shared.key_aliases.contains_key(&key));
+    }
+
+    #[test]
+    fn rapoo_enumeration_failure_preserves_pair_but_cannot_infer_port_move() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        merge_additional(&mut shared, BackendId::Rapoo, crate::backends::Poll::default());
+        assert_eq!(shared.devices.len(), 1);
+        assert!(shared.readings[0].connected);
+        assert!(!shared.devices[&receiver.target.key].basic.as_ref().unwrap().dpi.stage_editable);
+        merge_additional(&mut shared, BackendId::Rapoo, crate::backends::Poll {
+            snapshots: vec![wired], ..Default::default()
+        });
+        assert_eq!(shared.devices.len(), 1);
+        let moved = rapoo_endpoint(0x1415, "moved", "pair", true);
+        merge_additional(&mut shared, BackendId::Rapoo, crate::backends::Poll {
+            snapshots: vec![moved.clone()], ..Default::default()
+        });
+        assert_eq!(shared.devices.len(), 2);
+        assert!(shared.devices.contains_key(&moved.target.key));
+    }
+
+    #[test]
+    fn rapoo_reused_path_with_changed_or_unknown_identity_keeps_cards_separate() {
+        let old = rapoo_endpoint(0x1415, "same-path", "known", true);
+        for serial in ["", "different"] {
+            let next = rapoo_endpoint(0x1415, "same-path", serial, true);
+            let mut shared = Shared::new(Settings::default());
+            shared.cfg.device_names.insert(old.target.key.clone(), "Old mouse".into());
+            merge_additional(&mut shared, BackendId::Rapoo, vec![old.clone()].into());
+            merge_additional(&mut shared, BackendId::Rapoo, vec![next.clone()].into());
+            assert_eq!(shared.devices.len(), 2);
+            assert!(!shared.devices[&old.target.key].reading.connected);
+            let current = shared.readings.iter().find(|reading| reading.connected).unwrap();
+            assert_ne!(current.key, old.target.key);
+            assert!(!shared.cfg.device_names.contains_key(&current.key));
+            assert!(!shared.key_aliases.contains_key(&old.target.key));
+            merge_additional(&mut shared, BackendId::Rapoo, vec![next].into());
+            assert_eq!(shared.devices.len(), 2);
+        }
     }
 
     #[test]
