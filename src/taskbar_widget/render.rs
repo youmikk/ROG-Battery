@@ -169,7 +169,7 @@ pub(super) struct Layout {
 
 impl Layout {
     pub fn new(content: &super::StripContent, light: bool, scale: f32) -> Option<Self> {
-        if !scale.is_finite() || scale <= 0.0 { return None; }
+        if !content.is_displayable() || !scale.is_finite() || scale <= 0.0 { return None; }
         let text = native_font(&[("Segoe UI Variable Text", 13.0), ("Segoe UI", 12.0)], scale, FW_SEMIBOLD)?;
         let icons = native_font(&[("Segoe Fluent Icons", 16.0), ("Segoe MDL2 Assets", 16.0)], scale, FW_SEMIBOLD)?;
         let foreground = if light { 0xff16_1917 } else { 0xfff2_f5f1 };

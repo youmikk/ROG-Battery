@@ -213,6 +213,12 @@ pub struct StripContent {
     pub empty_label: Option<String>,
 }
 
+impl StripContent {
+    fn is_displayable(&self) -> bool {
+        !self.items.is_empty() || self.empty_label.as_deref().is_some_and(|label| !label.is_empty())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StripItem {
     pub level: Option<crate::device::BatteryPercent>,
@@ -429,7 +435,7 @@ impl TaskbarWidget {
                 .content
                 .borrow()
                 .as_ref()
-                .is_some_and(|content| !content.items.is_empty())
+                .is_some_and(StripContent::is_displayable)
         {
             return false;
         }
@@ -550,10 +556,7 @@ impl TaskbarWidget {
         let dpi = unsafe { GetDpiForWindow(taskbar) };
         let scale = (if dpi == 0 { 96 } else { dpi }) as f32 / 96.0;
         let content = self.content.borrow().clone();
-        let Some(content) = content.filter(|content| {
-            !content.items.is_empty()
-                || content.empty_label.as_deref().is_some_and(|label| !label.is_empty())
-        }) else {
+        let Some(content) = content.filter(StripContent::is_displayable) else {
             self.hide_now(hwnd);
             return;
         };
@@ -914,6 +917,61 @@ mod tests {
         assert_eq!(unsafe { GetParent(strip.0) }, taskbar.0);
         assert_ne!(unsafe { GetClientRect(strip.0, &mut actual) }, 0);
         assert_eq!(actual, Rect::new(0, 0, 160, 48));
+    }
+
+    #[test]
+    fn empty_placeholder_is_an_available_background_entry() {
+        struct OwnedWindow(Handle);
+        impl Drop for OwnedWindow {
+            fn drop(&mut self) {
+                unsafe { DestroyWindow(self.0); }
+            }
+        }
+        let instance = unsafe { crate::win32::GetModuleHandleW(ptr::null()) };
+        let host_class = crate::win32::to_wide("STATIC");
+        let host = OwnedWindow(unsafe {
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                host_class.as_ptr(), ptr::null(), WS_POPUP, -32000, -32000, 800, 48,
+                ptr::null_mut(), ptr::null_mut(), instance, ptr::null_mut())
+        });
+        assert!(!host.0.is_null());
+        let tray_class_name = crate::win32::to_wide("TrayNotifyWnd");
+        let tray_class = WndClassExW {
+            cb_size: core::mem::size_of::<WndClassExW>() as u32,
+            style: 0,
+            wnd_proc: Some(DefWindowProcW),
+            cls_extra: 0,
+            wnd_extra: 0,
+            h_instance: instance,
+            h_icon: ptr::null_mut(),
+            h_cursor: ptr::null_mut(),
+            hbr_background: ptr::null_mut(),
+            menu_name: ptr::null(),
+            class_name: tray_class_name.as_ptr(),
+            h_icon_sm: ptr::null_mut(),
+        };
+        assert_ne!(unsafe { RegisterClassExW(&tray_class) }, 0);
+        let tray = OwnedWindow(unsafe {
+            CreateWindowExW(0, tray_class_name.as_ptr(), ptr::null(), WS_CHILD,
+                600, 0, 200, 48, host.0, ptr::null_mut(), instance, ptr::null_mut())
+        });
+        assert!(!tray.0.is_null());
+        let widget = TaskbarWidget::new(ptr::null_mut(), 0);
+        widget.enabled.set(true);
+        widget.taskbar.set(host.0);
+        *widget.content.borrow_mut() = Some(StripContent {
+            items: vec![StripItem {
+                level: Some(crate::device::BatteryPercent { value: 50, approximate: false }),
+                charging: false,
+                kind: crate::tray_prefs::TrayKind::Mouse,
+            }],
+            empty_label: None,
+        });
+        assert!(widget.host_available(), "fake host must pass the original availability checks");
+        let empty = StripContent { items: Vec::new(), empty_label: Some("No devices".into()) };
+        assert!(render::Layout::new(&empty, true, 1.0).is_some());
+        *widget.content.borrow_mut() = Some(empty);
+        assert!(widget.host_available(), "a renderable empty placeholder must remain a background entry point");
     }
 
     #[test]
