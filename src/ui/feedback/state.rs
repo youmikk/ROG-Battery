@@ -22,6 +22,8 @@ pub(super) enum Task {
     SoftwareDiagnostics,
     CaptureExport,
     HistoryDelete,
+    FeedbackExport,
+    RetryEntry,
 }
 
 impl Task {
@@ -184,7 +186,7 @@ impl Model {
     }
 
     fn reopen_mode(&mut self, devices: Vec<Candidate>, history: bool, software: bool) -> bool {
-        if matches!(self.task, Some(Task::CaptureExport | Task::HistoryDelete)) { return false; }
+        if matches!(self.task, Some(Task::CaptureExport | Task::HistoryDelete | Task::FeedbackExport)) { return false; }
         self.latest_devices = devices;
         if !history {
             self.latest_software = software;

@@ -50,6 +50,8 @@ enum Action {
     HistoryPage(usize),
     DeleteLocal(String),
     ClearHistory,
+    Export(Option<String>),
+    RetryEntry(String),
     Devices,
     Device(usize),
     UnknownDevice(usize),
@@ -80,7 +82,7 @@ enum Action {
 }
 impl Action {
     fn enabled(&self, model: &Model) -> bool {
-        if matches!(model.task, Some(Task::CaptureExport | Task::HistoryDelete)) { return matches!(self, Self::Close); }
+        if matches!(model.task, Some(Task::CaptureExport | Task::HistoryDelete | Task::FeedbackExport)) { return matches!(self, Self::Close); }
         if matches!(self, Self::Capture) && (model.software || (model.capture.is_none()
             && !model.selected.and_then(|index| model.devices.get(index))
                 .is_some_and(|device| device.capture_interface.is_some()))) { return false; }
@@ -151,6 +153,8 @@ struct Label {
 enum ResultMessage {
     History(Result<Vec<client::Entry>, String>),
     Deleted(Vec<String>, Result<(), String>),
+    Exported(Result<std::path::PathBuf, String>),
+    Retried(Result<client::SubmitOutcome, String>),
     Submitted(Result<client::SubmitOutcome, String>, Option<String>),
     Thread(
         Result<client::Thread, String>,
@@ -795,6 +799,9 @@ impl Controls {
                 );
                 y += 85.0;
                 if !s.software { y = self.capture_form_layout(&s, y); }
+                self.button(Action::Export(None), text("导出完整反馈文件", "Export feedback files"), "",
+                    R::new(25.0, y, 280.0, 34.0), Style::Card, false);
+                y += 44.0;
                 if !s.error.is_empty() {
                     self.button(
                         Action::Fallback,
@@ -942,7 +949,13 @@ impl Controls {
                         short_date(entry.created_at)
                     ));
                     self.button(Action::DeleteLocal(entry.request_id.clone()), text("删除本地记录", "Delete locally"), "",
-                        R::new(523.0, y + 34.0, 112.0, 36.0), Style::Card, false);
+                        R::new(523.0, y + 70.0, 112.0, 32.0), Style::Card, false);
+                    self.button(Action::Export(Some(entry.request_id.clone())), text("导出文件", "Export files"), "",
+                        R::new(523.0, y, 112.0, 32.0), Style::Card, false);
+                    if entry.status == client::Status::Pending {
+                        self.button(Action::RetryEntry(entry.request_id.clone()), text("重新发送", "Retry"), "",
+                            R::new(523.0, y + 35.0, 112.0, 32.0), Style::Card, false);
+                    }
                     y += 112.0;
                 }
                 self.label(
@@ -1587,6 +1600,10 @@ impl Controls {
                 let ids = self.state.borrow().entries.iter().map(|entry| entry.request_id.clone()).collect();
                 self.delete_local(ids);
             }
+            Action::Export(id) => self.export_feedback(id),
+            Action::RetryEntry(id) => {
+                self.work(Task::RetryEntry, move || ResultMessage::Retried(client::retry(&id)));
+            }
             Action::Devices => {
                 let mut s = self.state.borrow_mut();
                 s.menu = !s.menu;
@@ -1843,6 +1860,31 @@ impl Controls {
             ResultMessage::Deleted(request_ids, result)
         });
     }
+    fn export_feedback(&self, request_id: Option<String>) {
+        if request_id.is_none() && !self.inventory_ready() {
+            self.prepare_inventory();
+            self.error(text("正在整理设备诊断，请稍后导出。", "Collecting diagnostics. Export shortly."));
+            return;
+        }
+        let draft = self.draft();
+        if request_id.is_none() {
+            if let Err(error) = client::validate_details(&draft) { self.error(error); return; }
+        }
+        let mut picker = nwg::FileDialog::default();
+        if let Err(error) = nwg::FileDialog::builder()
+            .title(text("选择反馈导出位置", "Choose feedback export folder"))
+            .action(nwg::FileDialogAction::OpenDirectory).build(&mut picker) {
+            self.error(error.to_string());
+            return;
+        }
+        if !picker.run(Some(&self.window)) { return; }
+        let Ok(root) = picker.get_selected_item() else { return; };
+        let root = std::path::PathBuf::from(root);
+        self.work(Task::FeedbackExport, move || ResultMessage::Exported(match request_id {
+            Some(id) => client::export_local(&id, &root),
+            None => client::export_draft(&draft, &root),
+        }));
+    }
     fn choose_images(&self) {
         let remaining = 3usize.saturating_sub(self.state.borrow().images.len());
         if remaining == 0 {
@@ -1938,6 +1980,25 @@ impl Controls {
                             crate::capture::clear();
                             *self.capture_folder.borrow_mut() = None;
                             self.reset_inputs();
+                        }
+                    }
+                    Err(error) => self.state.borrow_mut().error = error,
+                },
+                ResultMessage::Exported(result) => match result {
+                    Ok(folder) => {
+                        let _ = crate::dynlight::shell_open(&folder.to_string_lossy());
+                        self.state.borrow_mut().error = format!("{}\n{}",
+                            text("反馈文件已导出", "Feedback files exported"), folder.display());
+                    }
+                    Err(error) => self.state.borrow_mut().error = error,
+                },
+                ResultMessage::Retried(result) => match result {
+                    Ok(outcome) => {
+                        let mut model = self.state.borrow_mut();
+                        model.entries.retain(|entry| entry.request_id != outcome.entry.request_id);
+                        model.entries.insert(0, outcome.entry);
+                        if outcome.pending {
+                            model.error = text("反馈已接收，结果待确认，可稍后重试。", "Feedback received; confirmation pending. Retry shortly.").into();
                         }
                     }
                     Err(error) => self.state.borrow_mut().error = error,

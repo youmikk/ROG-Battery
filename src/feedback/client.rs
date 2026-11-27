@@ -25,6 +25,9 @@ use winapi::{
 #[path = "capture.rs"]
 mod capture_attachment;
 pub use capture_attachment::{capture, Capture};
+#[path = "export.rs"]
+mod export;
+pub use export::{export_draft, export_local};
 
 const REPOSITORY: &str = "https://github.com/youmikk/X-Battery";
 // Existing encrypted history and cached relay receipts use the former URL.
@@ -1026,13 +1029,17 @@ fn markdown_label(value: &str) -> String {
 }
 
 pub fn fallback(draft: &Draft) -> Result<Fallback, String> {
+    fallback_version(draft, crate::gui::APP_VERSION)
+}
+
+fn fallback_version(draft: &Draft, version: &str) -> Result<Fallback, String> {
     validate_draft(draft)?;
-    if !valid_version(crate::gui::APP_VERSION) { return Err(invalid()); }
+    if !valid_version(version) { return Err(invalid()); }
     let title = format!("[{}] {}", match draft.category.as_str() {
         "device" => message("设备适配", "Device support"), "battery" => message("电量", "Battery"),
         "dpi" => "DPI".into(), _ => message("反馈", "Feedback"),
     }, draft.device.name);
-    let header = format!("X-Battery {}\n\n- Device: {}\n- Type: {}\n- Connection: {}\n", crate::gui::APP_VERSION,
+    let header = format!("X-Battery {}\n\n- Device: {}\n- Type: {}\n- Connection: {}\n", version,
         markdown_label(&draft.device.name), draft.device.family, markdown_label(&draft.device.connection));
     let mut markdown = header.clone();
     if let Some(brand) = &draft.device.brand { markdown.push_str(&format!("- Brand: {}\n", markdown_label(brand))); }
@@ -1145,7 +1152,7 @@ mod tests {
         }
     }
 
-    fn draft() -> Draft {
+    pub(super) fn draft() -> Draft {
         Draft { category: "battery".into(), device: Device { name: "Example mouse".into(), family: "mouse".into(),
             connection: "2.4 GHz".into(), brand: Some("Brand".into()), model: None },
             description: "Battery reading is unavailable.".into(), diagnostics: None, images: vec![], capture: None }
@@ -1162,7 +1169,7 @@ mod tests {
         format!("{header}\n{transfer}\n{end}\n").into_bytes()
     }
 
-    fn screenshot() -> Image {
+    pub(super) fn screenshot() -> Image {
         let bytes = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=").unwrap();
         image("screen.png", "image/png", &bytes).unwrap()
     }
@@ -1198,9 +1205,9 @@ mod tests {
         assert!(read_history(&scratch.history()).unwrap().entries.is_empty());
     }
 
-    struct Scratch(std::path::PathBuf);
+    pub(super) struct Scratch(pub(super) std::path::PathBuf);
     impl Scratch {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             // Never use the real profile or a process-wide environment change.
             // CARGO_MANIFEST_DIR is the authorized D: checkout for this task.
             let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
