@@ -23,6 +23,7 @@ pub fn with_inventory(summary: &str, inventory: &str) -> String {
 
 #[derive(Clone)]
 pub struct Candidate {
+    pub interface: Option<crate::hid::HidInterface>,
     pub capture_interface: Option<crate::hid::HidInterface>,
     /// Display-only name; the report uses the original device name below.
     pub label: String,
@@ -51,6 +52,7 @@ pub fn candidate(label: String, reading: &crate::device::DeviceReading,
     }
     diagnostics.push_str(&crate::diagnostics::readings::report(reading, measured, lifetime));
     Candidate { label, battery: reading.battery_text(true), diagnostics,
+        interface: interface.cloned(),
         capture_interface: interface.filter(|interface| crate::capture::eligible(interface)).cloned(),
         device: client::Device { name, family: family.into(), connection: connection.into(), brand: None, model: None } }
 }
@@ -303,6 +305,32 @@ fn append_probe_result(output: &mut String, target: &super::backends::Target,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidates_keep_source_interfaces_independently_of_capture_eligibility() {
+        let mut interface = crate::hid::HidInterface {
+            path: "private-source-path".into(), serial: "private-serial".into(),
+            vendor_id: 0x1234, product_id: 0x5678, usage_page: 1, usage: 2,
+            input_len: 8, output_len: 0, feature_len: 8, product: "Factory mouse".into(),
+        };
+        let reading = crate::device::DeviceReading { name: "Factory mouse".into(), ..Default::default() };
+        let make = |interface: Option<&crate::hid::HidInterface>| candidate("private-alias".into(), &reading,
+            interface, None, None, "unknown", crate::device::DeviceFamily::Mouse, None,
+            std::time::Duration::from_secs(120));
+        let standard = make(Some(&interface));
+        assert_eq!(standard.interface.as_ref().unwrap().path, interface.path);
+        assert!(standard.capture_interface.is_none());
+        for private in [&interface.path, &interface.serial, &standard.label] {
+            assert!(!standard.diagnostics.contains(private));
+        }
+        interface.usage_page = 0xff00;
+        let vendor = make(Some(&interface));
+        assert_eq!(vendor.capture_interface.as_ref().unwrap().path, interface.path);
+        assert_eq!(vendor.interface.as_ref().unwrap().path, interface.path);
+        let non_hid = make(None);
+        assert!(non_hid.interface.is_none());
+        assert!(non_hid.capture_interface.is_none());
+    }
 
     #[test]
     fn report_budget_preserves_inventory_and_marks_truncated_history() {

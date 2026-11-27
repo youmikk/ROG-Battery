@@ -1,17 +1,137 @@
-use crate::hid::{EnumerateReport, HidInterface, Skipped};
+use crate::hid::{path_ids, EnumerateReport, GroupedEnumerateReport, HidInterface, Skipped};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 const MAX_REPORT_BYTES: usize = 10 * 1024;
 const MAX_PRODUCT_BYTES: usize = 1024;
 const MAX_PRODUCT_CHARS: usize = 96;
 
-pub fn collect() -> String {
+#[derive(Clone)]
+pub struct UnknownDevice {
+    pub name: String,
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+    pub interfaces: usize,
+    pub diagnostics: String,
+}
+
+#[derive(Clone)]
+pub struct DeviceInventory {
+    pub report: String,
+    pub unknown: Vec<UnknownDevice>,
+}
+
+pub fn collect_for_devices(devices: &[super::Candidate]) -> DeviceInventory {
     let collected_at = crate::diagnostics::unix_millis();
     let result = crate::win32::HidApi::load()
         .map_err(|reason| CollectionFailure::new(Stage::Load, &reason))
-        .and_then(|api| crate::hid::enumerate_all_report(&api)
+        .and_then(|api| crate::hid::enumerate_all_grouped_report(&api)
             .map_err(|reason| CollectionFailure::new(Stage::Enumeration, &reason)));
-    render(collected_at, result, crate::diagnostics::anonymous_id)
+    inventory_for_devices(collected_at, result, devices, crate::diagnostics::anonymous_id)
+}
+
+fn inventory_for_devices(
+    collected_at: u128,
+    result: Result<GroupedEnumerateReport, CollectionFailure>,
+    devices: &[super::Candidate],
+    channel_id: impl Fn(&str) -> u64,
+) -> DeviceInventory {
+    match result {
+        Ok(grouped) => {
+            let unknown = unknown_devices(collected_at, &grouped, devices, &channel_id);
+            DeviceInventory { report: render(collected_at, Ok(grouped.report), channel_id), unknown }
+        }
+        Err(failure) => DeviceInventory {
+            report: render(collected_at, Err(failure), channel_id), unknown: Vec::new(),
+        },
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum GroupKey {
+    Physical(String),
+    Collection(String),
+    Path(String),
+}
+
+fn collection_group(path: &str) -> String {
+    let path = path.to_ascii_lowercase();
+    let parts: Vec<_> = path.split('#').collect();
+    let [prefix, hardware, instance, class] = parts.as_slice() else { return path; };
+    if *prefix != r"\\?\hid" || instance.is_empty() || class.is_empty() { return path; }
+    let mut collections = hardware.split('&').filter_map(|field| field.strip_prefix("col"));
+    let Some(collection) = collections.next() else { return path; };
+    if collections.next().is_some() || collection.len() != 2
+        || !collection.bytes().all(|byte| byte.is_ascii_hexdigit()) { return path; }
+    let number = u8::from_str_radix(collection, 16).unwrap();
+    let one_based = format!("&00{collection}");
+    let zero_based = number.checked_sub(1).map(|number| format!("&{number:04x}"));
+    let suffix = if instance.ends_with(&one_based) { one_based.as_str() }
+        else if let Some(suffix) = zero_based.as_deref().filter(|suffix| instance.ends_with(*suffix)) { suffix }
+        else { return path; };
+    let instance = &instance[..instance.len() - suffix.len()];
+    if instance.is_empty() { return path; }
+    let field = format!("col{collection}");
+    let hardware = hardware.split('&').filter(|value| *value != field).collect::<Vec<_>>().join("&");
+    format!("{prefix}#{hardware}#{instance}#{class}")
+}
+
+fn group_key(path: &str, physical_groups: &BTreeMap<String, String>,
+    collections: &BTreeMap<String, BTreeSet<String>>) -> GroupKey {
+    let path = path.to_ascii_lowercase();
+    if let Some(group) = physical_groups.get(&path) {
+        return GroupKey::Physical(group.clone());
+    }
+    let collection = collection_group(&path);
+    match collections.get(&collection) {
+        Some(groups) if groups.len() == 1 => GroupKey::Physical(groups.first().unwrap().clone()),
+        Some(_) => GroupKey::Path(path),
+        None => GroupKey::Collection(collection),
+    }
+}
+
+fn unique_id(mut values: impl Iterator<Item = u16>) -> Option<u16> {
+    let first = values.next()?;
+    values.all(|value| value == first).then_some(first)
+}
+
+fn unknown_devices(collected_at: u128, grouped: &GroupedEnumerateReport,
+    devices: &[super::Candidate], channel_id: &impl Fn(&str) -> u64) -> Vec<UnknownDevice> {
+    let mut collections = BTreeMap::<String, BTreeSet<String>>::new();
+    for (path, physical) in &grouped.physical_groups {
+        collections.entry(collection_group(path)).or_default().insert(physical.clone());
+    }
+    let known: BTreeSet<_> = devices.iter().filter_map(|device| device.interface.as_ref())
+        .map(|interface| group_key(&interface.path, &grouped.physical_groups, &collections)).collect();
+    let mut groups = BTreeMap::<GroupKey, EnumerateReport>::new();
+    for interface in &grouped.report.interfaces {
+        let key = group_key(&interface.path, &grouped.physical_groups, &collections);
+        if known.contains(&key) { continue; }
+        groups.entry(key).or_insert_with(|| EnumerateReport { interfaces: Vec::new(), skipped: Vec::new() })
+            .interfaces.push(interface.clone());
+    }
+    for skipped in &grouped.report.skipped {
+        let key = group_key(&skipped.path, &grouped.physical_groups, &collections);
+        if known.contains(&key) { continue; }
+        groups.entry(key).or_insert_with(|| EnumerateReport { interfaces: Vec::new(), skipped: Vec::new() })
+            .skipped.push(skipped.clone());
+    }
+    let system = super::system_version();
+    groups.into_values().map(|report| {
+        let name = report.interfaces.iter().filter_map(|interface| safe_product_name(&interface.product).ok())
+            .min().unwrap_or_default();
+        let ids: Vec<_> = report.interfaces.iter().map(|interface| (Some(interface.vendor_id), Some(interface.product_id)))
+            .chain(report.skipped.iter().map(|skipped| path_ids(&skipped.path))).collect();
+        let vendor_id = unique_id(ids.iter().filter_map(|ids| ids.0));
+        let product_id = unique_id(ids.iter().filter_map(|ids| ids.1));
+        let interfaces = report.interfaces.len() + report.skipped.len();
+        let hex = |value: Option<u16>| value.map_or_else(|| "unknown".into(), |value| format!("{value:04X}"));
+        let diagnostics = format!(
+            "App: X-Battery {}\nSystem: {system}\nModel: {}\nVID/PID: {}:{}\nDevice selection: system-enumerated; identity=unconfirmed; support=unknown\n\nSelected interface inventory\n{}",
+            crate::gui::APP_VERSION, if name.is_empty() { "unknown" } else { &name }, hex(vendor_id), hex(product_id),
+            render(collected_at, Ok(report), channel_id));
+        UnknownDevice { name, vendor_id, product_id, interfaces, diagnostics }
+    }).collect()
 }
 
 #[derive(Clone, Copy)]
@@ -80,22 +200,6 @@ fn system_error(reason: &str) -> Option<u32> {
     None
 }
 
-fn path_ids(value: &str) -> (Option<u16>, Option<u16>) {
-    let lower = value.to_ascii_lowercase();
-    let Some(remainder) = lower.strip_prefix(r"\\?\hid#") else { return (None, None); };
-    let Some((hardware, _)) = remainder.split_once('#') else { return (None, None); };
-    (hardware_id(hardware, "vid_"), hardware_id(hardware, "pid_"))
-}
-
-fn hardware_id(hardware: &str, prefix: &str) -> Option<u16> {
-    let mut fields = hardware.split('&').filter_map(|field| field.strip_prefix(prefix));
-    let value = fields.next()?;
-    if fields.next().is_some() || value.len() != 4 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    u16::from_str_radix(value, 16).ok()
-}
-
 fn private_name(value: &str) -> bool {
     let normalized: String = value.chars()
         .filter(|character| !character.is_whitespace())
@@ -118,21 +222,25 @@ fn private_name(value: &str) -> bool {
             .iter().any(|marker| normalized.contains(marker))
 }
 
-fn product_name(value: &str) -> String {
-    if value.len() > MAX_PRODUCT_BYTES { return "omitted_unsafe".into(); }
+fn safe_product_name(value: &str) -> Result<String, &'static str> {
+    if value.len() > MAX_PRODUCT_BYTES { return Err("omitted_unsafe"); }
     if value.chars().any(|character| matches!(character,
         '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
         | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')) {
-        return "omitted_unsafe".into();
+        return Err("omitted_unsafe");
     }
     let clean: String = value.chars().filter(|character| !character.is_control()).collect();
     let clean = clean.trim();
-    if clean.is_empty() { return "unavailable".into(); }
-    if private_name(clean) { return "omitted_unsafe".into(); }
+    if clean.is_empty() { return Err("unavailable"); }
+    if private_name(clean) { return Err("omitted_unsafe"); }
     let bounded: String = clean.chars().take(MAX_PRODUCT_CHARS).collect();
     let quoted = format!("{bounded:?}");
-    if quoted.contains(":\\") { return "omitted_unsafe".into(); }
-    quoted
+    if quoted.contains(":\\") { return Err("omitted_unsafe"); }
+    Ok(bounded)
+}
+
+fn product_name(value: &str) -> String {
+    safe_product_name(value).map(|value| format!("{value:?}")).unwrap_or_else(str::to_string)
 }
 
 struct Row {
@@ -228,6 +336,202 @@ mod tests {
 
     fn channel(value: &str) -> u64 {
         value.bytes().fold(0u64, |hash, byte| hash.wrapping_mul(131).wrapping_add(u64::from(byte)))
+    }
+
+    fn path(instance: &str, usb_interface: u8, collection: u8) -> String {
+        format!(r"\\?\hid#vid_dead&pid_beef&mi_{usb_interface:02x}&col{collection:02x}#7&{instance}&0&{:04x}#{{hid}}",
+            collection - 1)
+    }
+
+    fn grouped(interfaces: Vec<HidInterface>, skipped: Vec<Skipped>, groups: &[(&str, &str)]) -> GroupedEnumerateReport {
+        GroupedEnumerateReport {
+            report: EnumerateReport { interfaces, skipped },
+            physical_groups: groups.iter().map(|(path, group)| (path.to_ascii_lowercase(), group.to_ascii_lowercase())).collect(),
+        }
+    }
+
+    fn known_device(interface: Option<&HidInterface>) -> crate::feedback::Candidate {
+        crate::feedback::Candidate {
+            interface: interface.cloned(),
+            capture_interface: interface.filter(|interface| crate::capture::eligible(interface)).cloned(),
+            label: "private-alias".into(), battery: "—".into(), diagnostics: "private-known-report".into(),
+            device: crate::feedback::client::Device {
+                name: "Known device".into(), family: "mouse".into(), connection: "unknown".into(),
+                brand: None, model: None,
+            },
+        }
+    }
+
+    #[test]
+    fn physical_groups_join_cross_interface_siblings_without_merging_identical_devices() {
+        let first = interface(&path("first", 0, 1));
+        let sibling = interface(&path("first", 1, 2));
+        let second = interface(&path("second", 0, 1));
+        let groups = [(&*first.path, "usb\\vid_dead&pid_beef\\first"),
+            (&*sibling.path, "usb\\vid_dead&pid_beef\\first"),
+            (&*second.path, "usb\\vid_dead&pid_beef\\second")];
+        let mut report = grouped(vec![first.clone(), sibling.clone(), second.clone()], Vec::new(), &groups);
+        let expected = render(COLLECTED_AT, Ok(report.report.clone()), channel);
+        let initial = unknown_devices(COLLECTED_AT, &report, &[], &channel);
+        assert_eq!(initial.iter().map(|device| device.interfaces).collect::<Vec<_>>(), vec![2, 1]);
+        for device in &initial {
+            assert_eq!((device.vendor_id, device.product_id), (Some(0xdead), Some(0xbeef)));
+            assert_eq!(device.name, first.product);
+            for field in [format!("App: X-Battery {}\n", crate::gui::APP_VERSION),
+                format!("System: {}\n", crate::feedback::system_version()), format!("Model: {}\n", first.product),
+                "VID/PID: DEAD:BEEF\n".into(), "Selected interface inventory\nHID interface inventory\n".into()] {
+                assert!(device.diagnostics.contains(&field));
+            }
+        }
+        report.report.interfaces.reverse();
+        let inventory = inventory_for_devices(COLLECTED_AT, Ok(report), &[], channel);
+        assert_eq!(inventory.report, expected);
+        assert_eq!(inventory.unknown.iter().map(|device| &device.diagnostics).collect::<Vec<_>>(),
+            initial.iter().map(|device| &device.diagnostics).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn collection_fallback_keeps_usb_interfaces_and_instances_separate() {
+        let first = path("first", 0, 1);
+        let sibling = path("first", 0, 2);
+        let another_interface = path("first", 1, 1);
+        let second = path("second", 0, 1);
+        let malformed = first.replace("&0000#", "&unexpected#");
+        assert_eq!(collection_group(&first), collection_group(&sibling.to_ascii_uppercase()));
+        assert_ne!(collection_group(&first), collection_group(&another_interface));
+        assert_ne!(collection_group(&first), collection_group(&second));
+        assert_eq!(collection_group(&malformed), malformed);
+        let one_based_first = first.replace("&0000#", "&0001#");
+        let one_based_sibling = sibling.replace("&0001#", "&0002#");
+        assert_eq!(collection_group(&one_based_first), collection_group(&one_based_sibling));
+        let report = grouped([first, sibling, another_interface, second, malformed]
+            .iter().map(|path| interface(path)).collect(), Vec::new(), &[]);
+        let unknown = unknown_devices(COLLECTED_AT, &report, &[], &channel);
+        let mut counts: Vec<_> = unknown.iter().map(|device| device.interfaces).collect();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![1, 1, 1, 2]);
+    }
+
+    #[test]
+    fn known_non_capture_interface_excludes_its_physical_group_and_preserves_known_slots() {
+        let mut first = interface(&path("first", 0, 1));
+        first.usage_page = 1;
+        first.usage = 2;
+        let sibling = interface(&path("first", 1, 1));
+        let failed_path = path("first", 2, 1);
+        let second = interface(&path("second", 0, 1));
+        let devices = vec![known_device(Some(&first)), known_device(Some(&first)), known_device(None)];
+        assert!(devices[0].capture_interface.is_none());
+        let report = grouped(vec![first.clone(), sibling.clone(), second.clone()],
+            vec![Skipped { path: failed_path.clone(), reason: "occupied".into() }],
+            &[(&first.path, "first"), (&sibling.path, "first"), (&failed_path, "first"), (&second.path, "second")]);
+        let inventory = inventory_for_devices(COLLECTED_AT, Ok(report), &devices, channel);
+        assert_eq!(inventory.unknown.len(), 1);
+        assert_eq!(inventory.unknown[0].interfaces, 1);
+        assert!(inventory.unknown[0].diagnostics.contains(&format!("channel={:016x}", channel(&second.path))));
+        assert!(inventory.report.contains("interface_count=4; success_count=3; failed_count=1"));
+        assert_eq!(devices.len(), 3);
+        assert_eq!(devices[0].interface.as_ref().unwrap().path, first.path);
+        assert_eq!(devices[1].label, "private-alias");
+    }
+
+    #[test]
+    fn known_collection_siblings_are_excluded_even_with_partial_parent_evidence() {
+        let known = interface(&path("first", 0, 1).to_ascii_uppercase());
+        let sibling = interface(&path("first", 0, 2));
+        let another_interface = interface(&path("first", 1, 1));
+        let second = interface(&path("second", 0, 1));
+        let failed = Skipped { path: path("first", 0, 3), reason: "occupied".into() };
+        let devices = [known_device(Some(&known))];
+        let fallback = grouped(vec![sibling.clone(), another_interface.clone(), second.clone()], vec![failed.clone()], &[]);
+        assert_eq!(unknown_devices(COLLECTED_AT, &fallback, &devices, &channel).len(), 2);
+        let resolved = grouped(vec![sibling.clone(), another_interface.clone(), second.clone()], vec![failed],
+            &[(&sibling.path, "first"), (&another_interface.path, "first"), (&second.path, "second")]);
+        let unknown = unknown_devices(COLLECTED_AT, &resolved, &devices, &channel);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].interfaces, 1);
+    }
+
+    #[test]
+    fn contradictory_physical_evidence_does_not_merge_or_hide_other_instances() {
+        let first = interface(&path("shared", 0, 1));
+        let second = interface(&path("shared", 0, 2));
+        let uncertain = interface(&path("shared", 0, 3));
+        let devices = [known_device(Some(&first))];
+        let report = grouped(vec![first.clone(), second.clone(), uncertain], Vec::new(),
+            &[(&first.path, "physical-first"), (&second.path, "physical-second")]);
+        let unknown = unknown_devices(COLLECTED_AT, &report, &devices, &channel);
+        assert_eq!(unknown.len(), 2);
+        assert!(unknown.iter().all(|device| device.interfaces == 1));
+    }
+
+    #[test]
+    fn failed_interfaces_remain_selectable_with_partial_ids_and_safe_failure_details() {
+        let first = path("first", 0, 1);
+        let sibling = path("first", 1, 1);
+        let second = path("second", 0, 1);
+        let partial = r"\\?\hid#vid_1234&pid_invalid#private-partial";
+        let report = grouped(Vec::new(), [&*first, &*sibling, &*second, partial, "private-path"].iter()
+            .map(|path| Skipped { path: (*path).into(),
+                reason: "CreateFileW 失败（GetLastError=32） C:\\Users\\Alice serial=private-serial".into() }).collect(),
+            &[(&first, "first"), (&sibling, "first"), (&second, "second")]);
+        let inventory = inventory_for_devices(COLLECTED_AT, Ok(report), &[], channel);
+        assert_eq!(inventory.unknown.len(), 4);
+        assert_eq!(inventory.unknown.iter().map(|device| device.interfaces).sum::<usize>(), 5);
+        assert_eq!(inventory.unknown.iter().filter(|device| device.vendor_id == Some(0xdead)).count(), 2);
+        assert!(inventory.unknown.iter().any(|device| device.vendor_id == Some(0x1234) && device.product_id.is_none()));
+        assert!(inventory.unknown.iter().any(|device| device.vendor_id.is_none() && device.product_id.is_none()));
+        for device in &inventory.unknown {
+            assert!(device.name.is_empty());
+            assert!(device.diagnostics.contains("Model: unknown\n"));
+            assert!(device.diagnostics.contains("identity=unconfirmed; support=unknown"));
+            assert!(device.diagnostics.contains("reason=open_failed; os_error=32"));
+            for private in ["private-", "Alice", r"\\?\", "serial=", "unsupported"] {
+                assert!(!device.diagnostics.contains(private));
+            }
+            assert_valid_report(&device.diagnostics);
+        }
+        assert!(inventory.unknown.iter().any(|device| device.diagnostics.contains("VID/PID: 1234:unknown\n")));
+        assert!(inventory.unknown.iter().any(|device| device.diagnostics.contains("VID/PID: unknown:unknown\n")));
+    }
+
+    #[test]
+    fn unknown_names_use_only_safe_products_and_never_paths_serials_or_known_aliases() {
+        for product in ["", " \t\n", "serial=private-serial", r"C:\Users\Alice\mouse",
+            "token=private-token", "Mouse\u{202e}private", "Ｐａｔｈ：private"] {
+            let mut device = interface("private-path");
+            device.product = product.into();
+            let report = grouped(vec![device], Vec::new(), &[("private-path", "private-parent")]);
+            let inventory = inventory_for_devices(COLLECTED_AT, Ok(report), &[known_device(None)], channel);
+            assert_eq!(inventory.unknown.len(), 1);
+            assert!(inventory.unknown[0].name.is_empty());
+            for value in [&inventory.report, &inventory.unknown[0].diagnostics] {
+                for private in ["private-", "Alice", "serial=", r"\\?\"] { assert!(!value.contains(private)); }
+                assert_valid_report(value);
+            }
+        }
+        let mut device = interface("private-path");
+        device.product = "  鼠标 \"Pro\"\n  ".into();
+        let report = grouped(vec![device], Vec::new(), &[]);
+        let unknown = unknown_devices(COLLECTED_AT, &report, &[], &channel);
+        assert_eq!(unknown[0].name, "鼠标 \"Pro\"");
+        assert!(unknown[0].diagnostics.contains("product=\"鼠标 \\\"Pro\\\"\""));
+    }
+
+    #[test]
+    fn report_truncation_does_not_remove_unknown_choices_and_scan_failures_do_not_invent_them() {
+        let report = grouped((0..180).map(|index| interface(&format!("private-path-{index:04}"))).collect(), Vec::new(), &[]);
+        let inventory = inventory_for_devices(COLLECTED_AT, Ok(report), &[], channel);
+        assert_eq!(inventory.unknown.len(), 180);
+        assert!(inventory.report.contains("truncated=true"));
+        assert_valid_report(&inventory.report);
+        let failure = CollectionFailure::new(Stage::Enumeration,
+            "SetupDiEnumDeviceInterfaces 失败（GetLastError=31） private-reason");
+        let inventory = inventory_for_devices(COLLECTED_AT, Err(failure), &[], channel);
+        assert!(inventory.unknown.is_empty());
+        assert!(inventory.report.contains("enumeration=failed"));
+        assert!(!inventory.report.contains("private-reason"));
+        assert_valid_report(&inventory.report);
     }
 
     fn inventory(interfaces: Vec<HidInterface>, skipped: Vec<Skipped>) -> String {

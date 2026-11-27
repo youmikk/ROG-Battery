@@ -30,6 +30,7 @@ const WIDTH: f32 = 660.0;
 const BODY_TOP: f32 = 91.0;
 const FOOTER: f32 = 66.0;
 const SLOTS: usize = 156;
+const DEVICE_PAGE_SIZE: usize = 12;
 
 fn back_view(view: View, submitted: bool) -> View {
     if matches!(view, View::Thread | View::Success) {
@@ -47,6 +48,8 @@ enum Action {
     History,
     Devices,
     Device(usize),
+    UnknownDevice(usize),
+    DevicePage(usize),
     Manual,
     Connection(usize),
     Category(usize),
@@ -154,7 +157,7 @@ enum ResultMessage {
     Fallback(Result<client::Fallback, String>),
     SoftwareDiagnostics(String),
     CaptureSaved(Result<std::path::PathBuf, String>),
-    DeviceInventory(String),
+    DeviceInventory(crate::feedback::inventory::DeviceInventory),
     Failed,
 }
 struct Colors {
@@ -346,6 +349,8 @@ impl Controls {
         } else { s
             .selected
             .and_then(|i| s.devices.get(i).map(|d| d.diagnostics.clone()))
+            .or_else(|| s.selected_unknown.and_then(|index| s.unknown_devices.get(index))
+                .map(|device| device.diagnostics.clone()))
             .unwrap_or_else(|| {
                 format!(
                     "App: X-Battery {}\nSystem: {}\nNo detected interface selected.\n",
@@ -457,13 +462,13 @@ impl Controls {
                 );
                 self.label(
                     if crate::i18n::english() {
-                        format!("{} devices detected", s.devices.len())
+                        format!("{} identified · {} other", s.devices.len(), s.unknown_devices.len())
                     } else {
-                        format!("已发现 {} 台设备", s.devices.len())
+                        format!("已识别 {} 台 · 待确认 {} 台", s.devices.len(), s.unknown_devices.len())
                     },
-                    502.0,
+                    390.0,
                     y,
-                    133.0,
+                    245.0,
                     19.0,
                     11.0,
                     false,
@@ -471,6 +476,7 @@ impl Controls {
                 );
                 y += 27.0;
                 let device = s.selected.and_then(|i| s.devices.get(i));
+                let unknown = s.selected_unknown.and_then(|index| s.unknown_devices.get(index));
                 let restored_device = s.restored_device.as_ref();
                 let device_kind = device
                     .map(|d| kind(&d.device.family))
@@ -480,10 +486,13 @@ impl Controls {
                     Action::Devices,
                     device
                         .map(|d| d.label.as_str())
+                        .or_else(|| unknown.map(unknown_name))
                         .or_else(|| restored_device.map(|device| device.name.as_str()))
                         .unwrap_or(text("列表中没有我的设备", "My device is not listed")),
                     device.map(device_note).unwrap_or_else(|| {
-                        if restored_device.is_some() { text("来自待提交反馈", "From the pending report").into() }
+                        if let Some(unknown) = unknown {
+                            format!("{} · {}", text("待确认型号", "Model unconfirmed"), unknown_identifier(unknown))
+                        } else if restored_device.is_some() { text("来自待提交反馈", "From the pending report").into() }
                         else { text("手动填写品牌和型号", "Enter the brand and model").into() }
                     }),
                     R::new(25.0, y, 610.0, 62.0),
@@ -496,14 +505,24 @@ impl Controls {
                 y += 62.0;
                 if s.menu {
                     y += 5.0;
-                    let count = s.devices.len().min(128) + 1;
-                    self.surface(R::new(25.0, y, 610.0, count as f32 * 35.0 + 8.0), false);
+                    let known_count = s.devices.len();
+                    let total = known_count + s.unknown_devices.len();
+                    let pages = total.max(1).div_ceil(DEVICE_PAGE_SIZE);
+                    let page = s.device_page.min(pages - 1);
+                    let start = page * DEVICE_PAGE_SIZE;
+                    let end = (start + DEVICE_PAGE_SIZE).min(total);
+                    let has_unknown = end > known_count;
+                    let loading = s.inventory_report.is_none();
+                    let section_height = if has_unknown || loading { 27.0 } else { 0.0 };
+                    let page_height = if pages > 1 { 35.0 } else { 0.0 };
+                    self.surface(R::new(25.0, y, 610.0,
+                        (end - start + 1) as f32 * 35.0 + section_height + page_height + 8.0), false);
                     y += 4.0;
-                    for (i, device) in s.devices.iter().enumerate().take(128) {
+                    for (i, device) in s.devices.iter().enumerate().skip(start).take(end - start) {
                         self.button(
                             Action::Device(i),
                             &device.label,
-                            "",
+                            candidate_identifier(device),
                             R::new(29.0, y, 602.0, 35.0),
                             Style::Option(kind(&device.device.family), s.selected == Some(i)),
                             false,
@@ -515,13 +534,47 @@ impl Controls {
                         text("列表中没有我的设备", "My device is not listed"),
                         "",
                         R::new(29.0, y, 602.0, 35.0),
-                        Style::Option(crate::tray_prefs::TrayKind::Generic, s.selected.is_none()),
+                        Style::Option(crate::tray_prefs::TrayKind::Generic,
+                            s.selected.is_none() && s.selected_unknown.is_none()),
                         false,
                     );
-                    y += 39.0;
+                    y += 35.0;
+                    if has_unknown || loading {
+                        self.label(if loading { text("正在查找其他设备…", "Finding other devices…") }
+                            else { text("未识别设备 · 可能名称", "Other devices · Reported name") },
+                            42.0, y + 4.0, 570.0, 23.0, 10.5, false, true);
+                        y += 27.0;
+                    }
+                    for (index, unknown) in s.unknown_devices.iter().enumerate()
+                        .filter(|(index, _)| (start..end).contains(&(known_count + index))) {
+                        self.button(Action::UnknownDevice(index), unknown_name(unknown), unknown_identifier(unknown),
+                            R::new(29.0, y, 602.0, 35.0),
+                            Style::Option(crate::tray_prefs::TrayKind::Generic, s.selected_unknown == Some(index)), false);
+                        y += 35.0;
+                    }
+                    if pages > 1 {
+                        if page > 0 {
+                            self.button(Action::DevicePage(page - 1), text("上一页", "Previous"), "",
+                                R::new(42.0, y, 85.0, 31.0), Style::Plain, false);
+                        }
+                        self.label(format!("{} / {}", page + 1, pages), 300.0, y + 4.0, 100.0, 23.0,
+                            11.0, false, true);
+                        if page + 1 < pages {
+                            self.button(Action::DevicePage(page + 1), text("下一页", "Next"), "",
+                                R::new(530.0, y, 85.0, 31.0), Style::Plain, false);
+                        }
+                        y += 35.0;
+                    }
+                    y += 4.0;
                 }
                 if device.is_none() && restored_device.is_none() {
                     y += 10.0;
+                    if let Some(unknown) = unknown {
+                        self.label(format!("{}：{} · {} · {} {}", text("可能的名称", "Reported name"),
+                            unknown_name(unknown), unknown_identifier(unknown), unknown.interfaces,
+                            text("个接口", "interfaces")), 25.0, y, 610.0, 24.0, 11.0, false, true);
+                        y += 30.0;
+                    }
                     self.label(text("设备品牌（必填）", "Brand (required)"), 25.0, y, 300.0, 20.0, 11.0, true, false);
                     self.label(text("完整型号（必填）", "Full model (required)"), 335.0, y, 300.0, 20.0, 11.0, true, false);
                     y += 26.0;
@@ -1370,17 +1423,19 @@ impl Controls {
         let generation = {
             let model = self.state.borrow();
             if !model.initialized || !matches!(model.view, View::Form | View::Diagnostics)
-                || model.inventory_report.is_some() || model.restored_draft.is_some()
-                || model.has_complete_diagnostics()
+                || model.inventory_report.is_some()
                 || self.inventory_working.get() { return; }
             model.inventory_generation
         };
         self.inventory_working.set(true);
+        let devices = self.state.borrow().devices.clone();
         let results = self.results.clone();
         let notice = self.notice;
         let spawned = std::thread::Builder::new().name("feedback-inventory".into()).spawn(move || {
-            let report = std::panic::catch_unwind(crate::feedback::inventory::collect)
-                .unwrap_or_else(|_| "HID interface inventory: collection failed\n".into());
+            let report = std::panic::catch_unwind(|| crate::feedback::inventory::collect_for_devices(&devices))
+                .unwrap_or_else(|_| crate::feedback::inventory::DeviceInventory {
+                    report: "HID interface inventory: collection failed\n".into(), unknown: Vec::new(),
+                });
             results.lock().unwrap_or_else(|error| error.into_inner())
                 .push((generation, ResultMessage::DeviceInventory(report)));
             notice.notice();
@@ -1445,6 +1500,15 @@ impl Controls {
         if !action.enabled(&self.state.borrow()) {
             return;
         }
+        if let Action::UnknownDevice(index) = &action {
+            let mut model = self.state.borrow_mut();
+            if model.selected_unknown == Some(*index) && model.unknown_devices.get(*index).is_some() {
+                model.menu = false;
+                drop(model);
+                self.rebuild();
+                return;
+            }
+        }
         if action.navigates() {
             self.remember_reply();
             self.state.borrow_mut().detach_task();
@@ -1452,6 +1516,7 @@ impl Controls {
         if matches!(
             action,
             Action::Device(_)
+                | Action::UnknownDevice(_)
                 | Action::Manual
                 | Action::Connection(_)
                 | Action::Category(_)
@@ -1496,10 +1561,12 @@ impl Controls {
                 self.rebuild();
             }
             Action::Device(i) => {
+                if i >= self.state.borrow().devices.len() { return; }
                 crate::capture::clear();
                 *self.capture_folder.borrow_mut() = None;
                 let mut s = self.state.borrow_mut();
                 s.selected = Some(i);
+                s.selected_unknown = None;
                 s.restored_device = None;
                 s.capture = None;
                 s.attach_capture = true;
@@ -1510,11 +1577,39 @@ impl Controls {
                 drop(s);
                 self.set_view(View::Form);
             }
+            Action::UnknownDevice(index) => {
+                let Some(unknown) = self.state.borrow().unknown_devices.get(index).cloned() else { return; };
+                crate::capture::clear();
+                *self.capture_folder.borrow_mut() = None;
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.selected = None;
+                    state.selected_unknown = Some(index);
+                    state.restored_device = None;
+                    state.capture = None;
+                    state.attach_capture = true;
+                    state.diagnostics_override = None;
+                    state.draft_retry = None;
+                    state.connection = 3;
+                    state.category = 0;
+                    state.menu = false;
+                }
+                self.updating.set(true);
+                self.brand.set_text("");
+                self.model.set_text(&unknown.name);
+                self.updating.set(false);
+                self.set_view(View::Form);
+            }
+            Action::DevicePage(page) => {
+                self.state.borrow_mut().device_page = page;
+                self.rebuild_position(false);
+            }
             Action::Manual => {
                 crate::capture::clear();
                 *self.capture_folder.borrow_mut() = None;
                 let mut s = self.state.borrow_mut();
                 s.selected = None;
+                let was_unknown = s.selected_unknown.take().is_some();
                 s.restored_device = None;
                 s.capture = None;
                 s.attach_capture = true;
@@ -1522,6 +1617,12 @@ impl Controls {
                 s.draft_retry = None;
                 s.menu = false;
                 drop(s);
+                if was_unknown {
+                    self.updating.set(true);
+                    self.brand.set_text("");
+                    self.model.set_text("");
+                    self.updating.set(false);
+                }
                 self.set_view(View::Form);
             }
             Action::Connection(i) => {
@@ -1760,12 +1861,12 @@ impl Controls {
             if let ResultMessage::DeviceInventory(report) = message {
                 self.inventory_working.set(false);
                 let mut model = self.state.borrow_mut();
-                if generation == model.inventory_generation && model.restored_draft.is_none()
-                    && !model.has_complete_diagnostics() {
-                    model.inventory_report = Some(report);
+                if generation == model.inventory_generation {
+                    model.inventory_report = Some(report.report);
+                    model.unknown_devices = report.unknown;
                 }
                 drop(model);
-                self.rebuild();
+                self.rebuild_position(false);
                 self.prepare_inventory();
                 continue;
             }
@@ -1853,6 +1954,7 @@ impl Controls {
                         s.software = crate::feedback::software::is_device(&draft.device);
                         s.latest_software = s.software;
                         s.selected = None;
+                        s.selected_unknown = None;
                         s.restored_device = Some(draft.device.clone());
                         s.connection = connection_index(&draft.device.connection);
                         s.category = ["device", "battery", "dpi", "other"]
@@ -1862,12 +1964,15 @@ impl Controls {
                         s.attach_diagnostics = draft.diagnostics.is_some();
                         s.diagnostics_override = draft.diagnostics.map(DiagnosticReport::Complete);
                         s.inventory_report = None;
+                        s.unknown_devices.clear();
                         s.inventory_generation = s.inventory_generation.wrapping_add(1);
                         s.images = images;
                         s.capture = capture;
                         s.attach_capture = true;
                         s.submitted = false;
                         s.view = View::Form;
+                        drop(s);
+                        self.prepare_inventory();
                     }
                     Err(e) => self.state.borrow_mut().error = e,
                 },
@@ -1983,8 +2088,23 @@ fn device_icon(p: &mut Painter, device: crate::tray_prefs::TrayKind, r: R, color
         super::panel_icons::draw(p, super::panel_icons::Icon::Device(device), r, color, 0.0);
     }
 }
+fn candidate_identifier(device: &Candidate) -> String {
+    device.interface.as_ref().map(|interface|
+        format!("VID {:04X} · PID {:04X}", interface.vendor_id, interface.product_id))
+        .unwrap_or_else(|| "VID/PID —".into())
+}
+
+fn unknown_identifier(device: &crate::feedback::inventory::UnknownDevice) -> String {
+    let hex = |value: Option<u16>| value.map(|value| format!("{value:04X}")).unwrap_or_else(|| "—".into());
+    format!("VID {} · PID {}", hex(device.vendor_id), hex(device.product_id))
+}
+
+fn unknown_name(device: &crate::feedback::inventory::UnknownDevice) -> &str {
+    if device.name.is_empty() { text("未知设备", "Unknown device") } else { &device.name }
+}
+
 fn device_note(device: &Candidate) -> String {
-    if device.battery == "—" {
+    let status = if device.battery == "—" {
         text(
             "已检测到设备 · 电量未知",
             "Device detected · Battery unknown",
@@ -1997,7 +2117,8 @@ fn device_note(device: &Candidate) -> String {
             text("电量", "Battery"),
             device.battery
         )
-    }
+    };
+    format!("{status} · {}", candidate_identifier(device))
 }
 fn short_date(milliseconds: u64) -> String {
     let days = (milliseconds / 86_400_000) as i64;
@@ -2271,8 +2392,18 @@ mod tests {
             controls.inventory_working.set(true);
             let inventory_generation = controls.state.borrow().inventory_generation;
             controls.results.lock().unwrap().push((inventory_generation,
-                ResultMessage::DeviceInventory("HID interface inventory\nVID/PID=046D:C52B\n".into())));
+                ResultMessage::DeviceInventory(crate::feedback::inventory::DeviceInventory {
+                    report: "HID interface inventory\nVID/PID=046D:C52B\n".into(),
+                    unknown: vec![unknown_device("USB Receiver", 0x046d, 0xc52b)],
+                })));
             controls.complete();
+            assert_eq!(controls.state.borrow().unknown_devices.len(), 1);
+            if !software {
+                controls.action(Action::Devices);
+                assert!(controls.items.borrow().iter().any(|item| matches!(item.action, Action::UnknownDevice(0))));
+                assert!(!controls.labels.borrow().iter().any(|label|
+                    label.text == text("正在查找其他设备…", "Finding other devices…")));
+            }
             controls.action(Action::ToggleDiagnostics);
             assert!(controls.draft().diagnostics.is_none());
             controls.action(Action::ToggleDiagnostics);
@@ -2298,7 +2429,7 @@ mod tests {
         let interface = crate::hid::HidInterface { path: "capture-regression-path".into(),
             vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
             input_len: 64, output_len: 64, feature_len: 0, product: "Test".into(), serial: "private".into() };
-        let candidate = Candidate { capture_interface: Some(interface.clone()),
+        let candidate = Candidate { interface: Some(interface.clone()), capture_interface: Some(interface.clone()),
             label: "Test".into(), battery: "50%".into(), diagnostics: "Model: Test\n".into(),
             device: client::Device { name: "Test".into(), family: "mouse".into(),
                 connection: "USB".into(), brand: None, model: None } };
@@ -2362,7 +2493,7 @@ mod tests {
         let interface = crate::hid::HidInterface { path: "capture-first-device".into(),
             vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
             input_len: 64, output_len: 64, feature_len: 0, product: "Test".into(), serial: String::new() };
-        let candidate = Candidate { capture_interface: Some(interface.clone()),
+        let candidate = Candidate { interface: Some(interface.clone()), capture_interface: Some(interface.clone()),
             label: "Test".into(), battery: "50%".into(), diagnostics: "Model: Test\n".into(),
             device: client::Device { name: "Test".into(), family: "mouse".into(),
                 connection: "USB".into(), brand: None, model: None } };
@@ -2491,6 +2622,7 @@ mod tests {
         let (_owner, _notice, dialog) = regression_dialog();
         let controls = &dialog.controls;
         let candidate = Candidate {
+            interface: None,
             capture_interface: None,
             label: "Detected mouse".into(), battery: "75%".into(),
             diagnostics: "Model: Detected mouse\nVID/PID: 24AE:1415\n".into(),
@@ -2519,14 +2651,127 @@ mod tests {
         assert!(Action::ToggleDiagnostics.enabled(&controls.state.borrow()));
         controls.state.borrow_mut().new_form();
         controls.state.borrow_mut().inventory_report = Some("new interfaces".into());
-        controls.results.lock().unwrap().push((old_generation, ResultMessage::DeviceInventory("old interfaces".into())));
+        controls.results.lock().unwrap().push((old_generation,
+            ResultMessage::DeviceInventory(crate::feedback::inventory::DeviceInventory {
+                report: "old interfaces".into(), unknown: vec![unknown_device("Old device", 0x1234, 0x5678)],
+            })));
         controls.complete();
         assert_eq!(controls.state.borrow().inventory_report.as_deref(), Some("new interfaces"));
+        assert!(controls.state.borrow().unknown_devices.is_empty());
         controls.state.borrow_mut().inventory_report = None;
         assert!(!controls.inventory_ready());
         controls.state.borrow_mut().attach_diagnostics = false;
         assert!(controls.inventory_ready());
         assert!(controls.draft().diagnostics.is_none());
+    }
+
+    fn unknown_device(name: &str, vendor_id: u16, product_id: u16) -> crate::feedback::inventory::UnknownDevice {
+        crate::feedback::inventory::UnknownDevice {
+            name: name.into(), vendor_id: Some(vendor_id), product_id: Some(product_id), interfaces: 3,
+            diagnostics: format!("App: X-Battery test\nModel: {name}\nVID/PID: {vendor_id:04X}:{product_id:04X}\n"),
+        }
+    }
+
+    #[test]
+    fn device_picker_shows_ids_even_when_the_interface_cannot_be_captured() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        let interface = crate::hid::HidInterface { path: "keyboard-interface".into(),
+            vendor_id: 0x258a, product_id: 0x024e, usage_page: 1, usage: 6,
+            input_len: 8, output_len: 0, feature_len: 0, product: "VGN V98 Pro V3".into(), serial: String::new() };
+        let candidate = Candidate {
+            interface: Some(interface), capture_interface: None, label: "VGN V98 Pro V3".into(),
+            battery: "99%".into(), diagnostics: String::new(),
+            device: client::Device { name: "VGN V98 Pro V3".into(), family: "keyboard".into(),
+                connection: "USB".into(), brand: None, model: None },
+        };
+        controls.state.borrow_mut().reopen(vec![candidate], false);
+        controls.state.borrow_mut().inventory_report = Some("HID interface inventory\n".into());
+        controls.state.borrow_mut().menu = true;
+        controls.rebuild();
+        let items = controls.items.borrow();
+        let row = items.iter().find(|item| matches!(item.action, Action::Device(0))).unwrap();
+        assert_eq!(row.detail, "VID 258A · PID 024E");
+        let selected = items.iter().find(|item| matches!(item.action, Action::Devices)).unwrap();
+        assert!(selected.detail.contains("99%"));
+        assert!(selected.detail.contains("VID 258A · PID 024E"));
+        assert!(!Action::CaptureStart.enabled(&controls.state.borrow()));
+    }
+
+    #[test]
+    fn unknown_device_selection_submits_its_ids_with_the_users_model() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(Vec::new(), false);
+        let generation = controls.state.borrow().inventory_generation;
+        controls.results.lock().unwrap().push((generation,
+            ResultMessage::DeviceInventory(crate::feedback::inventory::DeviceInventory {
+                report: "HID interface inventory\nVID/PID=258A:024E\nVID/PID=1234:5678\n".into(),
+                unknown: vec![unknown_device("VGN V98Pro V3", 0x258a, 0x024e)],
+            })));
+        controls.complete();
+        controls.action(Action::Devices);
+        {
+            let items = controls.items.borrow();
+            let manual = items.iter().find(|item| matches!(item.action, Action::Manual)).unwrap();
+            let unknown = items.iter().find(|item| matches!(item.action, Action::UnknownDevice(0))).unwrap();
+            assert!(unknown.rect.y > manual.rect.bottom());
+            assert_eq!(unknown.label, "VGN V98Pro V3");
+            assert_eq!(unknown.detail, "VID 258A · PID 024E");
+        }
+        controls.action(Action::UnknownDevice(0));
+        assert_eq!(controls.model.text(), "VGN V98Pro V3");
+        assert!(controls.brand.text().is_empty());
+        assert_eq!(controls.state.borrow().connection, 3);
+        assert!(!Action::CaptureStart.enabled(&controls.state.borrow()));
+        controls.brand.set_text("VGN");
+        controls.model.set_text("V98 Pro V3");
+        controls.set_description("The receiver is connected but the battery is not shown.");
+        controls.action(Action::Connection(1));
+        controls.action(Action::Category(1));
+        controls.action(Action::Devices);
+        controls.action(Action::UnknownDevice(0));
+        assert_eq!(controls.brand.text(), "VGN");
+        assert_eq!(controls.model.text(), "V98 Pro V3");
+        assert_eq!(controls.state.borrow().connection, 1);
+        assert_eq!(controls.state.borrow().category, 1);
+        let preview = controls.diagnostics();
+        let draft = submit_offline(controls);
+        assert_eq!(draft.device.name, "VGN V98 Pro V3");
+        assert_eq!(draft.device.model.as_deref(), Some("V98 Pro V3"));
+        assert_eq!(draft.diagnostics.as_deref(), Some(preview.as_str()));
+        assert!(preview.contains("VID/PID: 258A:024E"));
+        assert!(preview.contains("VID/PID=1234:5678"));
+    }
+
+    #[test]
+    fn large_device_lists_remain_selectable_without_exhausting_native_controls() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(Vec::new(), false);
+        {
+            let mut state = controls.state.borrow_mut();
+            state.inventory_report = Some("HID interface inventory\n".into());
+            state.unknown_devices = (0..150).map(|index|
+                unknown_device(&format!("Device {index}"), 0x1234, index)).collect();
+            state.menu = true;
+        }
+        controls.set_description("Keep this description while selecting the device.");
+        for page in 0..150usize.div_ceil(DEVICE_PAGE_SIZE) {
+            controls.action(Action::DevicePage(page));
+            let items = controls.items.borrow();
+            assert!(items.iter().filter(|item| !item.root).count() < SLOTS);
+            assert!(items.iter().filter(|item| matches!(item.action, Action::UnknownDevice(_))).count() <= DEVICE_PAGE_SIZE);
+        }
+        assert!(controls.items.borrow().iter().any(|item| matches!(item.action, Action::UnknownDevice(149))));
+        controls.action(Action::UnknownDevice(149));
+        assert_eq!(controls.model.text(), "Device 149");
+        assert!(controls.diagnostics().contains("VID/PID: 1234:0095"));
+        controls.action(Action::Manual);
+        assert!(controls.state.borrow().selected_unknown.is_none());
+        assert!(controls.model.text().is_empty());
+        assert!(!controls.diagnostics().contains("VID/PID: 1234:0095"));
+        assert_eq!(controls.description.text(), "Keep this description while selecting the device.");
     }
 
     #[test]
@@ -3014,14 +3259,17 @@ fn draw_button(p: &mut Painter, item: &Item, pressed: bool, focus: bool, enabled
         }
         Style::Option(device, selected) => {
             device_icon(p, device, R::new(9.0, r.cy() - 8.5, 17.0, 17.0), t.text2);
+            let detail_width = if item.detail.is_empty() { 0.0 } else { 195.0 };
             p.text(
                 &item.label,
-                R::new(36.0, 0.0, r.w - 72.0, r.h),
+                R::new(36.0, 0.0, r.w - 84.0 - detail_width, r.h),
                 12.0,
                 false,
                 t.text,
                 Align::Left,
             );
+            p.text(&item.detail, R::new(r.w - 36.0 - detail_width, 0.0, detail_width, r.h),
+                11.0, false, t.text2, Align::Right);
             if selected {
                 feedback_icons::draw(
                     p,

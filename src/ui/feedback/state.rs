@@ -42,7 +42,10 @@ pub(super) struct Model {
     pub(super) software: bool,
     pub(super) latest_software: bool,
     pub(super) menu: bool,
+    pub(super) device_page: usize,
     pub(super) selected: Option<usize>,
+    pub(super) unknown_devices: Vec<crate::feedback::inventory::UnknownDevice>,
+    pub(super) selected_unknown: Option<usize>,
     pub(super) connection: usize,
     pub(super) category: usize,
     pub(super) attach_diagnostics: bool,
@@ -75,7 +78,10 @@ impl Default for Model {
             software: false,
             latest_software: false,
             menu: false,
+            device_page: 0,
             selected: None,
+            unknown_devices: Vec::new(),
+            selected_unknown: None,
             connection: 0,
             category: 0,
             attach_diagnostics: true,
@@ -142,6 +148,8 @@ impl Model {
         self.restored_device = None;
         self.diagnostics_override = None;
         self.inventory_report = None;
+        self.unknown_devices.clear();
+        self.selected_unknown = None;
         self.inventory_generation = self.inventory_generation.wrapping_add(1);
         self.error.clear();
         self.images.clear();
@@ -150,6 +158,7 @@ impl Model {
         self.current = None;
         self.thread = None;
         self.menu = false;
+        self.device_page = 0;
         self.software = self.latest_software;
         if self.software || mode_changed {
             self.category = if self.software { 3 } else { 0 };

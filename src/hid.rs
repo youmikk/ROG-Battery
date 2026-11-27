@@ -70,6 +70,11 @@ pub struct EnumerateReport {
     pub skipped: Vec<Skipped>,
 }
 
+pub struct GroupedEnumerateReport {
+    pub report: EnumerateReport,
+    pub physical_groups: std::collections::BTreeMap<String, String>,
+}
+
 pub fn enumerate(hid: &HidApi) -> Result<Vec<HidInterface>, String> {
     Ok(enumerate_report(hid)?.interfaces)
 }
@@ -83,6 +88,54 @@ pub fn enumerate_report(hid: &HidApi) -> Result<EnumerateReport, String> {
 /// 只读描述符枚举，品牌协议决定后续可用的控制接口。
 pub fn enumerate_all_report(hid: &HidApi) -> Result<EnumerateReport, String> {
     enumerate_all_report_with(hid, |_, _| {})
+}
+
+pub fn enumerate_all_grouped_report(hid: &HidApi) -> Result<GroupedEnumerateReport, String> {
+    let mut instances = std::collections::BTreeMap::new();
+    let report = enumerate_all_report_with(hid, |path, instance| {
+        instances.insert(path.to_ascii_lowercase(), instance);
+    })?;
+    Ok(group_report_with(report, &instances, |instance, vendor_id, product_id| {
+        usb_physical_group_with(instance, vendor_id, product_id, |node| {
+            let identity = device_instance_id(node)?;
+            usb_ancestor_matches(&identity, vendor_id, product_id).then_some(identity)
+        }, parent_instance)
+    }))
+}
+
+fn group_report_with(
+    report: EnumerateReport,
+    instances: &std::collections::BTreeMap<String, u32>,
+    mut physical_group: impl FnMut(u32, u16, u16) -> Option<String>,
+) -> GroupedEnumerateReport {
+    let mut physical_groups = std::collections::BTreeMap::new();
+    let paths = report.interfaces.iter().map(|interface|
+        (&interface.path, (Some(interface.vendor_id), Some(interface.product_id))))
+        .chain(report.skipped.iter().map(|skipped| (&skipped.path, path_ids(&skipped.path))));
+    for (path, (vendor_id, product_id)) in paths {
+        let path = path.to_ascii_lowercase();
+        let Some(&instance) = instances.get(&path) else { continue; };
+        let (Some(vendor_id), Some(product_id)) = (vendor_id, product_id) else { continue; };
+        if let Some(group) = physical_group(instance, vendor_id, product_id).filter(|group| !group.is_empty()) {
+            physical_groups.insert(path, group.to_ascii_lowercase());
+        }
+    }
+    GroupedEnumerateReport { report, physical_groups }
+}
+
+pub(crate) fn path_ids(value: &str) -> (Option<u16>, Option<u16>) {
+    let lower = value.to_ascii_lowercase();
+    let Some(remainder) = lower.strip_prefix(r"\\?\hid#") else { return (None, None); };
+    let Some((hardware, _)) = remainder.split_once('#') else { return (None, None); };
+    let field = |prefix: &str| {
+        let mut fields = hardware.split('&').filter_map(|field| field.strip_prefix(prefix));
+        let value = fields.next()?;
+        if fields.next().is_some() || value.len() != 4 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        u16::from_str_radix(value, 16).ok()
+    };
+    (field("vid_"), field("pid_"))
 }
 
 fn enumerate_all_report_with(
@@ -217,21 +270,38 @@ fn interface_path(
 }
 
 fn usb_physical_group(instance: u32, interface: &HidInterface) -> Option<String> {
-    use winapi::um::cfgmgr32::{CM_Get_Device_IDW, CM_Get_Parent, CR_SUCCESS, MAX_DEVICE_ID_LEN};
     usb_physical_group_with(instance, interface.vendor_id, interface.product_id,
-        |instance| {
-            let mut buffer = [0u16; MAX_DEVICE_ID_LEN];
-            if unsafe { CM_Get_Device_IDW(instance, buffer.as_mut_ptr(), buffer.len() as u32, 0) } != CR_SUCCESS {
-                return None;
-            }
-            let end = buffer.iter().position(|&unit| unit == 0)?;
-            String::from_utf16(&buffer[..end]).ok()
-        },
-        |instance| {
-            let mut parent = 0;
-            (unsafe { CM_Get_Parent(&mut parent, instance, 0) } == CR_SUCCESS).then_some(parent)
-        },
-    )
+        device_instance_id, parent_instance)
+}
+
+fn device_instance_id(instance: u32) -> Option<String> {
+    use winapi::um::cfgmgr32::{CM_Get_Device_IDW, CR_SUCCESS, MAX_DEVICE_ID_LEN};
+    let mut buffer = [0u16; MAX_DEVICE_ID_LEN];
+    if unsafe { CM_Get_Device_IDW(instance, buffer.as_mut_ptr(), buffer.len() as u32, 0) } != CR_SUCCESS {
+        return None;
+    }
+    let end = buffer.iter().position(|&unit| unit == 0)?;
+    String::from_utf16(&buffer[..end]).ok()
+}
+
+fn parent_instance(instance: u32) -> Option<u32> {
+    use winapi::um::cfgmgr32::{CM_Get_Parent, CR_SUCCESS};
+    let mut parent = 0;
+    (unsafe { CM_Get_Parent(&mut parent, instance, 0) } == CR_SUCCESS).then_some(parent)
+}
+
+fn usb_ancestor_matches(identity: &str, vendor_id: u16, product_id: u16) -> bool {
+    let identity = identity.to_ascii_lowercase();
+    let parts: Vec<_> = identity.split('\\').collect();
+    if parts.len() != 3 || parts[2].is_empty() || identity.contains('\0') { return false; }
+    let expected = format!("vid_{vendor_id:04x}&pid_{product_id:04x}");
+    match parts[0] {
+        "hid" => true,
+        "usb" if parts[1] == expected => true,
+        "usb" => parts[1].strip_prefix(&format!("{expected}&mi_"))
+            .is_some_and(|suffix| suffix.len() == 2 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())),
+        _ => false,
+    }
 }
 
 fn usb_physical_group_with(
@@ -1265,6 +1335,46 @@ mod link_tests {
         assert_eq!(usb_physical_group_with(1, VID_ASUS, PID_DONGLE,
             |_| { calls += 1; Some("ROOT\\unknown\\node".into()) }, |node| Some(node + 1)), None);
         assert_eq!(calls, 32);
+    }
+
+    #[test]
+    fn grouped_enumeration_keeps_failed_interfaces_and_normalizes_instance_keys() {
+        let first = interface("FIRST", USAGE_PAGE_MOUSE_CTRL);
+        let failed = Skipped { path: r"\\?\HID#VID_0B05&PID_1ACE#second".into(), reason: "occupied".into() };
+        let partial = Skipped { path: r"\\?\hid#vid_0b05&pid_invalid#third".into(), reason: "occupied".into() };
+        let instances = [(first.path.to_ascii_lowercase(), 1), (failed.path.to_ascii_lowercase(), 2),
+            (partial.path.to_ascii_lowercase(), 3)].into_iter().collect();
+        let report = EnumerateReport { interfaces: vec![first.clone()], skipped: vec![failed.clone(), partial] };
+        let mut visited = Vec::new();
+        let grouped = group_report_with(report, &instances, |instance, vendor, product| {
+            assert_eq!((vendor, product), (VID_ASUS, PID_DONGLE));
+            visited.push(instance);
+            Some(format!("USB\\VID_0B05&PID_1ACE\\PHYSICAL-{instance}"))
+        });
+        assert_eq!(visited, vec![1, 2]);
+        assert_eq!(grouped.report.interfaces.len(), 1);
+        assert_eq!(grouped.report.skipped.len(), 2);
+        assert_eq!(grouped.physical_groups.len(), 2);
+        assert_eq!(grouped.physical_groups["first"], "usb\\vid_0b05&pid_1ace\\physical-1");
+        assert_eq!(grouped.physical_groups[&failed.path.to_ascii_lowercase()], "usb\\vid_0b05&pid_1ace\\physical-2");
+        let unresolved = group_report_with(grouped.report, &instances, |_, _, _| None);
+        assert!(unresolved.physical_groups.is_empty());
+    }
+
+    #[test]
+    fn feedback_grouping_stops_at_non_usb_and_unrelated_ancestors() {
+        for identity in [r"BTHENUM\DEV_112233445566\remote", r"BTHLEDEVICE\unknown\remote",
+            r"ROOT\unknown\node", r"USB\VID_0B05&PID_FFFF\other",
+            r"USB\VID_0B05&PID_1ACE&MI_00&extra\malformed", r"USB\VID_0B05&PID_1ACE\",
+            "USB\\VID_0B05&PID_1ACE\\bad\0"] {
+            assert!(usb_physical_group_with(1, VID_ASUS, PID_DONGLE,
+                |_| usb_ancestor_matches(identity, VID_ASUS, PID_DONGLE).then(|| identity.into()),
+                |_| panic!("uncertain ancestry must not reach a shared USB adapter")).is_none());
+        }
+        for identity in [r"HID\VID_0B05&PID_1ACE&MI_00&COL01\collection",
+            r"USB\VID_0B05&PID_1ACE&MI_00\interface", r"USB\VID_0B05&PID_1ACE\physical"] {
+            assert!(usb_ancestor_matches(identity, VID_ASUS, PID_DONGLE));
+        }
     }
 
     #[test]
