@@ -304,14 +304,21 @@ impl<C:Channel> Session<C> {
         let mut current = before.clone();
         let mut applied = Vec::new();
         for change in before.changes_to(expected) {
-            if self.read_fresh_config(deadline)? != current {
+            let observed = match self.read_fresh_config(deadline) {
+                Ok(observed) => observed,
+                Err(error) => return Err(self.recover_config(before, &current, &applied, error)),
+            };
+            if observed != current {
                 return Err("设备配置已变化，请刷新后重试".into());
             }
             let reply = self.query(0xa5, address(before.profile, change.offset),
                 change.after.len(), &change.after);
             let mut next = current.clone();
             next.apply_register(change.offset, &change.after);
-            let observed = self.read_fresh_config(deadline)?;
+            let observed = match self.read_fresh_config(deadline) {
+                Ok(observed) => observed,
+                Err(error) => return Err(self.recover_config(before, &current, &applied, error)),
+            };
             let accepted = matches!(&reply, Ok(_) | Err(QueryError::Unconfirmed(_)));
             if observed == next && accepted {
                 current = next;
@@ -323,15 +330,20 @@ impl<C:Channel> Session<C> {
             }
             let error = reply.err().map(String::from)
                 .unwrap_or_else(|| "无法确认设备已保存设置，请刷新后检查".into());
-            return Err(if applied.is_empty() {
-                error
-            } else if self.restore_config(before, &current, &applied).is_ok() {
-                format!("{error}；已恢复原配置")
-            } else {
-                format!("{error}；恢复未完成，请刷新后检查档位")
-            });
+            return Err(self.recover_config(before, &current, &applied, error));
         }
         Ok(current)
+    }
+
+    fn recover_config(&mut self, before: &Config, current: &Config,
+        applied: &[RegisterChange], error: String) -> String {
+        if applied.is_empty() {
+            error
+        } else if self.restore_config(before, current, applied).is_ok() {
+            format!("{error}；已恢复原配置")
+        } else {
+            format!("{error}；恢复未完成，请刷新后检查档位")
+        }
     }
     fn write_sorted_stages(&mut self,before:&Config,mut next:Vec<(u16,u16,bool)>)->Result<Config,String> {
         next.sort_by_key(|&(x,y,_)|(x,y));
@@ -733,7 +745,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
-    enum WriteFault { Reject, Ignore, LostAck, Disconnect, ProfileChange, ExternalChange }
+    enum WriteFault { Reject, Ignore, LostAck, Disconnect, ProfileChange, ExternalChange, ReadFailure }
 
     struct FaultyReports {
         inner: Reports,
@@ -742,12 +754,19 @@ mod tests {
         disconnected: bool,
         attempts: Vec<(u32, Vec<u8>)>,
         reject_restore: bool,
+        reads_after_write: usize,
     }
 
     impl Channel for FaultyReports {
         fn send(&mut self, packet: &[u8]) -> Result<(), String> {
             if self.disconnected { return Err("disconnected".into()); }
-            if packet[2] != 0xa5 { return self.inner.send(packet); }
+            if packet[2] != 0xa5 {
+                if self.attempts.len() == self.fail_at && matches!(self.fault, WriteFault::ReadFailure) {
+                    self.reads_after_write += 1;
+                    if self.reads_after_write == 10 { return Err("read failed".into()); }
+                }
+                return self.inner.send(packet);
+            }
             let register = u32::from_le_bytes(packet[4..8].try_into().unwrap());
             self.attempts.push((register, packet[8..8 + packet[3] as usize].to_vec()));
             let attempt = self.attempts.len();
@@ -786,6 +805,7 @@ mod tests {
                     self.inner.pending.push_back(vec![8, 0]);
                     Ok(())
                 }
+                WriteFault::ReadFailure => self.inner.send(packet),
                 WriteFault::Reject => unreachable!(),
             }
         }
@@ -800,7 +820,7 @@ mod tests {
         inner.memory.insert(address(2, ENABLE_GEAR), 2);
         inner.memory.insert(address(2, ACTIVE), 2);
         Session::new(FaultyReports { inner, fail_at, fault, disconnected: false,
-            attempts: Vec::new(), reject_restore: false }, &interface("fault-test", 2, 2))
+            attempts: Vec::new(), reject_restore: false, reads_after_write: 0 }, &interface("fault-test", 2, 2))
     }
 
     fn removal_status() -> Dpi {
@@ -865,6 +885,19 @@ mod tests {
         assert_eq!(session.channel.attempts.len(), 4);
         assert_eq!(session.channel.inner.memory[&address(2, ENABLE_GEAR)], 2);
         assert_eq!(session.channel.inner.memory[&address(2, ACTIVE)], 2);
+    }
+
+    #[test]
+    fn read_failure_between_writes_restores_the_confirmed_prefix() {
+        for fail_at in 1..6 {
+            let mut session = fault_session(fail_at, WriteFault::ReadFailure);
+            let before = session.config().unwrap();
+            let error = session.remove_stage(DpiStage { index: 0, value: 400 },
+                before.token(), &removal_status()).unwrap_err();
+            assert!(error.contains("已恢复原配置"), "{error}");
+            assert_eq!(session.config().unwrap(), before);
+            assert_eq!(session.channel.attempts.len(), fail_at * 2);
+        }
     }
 
     #[test]
