@@ -16,6 +16,7 @@ use winapi::um::winuser as wu;
 mod layout;
 mod state;
 mod capture;
+mod history;
 use state::{DiagnosticReport, Model, Task, View};
 
 pub fn text<'a>(zh: &'a str, en: &'a str) -> &'a str {
@@ -943,7 +944,7 @@ impl Controls {
                             entry.device.name,
                             category_label(&entry.category)
                         ),
-                        R::new(25.0, y, 490.0, 103.0),
+                        R::new(25.0, y, 610.0, 103.0),
                         Style::History,
                         false,
                     );
@@ -955,14 +956,6 @@ impl Controls {
                             .unwrap_or_else(|| text("待确认", "Unconfirmed").into()),
                         short_date(entry.created_at)
                     ));
-                    self.button(Action::DeleteLocal(entry.request_id.clone()), text("删除本地记录", "Delete locally"), "",
-                        R::new(523.0, y + 70.0, 112.0, 32.0), Style::Card, false);
-                    self.button(Action::Export(Some(entry.request_id.clone())), text("导出文件", "Export files"), "",
-                        R::new(523.0, y, 112.0, 32.0), Style::Card, false);
-                    if entry.status == client::Status::Pending {
-                        self.button(Action::RetryEntry(entry.request_id.clone()), text("重新发送", "Retry"), "",
-                            R::new(523.0, y + 35.0, 112.0, 32.0), Style::Card, false);
-                    }
                     y += 112.0;
                 }
                 self.label(
@@ -1877,8 +1870,7 @@ impl Controls {
     }
     fn delete_local(&self, request_ids: Vec<String>) {
         if request_ids.is_empty() { return; }
-        let prompt = text("删除这些本地反馈记录？GitHub 议题及另存的文件会保留，应用内的跟进入口将移除。",
-            "Delete these local feedback records? GitHub issues and separately saved files will remain, but their in-app follow-up access will be removed.");
+        let prompt = text("是否删除？", "Delete?");
         let prompt: Vec<u16> = prompt.encode_utf16().chain(Some(0)).collect();
         let title: Vec<u16> = text("删除本地反馈", "Delete local feedback").encode_utf16().chain(Some(0)).collect();
         if unsafe { wu::MessageBoxW(self.window.handle.hwnd().unwrap(), prompt.as_ptr(), title.as_ptr(),
@@ -2672,7 +2664,7 @@ mod tests {
     }
 
     #[test]
-    fn history_pages_keep_all_128_entries_and_each_action_within_native_slots() {
+    fn history_pages_keep_full_width_cards_and_put_record_actions_in_context_menus() {
         let (_owner, _notice, dialog) = regression_dialog();
         let controls = &dialog.controls;
         controls.state.borrow_mut().initialized = true;
@@ -2691,11 +2683,15 @@ mod tests {
             let indices: Vec<_> = items.iter().filter_map(|item| if let Action::Entry(index) = item.action { Some(index) } else { None }).collect();
             assert_eq!(indices.len(), if page == 6 { 8 } else { 20 });
             for index in &indices {
-                let id = controls.state.borrow().entries[*index].request_id.clone();
-                assert_eq!(items.iter().filter(|item| matches!(&item.action, Action::DeleteLocal(value) if value == &id)).count(), 1);
-                assert_eq!(items.iter().filter(|item| matches!(&item.action, Action::Export(Some(value)) if value == &id)).count(), 1);
-                assert_eq!(items.iter().filter(|item| matches!(&item.action, Action::RetryEntry(value) if value == &id)).count(), 1);
+                let entry = controls.state.borrow().entries[*index].clone();
+                let actions = history::actions(&entry);
+                assert!(actions.iter().any(|(_, action)| matches!(action, Action::DeleteLocal(id) if id == &entry.request_id)));
+                assert!(actions.iter().any(|(_, action)| matches!(action, Action::Export(Some(id)) if id == &entry.request_id)));
+                assert!(actions.iter().any(|(_, action)| matches!(action, Action::RetryEntry(id) if id == &entry.request_id)));
+                let card = items.iter().find(|item| matches!(item.action, Action::Entry(value) if value == *index)).unwrap();
+                assert_eq!(card.rect.w, 610.0);
             }
+            assert!(!items.iter().any(|item| matches!(item.action, Action::DeleteLocal(_) | Action::Export(_) | Action::RetryEntry(_))));
             seen.extend(indices);
             drop(items);
             controls.scroll.set(f32::MAX);
@@ -2714,6 +2710,68 @@ mod tests {
             controls.complete();
             assert!(!controls.state.borrow().busy());
         }
+    }
+
+    #[test]
+    fn history_context_selection_tracks_scrolled_cards_and_keeps_request_identity() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.scale.set(1.5);
+        controls.max_height.set(450.0);
+        {
+            let mut model = controls.state.borrow_mut();
+            model.initialized = true;
+            model.view = View::History;
+            model.entries = (0..6).map(|index| client::Entry {
+                request_id: format!("00000000-0000-4000-8000-{index:012}"), created_at: 1, updated_at: 1,
+                category: "battery".into(), device: snapshot_candidate("history", 1, 50).device,
+                description: format!("Feedback {index}"), status: client::Status::Completed,
+                number: Some(index + 1), url: None,
+            }).collect();
+        }
+        controls.rebuild();
+        controls.window.set_position(-900, 100);
+        controls.scroll.set(130.0);
+        controls.layout(false);
+        let body = controls.body.handle.hwnd().unwrap();
+        let source = controls.buttons[2].handle.hwnd().unwrap();
+        let screen = |horizontal, vertical| {
+            let mut point = winapi::shared::windef::POINT { x: horizontal, y: vertical };
+            assert_ne!(unsafe { wu::ClientToScreen(body, &mut point) }, 0);
+            point
+        };
+        let (entry, _) = controls.history_context_target(source, screen(60, 150), false).unwrap();
+        assert_eq!(entry.request_id, "00000000-0000-4000-8000-000000000002");
+        let (keyboard, position) = controls.history_context_target(source, screen(0, 0), true).unwrap();
+        assert_eq!(keyboard.request_id, entry.request_id);
+        assert_eq!(controls.history_context_target(body, position, false).unwrap().0.request_id, entry.request_id);
+        assert!(controls.history_context_target(source, screen(15, 150), false).is_none());
+        assert!(controls.history_context_target(source, screen(60, -1), false).is_none());
+        assert!(controls.history_context_target(source, screen(60, 600), false).is_none());
+        assert!(controls.history_context_target(controls.buttons[0].handle.hwnd().unwrap(), screen(0, 0), true).is_none());
+        let actions = history::actions(&entry);
+        assert_eq!(actions.len(), 2);
+        assert!(!actions.iter().any(|(_, action)| matches!(action, Action::RetryEntry(_))));
+        for scale in [1.25, 1.5, 1.75, 2.0] {
+            controls.scale.set(scale);
+            controls.layout(false);
+            let mut card = controls.items.borrow().iter().find(|item| matches!(item.action, Action::Entry(2))).unwrap().rect;
+            card.y -= controls.scroll.get();
+            let (left, top, width, height) = layout::pixels(card, scale);
+            for horizontal in [left, left + width - 1] {
+                let target = controls.history_context_target(source, screen(horizontal, top + height / 2), false).unwrap();
+                assert_eq!(target.0.request_id, entry.request_id);
+            }
+            assert!(controls.history_context_target(source, screen(left - 1, top + height / 2), false).is_none());
+            assert!(controls.history_context_target(source, screen(left + width, top + height / 2), false).is_none());
+        }
+        controls.state.borrow_mut().entries.reverse();
+        assert!(actions.iter().any(|(_, action)| matches!(action, Action::DeleteLocal(id) if id == &entry.request_id)));
+        let generation = controls.state.borrow_mut().begin_task(Task::History).unwrap();
+        assert!(controls.history_context_target(source, position, false).is_none());
+        controls.state.borrow_mut().finish_task(generation);
+        controls.state.borrow_mut().view = View::Form;
+        assert!(controls.history_context_target(source, position, false).is_none());
     }
 
     #[test]
@@ -4061,6 +4119,7 @@ impl Dialog {
                     &handle,
                     0x10150 + usize::from(body),
                     move |hwnd, msg, wp, lp| match msg {
+                        wu::WM_CONTEXTMENU if c.history_context_menu(wp as _, lp) => Some(0),
                         wu::WM_ERASEBKGND => Some(1),
                         wu::WM_PAINT | wu::WM_PRINTCLIENT => unsafe {
                             let mut ps: wu::PAINTSTRUCT = std::mem::zeroed();
