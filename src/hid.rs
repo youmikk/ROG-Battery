@@ -421,43 +421,72 @@ pub fn query_report(iface: &HidInterface, report_id: u8, feature: bool, timeout_
     if handle.is_null() || handle == INVALID_HANDLE_VALUE { return None; }
     let event = unsafe { CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null()) };
     if event.is_null() || event == INVALID_HANDLE_VALUE { unsafe { CloseHandle(handle); } return None; }
-    let result = query_report_with_handles(handle, event, length, report_id, feature, timeout_ms);
+    let result = query_report_captured(iface, report_id, feature, |report| {
+        query_report_transfer(handle, event, report, feature, timeout_ms)
+    });
     unsafe { CloseHandle(event); CloseHandle(handle); }
-    crate::capture::record(&iface.path, if feature { "get-feature" } else { "get-input" },
-        result.as_deref().unwrap_or_default(), result.is_some());
     result
 }
 
 pub(crate) fn query_report_with_handles(handle: Handle, event: Handle, length: usize,
     report_id: u8, feature: bool, timeout_ms: u32) -> Option<Vec<u8>> {
-    use winapi::shared::hidclass::{IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_INPUT_REPORT};
     if length == 0 || handle.is_null() || handle == INVALID_HANDLE_VALUE
         || event.is_null() || event == INVALID_HANDLE_VALUE { return None; }
+    query_report_with(length, report_id, |report| {
+        query_report_transfer(handle, event, report, feature, timeout_ms)
+    }, |_, _| {})
+}
+
+fn query_report_captured(iface: &HidInterface, report_id: u8, feature: bool,
+    transfer: impl FnOnce(&mut [u8]) -> Option<usize>) -> Option<Vec<u8>> {
+    let length = usize::from(if feature { iface.feature_len } else { iface.input_len });
+    query_report_with(length, report_id, transfer, |report, returned| {
+        capture_control_result(&iface.path, if feature { "get-feature" } else { "get-input" },
+            report, returned, report_id == 0);
+    })
+}
+
+fn query_report_with(length: usize, report_id: u8,
+    transfer: impl FnOnce(&mut [u8]) -> Option<usize>,
+    observe: impl FnOnce(&[u8], Option<usize>)) -> Option<Vec<u8>> {
+    if length == 0 { return None; }
     let mut report = vec![0u8; length];
     report[0] = report_id;
+    let result = transfer(&mut report);
+    observe(&report, result);
+    let returned = result?;
+    if returned == 0 || returned > length || report[0] != report_id { return None; }
+    let actual = returned.saturating_add(usize::from(report_id == 0)).min(length);
+    report.truncate(actual);
+    Some(report)
+}
+
+pub(crate) fn capture_control_result(path: &str, api: &'static str, report: &[u8],
+    returned: Option<usize>, unnumbered: bool) {
+    let actual = returned.filter(|count| *count > 0)
+        .map_or(0, |count| count.saturating_add(usize::from(unnumbered)).min(report.len()));
+    crate::capture::record(path, api, &report[..actual], returned.is_some());
+}
+
+fn query_report_transfer(handle: Handle, event: Handle, report: &mut [u8],
+    feature: bool, timeout_ms: u32) -> Option<usize> {
+    use winapi::shared::hidclass::{IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_INPUT_REPORT};
     let mut overlapped = Overlapped { h_event: event, ..Default::default() };
     let mut returned = 0;
-    let result = (|| {
-        let ok = unsafe { DeviceIoControl(handle,
-            if feature { IOCTL_HID_GET_FEATURE } else { IOCTL_HID_GET_INPUT_REPORT },
-            report.as_mut_ptr().cast(), length as u32, report.as_mut_ptr().cast(), length as u32,
-            &mut returned, &mut overlapped) };
-        if ok == 0 {
-            if last_error() != ERROR_IO_PENDING { return None; }
-            if unsafe { WaitForSingleObject(event, timeout_ms) } != WAIT_OBJECT_0 {
-                // 缓冲区和 OVERLAPPED 必须活到取消完成，不能在内核仍持有时释放。
-                unsafe { CancelIoEx(handle, &mut overlapped); GetOverlappedResult(handle, &mut overlapped, &mut returned, 1); }
-                return None;
-            }
-            if unsafe { GetOverlappedResult(handle, &mut overlapped, &mut returned, 0) } == 0 { return None; }
+    let ok = unsafe { DeviceIoControl(handle,
+        if feature { IOCTL_HID_GET_FEATURE } else { IOCTL_HID_GET_INPUT_REPORT },
+        report.as_mut_ptr().cast(), report.len() as u32, report.as_mut_ptr().cast(), report.len() as u32,
+        &mut returned, &mut overlapped) };
+    if ok == 0 {
+        if last_error() != ERROR_IO_PENDING { return None; }
+        if unsafe { WaitForSingleObject(event, timeout_ms) } != WAIT_OBJECT_0 {
+            // 缓冲区和 OVERLAPPED 必须活到取消完成，不能在内核仍持有时释放。
+            unsafe { CancelIoEx(handle, &mut overlapped); GetOverlappedResult(handle, &mut overlapped, &mut returned, 1); }
+            return None;
         }
-        if returned == 0 || report[0] != report_id { return None; }
-        if returned as usize > length { return None; }
-        let actual = (returned as usize + usize::from(report_id == 0)).min(length);
-        report.truncate(actual);
-        Some(report)
-    })();
-    result
+        if unsafe { GetOverlappedResult(handle, &mut overlapped, &mut returned, 0) } == 0 { return None; }
+    }
+    Some(returned as usize)
 }
 
 /// 一个已打开的命令通道。读写分别使用可取消的 overlapped 句柄。
@@ -1628,8 +1657,70 @@ mod enumeration_tests {
 }
 
 #[cfg(test)]
+pub(crate) mod capture_test_support {
+    pub(crate) struct CaptureGuard { path: String }
+
+    impl CaptureGuard {
+        pub(crate) fn start(interface: &super::HidInterface) -> Self {
+            crate::capture::clear();
+            crate::capture::start(interface).unwrap();
+            Self { path: interface.path.clone() }
+        }
+
+        pub(crate) fn transfers(&self) -> Vec<serde_json::Value> {
+            crate::capture::stop();
+            let raw = crate::capture::feedback_data(&self.path)
+                .unwrap_or_else(|| crate::capture::status().preview.join("\n"));
+            raw.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|record| record["kind"] == "transfer").collect()
+        }
+    }
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) { crate::capture::clear(); }
+    }
+}
+
+#[cfg(test)]
 mod input_tests {
     use super::protocol_input;
+
+    #[test]
+    fn control_capture_preserves_wrong_ids_and_rejects_invalid_lengths_after_recording() {
+        let interface = super::HidInterface { path: "control-capture-test".into(), vendor_id: 0x1234,
+            product_id: 0x5678, usage_page: 0xff00, usage: 1, input_len: 4,
+            output_len: 4, feature_len: 4, product: String::new(), serial: String::new() };
+        for feature in [false, true] {
+            for (returned, report_id, bytes, accepted, expected_hex) in [
+                (Some(3), 7, [8, 0xab, 0xcd, 0xee], false, "08ABCD"),
+                (Some(3), 7, [7, 0xab, 0xcd, 0xee], true, "07ABCD"),
+                (Some(3), 0, [0, 0xab, 0xcd, 0xee], true, "00ABCDEE"),
+                (Some(0), 0, [0, 0xab, 0xcd, 0xee], false, ""),
+                (Some(5), 7, [7, 0xab, 0xcd, 0xee], false, "07ABCDEE"),
+                (None, 7, [7, 0xab, 0xcd, 0xee], false, ""),
+            ] {
+                let capture = super::capture_test_support::CaptureGuard::start(&interface);
+                let result = super::query_report_captured(&interface, report_id, feature, |report| {
+                    assert_eq!(report, &[report_id, 0, 0, 0]);
+                    report.copy_from_slice(&bytes);
+                    returned
+                });
+                assert_eq!(result.is_some(), accepted);
+                let records = capture.transfers();
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0]["api"], if feature { "get-feature" } else { "get-input" });
+                assert_eq!(records[0]["hex"], expected_hex);
+                assert_eq!(records[0]["success"], returned.is_some());
+            }
+        }
+        let rejected = super::query_report_with(4, 7, |report| {
+            report.copy_from_slice(&[8, 0xab, 0xcd, 0xee]);
+            Some(3)
+        }, |_, _| {});
+        assert!(rejected.is_none());
+        assert!(super::query_report_with(0, 7, |_| panic!("empty report must not reach I/O"),
+            |_, _| panic!("no transfer occurred")).is_none());
+    }
 
     #[test]
     fn capture_records_wait_timeouts_but_excludes_empty_queue_checks() {

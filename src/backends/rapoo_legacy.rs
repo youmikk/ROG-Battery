@@ -70,7 +70,7 @@ trait Transport {
     fn pause(&self) {}
 }
 
-struct NativeTransport { handle: Handle, reply_bytes: Option<usize> }
+struct NativeTransport { handle: Handle, capture_path: String, reply_bytes: Option<usize> }
 
 impl NativeTransport {
     fn open(i: &HidInterface) -> Result<Self, String> {
@@ -80,7 +80,7 @@ impl NativeTransport {
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return Err(crate::tr!("暂时无法连接设备，请确认未被其他软件占用").into());
         }
-        Ok(Self { handle, reply_bytes: None })
+        Ok(Self { handle, capture_path: i.path.clone(), reply_bytes: None })
     }
 
     fn transfer(&mut self, timeout_ms: u32,
@@ -114,6 +114,33 @@ impl NativeTransport {
         unsafe { CloseHandle(event); }
         result
     }
+
+    fn send_with(&mut self, packet: &[u8], timeout_ms: u32,
+        transfer: impl FnOnce(&mut Self, &[u8], u32) -> Result<usize, String>) -> Result<(), String> {
+        if packet != request() { return Err(UNAVAILABLE.into()); }
+        let result = transfer(self, packet, timeout_ms);
+        let success = result.as_ref().is_ok_and(|sent| *sent == packet.len());
+        crate::capture::record(&self.capture_path, "write", packet, success);
+        result?;
+        if !success { return Err(crate::tr!("与设备通信失败，请检查连接后重试").into()); }
+        Ok(())
+    }
+
+    fn receive_with(&mut self, report_id: u8, timeout_ms: u32,
+        transfer: impl FnOnce(&mut Self, &mut [u8], u32) -> Result<usize, String>) -> Result<Vec<u8>, String> {
+        if report_id != REPORT { return Err(UNAVAILABLE.into()); }
+        self.reply_bytes = None;
+        let mut packet = vec![0; usize::from(LENGTH)];
+        packet[0] = report_id;
+        let result = transfer(self, &mut packet, timeout_ms);
+        crate::hid::capture_control_result(&self.capture_path, "get-input", &packet,
+            result.as_ref().ok().copied(), false);
+        let received = result?;
+        self.reply_bytes = Some(received);
+        if !matches!(received, 31 | 32) { return Err(UNAVAILABLE.into()); }
+        packet.truncate(received);
+        Ok(packet)
+    }
 }
 
 impl Drop for NativeTransport {
@@ -123,27 +150,21 @@ impl Drop for NativeTransport {
 impl Transport for NativeTransport {
     fn send(&mut self, packet: &[u8], timeout_ms: u32) -> Result<(), String> {
         // This transport exposes no general register/write command path.
-        if packet != request() { return Err(UNAVAILABLE.into()); }
-        let sent = self.transfer(timeout_ms, |handle, ov, count| unsafe {
-            WriteFile(handle, packet.as_ptr().cast(), packet.len() as u32, count, ov)
-        })?;
-        if sent != packet.len() { return Err(crate::tr!("与设备通信失败，请检查连接后重试").into()); }
-        Ok(())
+        self.send_with(packet, timeout_ms, |transport, packet, timeout| {
+            transport.transfer(timeout, |handle, overlapped, count| unsafe {
+                WriteFile(handle, packet.as_ptr().cast(), packet.len() as u32, count, overlapped)
+            })
+        })
     }
 
     fn receive(&mut self, report_id: u8, timeout_ms: u32) -> Result<Vec<u8>, String> {
-        if report_id != REPORT { return Err(UNAVAILABLE.into()); }
-        let mut packet = vec![0; usize::from(LENGTH)];
-        packet[0] = report_id;
-        let received = self.transfer(timeout_ms, |handle, ov, count| unsafe {
-            DeviceIoControl(handle, IOCTL_HID_GET_INPUT_REPORT,
-                packet.as_mut_ptr().cast(), packet.len() as u32,
-                packet.as_mut_ptr().cast(), packet.len() as u32, count, ov)
-        })?;
-        self.reply_bytes = Some(received);
-        if !matches!(received, 31 | 32) { return Err(UNAVAILABLE.into()); }
-        packet.truncate(received);
-        Ok(packet)
+        self.receive_with(report_id, timeout_ms, |transport, packet, timeout| {
+            transport.transfer(timeout, |handle, overlapped, count| unsafe {
+                DeviceIoControl(handle, IOCTL_HID_GET_INPUT_REPORT,
+                    packet.as_mut_ptr().cast(), packet.len() as u32,
+                    packet.as_mut_ptr().cast(), packet.len() as u32, count, overlapped)
+            })
+        })
     }
 
     fn pause(&self) { std::thread::sleep(Duration::from_millis(250)); }
@@ -208,6 +229,55 @@ mod tests {
         let mut r = vec![0; length];
         r[..3].copy_from_slice(&[1, state, percent]);
         r
+    }
+
+    #[test]
+    fn native_capture_keeps_replies_before_length_validation_and_records_failures() {
+        let interface = interface("native-capture");
+        for returned in [Some(0), Some(3), Some(31), Some(32), Some(33), None] {
+            let capture = crate::hid::capture_test_support::CaptureGuard::start(&interface);
+            let mut transport = std::mem::ManuallyDrop::new(NativeTransport {
+                handle: core::ptr::null_mut(), capture_path: interface.path.clone(), reply_bytes: None,
+            });
+            transport.send_with(&request(), 250, |_, packet, timeout| {
+                assert_eq!(packet, request());
+                assert_eq!(timeout, 250);
+                Ok(packet.len())
+            }).unwrap();
+            let response = frame(91, 1, 32);
+            let result = transport.receive_with(REPORT, 500, |_, packet, timeout| {
+                assert_eq!(timeout, 500);
+                assert_eq!(packet[0], REPORT);
+                packet.copy_from_slice(&response);
+                returned.ok_or_else(|| "cancelled".into())
+            });
+            assert_eq!(result.is_ok(), matches!(returned, Some(31 | 32)));
+            if let Ok(report) = result { assert_eq!(battery(&report).unwrap().percent, Some(91)); }
+            let records = capture.transfers();
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0]["api"], "write");
+            assert_eq!(records[0]["hex"], format!("BAA5AA{}", "00".repeat(29)));
+            assert_eq!(records[0]["success"], true);
+            assert_eq!(records[1]["api"], "get-input");
+            let expected = response[..returned.unwrap_or(0).min(response.len())].iter()
+                .map(|byte| format!("{byte:02X}")).collect::<String>();
+            assert_eq!(records[1]["hex"], expected);
+            assert_eq!(records[1]["success"], returned.is_some());
+            assert_eq!(transport.reply_bytes, returned);
+        }
+        for sent in [Ok(0), Ok(31), Err("cancelled".into())] {
+            let capture = crate::hid::capture_test_support::CaptureGuard::start(&interface);
+            let mut transport = std::mem::ManuallyDrop::new(NativeTransport {
+                handle: core::ptr::null_mut(), capture_path: interface.path.clone(), reply_bytes: None,
+            });
+            assert!(transport.send_with(&[0; 32], 250, |_, _, _| panic!("unsafe command")).is_err());
+            assert!(transport.receive_with(0, 500, |_, _, _| panic!("unsafe report")).is_err());
+            assert!(transport.send_with(&request(), 250, |_, _, _| sent).is_err());
+            let records = capture.transfers();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["api"], "write");
+            assert_eq!(records[0]["success"], false);
+        }
     }
 
     struct Fake {

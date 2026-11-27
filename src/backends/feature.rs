@@ -117,17 +117,24 @@ impl FeatureChannel {
     /// Rapoo acknowledges in the report-ID byte on some Windows transports.
     /// Its protocol parser validates the status and payload after this transfer.
     pub(super) fn receive_raw(&mut self, report_id: u8, timeout: u32) -> Result<Vec<u8>, String> {
+        self.receive_raw_with(report_id, timeout, |channel, response, timeout| {
+            channel.transfer(GET_FEATURE, response, timeout)
+        })
+    }
+
+    fn receive_raw_with(&mut self, report_id: u8, timeout: u32,
+        transfer: impl FnOnce(&mut Self, &mut [u8], u32) -> Result<usize, String>) -> Result<Vec<u8>, String> {
         let mut response = vec![0; self.length];
         response[0] = report_id;
-        let result = self.transfer(GET_FEATURE, &mut response, timeout);
-        if result.is_err() { crate::capture::record(&self.capture_path, "get-feature", &[], false); }
-        let length = result?;
-        let length = length + usize::from(report_id == 0);
-        if length == 0 || length > self.length {
+        let result = transfer(self, &mut response, timeout);
+        crate::hid::capture_control_result(&self.capture_path, "get-feature", &response,
+            result.as_ref().ok().copied(), report_id == 0);
+        let returned = result?;
+        let length = returned.saturating_add(usize::from(report_id == 0));
+        if returned == 0 || length > self.length {
             return Err(crate::tr!("设备通信数据格式异常").into());
         }
         response.truncate(length);
-        crate::capture::record(&self.capture_path, "get-feature", &response, true);
         Ok(response)
     }
 
@@ -161,6 +168,45 @@ impl Drop for FeatureChannel {
         unsafe {
             CloseHandle(self.event);
             CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feature_capture_records_zero_short_oversized_and_failed_native_results() {
+        let interface = HidInterface { path: "feature-native-capture".into(), vendor_id: 0x1234,
+            product_id: 0x5678, usage_page: 0xff00, usage: 1, input_len: 0,
+            output_len: 0, feature_len: 4, product: String::new(), serial: String::new() };
+        for (report_id, returned, accepted, expected_hex) in [
+            (7, Some(3), true, "08ABCD"),
+            (7, Some(0), false, ""),
+            (0, Some(0), false, ""),
+            (7, Some(5), false, "08ABCDEE"),
+            (0, Some(3), true, "08ABCDEE"),
+            (0, Some(4), false, "08ABCDEE"),
+            (7, None, false, ""),
+        ] {
+            let capture = crate::hid::capture_test_support::CaptureGuard::start(&interface);
+            let mut channel = std::mem::ManuallyDrop::new(FeatureChannel {
+                capture_path: interface.path.clone(), handle: core::ptr::null_mut(),
+                event: core::ptr::null_mut(), length: 4,
+            });
+            let result = channel.receive_raw_with(report_id, 160, |_, response, timeout| {
+                assert_eq!(timeout, 160);
+                assert_eq!(response, &[report_id, 0, 0, 0]);
+                response.copy_from_slice(&[8, 0xab, 0xcd, 0xee]);
+                returned.ok_or_else(|| "cancelled".into())
+            });
+            assert_eq!(result.is_ok(), accepted);
+            let records = capture.transfers();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["api"], "get-feature");
+            assert_eq!(records[0]["hex"], expected_hex);
+            assert_eq!(records[0]["success"], returned.is_some());
         }
     }
 }
