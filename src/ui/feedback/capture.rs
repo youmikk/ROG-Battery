@@ -32,6 +32,7 @@ impl Controls {
 
     pub(super) fn finish_capture(&self) {
         self.stop_capture_timer();
+        if crate::capture::status().started { self.refresh_device_snapshot(); }
         let path = {
             let state = self.state.borrow();
             state.selected.and_then(|index| state.devices.get(index))

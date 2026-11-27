@@ -241,6 +241,7 @@ struct Controls {
     inventory_working: Cell<bool>,
     capture_folder: RefCell<Option<std::path::PathBuf>>,
     request_capture_refresh: Box<dyn Fn()>,
+    snapshot_provider: Option<Box<dyn Fn() -> Vec<Candidate>>>,
 }
 pub struct Dialog {
     controls: Rc<Controls>,
@@ -344,6 +345,9 @@ impl Controls {
     }
     fn diagnostics(&self) -> String {
         let s = self.state.borrow();
+        if let Some(draft) = &s.submitted_draft {
+            return draft.diagnostics.clone().unwrap_or_default();
+        }
         if let Some(DiagnosticReport::Complete(value)) = &s.diagnostics_override {
             return value.clone();
         }
@@ -376,6 +380,9 @@ impl Controls {
     }
     fn draft(&self) -> client::Draft {
         let s = self.state.borrow();
+        if let Some(draft) = &s.submitted_draft {
+            return draft.clone();
+        }
         if let Some(draft) = &s.restored_draft {
             let mut draft = draft.clone();
             draft.images = s.images.clone();
@@ -1531,10 +1538,35 @@ impl Controls {
     fn action(&self, action: Action) {
         self.action_with_submit(action, client::configured().then_some(submit_feedback));
     }
+
+    fn refresh_device_snapshot(&self) {
+        let refresh = {
+            let state = self.state.borrow();
+            !state.software && !state.submitted && state.draft_retry.is_none()
+                && state.restored_draft.is_none() && state.submitted_draft.is_none()
+                && !state.task.is_some_and(Task::locks_editors)
+        };
+        if refresh {
+            if let Some(provider) = &self.snapshot_provider {
+                let devices = provider();
+                self.state.borrow_mut().refresh_devices(devices);
+            }
+        }
+    }
+
     fn action_with_submit(&self, action: Action,
         submit: Option<impl FnOnce(client::Draft, Option<String>) -> ResultMessage + Send + 'static>) {
         if !action.enabled(&self.state.borrow()) {
             return;
+        }
+        if let Action::Device(index) = &action {
+            let mut model = self.state.borrow_mut();
+            if model.selected == Some(*index) && model.devices.get(*index).is_some() {
+                model.menu = false;
+                drop(model);
+                self.rebuild();
+                return;
+            }
         }
         if let Action::UnknownDevice(index) = &action {
             let mut model = self.state.borrow_mut();
@@ -1562,8 +1594,7 @@ impl Controls {
                 | Action::RemoveImage(_)
         ) {
             let mut s = self.state.borrow_mut();
-            s.restored_draft = None;
-            s.draft_retry = None;
+            s.edit_draft();
         }
         match action {
             Action::Close => {
@@ -1622,7 +1653,6 @@ impl Controls {
                 s.attach_capture = true;
                 s.connection = connection_index(&s.devices[i].device.connection);
                 s.diagnostics_override = None;
-                s.draft_retry = None;
                 s.menu = false;
                 drop(s);
                 self.set_view(View::Form);
@@ -1639,7 +1669,6 @@ impl Controls {
                     state.capture = None;
                     state.attach_capture = true;
                     state.diagnostics_override = None;
-                    state.draft_retry = None;
                     state.connection = 3;
                     state.category = 0;
                     state.menu = false;
@@ -1664,7 +1693,6 @@ impl Controls {
                 s.capture = None;
                 s.attach_capture = true;
                 s.diagnostics_override = None;
-                s.draft_retry = None;
                 s.menu = false;
                 drop(s);
                 if was_unknown {
@@ -1677,22 +1705,20 @@ impl Controls {
             }
             Action::Connection(i) => {
                 self.state.borrow_mut().connection = i;
-                self.state.borrow_mut().draft_retry = None;
                 self.rebuild();
             }
             Action::Category(i) => {
                 self.state.borrow_mut().category = i;
-                self.state.borrow_mut().draft_retry = None;
                 self.rebuild();
             }
             Action::ToggleDiagnostics => {
                 let mut s = self.state.borrow_mut();
                 s.attach_diagnostics = !s.attach_diagnostics;
-                s.draft_retry = None;
                 drop(s);
                 self.rebuild();
             }
             Action::Diagnostics => {
+                self.refresh_device_snapshot();
                 self.set_view(View::Diagnostics);
             }
             Action::Capture => { self.set_view(View::Capture); }
@@ -1717,11 +1743,11 @@ impl Controls {
             }
             Action::RemoveImage(i) => {
                 self.state.borrow_mut().images.remove(i);
-                self.state.borrow_mut().draft_retry = None;
                 self.rebuild();
             }
             Action::AddImage => self.choose_images(),
             Action::Submit => {
+                self.refresh_device_snapshot();
                 let draft = self.draft();
                 if !self.state.borrow().software
                     && self.state.borrow().draft_retry.is_none()
@@ -1751,9 +1777,11 @@ impl Controls {
                     return;
                 };
                 let retry = self.state.borrow().draft_retry.clone();
+                self.state.borrow_mut().submitted_draft = Some(draft.clone());
                 self.work(Task::Submit, move || submit(draft, retry));
             }
             Action::Fallback => {
+                self.refresh_device_snapshot();
                 if !self.inventory_ready() {
                     self.prepare_inventory();
                     self.error(text("正在整理设备诊断信息，请稍等片刻；如果不希望附带诊断，也可以取消勾选后直接复制。",
@@ -1849,8 +1877,8 @@ impl Controls {
     }
     fn delete_local(&self, request_ids: Vec<String>) {
         if request_ids.is_empty() { return; }
-        let prompt = text("删除这些本地记录及附件？已提交的 GitHub 议题会保留，应用内的跟进入口将移除。",
-            "Delete these local records and attachments? Submitted GitHub issues remain, but their in-app follow-up access will be removed.");
+        let prompt = text("删除这些本地反馈记录？GitHub 议题及另存的文件会保留，应用内的跟进入口将移除。",
+            "Delete these local feedback records? GitHub issues and separately saved files will remain, but their in-app follow-up access will be removed.");
         let prompt: Vec<u16> = prompt.encode_utf16().chain(Some(0)).collect();
         let title: Vec<u16> = text("删除本地反馈", "Delete local feedback").encode_utf16().chain(Some(0)).collect();
         if unsafe { wu::MessageBoxW(self.window.handle.hwnd().unwrap(), prompt.as_ptr(), title.as_ptr(),
@@ -1861,6 +1889,7 @@ impl Controls {
         });
     }
     fn export_feedback(&self, request_id: Option<String>) {
+        if request_id.is_none() { self.refresh_device_snapshot(); }
         if request_id.is_none() && !self.inventory_ready() {
             self.prepare_inventory();
             self.error(text("正在整理设备诊断，请稍后导出。", "Collecting diagnostics. Export shortly."));
@@ -2016,6 +2045,7 @@ impl Controls {
                             s.submitted = true;
                             s.draft_retry = None;
                             s.restored_draft = None;
+                            s.submitted_draft = None;
                             s.restored_device = None;
                             s.images.clear();
                             s.capture = None;
@@ -2067,6 +2097,7 @@ impl Controls {
                         crate::capture::clear();
                         *self.capture_folder.borrow_mut() = None;
                         self.state.borrow_mut().restored_draft = Some(draft.clone());
+                        self.state.borrow_mut().submitted_draft = None;
                         let mut s = self.state.borrow_mut();
                         s.draft_retry = Some(id);
                         s.software = crate::feedback::software::is_device(&draft.device);
@@ -2098,8 +2129,7 @@ impl Controls {
                     Ok(images) => {
                         let mut s = self.state.borrow_mut();
                         s.images.extend(images);
-                        s.draft_retry = None;
-                        s.restored_draft = None;
+                        s.edit_draft();
                     }
                     Err(e) => self.state.borrow_mut().error = e,
                 },
@@ -2318,13 +2348,18 @@ mod tests {
     }
 
     fn regression_dialog_with_capture_refresh(refresh: impl Fn() + 'static) -> (nwg::Window, nwg::Notice, Dialog) {
+        regression_dialog_with_sources(refresh, None)
+    }
+
+    fn regression_dialog_with_sources(refresh: impl Fn() + 'static,
+        snapshot: Option<Box<dyn Fn() -> Vec<Candidate>>>) -> (nwg::Window, nwg::Notice, Dialog) {
         nwg::init().unwrap();
         let mut owner = nwg::Window::default();
         nwg::Window::builder().title("Feedback regression")
             .flags(nwg::WindowFlags::POPUP).size((760, 680)).build(&mut owner).unwrap();
         let mut notice = nwg::Notice::default();
         nwg::Notice::builder().parent(&owner).build(&mut notice).unwrap();
-        let dialog = Dialog::new(&owner, notice.sender(), refresh).unwrap();
+        let dialog = Dialog::new(&owner, notice.sender(), refresh, snapshot).unwrap();
         (owner, notice, dialog)
     }
 
@@ -2462,6 +2497,225 @@ mod tests {
         draft
     }
 
+    fn snapshot_candidate(key: &str, slot: u8, percent: u8) -> Candidate {
+        let interface = crate::hid::HidInterface { path: "shared-receiver".into(),
+            vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
+            input_len: 64, output_len: 64, feature_len: 0, product: "Mouse".into(), serial: String::new() };
+        let reading = crate::device::DeviceReading { key: key.into(), name: "Mouse".into(), connected: true,
+            battery: Some(crate::device::Battery { percent: Some(percent), estimated_percent: None, charging: Some(true),
+                voltage_mv: None, approximate: false, level: None }), ..Default::default() };
+        crate::feedback::candidate("Mouse".into(), &reading, Some(&interface), Some(crate::backends::BackendId::Logitech),
+            Some(slot), "USB", crate::device::DeviceFamily::Mouse, Some(std::time::Instant::now()),
+            std::time::Duration::from_secs(120), &Default::default(), &Default::default())
+    }
+
+    fn wait_for_feedback(controls: &Controls) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while controls.state.borrow().busy() {
+            controls.complete();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn device_snapshots_refresh_on_demand_keep_receiver_slots_and_preserve_same_device_capture() {
+        let first = snapshot_candidate("first", 1, 20);
+        let second = snapshot_candidate("second", 2, 90);
+        let snapshots = Rc::new(RefCell::new(vec![second.clone(), snapshot_candidate("first", 1, 30)]));
+        let calls = Rc::new(Cell::new(0));
+        let source = snapshots.clone();
+        let counter = calls.clone();
+        let (_owner, _notice, dialog) = regression_dialog_with_sources(|| {}, Some(Box::new(move || {
+            counter.set(counter.get() + 1);
+            source.borrow().clone()
+        })));
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(vec![first.clone(), second.clone()], false);
+        controls.state.borrow_mut().inventory_report = Some("HID interface inventory\n".into());
+        controls.set_description("Battery state changes during device capture.");
+        for _tick in 0..5 { dialog.poll(); }
+        assert_eq!(calls.get(), 0);
+        controls.action(Action::Capture);
+        controls.action(Action::CaptureStart);
+        crate::capture::record("shared-receiver", "input", &[1, 2, 3], true);
+        controls.action(Action::CaptureStop);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(controls.state.borrow().selected, Some(1));
+        assert!(controls.diagnostics().contains("Battery: 30%"));
+        let capture = controls.state.borrow().capture.clone().unwrap();
+        controls.action(Action::Back);
+        controls.action(Action::ToggleCapture);
+        *controls.capture_folder.borrow_mut() = Some("already-saved-capture".into());
+        controls.action(Action::Device(1));
+        assert_eq!(controls.state.borrow().capture, Some(capture.clone()));
+        assert!(!controls.state.borrow().attach_capture);
+        assert!(controls.capture_folder.borrow().is_some());
+        assert!(crate::capture::status().started);
+        controls.action(Action::ToggleCapture);
+        *snapshots.borrow_mut() = vec![snapshot_candidate("first", 1, 40), second.clone()];
+        let submitted = submit_offline(controls);
+        assert!(submitted.diagnostics.as_ref().unwrap().contains("Battery: 40%"));
+        assert_eq!(submitted.capture, Some(capture));
+        assert_eq!(submitted.device.name, first.device.name);
+
+        let mut model = Model::default();
+        model.reopen(vec![first.clone()], false);
+        model.reopen(vec![snapshot_candidate("first", 1, 50)], false);
+        assert!(model.devices[model.selected.unwrap()].diagnostics.contains("Battery: 50%"));
+        model.refresh_devices(vec![snapshot_candidate("replacement", 1, 99), second]);
+        let disconnected = &model.devices[model.selected.unwrap()];
+        assert_eq!(disconnected.key, first.key);
+        assert!(disconnected.diagnostics.contains("selected device unavailable"));
+        assert!(disconnected.diagnostics.contains("VID/PID: 1234:5678"));
+        assert!(!disconnected.diagnostics.contains("Battery: 99%"));
+    }
+
+    #[test]
+    fn pending_submission_keeps_exact_draft_and_uuid_until_an_explicit_edit() {
+        let snapshots = Rc::new(RefCell::new(vec![snapshot_candidate("first", 1, 25)]));
+        let calls = Rc::new(Cell::new(0));
+        let source = snapshots.clone();
+        let counter = calls.clone();
+        let (_owner, _notice, dialog) = regression_dialog_with_sources(|| {}, Some(Box::new(move || {
+            counter.set(counter.get() + 1);
+            source.borrow().clone()
+        })));
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().reopen(vec![snapshot_candidate("first", 1, 10)], false);
+        controls.state.borrow_mut().inventory_report = Some("HID interface inventory\n".into());
+        controls.set_description("Battery changes while the feedback result is pending.");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        controls.action_with_submit(Action::Submit, Some(move |draft: client::Draft, retry: Option<String>| {
+            assert!(retry.is_none());
+            sender.send(draft).unwrap();
+            ResultMessage::Submitted(Err("simulated offline".into()), Some("original-pending-uuid".into()))
+        }));
+        let original = receiver.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        wait_for_feedback(controls);
+        assert!(original.diagnostics.as_ref().unwrap().contains("Battery: 25%"));
+        assert_eq!(calls.get(), 1);
+        *snapshots.borrow_mut() = vec![snapshot_candidate("first", 1, 80)];
+        controls.state.borrow_mut().reopen(snapshots.borrow().clone(), false);
+        controls.action(Action::Diagnostics);
+        controls.action(Action::Back);
+        assert_eq!(controls.draft(), original);
+        assert_eq!(controls.diagnostics(), original.diagnostics.clone().unwrap());
+        assert_eq!(calls.get(), 1);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        controls.action_with_submit(Action::Submit, Some(move |draft: client::Draft, retry: Option<String>| {
+            assert_eq!(retry.as_deref(), Some("original-pending-uuid"));
+            sender.send(draft).unwrap();
+            ResultMessage::Submitted(Err("still offline".into()), retry)
+        }));
+        let retried = receiver.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        wait_for_feedback(controls);
+        assert_eq!(serde_json::to_vec(&retried).unwrap(), serde_json::to_vec(&original).unwrap());
+        assert_eq!(calls.get(), 1);
+        controls.set_description("Edited feedback should use the latest shared state.");
+        controls.state.borrow_mut().edit_draft();
+        let edited = submit_offline(controls);
+        assert!(edited.diagnostics.as_ref().unwrap().contains("Battery: 80%"));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn submission_failures_without_pending_id_keep_exact_draft_until_an_explicit_edit() {
+        for failure in [ResultMessage::Submitted(Err("simulated offline".into()), None), ResultMessage::Failed] {
+            let snapshots = Rc::new(RefCell::new(vec![snapshot_candidate("first", 1, 25)]));
+            let calls = Rc::new(Cell::new(0));
+            let source = snapshots.clone();
+            let counter = calls.clone();
+            let (_owner, _notice, dialog) = regression_dialog_with_sources(|| {}, Some(Box::new(move || {
+                counter.set(counter.get() + 1);
+                source.borrow().clone()
+            })));
+            let controls = &dialog.controls;
+            controls.state.borrow_mut().reopen(vec![snapshot_candidate("first", 1, 10)], false);
+            controls.state.borrow_mut().inventory_report = Some("HID interface inventory\n".into());
+            controls.set_description("Retry the original snapshot when the pending request ID is unknown.");
+            let (sender, receiver) = std::sync::mpsc::channel();
+            controls.action_with_submit(Action::Submit, Some(move |draft: client::Draft, retry: Option<String>| {
+                assert!(retry.is_none());
+                sender.send(draft).unwrap();
+                failure
+            }));
+            let original = receiver.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+            wait_for_feedback(controls);
+            assert_eq!(controls.state.borrow().submitted_draft.as_ref(), Some(&original));
+            assert!(controls.state.borrow().draft_retry.is_none());
+            assert!(!controls.state.borrow().error.is_empty());
+            assert!(original.diagnostics.as_ref().unwrap().contains("Battery: 25%"));
+            *snapshots.borrow_mut() = vec![snapshot_candidate("first", 1, 80)];
+            controls.state.borrow_mut().reopen(snapshots.borrow().clone(), false);
+            controls.action(Action::Diagnostics);
+            controls.action(Action::Back);
+            assert_eq!(controls.diagnostics(), original.diagnostics.clone().unwrap());
+            let (sender, receiver) = std::sync::mpsc::channel();
+            controls.action_with_submit(Action::Submit, Some(move |draft: client::Draft, retry: Option<String>| {
+                assert!(retry.is_none());
+                sender.send(draft).unwrap();
+                ResultMessage::Failed
+            }));
+            let retried = receiver.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+            wait_for_feedback(controls);
+            assert_eq!(serde_json::to_vec(&retried).unwrap(), serde_json::to_vec(&original).unwrap());
+            assert_eq!(controls.state.borrow().submitted_draft.as_ref(), Some(&original));
+            assert!(controls.state.borrow().draft_retry.is_none());
+            assert_eq!(calls.get(), 1);
+            controls.set_description("Edited feedback should use the latest shared state.");
+            controls.state.borrow_mut().edit_draft();
+            let edited = submit_offline(controls);
+            assert!(edited.diagnostics.as_ref().unwrap().contains("Battery: 80%"));
+            assert_eq!(calls.get(), 2);
+        }
+    }
+
+    #[test]
+    fn history_pages_keep_all_128_entries_and_each_action_within_native_slots() {
+        let (_owner, _notice, dialog) = regression_dialog();
+        let controls = &dialog.controls;
+        controls.state.borrow_mut().initialized = true;
+        controls.state.borrow_mut().view = View::History;
+        controls.state.borrow_mut().entries = (0..128).map(|index| client::Entry {
+            request_id: format!("00000000-0000-4000-8000-{index:012}"), created_at: 1, updated_at: 1,
+            category: "battery".into(), device: snapshot_candidate("history", 1, 50).device,
+            description: format!("Feedback {index}"), status: client::Status::Pending, number: None, url: None,
+        }).collect();
+        let mut seen = Vec::new();
+        for page in 0..7 {
+            controls.action(Action::HistoryPage(page));
+            let items = controls.items.borrow();
+            assert!(items.iter().filter(|item| !item.root).count() <= SLOTS);
+            assert!(items.iter().filter(|item| item.root).count() <= controls.header_buttons.len());
+            let indices: Vec<_> = items.iter().filter_map(|item| if let Action::Entry(index) = item.action { Some(index) } else { None }).collect();
+            assert_eq!(indices.len(), if page == 6 { 8 } else { 20 });
+            for index in &indices {
+                let id = controls.state.borrow().entries[*index].request_id.clone();
+                assert_eq!(items.iter().filter(|item| matches!(&item.action, Action::DeleteLocal(value) if value == &id)).count(), 1);
+                assert_eq!(items.iter().filter(|item| matches!(&item.action, Action::Export(Some(value)) if value == &id)).count(), 1);
+                assert_eq!(items.iter().filter(|item| matches!(&item.action, Action::RetryEntry(value) if value == &id)).count(), 1);
+            }
+            seen.extend(indices);
+            drop(items);
+            controls.scroll.set(f32::MAX);
+            controls.layout(false);
+        }
+        assert_eq!(seen, (0..128).collect::<Vec<_>>());
+        for task in [Task::HistoryDelete, Task::FeedbackExport] {
+            let generation = controls.state.borrow_mut().begin_task(task).unwrap();
+            for action in [Action::New, Action::Back, Action::History, Action::HistoryPage(0), Action::Entry(0)] {
+                controls.action(action);
+                assert_eq!(controls.state.borrow().task, Some(task));
+            }
+            controls.action(Action::Close);
+            assert_eq!(controls.state.borrow().task, Some(task));
+            controls.results.lock().unwrap().push((generation, ResultMessage::Failed));
+            controls.complete();
+            assert!(!controls.state.borrow().busy());
+        }
+    }
+
     #[test]
     fn unknown_device_feedback_includes_all_interfaces_and_has_named_required_fields() {
         let (_owner, _notice, dialog) = regression_dialog();
@@ -2547,7 +2801,7 @@ mod tests {
         let interface = crate::hid::HidInterface { path: "capture-regression-path".into(),
             vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
             input_len: 64, output_len: 64, feature_len: 0, product: "Test".into(), serial: "private".into() };
-        let candidate = Candidate { interface: Some(interface.clone()), capture_interface: Some(interface.clone()),
+        let candidate = Candidate { key: 1, interface: Some(interface.clone()), capture_interface: Some(interface.clone()),
             label: "Test".into(), battery: "50%".into(), diagnostics: "Model: Test\n".into(),
             device: client::Device { name: "Test".into(), family: "mouse".into(),
                 connection: "USB".into(), brand: None, model: None } };
@@ -2611,7 +2865,7 @@ mod tests {
         let interface = crate::hid::HidInterface { path: "capture-first-device".into(),
             vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
             input_len: 64, output_len: 64, feature_len: 0, product: "Test".into(), serial: String::new() };
-        let candidate = Candidate { interface: Some(interface.clone()), capture_interface: Some(interface.clone()),
+        let candidate = Candidate { key: 1, interface: Some(interface.clone()), capture_interface: Some(interface.clone()),
             label: "Test".into(), battery: "50%".into(), diagnostics: "Model: Test\n".into(),
             device: client::Device { name: "Test".into(), family: "mouse".into(),
                 connection: "USB".into(), brand: None, model: None } };
@@ -2740,6 +2994,7 @@ mod tests {
         let (_owner, _notice, dialog) = regression_dialog();
         let controls = &dialog.controls;
         let candidate = Candidate {
+            key: 1,
             interface: None,
             capture_interface: None,
             label: "Detected mouse".into(), battery: "75%".into(),
@@ -2798,6 +3053,7 @@ mod tests {
             vendor_id: 0x258a, product_id: 0x024e, usage_page: 1, usage: 6,
             input_len: 8, output_len: 0, feature_len: 0, product: "VGN V98 Pro V3".into(), serial: String::new() };
         let candidate = Candidate {
+            key: 1,
             interface: Some(interface), capture_interface: None, label: "VGN V98 Pro V3".into(),
             battery: "99%".into(), diagnostics: String::new(),
             device: client::Device { name: "VGN V98 Pro V3".into(), family: "keyboard".into(),
@@ -3555,7 +3811,8 @@ fn draw_button(p: &mut Painter, item: &Item, pressed: bool, focus: bool, enabled
 }
 impl Dialog {
     pub fn new(owner: &nwg::Window, notice: nwg::NoticeSender,
-        request_capture_refresh: impl Fn() + 'static) -> Result<Self, String> {
+        request_capture_refresh: impl Fn() + 'static,
+        snapshot_provider: Option<Box<dyn Fn() -> Vec<Candidate>>>) -> Result<Self, String> {
         let scale = crate::dwm::system_scale();
         let px = |v: f32| (v * scale).round() as i32;
         let mut overlay = nwg::Window::default();
@@ -3679,6 +3936,7 @@ impl Dialog {
             inventory_working: Cell::new(false),
             capture_folder: RefCell::new(None),
             request_capture_refresh: Box::new(request_capture_refresh),
+            snapshot_provider,
         });
         let callback = c.clone();
         let handler = nwg::full_bind_event_handler(&c.window.handle, move |event, data, handle| {

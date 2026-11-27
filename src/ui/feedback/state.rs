@@ -67,6 +67,7 @@ pub(super) struct Model {
     pub(super) inventory_report: Option<String>,
     pub(super) inventory_generation: u64,
     pub(super) restored_draft: Option<client::Draft>,
+    pub(super) submitted_draft: Option<client::Draft>,
     pub(super) restored_device: Option<client::Device>,
     pub(super) reply_drafts: std::collections::BTreeMap<u64, String>,
     generation: u64,
@@ -104,6 +105,7 @@ impl Default for Model {
             inventory_report: None,
             inventory_generation: 0,
             restored_draft: None,
+            submitted_draft: None,
             restored_device: None,
             reply_drafts: Default::default(),
             generation: 0,
@@ -139,17 +141,20 @@ impl Model {
     }
 
     pub(super) fn detach_task(&mut self) {
+        if matches!(self.task, Some(Task::CaptureExport | Task::HistoryDelete | Task::FeedbackExport)) { return; }
         self.generation = self.generation.wrapping_add(1);
         self.task = None;
     }
 
     pub(super) fn new_form(&mut self) {
+        if matches!(self.task, Some(Task::CaptureExport | Task::HistoryDelete | Task::FeedbackExport)) { return; }
         let mode_changed = self.software != self.latest_software;
         self.detach_task();
         self.view = View::Form;
         self.submitted = false;
         self.draft_retry = None;
         self.restored_draft = None;
+        self.submitted_draft = None;
         self.restored_device = None;
         self.diagnostics_override = None;
         self.inventory_report = None;
@@ -187,7 +192,7 @@ impl Model {
 
     fn reopen_mode(&mut self, devices: Vec<Candidate>, history: bool, software: bool) -> bool {
         if matches!(self.task, Some(Task::CaptureExport | Task::HistoryDelete | Task::FeedbackExport)) { return false; }
-        self.latest_devices = devices;
+        self.refresh_devices(devices);
         if !history {
             self.latest_software = software;
         }
@@ -208,9 +213,27 @@ impl Model {
     pub(super) fn edit_draft(&mut self) -> bool {
         self.draft_retry = None;
         self.restored_draft = None;
+        self.submitted_draft = None;
         let had_error = !self.error.is_empty();
         self.error.clear();
         had_error
+    }
+
+    pub(super) fn refresh_devices(&mut self, devices: Vec<Candidate>) {
+        self.latest_devices = devices;
+        if self.software || self.submitted || self.draft_retry.is_some()
+            || self.restored_draft.is_some() || self.submitted_draft.is_some()
+            || self.task.is_some_and(Task::locks_editors) { return; }
+        let selected = self.selected.and_then(|index| self.devices.get(index)).cloned();
+        self.devices = self.latest_devices.clone();
+        if let Some(selected) = selected {
+            self.selected = self.devices.iter().position(|device| device.same_source(&selected));
+            if self.selected.is_none() {
+                self.selected = Some(self.devices.len());
+                self.devices.push(selected.unavailable());
+            }
+        }
+        self.device_page = self.device_page.min(self.devices.len().saturating_sub(1) / super::DEVICE_PAGE_SIZE);
     }
 
     pub(super) fn record_entry(&mut self, entry: client::Entry) {
@@ -408,6 +431,23 @@ mod tests {
         assert!(model.edit_draft());
         assert!(model.draft_retry.is_none());
         assert!(!model.edit_draft());
+    }
+
+    #[test]
+    fn local_mutations_cannot_detach_or_reset_until_their_results_arrive() {
+        for task in [Task::CaptureExport, Task::HistoryDelete, Task::FeedbackExport] {
+            let mut model = Model::default();
+            model.initialized = true;
+            model.view = View::History;
+            let generation = model.begin_task(task).unwrap();
+            model.detach_task();
+            model.new_form();
+            assert!(!model.reopen(Vec::new(), false));
+            assert!(!model.reopen_software());
+            assert_eq!(model.view, View::History);
+            assert_eq!(model.task, Some(task));
+            assert!(model.finish_task(generation));
+        }
     }
 
     #[test]

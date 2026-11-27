@@ -23,6 +23,7 @@ pub fn with_inventory(summary: &str, inventory: &str) -> String {
 
 #[derive(Clone)]
 pub struct Candidate {
+    pub key: u64,
     pub interface: Option<crate::hid::HidInterface>,
     pub capture_interface: Option<crate::hid::HidInterface>,
     /// Display-only name; the report uses the original device name below.
@@ -32,15 +33,45 @@ pub struct Candidate {
     pub diagnostics: String,
 }
 
+impl Candidate {
+    pub fn same_source(&self, other: &Self) -> bool {
+        self.key == other.key && match (&self.interface, &other.interface) {
+            (Some(first), Some(second)) => first.path.eq_ignore_ascii_case(&second.path),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    pub fn unavailable(&self) -> Self {
+        let mut candidate = self.clone();
+        candidate.battery = "—".into();
+        candidate.diagnostics = format!("App: X-Battery {}\nSystem: {}\nModel: {}\nCaptured at (Unix ms): {}\nSnapshot source: shared state; selected device unavailable\nConnected: false\nBattery: unknown\nCharging: unknown\nCurrent DPI: unknown\nPolling rate: unknown\n",
+            crate::gui::APP_VERSION, system_version(), clean(&self.device.name), crate::diagnostics::unix_millis());
+        if let Some(interface) = &self.interface {
+            let _ = writeln!(candidate.diagnostics, "Last known interface (not currently observed)\nVID/PID: {:04X}:{:04X}\nUsage: {:04X}:{:04X}\nReport bytes (input/output/feature): {}/{}/{}",
+                interface.vendor_id, interface.product_id, interface.usage_page, interface.usage,
+                interface.input_len, interface.output_len, interface.feature_len);
+        }
+        candidate
+    }
+}
+
 pub fn candidate(label: String, reading: &crate::device::DeviceReading,
     interface: Option<&crate::hid::HidInterface>, backend: Option<crate::backends::BackendId>,
     address: Option<u8>, connection: &str, family: crate::device::DeviceFamily,
-    measured: Option<std::time::Instant>, lifetime: std::time::Duration) -> Candidate {
+    measured: Option<std::time::Instant>, lifetime: std::time::Duration,
+    dpi: &crate::device::Dpi, polling_rate: &crate::device::PollingRate) -> Candidate {
     let family = family_code(family);
     let name = clean(&reading.name);
     let mut diagnostics = format!("App: X-Battery {}\nSystem: {}\nModel: {}\nType: {}\nConnection: {}\nBattery: {}\nReading: {:?}\nConnected: {}\n",
         crate::gui::APP_VERSION, system_version(), name, family, clean(connection),
         reading.battery_text(true), reading.quality, reading.connected);
+    let charging = if reading.connected && reading.quality == crate::device::ReadingQuality::Live {
+        reading.battery.as_ref().and_then(|battery| battery.charging)
+    } else { None };
+    let _ = writeln!(diagnostics, "Snapshot source: shared state\nCharging: {}",
+        match charging { Some(true) => "yes", Some(false) => "no", None => "unknown" });
+    append_configuration(&mut diagnostics, dpi, polling_rate);
     if let Some(interface) = interface {
         let _ = writeln!(diagnostics, "VID/PID: {:04X}:{:04X}\nUsage: {:04X}:{:04X}\nReport bytes (input/output/feature): {}/{}/{}",
             interface.vendor_id, interface.product_id, interface.usage_page, interface.usage,
@@ -51,10 +82,29 @@ pub fn candidate(label: String, reading: &crate::device::DeviceReading,
         }
     }
     diagnostics.push_str(&crate::diagnostics::readings::report(reading, measured, lifetime));
-    Candidate { label, battery: reading.battery_text(true), diagnostics,
+    Candidate { key: crate::diagnostics::anonymous_id(&format!("{}:{backend:?}:{address:?}", reading.key)),
+        label, battery: reading.battery_text(true), diagnostics,
         interface: interface.cloned(),
         capture_interface: interface.filter(|interface| crate::capture::eligible(interface)).cloned(),
         device: client::Device { name, family: family.into(), connection: connection.into(), brand: None, model: None } }
+}
+
+fn append_configuration(output: &mut String, dpi: &crate::device::Dpi, rate: &crate::device::PollingRate) {
+    let value = |value: Option<u16>| value.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into());
+    let _ = writeln!(output, "Current DPI: {}\nCurrent DPI Y: {}\nDPI writable: {}",
+        value(dpi.current), value(dpi.current_y), dpi.writable);
+    let stages = dpi.stages.iter().take(16).map(|stage| match dpi.stage_y.get(&stage.index) {
+        Some(y) => format!("{}:X{}/Y{y}", u16::from(stage.index) + 1, stage.value),
+        None => format!("{}:{}", u16::from(stage.index) + 1, stage.value),
+    }).collect::<Vec<_>>().join(", ");
+    let _ = writeln!(output, "DPI stages: {}\nActive DPI stage: {}\nDPI profile: {}",
+        if stages.is_empty() { "unknown" } else { &stages },
+        value(dpi.active_stage.map(|index| u16::from(index) + 1)), value(dpi.profile));
+    let _ = writeln!(output, "Polling rate: {}\nPolling rate choices: {}\nPolling rate writable: {}",
+        rate.current.map(|hz| format!("{hz} Hz")).unwrap_or_else(|| "unknown".into()),
+        if rate.values.is_empty() { "unknown".into() } else {
+            rate.values.iter().take(32).map(u16::to_string).collect::<Vec<_>>().join(", ")
+        }, rate.writable);
 }
 
 fn family_code(family: crate::device::DeviceFamily) -> &'static str {
@@ -316,7 +366,7 @@ mod tests {
         let reading = crate::device::DeviceReading { name: "Factory mouse".into(), ..Default::default() };
         let make = |interface: Option<&crate::hid::HidInterface>| candidate("private-alias".into(), &reading,
             interface, None, None, "unknown", crate::device::DeviceFamily::Mouse, None,
-            std::time::Duration::from_secs(120));
+            std::time::Duration::from_secs(120), &Default::default(), &Default::default());
         let standard = make(Some(&interface));
         assert_eq!(standard.interface.as_ref().unwrap().path, interface.path);
         assert!(standard.capture_interface.is_none());
@@ -330,6 +380,51 @@ mod tests {
         let non_hid = make(None);
         assert!(non_hid.interface.is_none());
         assert!(non_hid.capture_interface.is_none());
+    }
+
+    #[test]
+    fn candidate_snapshot_preserves_charging_configuration_and_last_known_identity() {
+        let interface = crate::hid::HidInterface { path: "private-path".into(), serial: "private-serial".into(),
+            vendor_id: 0x1234, product_id: 0x5678, usage_page: 0xff00, usage: 1,
+            input_len: 64, output_len: 32, feature_len: 8, product: "Mouse".into() };
+        let mut reading = crate::device::DeviceReading { key: "private-key".into(), name: "Mouse".into(), connected: true,
+            battery: Some(crate::device::Battery { percent: Some(0), estimated_percent: None, charging: Some(false),
+                voltage_mv: None, approximate: false, level: None }), ..Default::default() };
+        let dpi = crate::device::Dpi { current: Some(800), current_y: Some(1600), active_stage: Some(1),
+            stages: vec![crate::device::DpiStage { index: 1, value: 800 }],
+            stage_y: [(1, 1600)].into(), profile: Some(2), writable: true, ..Default::default() };
+        let rate = crate::device::PollingRate { current: Some(1000), values: vec![500, 1000], writable: true, ..Default::default() };
+        let make = |reading: &crate::device::DeviceReading, slot, dpi: &crate::device::Dpi, rate: &crate::device::PollingRate|
+            candidate("private-alias".into(), reading, Some(&interface), Some(crate::backends::BackendId::Logitech),
+                Some(slot), "USB", crate::device::DeviceFamily::Mouse, Some(std::time::Instant::now()),
+                std::time::Duration::from_secs(120), dpi, rate);
+        let current = make(&reading, 1, &dpi, &rate);
+        for field in ["Captured at (Unix ms):", "Battery: 0%", "Charging: no", "Current DPI: 800",
+            "Current DPI Y: 1600", "DPI stages: 2:X800/Y1600", "Active DPI stage: 2", "DPI profile: 2",
+            "Polling rate: 1000 Hz", "Polling rate choices: 500, 1000"] {
+            assert!(current.diagnostics.contains(field), "{field}");
+        }
+        assert!(!current.same_source(&make(&reading, 2, &dpi, &rate)));
+        let absent = current.unavailable();
+        for field in ["Last known interface", "VID/PID: 1234:5678", "Usage: FF00:0001",
+            "Report bytes (input/output/feature): 64/32/8", "Connected: false", "Charging: unknown"] {
+            assert!(absent.diagnostics.contains(field), "{field}");
+        }
+        assert!(!absent.diagnostics.contains("Connected: true"));
+        for private in ["private-key", "private-path", "private-serial", "private-alias"] {
+            assert!(!current.diagnostics.contains(private));
+            assert!(!absent.diagnostics.contains(private));
+        }
+        reading.battery.as_mut().unwrap().charging = Some(true);
+        assert!(make(&reading, 1, &dpi, &rate).diagnostics.contains("Charging: yes"));
+        reading.battery.as_mut().unwrap().charging = None;
+        let unknown = make(&reading, 1, &Default::default(), &Default::default());
+        for field in ["Charging: unknown", "Current DPI: unknown", "DPI stages: unknown", "Polling rate: unknown"] {
+            assert!(unknown.diagnostics.contains(field));
+        }
+        reading.connected = false;
+        reading.battery.as_mut().unwrap().charging = Some(true);
+        assert!(make(&reading, 1, &dpi, &rate).diagnostics.contains("Charging: unknown"));
     }
 
     #[test]

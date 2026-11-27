@@ -342,6 +342,50 @@ struct DeviceSnapshot {
     battery_at: Option<std::time::Instant>,
 }
 
+fn feedback_candidates(shared: &Shared) -> Vec<crate::feedback::Candidate> {
+    shared.readings.iter().map(|reading| {
+        let record = shared.devices.get(&reading.key);
+        let basic = record.and_then(|record| record.basic.as_ref());
+        let link = record.and_then(|record| record.link.as_ref());
+        let interface = basic.and_then(|basic| basic.target.hid().ok()).or_else(|| link.map(|link| &link.iface));
+        let backend = basic.map(|basic| basic.target.backend).or_else(|| link.map(|_| crate::backends::BackendId::Rog));
+        let family = match shared.cfg.device_kind(reading) {
+            crate::tray_prefs::TrayKind::Mouse => crate::device::DeviceFamily::Mouse,
+            crate::tray_prefs::TrayKind::Keyboard => crate::device::DeviceFamily::Keyboard,
+            crate::tray_prefs::TrayKind::Headset => crate::device::DeviceFamily::Headset,
+            crate::tray_prefs::TrayKind::Gamepad => crate::device::DeviceFamily::Gamepad,
+            _ => crate::device::DeviceFamily::Unknown,
+        };
+        let connection = link.map(|link| match link.mode.as_str() {
+            "Wireless24G" => "2.4GHz", "Wired" => "USB", "Bluetooth" => "Bluetooth", _ => "unknown",
+        }).unwrap_or("unknown");
+        let lifetime = backend.filter(|backend| *backend != crate::backends::BackendId::Rog)
+            .map(|backend| backend.sample_lifetime()).unwrap_or_else(|| rog_sample_lifetime(&shared.cfg));
+        let address = basic.map(|basic| basic.target.address);
+        let (dpi, polling_rate) = if let Some(basic) = basic {
+            (basic.dpi.clone(), basic.polling_rate.clone())
+        } else if let Some(state) = record.and_then(|record| record.state.as_ref())
+            .filter(|_| family == crate::device::DeviceFamily::Mouse) {
+            let stages: Vec<_> = (0..proto::DPI_STAGES).filter_map(|index|
+                u16::try_from(state.dpi(index)).ok().map(|value| crate::device::DpiStage { index: index as u8, value })).collect();
+            let active = state.active_stage.checked_sub(1).filter(|index| usize::from(*index) < proto::DPI_STAGES);
+            let dpi = crate::device::Dpi {
+                current: active.and_then(|index| stages.iter().find(|stage| stage.index == index).map(|stage| stage.value)),
+                active_stage: active, stages, profile: Some(u16::from(state.profile)),
+                writable: link.is_some_and(|link| !link.read_only), ..Default::default()
+            };
+            let polling_rate = crate::device::PollingRate {
+                current: [125, 250, 500, 1000, 2000, 4000, 8000].get(usize::from(state.poll_code)).copied(),
+                ..Default::default()
+            };
+            (dpi, polling_rate)
+        } else { Default::default() };
+        crate::feedback::candidate(shared.cfg.device_name(reading).to_string(), reading, interface,
+            backend, address, connection, family, record.and_then(|record| record.battery_at), lifetime,
+            &dpi, &polling_rate)
+    }).collect()
+}
+
 fn record_reading_diagnostic(surface: crate::diagnostics::readings::Surface,
     reading: &crate::device::DeviceReading, record: Option<&DeviceSnapshot>, cfg: &Settings,
     enabled: bool, now: std::time::Instant) {
@@ -2674,29 +2718,7 @@ fn handle_act(a: Act, env: &UiEnv) {
         }
         Act::DeviceFeedback | Act::FeedbackHistory => {
             let s = lock_shared(env.shared);
-            let devices = s.readings.iter().map(|reading| {
-                let record = s.devices.get(&reading.key);
-                let basic = record.and_then(|record| record.basic.as_ref());
-                let link = record.and_then(|record| record.link.as_ref());
-                let interface = basic.and_then(|basic| basic.target.hid().ok()).or_else(|| link.map(|link| &link.iface));
-                let backend = basic.map(|basic| basic.target.backend).or_else(|| link.map(|_| crate::backends::BackendId::Rog));
-                let family = match s.cfg.device_kind(reading) {
-                    crate::tray_prefs::TrayKind::Mouse => crate::device::DeviceFamily::Mouse,
-                    crate::tray_prefs::TrayKind::Keyboard => crate::device::DeviceFamily::Keyboard,
-                    crate::tray_prefs::TrayKind::Headset => crate::device::DeviceFamily::Headset,
-                    crate::tray_prefs::TrayKind::Gamepad => crate::device::DeviceFamily::Gamepad,
-                    _ => crate::device::DeviceFamily::Unknown,
-                };
-                let connection = link.map(|link| match link.mode.as_str() {
-                    "Wireless24G" => "2.4GHz", "Wired" => "USB", "Bluetooth" => "Bluetooth", _ => "unknown",
-                }).unwrap_or("unknown");
-                let lifetime = backend.filter(|backend| *backend != crate::backends::BackendId::Rog)
-                    .map(|backend| backend.sample_lifetime()).unwrap_or_else(|| rog_sample_lifetime(&s.cfg));
-                let address = basic.filter(|basic| basic.target.backend == crate::backends::BackendId::Logitech)
-                    .map(|basic| basic.target.address);
-                crate::feedback::candidate(s.cfg.device_name(reading).to_string(), reading, interface,
-                    backend, address, connection, family, record.and_then(|record| record.battery_at), lifetime)
-            }).collect();
+            let devices = feedback_candidates(&s);
             let dark = crate::ui::theme::resolve(&s.cfg.theme) == crate::ui::theme::Mode::Dark;
             drop(s);
             env.feedback_dialog.show(env.window, devices, dark, matches!(a, Act::FeedbackHistory));
@@ -3952,8 +3974,9 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
     let popup = Rc::new(crate::ui::tray_popup::Popup::new(sender, audio.clone())?);
     let name_dialog = crate::ui::device_name::Dialog::new(&window, sender)?;
     let capture_signal = Arc::clone(&signal);
+    let feedback_shared = Arc::clone(&shared);
     let feedback_dialog = crate::ui::feedback::Dialog::new(&window, sender,
-        move || capture_signal.request_refresh())?;
+        move || capture_signal.request_refresh(), Some(Box::new(move || feedback_candidates(&lock_shared(&feedback_shared)))))?;
 
     {
         let shared_a = Arc::clone(&shared);
@@ -5047,7 +5070,7 @@ mod config_action_tests {
                 shared: Arc::new(Mutex::new(shared)), signal, tray,
                 taskbar: crate::taskbar_widget::TaskbarWidget::new(hwnd, 0),
                 name_dialog: crate::ui::device_name::Dialog::new(&window, notice.sender()).unwrap(),
-                feedback_dialog: crate::ui::feedback::Dialog::new(&window, notice.sender(), || {}).unwrap(),
+                feedback_dialog: crate::ui::feedback::Dialog::new(&window, notice.sender(), || {}, None).unwrap(),
                 store: StoreUpdates {
                     controller: crate::store::Controller::for_test(),
                     preparation: RefCell::new(None), writes_blocked: Cell::new(false),
@@ -5883,6 +5906,44 @@ mod backend_tests {
         }
         assert_eq!(window_close_action("minimize", false, false), WindowCloseAction::Minimize);
         assert_eq!(window_close_action("quit", false, false), WindowCloseAction::Quit);
+    }
+
+    #[test]
+    fn feedback_candidates_read_existing_shared_samples_and_configuration_without_refreshing_hardware() {
+        let reading = DeviceReading { key: "feedback-device".into(), name: "Logitech G304".into(),
+            family: DeviceFamily::Mouse, connected: true, battery: Some(Battery { percent: Some(25),
+                estimated_percent: None, charging: Some(false), voltage_mv: None, approximate: false, level: None }),
+            ..Default::default() };
+        let mut shared = Shared::new(Settings::default());
+        shared.replace_mock_readings(vec![reading]);
+        let before = shared.refresh_generation;
+        let current = feedback_candidates(&shared);
+        assert_eq!(current.len(), 1);
+        assert!(current[0].diagnostics.contains("Battery: 25%"));
+        assert!(current[0].diagnostics.contains("Current DPI: 800"));
+        assert!(current[0].diagnostics.contains("Polling rate: 1000 Hz"));
+        assert!(current[0].diagnostics.contains("Captured at (Unix ms):"));
+        shared.readings[0].battery.as_mut().unwrap().percent = Some(35);
+        shared.readings[0].battery.as_mut().unwrap().charging = Some(true);
+        let updated = feedback_candidates(&shared);
+        assert!(updated[0].same_source(&current[0]));
+        assert!(updated[0].diagnostics.contains("Battery: 35%"));
+        assert!(updated[0].diagnostics.contains("Charging: yes"));
+        let record = shared.devices.get_mut("feedback-device").unwrap();
+        record.basic = None;
+        record.state = Some(proto::State { active_stage: 2, poll_code: 2,
+            enc: [proto::encode_dpi(400), proto::encode_dpi(800), proto::encode_dpi(1600), proto::encode_dpi(3200)],
+            ..Default::default() });
+        let rog = feedback_candidates(&shared);
+        assert!(rog[0].diagnostics.contains("Current DPI: 800"));
+        assert!(rog[0].diagnostics.contains("Polling rate: 500 Hz"));
+        shared.devices.get_mut("feedback-device").unwrap().state = None;
+        let unknown = feedback_candidates(&shared);
+        assert!(unknown[0].diagnostics.contains("Current DPI: unknown"));
+        assert!(unknown[0].diagnostics.contains("Polling rate: unknown"));
+        assert_eq!(shared.refresh_generation, before);
+        assert!(shared.pending.is_empty());
+        assert!(shared.source_pending.values().all(VecDeque::is_empty));
     }
 
     #[test]

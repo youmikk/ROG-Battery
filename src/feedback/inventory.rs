@@ -352,6 +352,7 @@ mod tests {
 
     fn known_device(interface: Option<&HidInterface>) -> crate::feedback::Candidate {
         crate::feedback::Candidate {
+            key: 0,
             interface: interface.cloned(),
             capture_interface: interface.filter(|interface| crate::capture::eligible(interface)).cloned(),
             label: "private-alias".into(), battery: "—".into(), diagnostics: "private-known-report".into(),
