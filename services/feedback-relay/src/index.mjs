@@ -350,7 +350,8 @@ export class FeedbackCoordinator {
       const now = this.now();
       let next = now + HOUR;
       try {
-        const ratePageFull = await this.exclusive("rates", async () => {
+        let ratePageFull = false;
+        try { ratePageFull = await this.exclusive("rates", async () => {
           const rateCursor = await this.storage.get("scan:rate");
           const expiredRates = await this.storage.list({ prefix: "rate:", limit: 1000,
             ...(rateCursor ? { startAfter: rateCursor } : {}) });
@@ -360,16 +361,22 @@ export class FeedbackCoordinator {
             if (value.expiresAt < now) await this.storage.delete(key);
           }
           return expiredRates.size === 1000;
-        });
+        }); } catch { next = Math.min(next, now + 60_000); }
         if (ratePageFull) next = Math.min(next, now + 60_000);
         let checked = 0;
         for (const prefix of ["request:", "reply:"]) {
-          const cursor = await this.storage.get(`scan:${prefix}`);
-          const rows = await this.storage.list({ prefix, limit: 250, ...(cursor ? { startAfter: cursor } : {}) });
-          if (rows.size === 250) {
-            await this.storage.put(`scan:${prefix}`, [...rows.keys()].at(-1));
+          let rows;
+          try {
+            const cursor = await this.storage.get(`scan:${prefix}`);
+            rows = await this.storage.list({ prefix, limit: 250, ...(cursor ? { startAfter: cursor } : {}) });
+            if (rows.size === 250) {
+              await this.storage.put(`scan:${prefix}`, [...rows.keys()].at(-1));
+              next = Math.min(next, now + 60_000);
+            } else await this.storage.delete(`scan:${prefix}`);
+          } catch {
             next = Math.min(next, now + 60_000);
-          } else await this.storage.delete(`scan:${prefix}`);
+            continue;
+          }
           for (const [key, snapshot] of rows) {
             const scope = snapshot.kind === "reply" ? `issue:${snapshot.number}` : key;
             if (this.queues.has(scope)) {

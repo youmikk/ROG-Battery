@@ -1562,6 +1562,24 @@ test("a repeatedly failing cleanup does not block later recovery or exhaust futu
   assert.equal(state.github.issues.length, 1);
 });
 
+for (const brokenPrefix of ["rate:", "request:"]) {
+  test(`a failed ${brokenPrefix} scan does not block pending reply recovery`, async () => {
+    const state = await recoverableSubmission("reply");
+    state.github.loseCommentResponse = true;
+    assert.equal((await state.send()).status, 202);
+    state.advance(6000);
+    const list = state.storage.list.bind(state.storage);
+    state.storage.list = async options => {
+      if (options.prefix === brokenPrefix) throw new Error("Partition unavailable");
+      return list(options);
+    };
+    await state.coordinator.alarm();
+    assert.equal((await state.storage.get(state.recordKey)).state, "complete");
+    assert.equal(state.github.comments.length, 1);
+    assert.ok(state.storage.scheduled > state.now());
+  });
+}
+
 test("an alarm scan failure still arms the next maintenance run", async () => {
   const state = setup();
   const list = state.storage.list.bind(state.storage);
