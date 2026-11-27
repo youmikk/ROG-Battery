@@ -3127,8 +3127,9 @@ fn apply_edit(env: &UiEnv, e: Edit) {
                     (true, true) => None,
                 };
                 if let Some((x, y)) = parsed.filter(|(x, y)| basic.dpi.values.contains(x) && basic.dpi.values.contains(y)) {
-                    env.submit(Cmd::BasicDpiStageAdd { target: basic.target, context, x, y });
-                    env.canvas.with_ui_mut(|u| u.remove_new_basic_dpi(slot));
+                    if env.submit(Cmd::BasicDpiStageAdd { target: basic.target, context, x, y }) {
+                        env.canvas.with_ui_mut(|u| u.remove_new_basic_dpi(slot));
+                    }
                     return;
                 }
             }
@@ -5223,6 +5224,55 @@ mod config_action_tests {
             Act::Toggle(Pref::TrayEnabled), Act::Toggle(Pref::TaskbarWidget),
             Act::Toggle(Pref::LowBatteryNotify),
         ]
+    }
+
+    #[test]
+    fn new_dpi_stage_keeps_input_when_queue_is_full_and_can_retry() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let fixture = Fixture::new();
+        let backend = crate::backends::BackendId::Rapoo;
+        let reading = crate::device::DeviceReading {
+            key: SECOND_DEVICE.into(), name: "Rapoo VT1".into(), connected: true,
+            family: crate::device::DeviceFamily::Mouse, ..Default::default()
+        };
+        let mut basic = mock_basic_snapshot(&reading);
+        basic.target.backend = backend;
+        basic.dpi.max_stages = 7;
+        basic.dpi.configuration_token = Some(42);
+        let target = basic.target.clone();
+        {
+            let mut shared = lock_shared(&fixture.shared);
+            shared.publish_additional(backend, vec![basic], 0, 1);
+            shared.source_pending.insert(backend, (0..MAX_PENDING).map(|_| Cmd::BasicDpiStageAdd {
+                target: target.clone(), context: crate::device::StageContext::Configuration(42), x: 400, y: 400,
+            }).collect());
+        }
+        fixture.canvas.with_ui_mut(|ui| {
+            ui.selected_device = Some(SECOND_DEVICE.into());
+            ui.new_basic_dpi_count = 2;
+            ui.begin_edit(Edit::NewBasicDpiX(0), "1200".into());
+            ui.begin_edit(Edit::NewBasicDpiY(0), "1400".into());
+            ui.begin_edit(Edit::NewBasicDpiX(1), "2000".into());
+        });
+        let save = |_: &Settings| Ok(());
+        apply_edit(&fixture.env(&save), Edit::NewBasicDpiX(0));
+        fixture.canvas.with_ui(|ui| {
+            assert_eq!(ui.new_basic_dpi_count, 2);
+            assert_eq!(ui.edit_text(Edit::NewBasicDpiX(0)), Some("1200"));
+            assert_eq!(ui.edit_text(Edit::NewBasicDpiY(0)), Some("1400"));
+            assert_eq!(ui.edit_text(Edit::NewBasicDpiX(1)), Some("2000"));
+        });
+        assert_eq!(lock_shared(&fixture.shared).source_pending[&backend].len(), MAX_PENDING);
+        lock_shared(&fixture.shared).source_pending.get_mut(&backend).unwrap().clear();
+        apply_edit(&fixture.env(&save), Edit::NewBasicDpiX(0));
+        fixture.canvas.with_ui(|ui| {
+            assert_eq!(ui.new_basic_dpi_count, 1);
+            assert_eq!(ui.edit_text(Edit::NewBasicDpiX(0)), Some("2000"));
+            assert_eq!(ui.edit_text(Edit::NewBasicDpiY(0)), None);
+        });
+        let shared = lock_shared(&fixture.shared);
+        assert!(matches!(shared.source_pending[&backend].front(),
+            Some(Cmd::BasicDpiStageAdd { x: 1200, y: 1400, .. })));
     }
 
     #[test]
