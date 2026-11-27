@@ -32,6 +32,8 @@ pub use export::{export_draft, export_local};
 const REPOSITORY: &str = "https://github.com/youmikk/X-Battery";
 // Existing encrypted history and cached relay receipts use the former URL.
 const LEGACY_REPOSITORY: &str = "https://github.com/youmikk/ROG-Battery";
+const DEFAULT_ENDPOINT: &str = "https://battery.youmikk.me";
+const LEGACY_ENDPOINT: &str = "https://r-battery-feedback.a2424729779.workers.dev";
 const MAX_IMAGE: usize = 5 * 1024 * 1024;
 const MAX_RESPONSE: usize = 512 * 1024;
 const MAX_REQUEST: usize = 21 * 1024 * 1024;
@@ -463,13 +465,19 @@ fn parse_endpoint(value: &str) -> Option<Endpoint> {
 }
 
 pub fn endpoint() -> Option<&'static str> {
-    option_env!("R_BATTERY_FEEDBACK_URL").filter(|value| parse_endpoint(value).is_some())
+    selected_endpoint(option_env!("R_BATTERY_FEEDBACK_URL"))
+}
+
+fn selected_endpoint(value: Option<&str>) -> Option<&str> {
+    let value = value.unwrap_or(DEFAULT_ENDPOINT);
+    if value.trim_end_matches('/') == LEGACY_ENDPOINT { return Some(DEFAULT_ENDPOINT); }
+    parse_endpoint(value).map(|_| value)
 }
 
 pub fn configured() -> bool { endpoint().is_some() }
 
 fn required_endpoint() -> Result<Endpoint, String> {
-    option_env!("R_BATTERY_FEEDBACK_URL").and_then(parse_endpoint).ok_or_else(|| message(
+    endpoint().and_then(parse_endpoint).ok_or_else(|| message(
         "当前版本暂未开通应用内直投，请先复制报告前往 GitHub 提交，如有截图或抓包文件记得一并上传。",
         "In-app submission is not enabled in this build. Copy the report to submit on GitHub and attach screenshots or capture files manually."))
 }
@@ -479,52 +487,93 @@ fn wide(value: &str) -> Vec<u16> { value.encode_utf16().chain(Some(0)).collect()
 struct Internet(HINTERNET);
 impl Drop for Internet { fn drop(&mut self) { unsafe { WinHttpCloseHandle(self.0); } } }
 
-fn internet(handle: HINTERNET) -> Result<Internet, String> {
-    if handle.is_null() { Err(network_error()) } else { Ok(Internet(handle)) }
+struct TransportFailure { message: String, retry_endpoint: bool }
+
+impl From<String> for TransportFailure {
+    fn from(message: String) -> Self { Self { message, retry_endpoint: false } }
 }
 
-fn option(handle: HINTERNET, key: u32, mut value: u32) -> Result<(), String> {
+struct Attempt { started: Instant, number: usize }
+
+impl Attempt {
+    fn failure(&self, step: &str, code: u32, status: u32, retry_endpoint: bool, message: String) -> TransportFailure {
+        let detail = format!("step={step} os_error={code} http_status={status} elapsed_ms={} attempt={}",
+            self.started.elapsed().as_millis(), self.number);
+        #[cfg(not(test))]
+        crate::diagnostics::event("feedback_network_failed", &detail);
+        #[cfg(test)]
+        let _ = detail;
+        TransportFailure { message, retry_endpoint }
+    }
+
+    fn windows(&self, step: &str) -> TransportFailure {
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+        self.failure(step, code, 0, true, format!("{}\n{step}: Windows {code}", network_error()))
+    }
+}
+
+fn internet(handle: HINTERNET, attempt: &Attempt, step: &str) -> Result<Internet, TransportFailure> {
+    if handle.is_null() { Err(attempt.windows(step)) } else { Ok(Internet(handle)) }
+}
+
+fn option(handle: HINTERNET, key: u32, mut value: u32, attempt: &Attempt) -> Result<(), TransportFailure> {
     if unsafe { WinHttpSetOption(handle, key, (&mut value as *mut u32).cast(), 4) } == 0 {
-        Err(network_error())
+        Err(attempt.windows("configure"))
     } else { Ok(()) }
 }
 
 fn http(endpoint: &Endpoint, method: &str, route: &str, bearer: Option<&str>, body: &[u8])
     -> Result<(u32, Vec<u8>), String> {
+    with_failover(endpoint, |endpoint, number| http_once(endpoint, method, route, bearer, body, number))
+}
+
+fn with_failover<T>(endpoint: &Endpoint, mut send: impl FnMut(&Endpoint, usize) -> Result<T, TransportFailure>) -> Result<T, String> {
+    match send(endpoint, 1) {
+        Ok(value) => Ok(value),
+        Err(error) if error.retry_endpoint && Some(endpoint) == parse_endpoint(DEFAULT_ENDPOINT).as_ref() => {
+            send(&parse_endpoint(LEGACY_ENDPOINT).unwrap(), 2).map_err(|error| error.message)
+        }
+        Err(error) => Err(error.message),
+    }
+}
+
+fn http_once(endpoint: &Endpoint, method: &str, route: &str, bearer: Option<&str>, body: &[u8], number: usize)
+    -> Result<(u32, Vec<u8>), TransportFailure> {
     if !matches!(method, "GET" | "POST") || !route.starts_with("/feedback")
         || !route.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/')
-        || body.len() > MAX_REQUEST || bearer.is_some_and(|key| !reply_key(key)) { return Err(invalid()); }
+        || body.len() > MAX_REQUEST || bearer.is_some_and(|key| !reply_key(key)) { return Err(invalid().into()); }
+    let attempt = Attempt { started: Instant::now(), number };
     let agent = wide("X-Battery feedback/1");
     let session = internet(unsafe { WinHttpOpen(agent.as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        null(), null(), 0) })?;
-    if unsafe { WinHttpSetTimeouts(session.0, 5000, 5000, 15000, 15000) } == 0 { return Err(network_error()); }
+        null(), null(), 0) }, &attempt, "open")?;
+    if unsafe { WinHttpSetTimeouts(session.0, 5000, 5000, 15000, 15000) } == 0 { return Err(attempt.windows("configure")); }
     // TLS 1.2, normal certificate verification, no ambient Windows credentials.
-    option(session.0, WINHTTP_OPTION_SECURE_PROTOCOLS, 0x00000800)?;
+    option(session.0, WINHTTP_OPTION_SECURE_PROTOCOLS, 0x00000800, &attempt)?;
     let host = wide(&endpoint.host);
-    let connection = internet(unsafe { WinHttpConnect(session.0, host.as_ptr(), endpoint.port, 0) })?;
+    let connection = internet(unsafe { WinHttpConnect(session.0, host.as_ptr(), endpoint.port, 0) }, &attempt, "connect")?;
     let verb = wide(method);
     let path = wide(&format!("{}{route}", endpoint.base));
     let request = internet(unsafe { WinHttpOpenRequest(connection.0, verb.as_ptr(), path.as_ptr(),
-        null(), null(), null_mut(), WINHTTP_FLAG_SECURE | WINHTTP_FLAG_REFRESH) })?;
-    option(request.0, WINHTTP_OPTION_REDIRECT_POLICY, 0)?;
-    option(request.0, WINHTTP_OPTION_AUTOLOGON_POLICY, 2)?;
+        null(), null(), null_mut(), WINHTTP_FLAG_SECURE | WINHTTP_FLAG_REFRESH) }, &attempt, "request")?;
+    option(request.0, WINHTTP_OPTION_REDIRECT_POLICY, 0, &attempt)?;
+    option(request.0, WINHTTP_OPTION_AUTOLOGON_POLICY, 2, &attempt)?;
     // WINHTTP_DISABLE_COOKIES | REDIRECTS | AUTHENTICATION.
-    option(request.0, WINHTTP_OPTION_DISABLE_FEATURE, 1 | 2 | 4)?;
-    option(request.0, WINHTTP_OPTION_MAX_RESPONSE_HEADER_SIZE, 16 * 1024)?;
-    option(request.0, WINHTTP_OPTION_CONNECT_RETRIES, 1)?;
+    option(request.0, WINHTTP_OPTION_DISABLE_FEATURE, 1 | 2 | 4, &attempt)?;
+    option(request.0, WINHTTP_OPTION_MAX_RESPONSE_HEADER_SIZE, 16 * 1024, &attempt)?;
+    option(request.0, WINHTTP_OPTION_CONNECT_RETRIES, 1, &attempt)?;
     let mut headers = String::from("Accept: application/json\r\nContent-Type: application/json; charset=utf-8\r\n");
     if let Some(key) = bearer { headers.push_str("Authorization: Bearer "); headers.push_str(key); headers.push_str("\r\n"); }
     let headers = wide(&headers);
-    let started = Instant::now();
     if unsafe { WinHttpSendRequest(request.0, headers.as_ptr(), (headers.len() - 1) as u32,
         if body.is_empty() { null_mut() } else { body.as_ptr() as *mut _ }, body.len() as u32,
-        body.len() as u32, 0) } == 0 || unsafe { WinHttpReceiveResponse(request.0, null_mut()) } == 0 {
-        return Err(network_error());
+        body.len() as u32, 0) } == 0 { return Err(attempt.windows("send")); }
+    if unsafe { WinHttpReceiveResponse(request.0, null_mut()) } == 0 {
+        return Err(attempt.windows("receive"));
     }
     let mut status = 0u32;
     let mut length = 4u32;
     if unsafe { WinHttpQueryHeaders(request.0, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        null(), (&mut status as *mut u32).cast(), &mut length, null_mut()) } == 0 { return Err(network_error()); }
+        null(), (&mut status as *mut u32).cast(), &mut length, null_mut()) } == 0 { return Err(attempt.windows("headers")); }
     if status == 429 {
         let header = wide("Retry-After");
         let mut buffer = [0u16; 32];
@@ -534,34 +583,44 @@ fn http(endpoint: &Endpoint, method: &str, route: &str, bearer: Option<&str>, bo
             Some(String::from_utf16_lossy(&buffer[..buffer.iter().position(|value| *value == 0)
                 .unwrap_or(buffer.len())]))
         } else { None };
-        return Err(rate_limit_error(value.as_deref()));
+        return Err(attempt.failure("status", 0, status, false, rate_limit_error(value.as_deref())));
     }
     // Only this relay status can carry an explicit terminal rejection. Other
     // errors remain uncertain and must not release a pending request.
-    if !matches!(status, 200 | 201 | 202 | 502) { return Err(http_error(status)); }
+    if !matches!(status, 200 | 201 | 202 | 502) {
+        return Err(attempt.failure("status", 0, status, status >= 500, http_error(status)));
+    }
     let mut content = [0u16; 128];
     let mut content_length = (content.len() * 2) as u32;
     if unsafe { WinHttpQueryHeaders(request.0, WINHTTP_QUERY_CONTENT_TYPE, null(), content.as_mut_ptr().cast(),
-        &mut content_length, null_mut()) } == 0 { return Err(service_error()); }
+        &mut content_length, null_mut()) } == 0 {
+        return Err(attempt.failure("content_type", 0, status, true, service_error()));
+    }
     let content = String::from_utf16_lossy(&content[..content.iter().position(|c| *c == 0).unwrap_or(content.len())]);
     if !content.split(';').next().unwrap_or_default().trim().eq_ignore_ascii_case("application/json") {
-        return Err(service_error());
+        return Err(attempt.failure("content_type", 0, status, true, service_error()));
     }
     let mut output = Vec::new();
     loop {
-        let Some(left) = Duration::from_secs(45).checked_sub(started.elapsed()) else { return Err(network_error()); };
-        option(request.0, WINHTTP_OPTION_RECEIVE_TIMEOUT, left.as_millis().min(15000).max(1) as u32)?;
+        let Some(left) = Duration::from_secs(45).checked_sub(attempt.started.elapsed()) else {
+            return Err(attempt.failure("deadline", 12002, status, true, network_error()));
+        };
+        option(request.0, WINHTTP_OPTION_RECEIVE_TIMEOUT, left.as_millis().min(15000).max(1) as u32, &attempt)?;
         let mut buffer = [0u8; 8192];
         let mut read = 0;
         if unsafe { WinHttpReadData(request.0, buffer.as_mut_ptr().cast(), buffer.len() as u32, &mut read) } == 0 {
-            return Err(network_error());
+            return Err(attempt.windows("read"));
         }
         if read == 0 { break; }
         let limit = if status == 502 { 4096 } else { MAX_RESPONSE };
-        if read as usize > buffer.len() || output.len() + read as usize > limit { return Err(service_error()); }
+        if read as usize > buffer.len() || output.len() + read as usize > limit {
+            return Err(attempt.failure("response_size", 0, status, false, service_error()));
+        }
         output.extend_from_slice(&buffer[..read as usize]);
     }
-    if status == 502 && !rejected(status, &output) { return Err(http_error(status)); }
+    if status == 502 && !rejected(status, &output) {
+        return Err(attempt.failure("status", 0, status, true, http_error(status)));
+    }
     Ok((status, output))
 }
 
@@ -577,8 +636,8 @@ fn rejected(status: u32, bytes: &[u8]) -> bool {
 
 fn http_error(status: u32) -> String {
     match status {
-        401 | 403 => message("当前设备暂未匹配到这条反馈的跟进权限，如需查看或补充，请直接前往 GitHub 页面。",
-            "This computer does not have permission to update that feedback. View or update the issue on GitHub."),
+        401 | 403 => message("反馈请求被拒绝，请检查网络访问限制或反馈服务配置。",
+            "The feedback request was denied. Check network restrictions or feedback service configuration."),
         404 => message("未找到这条反馈，请稍后重试或前往 GitHub 查看。",
             "This feedback could not be found. Retry later or view it on GitHub."),
         409 => message("反馈请求暂时无法完成，请稍后重试。",
@@ -1158,7 +1217,7 @@ mod tests {
             description: "Battery reading is unavailable.".into(), diagnostics: None, images: vec![], capture: None }
     }
 
-    fn raw_capture(hex: &str) -> Vec<u8> {
+    pub(super) fn raw_capture(hex: &str) -> Vec<u8> {
         let header = serde_json::json!({"schema":1, "app":"1.4.10", "started_unix_ms":1795651200000u64,
             "vendor_id":4660, "product_id":22136, "usage_page":65280, "usage":1,
             "input_bytes":64, "output_bytes":64, "feature_bytes":0,
@@ -1242,6 +1301,40 @@ mod tests {
             "https://feedback.example/%2fsecret", "https://feedback.example/a//b", "https://a:0", "https://a:65536",
             "https://a\\b", "https://a\r\nX:1", "https://a./", "https://-a.example", "", "https://"] {
             assert!(parse_endpoint(url).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn relay_domain_migrates_only_the_known_shared_service() {
+        assert_eq!(selected_endpoint(None), Some(DEFAULT_ENDPOINT));
+        assert_eq!(selected_endpoint(Some(LEGACY_ENDPOINT)), Some(DEFAULT_ENDPOINT));
+        assert_eq!(selected_endpoint(Some("https://custom.example")), Some("https://custom.example"));
+        assert!(selected_endpoint(Some("")).is_none());
+        assert!(selected_endpoint(Some("http://insecure.example")).is_none());
+    }
+
+    #[test]
+    fn failover_reuses_the_same_request_and_only_visits_the_shared_relay() {
+        let endpoint = parse_endpoint(DEFAULT_ENDPOINT).unwrap();
+        let body = serde_json::to_vec(&draft()).unwrap();
+        let mut visits = Vec::new();
+        let result = with_failover(&endpoint, |endpoint, attempt| {
+            visits.push((endpoint.host.clone(), body.clone()));
+            if attempt == 1 { Err(TransportFailure { message: "timeout".into(), retry_endpoint: true }) }
+            else { Ok(201) }
+        }).unwrap();
+        assert_eq!(result, 201);
+        assert_eq!(visits.len(), 2);
+        assert_eq!(visits[0].1, visits[1].1);
+        assert_eq!(visits[1].0, parse_endpoint(LEGACY_ENDPOINT).unwrap().host);
+        for (endpoint, retry_endpoint) in [(endpoint, false), (parse_endpoint("https://custom.example").unwrap(), true)] {
+            let mut calls = 0;
+            let result: Result<(), _> = with_failover(&endpoint, |_, _| {
+                calls += 1;
+                Err(TransportFailure { message: "denied".into(), retry_endpoint })
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, 1);
         }
     }
 

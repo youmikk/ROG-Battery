@@ -2,25 +2,25 @@ use super::*;
 use std::path::PathBuf;
 
 pub fn export_draft(draft: &Draft, root: &Path) -> Result<PathBuf, String> {
-    save(draft, crate::gui::APP_VERSION, None, root)
+    save(draft, crate::gui::APP_VERSION, None, None, root)
 }
 
 pub fn export_local(request_id: &str, root: &Path) -> Result<PathBuf, String> {
     if !uuid(request_id) { return Err(invalid()); }
     let entry = with_history(false, |history| history.entries.iter()
         .find(|entry| entry.request_id == request_id).cloned().ok_or_else(damaged))?;
-    save(&entry.draft, &entry.app_version, Some(&entry.public()), root)
+    save(&entry.draft, &entry.app_version, Some(&entry.public()), entry.pending_reply.as_ref().map(|reply| reply.body.as_str()), root)
 }
 
-fn save(draft: &Draft, version: &str, receipt: Option<&Entry>, root: &Path) -> Result<PathBuf, String> {
-    save_with(draft, version, receipt, root, |path, bytes| {
+fn save(draft: &Draft, version: &str, receipt: Option<&Entry>, followup: Option<&str>, root: &Path) -> Result<PathBuf, String> {
+    save_with(draft, version, receipt, followup, root, |path, bytes| {
         let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
         file.write_all(bytes)?;
         file.sync_all()
     })
 }
 
-fn save_with(draft: &Draft, version: &str, receipt: Option<&Entry>, root: &Path,
+fn save_with(draft: &Draft, version: &str, receipt: Option<&Entry>, followup: Option<&str>, root: &Path,
     mut write: impl FnMut(&Path, &[u8]) -> std::io::Result<()>) -> Result<PathBuf, String> {
     let report = fallback_version(draft, version)?.markdown;
     let folder = root.join(format!("X-Battery-feedback-{}-{}", now(), new_uuid()?));
@@ -41,6 +41,11 @@ fn save_with(draft: &Draft, version: &str, receipt: Option<&Entry>, root: &Path,
             write(&folder.join("raw.jsonl"), &bytes).map_err(|error| storage_io_error(("导出采集", "Export capture"), error))?;
             attachments.push("raw.jsonl".into());
         }
+        if let Some(body) = followup {
+            write(&folder.join("follow-up.txt"), body.as_bytes())
+                .map_err(|error| storage_io_error(("导出补充说明", "Export follow-up"), error))?;
+            attachments.push("follow-up.txt".into());
+        }
         let manifest = serde_json::json!({
             "schema": 1, "appVersion": version, "category": draft.category, "device": draft.device,
             "description": draft.description, "diagnostics": draft.diagnostics, "attachments": attachments,
@@ -49,6 +54,9 @@ fn save_with(draft: &Draft, version: &str, receipt: Option<&Entry>, root: &Path,
         let manifest = serde_json::to_vec_pretty(&manifest).map_err(|_| invalid())?;
         write(&folder.join("feedback.json"), &manifest).map_err(|error| storage_io_error(("导出反馈", "Export feedback"), error))?;
         write(&folder.join("report.md"), report.as_bytes()).map_err(|error| storage_io_error(("导出说明", "Export report"), error))?;
+        let network = crate::feedback::software::network_summary();
+        write(&folder.join("network-summary.txt"), network.as_bytes())
+            .map_err(|error| storage_io_error(("导出网络诊断", "Export network diagnostics"), error))?;
         Ok(())
     })();
     if result.is_err() {
@@ -60,7 +68,7 @@ fn save_with(draft: &Draft, version: &str, receipt: Option<&Entry>, root: &Path,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::tests::{draft, screenshot, Scratch};
+    use super::super::tests::{draft, screenshot, raw_capture, Scratch};
 
     #[test]
     fn offline_export_keeps_attachments_and_original_version_without_followup_credentials() {
@@ -69,8 +77,12 @@ mod tests {
         let screenshot = screenshot();
         let original = STANDARD.decode(&screenshot.data_base64).unwrap();
         draft.images.push(screenshot);
-        let folder = save(&draft, "1.4.9", None, &scratch.0).unwrap();
+        let raw = raw_capture("AABBCC");
+        draft.capture = Some(capture(&raw).unwrap());
+        let folder = save(&draft, "1.4.9", None, Some("Pending follow-up"), &scratch.0).unwrap();
         assert_eq!(fs::read(folder.join("screenshot-1.png")).unwrap(), original);
+        assert_eq!(fs::read(folder.join("raw.jsonl")).unwrap(), raw);
+        assert_eq!(fs::read_to_string(folder.join("follow-up.txt")).unwrap(), "Pending follow-up");
         let manifest = fs::read_to_string(folder.join("feedback.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         assert_eq!(value["appVersion"], "1.4.9");
@@ -84,7 +96,7 @@ mod tests {
         let scratch = Scratch::new();
         let marker = scratch.0.join("keep.txt");
         fs::write(&marker, b"keep").unwrap();
-        assert!(save_with(&draft(), "1.4.9", None, &scratch.0, |_, _|
+        assert!(save_with(&draft(), "1.4.9", None, None, &scratch.0, |_, _|
             Err(std::io::Error::from(std::io::ErrorKind::StorageFull))).is_err());
         assert_eq!(fs::read_dir(&scratch.0).unwrap().count(), 1);
         assert_eq!(fs::read(marker).unwrap(), b"keep");

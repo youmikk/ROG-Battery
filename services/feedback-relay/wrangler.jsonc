@@ -4,9 +4,10 @@
   "main": "src/index.mjs",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
+  "routes": [{ "pattern": "battery.youmikk.me", "custom_domain": true }],
   "observability": { "enabled": false },
   "vars": {
-    "PUBLIC_BASE_URL": "https://r-battery-feedback.a2424729779.workers.dev",
+    "PUBLIC_BASE_URL": "https://battery.youmikk.me",
     "GITHUB_AUTHOR_LOGIN": "youmikk"
   },
   "durable_objects": {

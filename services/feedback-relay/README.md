@@ -59,6 +59,10 @@ node --test test/relay.test.mjs
 
 使用自有域名时，先把域名绑定到此 Worker，再设置 `PUBLIC_BASE_URL`。截图永久引用这个源，部署后应保持域名稳定。
 
+当前主入口为 `https://battery.youmikk.me`，保留原 `workers.dev` 地址。两个域名必须绑定同一 Worker 和同一 `FEEDBACK` Durable Object。桌面端遇到传输或服务端临时错误时，使用原请求正文、UUID 和回复密钥尝试备用入口；限流和明确拒绝不切换。自定义其他服务地址不会自动转发到本项目中继。
+
+应用中的“我的反馈”支持重新发送、导出文件、删除单条和清空本地记录。导出目录包含说明、诊断、尚在本地保留的截图及 `raw.jsonl`，不包含跟进密钥。已确认成功的记录会释放本地附件副本。删除本地记录会移除应用内跟进权限，GitHub 议题保留。
+
 GitHub Token 可更换，但保持发帖账号与 `GITHUB_AUTHOR_LOGIN` 一致，才能恢复该账号仍未确认的旧提交。**不要直接轮换 `FEEDBACK_SECRET`、更改 Durable Object 名称 `coordinator-v1` 或清空持久化记录**：这些变动会破坏旧反馈的回复认证或幂等记录。需要轮换时先设计旧密钥兼容和数据迁移。
 
 `observability.enabled` 默认关闭，服务没有正文、凭据或截图日志。Cloudflare 账户自身的访问日志/分析配置由维护者管理；不要额外开启请求体或 Authorization 日志。`.dev.vars`、`.wrangler` 和本地环境文件已加入本目录 `.gitignore`。
