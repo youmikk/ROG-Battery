@@ -19,6 +19,8 @@ const DRAIN_BATCH_LIMIT: usize = 32;
 #[derive(Default)]
 struct StatusState {
     sample: Option<(Instant, Option<(Battery, Dpi)>, usize)>,
+    generation: u64,
+    awaiting_report: bool,
     failed: bool,
 }
 
@@ -27,9 +29,13 @@ impl StatusState {
         if frame.first() == Some(&STATUS_REPORT) {
             if let Some(parsed) = parse_status(frame) {
                 self.sample = Some((now, Some(parsed), frame.len()));
+                self.generation = self.generation.wrapping_add(1);
+                self.awaiting_report = false;
             } else if frame.len() >= 9 && frame[7] == 0 && frame[2] <= 6 {
                 // 完整的离线状态保留为状态证据；损坏报文不覆盖最后有效电量。
                 self.sample = Some((now, None, frame.len()));
+                self.generation = self.generation.wrapping_add(1);
+                self.awaiting_report = false;
             }
         }
     }
@@ -43,17 +49,24 @@ impl StatusState {
         self.recent(now).filter(|s|after.is_none_or(|after|s.0>after))
     }
 
-    /// 在板载写入已校验成功后同步缓存的 DPI 状态，避免排序或增删改变活动档位索引时触发误判回退。
-    fn sync_dpi(&mut self, profile: u8, active: u8, x: u16, y: u16) {
-        if self.failed {
-            return;
+    fn invalidate_sync(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.awaiting_report = true;
+    }
+
+    fn sync_dpi(&mut self, generation: u64, now: Instant, profile: u8, active: u8, x: u16, y: u16) -> bool {
+        if self.generation != generation || self.awaiting_report || self.recent(now).is_none() {
+            return false;
         }
         if let Some((_, Some((_, dpi)), _)) = self.sample.as_mut() {
             dpi.profile = Some(u16::from(profile));
             dpi.active_stage = Some(active);
             dpi.current = Some(x);
             dpi.current_y = Some(y);
+            self.generation = self.generation.wrapping_add(1);
+            return true;
         }
+        false
     }
 }
 
@@ -62,6 +75,12 @@ struct StatusReader {
     state: Mutex<StatusState>,
     changed: Condvar,
     stop: AtomicBool,
+}
+
+/// 与一次状态预读原子取得的缓存栅栏；仅用于该次写入的完整回读校验成功后。
+pub(super) struct StatusFence {
+    session: Arc<StatusReader>,
+    generation: u64,
 }
 
 static READERS: OnceLock<Mutex<BTreeMap<String, Arc<StatusReader>>>> = OnceLock::new();
@@ -150,6 +169,7 @@ fn status_reader(interface: &HidInterface) -> Arc<StatusReader> {
                 worker.changed.notify_all();
                 break;
             } else if last_input.elapsed() >= SILENT_REOPEN {
+                worker.state.lock().unwrap_or_else(|error| error.into_inner()).invalidate_sync();
                 drop(device);
                 let reopen_started = Instant::now();
                 match HidDevice::open_read_only(&interface) {
@@ -361,13 +381,13 @@ fn read_with(target: &Target,
     let Some((mut taken, mut battery, status)) = read_status(FIRST_REPORT_WAIT)? else {
         return Ok(offline_snapshot(target));
     };
-    let (mut dpi, mut polling_rate) = read_config(&status).unwrap_or((status, Default::default()));
+    let (mut dpi, mut polling_rate) = read_config(&status).unwrap_or_else(|_| (status.clone(), Default::default()));
     match read_status(Duration::ZERO) {
         Ok(Some((new_taken, new_battery, new_status))) => {
             taken = new_taken;
             battery = new_battery;
-            if dpi.profile != new_status.profile || dpi.active_stage != new_status.active_stage
-                || dpi.current != new_status.current || dpi.current_y != new_status.current_y {
+            if status.profile != new_status.profile || status.active_stage != new_status.active_stage
+                || status.current != new_status.current || status.current_y != new_status.current_y {
                 dpi = new_status;
                 polling_rate = Default::default();
             }
@@ -382,6 +402,15 @@ fn read_with(target: &Target,
         target: target.clone(), battery: Some(battery), dpi, connected: true,
         battery_unavailable: false, battery_at: Some(taken), polling_rate,
     })
+}
+
+#[cfg(test)]
+pub(super) fn read_with_status_for_test(target: &Target, status: &Dpi,
+    configured: (Dpi, PollingRate)) -> Snapshot {
+    let measured = Instant::now();
+    let battery = Battery { percent: Some(75), estimated_percent: None, charging: Some(false),
+        voltage_mv: None, approximate: false, level: None };
+    read_with(target, |_| Ok(Some((measured, battery.clone(), status.clone()))), |_| Ok(configured)).unwrap()
 }
 
 impl DeviceBackend for Rapoo {
@@ -447,6 +476,20 @@ pub(super) fn latest_status(target:&Target,after:Option<Instant>,wait:Duration)-
         .ok_or_else(|| crate::tr!("暂未收到设备状态更新，请轻动鼠标唤醒后再试").into())
 }
 
+/// 在事务开始前调用；返回的栅栏不能在写入完成后重新取得以绕过更新的遥测。
+pub(super) fn latest_status_fenced(target: &Target, after: Option<Instant>, wait: Duration)
+    -> Result<(Instant, Battery, Dpi, StatusFence), String> {
+    let session = status_reader(target.hid()?);
+    fenced_status_from_session(target, &session, after, wait)
+}
+
+fn fenced_status_from_session(target: &Target, session: &Arc<StatusReader>, after: Option<Instant>,
+    wait: Duration) -> Result<(Instant, Battery, Dpi, StatusFence), String> {
+    let (taken, battery, dpi, generation) = sample_from_session(target, session, after, wait, true)?
+        .ok_or_else(|| crate::tr!("暂未收到设备状态更新，请轻动鼠标唤醒后再试").to_string())?;
+    Ok((taken, battery, dpi, StatusFence { session: Arc::clone(session), generation }))
+}
+
 fn latest_sample(target: &Target, after: Option<Instant>, wait: Duration)
     -> Result<Option<(Instant, Battery, Dpi)>, String> {
     let session=status_reader(target.hid()?);
@@ -455,13 +498,20 @@ fn latest_sample(target: &Target, after: Option<Instant>, wait: Duration)
 
 fn status_from_session(target: &Target, session: &StatusReader, after: Option<Instant>,
     wait: Duration) -> Result<Option<(Instant, Battery, Dpi)>, String> {
+    sample_from_session(target, session, after, wait, false)
+        .map(|sample| sample.map(|(taken, battery, dpi, _)| (taken, battery, dpi)))
+}
+
+fn sample_from_session(target: &Target, session: &StatusReader, after: Option<Instant>,
+    wait: Duration, require_fence: bool) -> Result<Option<(Instant, Battery, Dpi, u64)>, String> {
     let started=Instant::now();
     let state=session.state.lock().unwrap_or_else(|e|e.into_inner());
-    let (state,_)=session.changed.wait_timeout_while(state,wait,|s| !s.failed &&
-        s.confirmed_after(Instant::now(),after).is_none())
+    let (state,_)=session.changed.wait_timeout_while(state,wait,|s| !s.failed && !session.stop.load(Ordering::Acquire) &&
+        (s.confirmed_after(Instant::now(),after).is_none() || (require_fence && s.awaiting_report)))
         .unwrap_or_else(|e|e.into_inner());
-    let sample=state.confirmed_after(Instant::now(),after);
-    let result=sample.map(|s|s.1.clone().map(|(battery,dpi)|(s.0,battery,dpi)));
+    let sample=state.confirmed_after(Instant::now(),after)
+        .filter(|_| !session.stop.load(Ordering::Acquire) && !(require_fence && state.awaiting_report));
+    let result=sample.map(|s|s.1.clone().map(|(battery,dpi)|(s.0,battery,dpi,state.generation)));
     let outcome = match &result {
         Some(Some(_)) => trace::Outcome::Ok,
         Some(None) => trace::Outcome::Offline,
@@ -473,20 +523,29 @@ fn status_from_session(target: &Target, session: &StatusReader, after: Option<In
     result.ok_or_else(||crate::tr!("暂未收到设备状态更新，请轻动鼠标唤醒后再试").into())
 }
 
-/// 将已校验的板载 DPI 档位写入结果同步到状态监听缓存，防止刷新竞态短暂退化为只读页。
-pub(super) fn sync_status_dpi(target: &Target, profile: u8, active: u8, x: u16, y: u16) {
+/// 仅覆盖栅栏对应的未变化采样；返回 false 时保留现有遥测，不重试，也不更新电量或时间。
+pub(super) fn sync_status_dpi(target: &Target, fence: &StatusFence, profile: u8, active: u8, x: u16, y: u16) -> bool {
     let Ok(interface) = target.hid() else {
-        return;
+        return false;
     };
-    let session = {
-        let sessions = readers().lock().unwrap_or_else(|error| error.into_inner());
-        sessions.get(&interface.path).cloned()
+    let sessions = readers().lock().unwrap_or_else(|error| error.into_inner());
+    let Some(session) = sessions.get(&interface.path) else {
+        return false;
     };
-    let Some(session) = session else {
-        return;
-    };
-    session.state.lock().unwrap_or_else(|error| error.into_inner()).sync_dpi(profile, active, x, y);
-    session.changed.notify_all();
+    sync_dpi_in_session(session, fence, profile, active, x, y)
+}
+
+fn sync_dpi_in_session(session: &Arc<StatusReader>, fence: &StatusFence,
+    profile: u8, active: u8, x: u16, y: u16) -> bool {
+    if !Arc::ptr_eq(session, &fence.session) || session.stop.load(Ordering::Acquire) {
+        return false;
+    }
+    let updated = session.state.lock().unwrap_or_else(|error| error.into_inner())
+        .sync_dpi(fence.generation, Instant::now(), profile, active, x, y);
+    if updated {
+        session.changed.notify_all();
+    }
+    updated
 }
 
 #[cfg(test)]
@@ -499,6 +558,94 @@ mod tests {
             input_len: 19, output_len: 0, feature_len: 0, serial: String::new(),
             product: "Rapoo fixture".into(), path: "rapoo-isolated-fixture".into(),
         }, 0)
+    }
+
+    fn readonly_configuration(status: &Dpi) -> (Dpi, PollingRate) {
+        let values = vec![400, 800, 1600, 3200, 6400, 12800, 25600];
+        let stages: Vec<_> = values.iter().enumerate().map(|(index, &value)|
+            crate::device::DpiStage { index: index as u8, value }).collect();
+        let stage_y = stages.iter().map(|stage| (stage.index, stage.value)).collect();
+        (Dpi { current: status.current, current_y: status.current_y, profile: Some(2),
+            values, stages, stage_y, configuration_token: Some(42), ..Default::default() },
+            PollingRate { current: Some(125), values: vec![125, 500, 1000], ..Default::default() })
+    }
+
+    #[test]
+    fn review_rapoo_read_pipeline_must_keep_readonly_configuration() {
+        for profile in [None, Some(0), Some(2)] {
+            let mut status = parse_status(&report()).unwrap().1;
+            status.profile = profile;
+            let configured = readonly_configuration(&status);
+            let sample = read_with_status_for_test(&test_target(), &status, configured.clone());
+            assert!(sample.connected);
+            assert_eq!(sample.dpi, configured.0);
+            assert_eq!(sample.polling_rate, configured.1);
+            assert_eq!(sample.dpi.stages.len(), 7);
+            assert_eq!(sample.dpi.active_stage, None);
+            assert!(!sample.dpi.stage_writable);
+            assert!(!sample.dpi.stage_editable);
+            assert!(!sample.polling_rate.writable);
+        }
+    }
+
+    #[test]
+    fn battery_only_recheck_preserves_configuration_and_its_write_permissions() {
+        for writable in [false, true] {
+            let target = test_target();
+            let session = StatusReader::default();
+            let updated_at = Instant::now();
+            session.state.lock().unwrap().receive(&report(), updated_at - Duration::from_secs(1));
+            let status = parse_status(&report()).unwrap().1;
+            let (mut configured, mut rate) = readonly_configuration(&status);
+            if writable {
+                configured.profile = status.profile;
+                configured.active_stage = status.active_stage;
+                configured.stage_writable = true;
+                configured.stage_editable = true;
+                rate.writable = true;
+            }
+            let sample = read_with(&target,
+                |wait| status_from_session(&target, &session, None, wait),
+                |_| {
+                    let mut newer = report();
+                    newer[7] = 2;
+                    newer[8] = 60;
+                    session.state.lock().unwrap().receive(&newer, updated_at);
+                    Ok((configured.clone(), rate.clone()))
+                }).unwrap();
+            assert_eq!(sample.dpi, configured);
+            assert_eq!(sample.polling_rate, rate);
+            assert_eq!(sample.battery_at, Some(updated_at));
+            let battery = sample.battery.unwrap();
+            assert_eq!(battery.percent, Some(60));
+            assert_eq!(battery.charging, Some(true));
+        }
+    }
+
+    #[test]
+    fn changed_raw_status_invalidates_configuration_even_if_projected_fields_match() {
+        for byte in [2, 3, 5, 12] {
+            let target = test_target();
+            let session = StatusReader::default();
+            let measured = Instant::now();
+            session.state.lock().unwrap().receive(&report(), measured);
+            let mut newer = report();
+            newer[byte] += 1;
+            let expected = parse_status(&newer).unwrap().1;
+            let sample = read_with(&target,
+                |wait| status_from_session(&target, &session, None, wait),
+                |_| {
+                    session.state.lock().unwrap().receive(&newer, measured);
+                    let (mut configured, mut rate) = readonly_configuration(&expected);
+                    configured.profile = expected.profile;
+                    configured.active_stage = expected.active_stage;
+                    configured.stage_editable = true;
+                    rate.writable = true;
+                    Ok((configured, rate))
+                }).unwrap();
+            assert_eq!(sample.dpi, expected);
+            assert_eq!(sample.polling_rate, PollingRate::default());
+        }
     }
 
     #[test]
@@ -784,14 +931,190 @@ mod tests {
         let now = Instant::now();
         let mut state = StatusState::default();
         state.receive(&report(), now);
-        state.sync_dpi(2, 1, 400, 400);
+        let generation = state.generation;
+        assert!(state.sync_dpi(generation, now, 2, 1, 400, 400));
         let sample = state.recent(now + Duration::from_secs(1)).unwrap();
         assert_eq!(sample.0, now);
+        assert_eq!(sample.2, report().len());
         let (battery, dpi) = sample.1.as_ref().unwrap();
         assert_eq!(battery.percent, Some(75));
+        assert_eq!(battery.charging, Some(false));
         assert_eq!(dpi.profile, Some(2));
         assert_eq!(dpi.active_stage, Some(1));
         assert_eq!(dpi.current, Some(400));
         assert_eq!(dpi.current_y, Some(400));
+        assert!(!state.sync_dpi(generation, now, 3, 2, 1600, 1600));
+        assert!(state.confirmed_after(now, Some(now)).is_none());
+        assert!(state.recent(now + SAMPLE_LIFETIME).is_none());
+    }
+
+    #[test]
+    fn review_rapoo_sync_must_preserve_newer_device_report() {
+        let written_at = Instant::now();
+        for interval in [Duration::ZERO, Duration::from_millis(1)] {
+            let mut state = StatusState::default();
+            state.receive(&report(), written_at);
+            let generation = state.generation;
+            let mut newer = report();
+            newer[2] = 2;
+            newer[3..5].copy_from_slice(&1600u16.to_le_bytes());
+            newer[5..7].copy_from_slice(&1600u16.to_le_bytes());
+            newer[12] = 3;
+            state.receive(&newer, written_at + interval);
+            assert!(!state.sync_dpi(generation, written_at + Duration::from_secs(1), 2, 1, 850, 850));
+            let sample = state.recent(written_at + Duration::from_secs(1)).unwrap();
+            let dpi = &sample.1.as_ref().unwrap().1;
+            assert_eq!(sample.0, written_at + interval);
+            assert_eq!((dpi.profile, dpi.active_stage, dpi.current, dpi.current_y),
+                (Some(3), Some(2), Some(1600), Some(1600)));
+        }
+    }
+
+    #[test]
+    fn every_accepted_report_during_a_write_invalidates_the_pre_read_fence() {
+        for battery_changed in [false, true] {
+            let session = Arc::new(StatusReader::default());
+            let measured = Instant::now();
+            session.state.lock().unwrap().receive(&report(), measured);
+            let (taken, battery, dpi, fence) = fenced_status_from_session(
+                &test_target(), &session, None, Duration::ZERO).unwrap();
+            assert_eq!(taken, measured);
+            assert_eq!(battery.percent, Some(75));
+            assert_eq!(dpi.current, Some(800));
+            let mut newer = report();
+            if battery_changed { newer[8] = 60; }
+            session.state.lock().unwrap().receive(&newer, measured);
+            assert!(!sync_dpi_in_session(&session, &fence, 2, 1, 850, 850));
+            let state = session.state.lock().unwrap();
+            let (battery, dpi) = state.sample.as_ref().unwrap().1.as_ref().unwrap();
+            assert_eq!(battery.percent, Some(if battery_changed { 60 } else { 75 }));
+            assert_eq!(dpi.current, Some(800));
+        }
+    }
+
+    #[test]
+    fn invalid_frames_do_not_invalidate_fence_or_renew_sample() {
+        let now = Instant::now();
+        let mut state = StatusState::default();
+        state.receive(&report(), now);
+        let generation = state.generation;
+        let mut invalid = report();
+        invalid[8] = 101;
+        for frame in [vec![6, 1, 2], vec![7, 0], invalid] {
+            state.receive(&frame, now + Duration::from_secs(1));
+        }
+        assert!(state.sync_dpi(generation, now + Duration::from_secs(1), 2, 1, 850, 850));
+        assert_eq!(state.sample.as_ref().unwrap().0, now);
+        assert_eq!(state.sample.as_ref().unwrap().1.as_ref().unwrap().0.percent, Some(75));
+    }
+
+    #[test]
+    fn offline_then_identical_reconnect_cannot_reuse_a_fence() {
+        let session = Arc::new(StatusReader::default());
+        let measured = Instant::now();
+        session.state.lock().unwrap().receive(&report(), measured);
+        let (_, _, _, fence) = fenced_status_from_session(
+            &test_target(), &session, None, Duration::ZERO).unwrap();
+        let mut offline = report();
+        offline[7] = 0;
+        session.state.lock().unwrap().receive(&offline, measured);
+        assert!(!sync_dpi_in_session(&session, &fence, 2, 1, 850, 850));
+        assert!(session.state.lock().unwrap().sample.as_ref().unwrap().1.is_none());
+        session.state.lock().unwrap().receive(&report(), measured);
+        assert!(!sync_dpi_in_session(&session, &fence, 2, 1, 850, 850));
+        assert_eq!(session.state.lock().unwrap().sample.as_ref().unwrap().1.as_ref().unwrap().1.current, Some(800));
+        let (_, _, _, new_fence) = fenced_status_from_session(
+            &test_target(), &session, None, Duration::ZERO).unwrap();
+        assert!(sync_dpi_in_session(&session, &new_fence, 2, 1, 850, 850));
+    }
+
+    #[test]
+    fn replaced_reader_rejects_old_fence_even_with_identical_sample_and_generation() {
+        let original = Arc::new(StatusReader::default());
+        let replacement = Arc::new(StatusReader::default());
+        let measured = Instant::now();
+        original.state.lock().unwrap().receive(&report(), measured);
+        replacement.state.lock().unwrap().receive(&report(), measured);
+        let (_, _, _, fence) = fenced_status_from_session(
+            &test_target(), &original, None, Duration::ZERO).unwrap();
+        assert_eq!(fence.generation, replacement.state.lock().unwrap().generation);
+        assert!(!sync_dpi_in_session(&replacement, &fence, 2, 1, 850, 850));
+        original.stop.store(true, Ordering::Release);
+        assert!(!sync_dpi_in_session(&original, &fence, 2, 1, 850, 850));
+        let (_, _, _, replacement_fence) = fenced_status_from_session(
+            &test_target(), &replacement, None, Duration::ZERO).unwrap();
+        assert!(sync_dpi_in_session(&replacement, &replacement_fence, 2, 1, 850, 850));
+    }
+
+    #[test]
+    fn silent_reopen_preserves_battery_but_requires_a_real_report_for_a_new_fence() {
+        let target = test_target();
+        let session = Arc::new(StatusReader::default());
+        let measured = Instant::now();
+        session.state.lock().unwrap().receive(&report(), measured);
+        let (_, _, _, fence) = fenced_status_from_session(&target, &session, None, Duration::ZERO).unwrap();
+        session.state.lock().unwrap().invalidate_sync();
+        assert!(!sync_dpi_in_session(&session, &fence, 2, 1, 850, 850));
+        assert!(fenced_status_from_session(&target, &session, None, Duration::ZERO).is_err());
+        let (taken, battery, dpi) = status_from_session(&target, &session, None, Duration::ZERO).unwrap().unwrap();
+        assert_eq!(taken, measured);
+        assert_eq!(battery.percent, Some(75));
+        assert_eq!(dpi.current, Some(800));
+        session.state.lock().unwrap().receive(&report(), measured);
+        assert!(!sync_dpi_in_session(&session, &fence, 2, 1, 850, 850));
+        let (_, _, _, new_fence) = fenced_status_from_session(&target, &session, None, Duration::ZERO).unwrap();
+        assert!(sync_dpi_in_session(&session, &new_fence, 2, 1, 850, 850));
+    }
+
+    #[test]
+    fn expired_or_failed_samples_cannot_be_synchronized() {
+        let measured = Instant::now();
+        let mut state = StatusState::default();
+        assert!(!state.sync_dpi(state.generation, measured, 2, 1, 850, 850));
+        state.receive(&report(), measured);
+        let generation = state.generation;
+        assert!(!state.sync_dpi(generation, measured + SAMPLE_LIFETIME, 2, 1, 850, 850));
+        state.failed = true;
+        assert!(!state.sync_dpi(generation, measured, 2, 1, 850, 850));
+        let (battery, dpi) = state.sample.as_ref().unwrap().1.as_ref().unwrap();
+        assert_eq!(battery.percent, Some(75));
+        assert_eq!(dpi.current, Some(800));
+        assert_eq!(state.sample.as_ref().unwrap().0, measured);
+        assert_eq!(state.generation, generation);
+    }
+
+    #[test]
+    fn unavailable_status_cannot_issue_a_fence_with_zero_wait() {
+        for unavailable in ["empty", "offline", "failed", "stopped", "expired"] {
+            let session = Arc::new(StatusReader::default());
+            {
+                let mut state = session.state.lock().unwrap();
+                let mut frame = report();
+                if unavailable == "offline" { frame[7] = 0; }
+                if unavailable != "empty" {
+                    let measured = Instant::now() - if unavailable == "expired" { SAMPLE_LIFETIME } else { Duration::ZERO };
+                    state.receive(&frame, measured);
+                }
+                state.failed = unavailable == "failed";
+                session.stop.store(unavailable == "stopped", Ordering::Release);
+            }
+            assert!(fenced_status_from_session(&test_target(), &session, None, Duration::ZERO).is_err(), "{unavailable}");
+        }
+    }
+
+    #[test]
+    fn fenced_sync_is_single_use_and_cannot_confirm_a_new_hardware_report() {
+        let target = test_target();
+        let session = Arc::new(StatusReader::default());
+        let measured = Instant::now() - Duration::from_secs(1);
+        session.state.lock().unwrap().receive(&report(), measured);
+        let (_, _, _, fence) = fenced_status_from_session(&target, &session, None, Duration::ZERO).unwrap();
+        assert!(sync_dpi_in_session(&session, &fence, 2, 1, 850, 850));
+        assert!(!sync_dpi_in_session(&session, &fence, 2, 1, 1600, 1600));
+        assert!(status_from_session(&target, &session, Some(measured), Duration::ZERO).is_err());
+        let (taken, battery, dpi) = status_from_session(&target, &session, None, Duration::ZERO).unwrap().unwrap();
+        assert_eq!(taken, measured);
+        assert_eq!(battery.percent, Some(75));
+        assert_eq!(dpi.current, Some(850));
     }
 }

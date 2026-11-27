@@ -13,6 +13,7 @@ const ACTIVE: u32 = 664;
 const BASE: u32 = 1536;
 const STRIDE: u32 = 1024;
 const SLOTS: usize = 7;
+const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 const RETAIL_RATES: [(u8, u16); 7] = [
     (8, 125), (4, 250), (2, 500), (1, 1000), (132, 2000), (130, 4000), (129, 8000),
 ];
@@ -64,6 +65,24 @@ fn packet(mode: u8, command: u8, address: u32, count: usize, data: &[u8]) -> Opt
 
 #[derive(Debug, PartialEq, Eq)]
 enum Reply<'a> { Busy, Data(&'a [u8]), Rejected }
+
+#[derive(Debug)]
+enum QueryError {
+    NotSent(&'static str),
+    Rejected,
+    Unconfirmed(String),
+}
+
+impl From<QueryError> for String {
+    fn from(error: QueryError) -> Self {
+        match error {
+            QueryError::NotSent(message) => message.into(),
+            QueryError::Rejected => "设备暂未接受此次配置请求".into(),
+            QueryError::Unconfirmed(message) => message,
+        }
+    }
+}
+
 fn reply(frame: &[u8], count: usize) -> Option<Reply<'_>> {
     if frame.len() > LENGTH || !(1..=25).contains(&count) { return None; }
     let data=if frame.first()==Some(&8) {frame.get(1..)?} else {frame};
@@ -89,6 +108,13 @@ impl Channel for Transport {
 
 #[derive(Clone,Debug,PartialEq,Eq)]
 struct Config { profile:u8, x:Vec<u8>, y:Vec<u8>, rate:u8 }
+
+struct RegisterChange {
+    offset: u32,
+    before: Vec<u8>,
+    after: Vec<u8>,
+}
+
 impl Config {
     fn decode(profile:u8, x:Vec<u8>, y:Vec<u8>, rate:u8) -> Result<Self,String> {
         if profile>7 || x.len()!=17 || y.len()!=14 || x[14]>=SLOTS as u8 || x[16]>x[14] {
@@ -132,8 +158,44 @@ impl Config {
         let values=if current.is_some() {table.iter().map(|&(_,hz)|hz).collect()} else {Vec::new()};
         PollingRate {current,values,writable:current.is_some() && self.matches_status(status),..Default::default()}
     }
+    #[cfg(test)]
     fn same_tables(&self,other:&Self)->bool {
         self.profile==other.profile && self.x[..16]==other.x[..16] && self.y==other.y
+    }
+
+    fn changes_to(&self, next: &Self) -> Vec<RegisterChange> {
+        let mut changes = Vec::new();
+        let mut add = |offset, before: &[u8], after: &[u8]| {
+            if before != after {
+                changes.push(RegisterChange { offset, before: before.to_vec(), after: after.to_vec() });
+            }
+        };
+        for slot in 0..SLOTS {
+            let offset = slot * 2;
+            add(X + offset as u32, &self.x[offset..offset + 2], &next.x[offset..offset + 2]);
+            add(Y + offset as u32, &self.y[offset..offset + 2], &next.y[offset..offset + 2]);
+        }
+        add(RATE, &[self.rate], &[next.rate]);
+        if next.x[14] > self.x[14] {
+            add(ENABLE_GEAR, &self.x[14..15], &next.x[14..15]);
+        }
+        add(ACTIVE, &self.x[16..17], &next.x[16..17]);
+        if next.x[14] < self.x[14] {
+            add(ENABLE_GEAR, &self.x[14..15], &next.x[14..15]);
+        }
+        changes
+    }
+
+    fn apply_register(&mut self, offset: u32, bytes: &[u8]) {
+        if offset == RATE {
+            self.rate = bytes[0];
+        } else if (X..X + 17).contains(&offset) {
+            let start = (offset - X) as usize;
+            self.x[start..start + bytes.len()].copy_from_slice(bytes);
+        } else {
+            let start = (offset - Y) as usize;
+            self.y[start..start + bytes.len()].copy_from_slice(bytes);
+        }
     }
 }
 
@@ -144,12 +206,13 @@ impl<C:Channel> Session<C> {
         Self {channel,interface:interface.clone(),mode:if interface.product_id>=0x4000 {0xff} else {0xa5},
             deadline:Instant::now()+Duration::from_secs(2)}
     }
-    fn query(&mut self,command:u8,address:u32,count:usize,data:&[u8])->Result<Vec<u8>,String> {
+    fn query(&mut self,command:u8,address:u32,count:usize,data:&[u8])->Result<Vec<u8>,QueryError> {
         let started=Instant::now();
         let result=(|| {
-            if started>=self.deadline {return Err("等待设备配置响应超时，请唤醒后重试".into());}
-            let p=packet(self.mode,command,address,count,data).ok_or("读取到的设备 DPI 配置异常，请刷新重试")?;
-            self.channel.send(&p)?;
+            if started>=self.deadline {return Err(QueryError::NotSent("等待设备配置响应超时，请唤醒后重试"));}
+            let p=packet(self.mode,command,address,count,data)
+                .ok_or(QueryError::NotSent("读取到的设备 DPI 配置异常，请刷新重试"))?;
+            self.channel.send(&p).map_err(QueryError::Unconfirmed)?;
             // Never resend a write when its acknowledgement is lost.
             for _ in 0..5 {
                 if Instant::now()>=self.deadline {break;}
@@ -157,18 +220,24 @@ impl<C:Channel> Session<C> {
                 let Ok(frame)=self.channel.receive() else {continue;};
                 match reply(&frame,count) {
                     Some(Reply::Data(data))=>return Ok(data.to_vec()),
-                    Some(Reply::Rejected)=>return Err("设备暂未接受此次配置请求".into()),
+                    Some(Reply::Rejected)=>return Err(QueryError::Rejected),
                     _=>{}
                 }
             }
-            Err("暂未获取到设备配置响应，请重试".into())
+            Err(QueryError::Unconfirmed("暂未获取到设备配置响应，请重试".into()))
         })();
         trace::record(&self.interface,BackendId::Rapoo,if command==0xa4 {"read-register"} else {"set-stage"},
             address as u16,command,LENGTH,if result.is_ok(){LENGTH}else{0},started,
-            if result.is_ok(){trace::Outcome::Ok}else{trace::Outcome::NoReply});
+            match &result {
+                Ok(_) => trace::Outcome::Ok,
+                Err(QueryError::Rejected) => trace::Outcome::Rejected(0),
+                Err(_) => trace::Outcome::NoReply,
+            });
         result
     }
-    fn read(&mut self,address:u32,count:usize)->Result<Vec<u8>,String> {self.query(0xa4,address,count,&[])}
+    fn read(&mut self,address:u32,count:usize)->Result<Vec<u8>,String> {
+        self.query(0xa4,address,count,&[]).map_err(String::from)
+    }
     fn profile(&mut self)->Result<u8,String> {
         let p=self.read(PROFILE,1)?[0];
         if p>7 {Err("读取到的设备 DPI 配置异常，请刷新重试".into())} else {Ok(p)}
@@ -194,14 +263,75 @@ impl<C:Channel> Session<C> {
             return Err("设备档位或配置已变化，请刷新后重试".into());
         }
         if before.active()==stage.index {return Ok(before);}
-        if self.profile()?!=before.profile {return Err("设备配置已变化，请刷新后重试".into());}
-        let _=self.query(0xa5,address(before.profile,ACTIVE),1,&[stage.index]);
-        self.deadline=Instant::now()+Duration::from_secs(2);
-        let after=self.config()?;
-        if after.active()!=stage.index || !before.same_tables(&after) || after.rate!=before.rate {
-            return Err("无法确认 DPI 档位切换".into());
+        let mut expected = before.clone();
+        expected.x[16] = stage.index;
+        self.apply_config(&before, &expected)
+    }
+
+    fn read_fresh_config(&mut self, deadline: Instant) -> Result<Config, String> {
+        self.deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+        self.config()
+    }
+
+    fn restore_config(&mut self, before: &Config, current: &Config,
+        applied: &[RegisterChange]) -> Result<(), String> {
+        let deadline = Instant::now() + TRANSACTION_TIMEOUT;
+        let mut confirmed = current.clone();
+        for change in applied.iter().rev() {
+            if self.read_fresh_config(deadline)? != confirmed {
+                return Err("设备配置已变化，请刷新后重试".into());
+            }
+            let reply = self.query(0xa5, address(before.profile, change.offset),
+                change.before.len(), &change.before);
+            confirmed.apply_register(change.offset, &change.before);
+            let observed = self.read_fresh_config(deadline)?;
+            if observed != confirmed || !matches!(&reply, Ok(_) | Err(QueryError::Unconfirmed(_))) {
+                return Err(reply.err().map(String::from)
+                    .unwrap_or_else(|| "无法确认设备已保存设置，请刷新后检查".into()));
+            }
         }
-        Ok(after)
+        if self.read_fresh_config(deadline)? != *before {
+            return Err("无法确认设备已保存设置，请刷新后检查".into());
+        }
+        Ok(())
+    }
+
+    fn apply_config(&mut self, before: &Config, expected: &Config) -> Result<Config, String> {
+        if before.profile != expected.profile || before.x[15] != expected.x[15] {
+            return Err("设备配置已变化，请刷新后重试".into());
+        }
+        let deadline = Instant::now() + TRANSACTION_TIMEOUT;
+        let mut current = before.clone();
+        let mut applied = Vec::new();
+        for change in before.changes_to(expected) {
+            if self.read_fresh_config(deadline)? != current {
+                return Err("设备配置已变化，请刷新后重试".into());
+            }
+            let reply = self.query(0xa5, address(before.profile, change.offset),
+                change.after.len(), &change.after);
+            let mut next = current.clone();
+            next.apply_register(change.offset, &change.after);
+            let observed = self.read_fresh_config(deadline)?;
+            let accepted = matches!(&reply, Ok(_) | Err(QueryError::Unconfirmed(_)));
+            if observed == next && accepted {
+                current = next;
+                applied.push(change);
+                continue;
+            }
+            if observed != current {
+                return Err("设备配置已变化，请刷新后重试".into());
+            }
+            let error = reply.err().map(String::from)
+                .unwrap_or_else(|| "无法确认设备已保存设置，请刷新后检查".into());
+            return Err(if applied.is_empty() {
+                error
+            } else if self.restore_config(before, &current, &applied).is_ok() {
+                format!("{error}；已恢复原配置")
+            } else {
+                format!("{error}；恢复未完成，请刷新后检查档位")
+            });
+        }
+        Ok(current)
     }
     fn write_sorted_stages(&mut self,before:&Config,mut next:Vec<(u16,u16,bool)>)->Result<Config,String> {
         next.sort_by_key(|&(x,y,_)|(x,y));
@@ -210,34 +340,15 @@ impl<C:Channel> Session<C> {
         let target_max=(new_count-1) as u8;
         let expected_active=next.iter().position(|&(_,_,active)|active)
             .unwrap_or_else(||usize::from(before.active()).min(new_count-1)) as u8;
-        if self.profile()?!=before.profile {return Err("设备配置已变化，请刷新后重试".into());}
-        let mut expected_x=before.x.clone();
-        let mut expected_y=before.y.clone();
-        expected_x[14]=target_max;
-        expected_x[16]=expected_active;
+        let mut expected=before.clone();
+        expected.x[14]=target_max;
+        expected.x[16]=expected_active;
         for (slot,&(x,y,_)) in next.iter().enumerate() {
             let off=slot*2;
-            expected_x[off..off+2].copy_from_slice(&x.to_le_bytes());
-            expected_y[off..off+2].copy_from_slice(&y.to_le_bytes());
-            if expected_x[off..off+2]!=before.x[off..off+2] {
-                let _=self.query(0xa5,address(before.profile,X)+off as u32,2,&expected_x[off..off+2]);
-            }
-            if expected_y[off..off+2]!=before.y[off..off+2] {
-                let _=self.query(0xa5,address(before.profile,Y)+off as u32,2,&expected_y[off..off+2]);
-            }
+            expected.x[off..off+2].copy_from_slice(&x.to_le_bytes());
+            expected.y[off..off+2].copy_from_slice(&y.to_le_bytes());
         }
-        if expected_active!=before.active() {
-            let _=self.query(0xa5,address(before.profile,ACTIVE),1,&[expected_active]);
-        }
-        if target_max!=before.x[14] {
-            let _=self.query(0xa5,address(before.profile,ENABLE_GEAR),1,&[target_max]);
-        }
-        self.deadline=Instant::now()+Duration::from_secs(2);
-        let after=self.config()?;
-        if after.profile!=before.profile || after.x!=expected_x || after.y!=expected_y || after.rate!=before.rate {
-            return Err("无法确认设备已保存设置，请刷新后检查".into());
-        }
-        Ok(after)
+        self.apply_config(before, &expected)
     }
     fn edit(&mut self,stage:DpiStage,token:u64,status:&Dpi,expected_y:u16,x:u16,y:u16)->Result<Config,String> {
         let pid=self.interface.product_id;
@@ -297,14 +408,9 @@ impl<C:Channel> Session<C> {
         let before=self.config()?;
         if !before.matches_status(status) {return Err("设备档位或配置已变化，请刷新后重试".into());}
         if before.rate==code {return Ok(before);}
-        if self.profile()?!=before.profile {return Err("设备配置已变化，请刷新后重试".into());}
-        let _=self.query(0xa5,address(before.profile,RATE),1,&[code]);
-        self.deadline=Instant::now()+Duration::from_secs(2);
-        let after=self.config()?;
-        if after.rate!=code || !before.same_tables(&after) || after.active()!=before.active() {
-            return Err("无法确认设备已保存设置，请刷新后检查".into());
-        }
-        Ok(after)
+        let mut expected = before.clone();
+        expected.rate = code;
+        self.apply_config(&before, &expected)
     }
 }
 
@@ -313,10 +419,11 @@ fn open(target:&Target,interfaces:&[HidInterface])->Result<Session<Transport>,St
     Ok(Session::new(Transport {output:FeatureChannel::open_output(output)?,feature:FeatureChannel::open(feature)?},target.hid()?))
 }
 
-fn sync_after(target:&Target,after:&Config) {
+fn sync_after(target:&Target,fence:&rapoo::StatusFence,after:&Config) {
     let active=usize::from(after.active());
     rapoo::sync_status_dpi(
         target,
+        fence,
         after.profile,
         after.active(),
         Config::axis(&after.x,active),
@@ -351,9 +458,9 @@ pub(super) fn edit(api:&HidApi,target:&Target,stage:DpiStage,context:StageContex
     let interfaces=super::enumeration::scan(api)?.interfaces;
     let key=channel::collection_group(target.hid()?);let lock=channel::lock(&key);
     let _guard=lock.lock().unwrap_or_else(|p|p.into_inner());
-    let (_,_,status)=rapoo::latest_status(target,None,Duration::from_millis(100))?;
+    let (_,_,status,fence)=rapoo::latest_status_fenced(target,None,Duration::from_millis(100))?;
     let after=open(target,&interfaces)?.edit(stage,token,&status,expected_y,x,y)?;
-    sync_after(target,&after);
+    sync_after(target,&fence,&after);
     Ok(())
 }
 
@@ -362,9 +469,9 @@ pub(super) fn add_stage(api:&HidApi,target:&Target,context:StageContext,x:u16,y:
     let interfaces=super::enumeration::scan(api)?.interfaces;
     let key=channel::collection_group(target.hid()?);let lock=channel::lock(&key);
     let _guard=lock.lock().unwrap_or_else(|p|p.into_inner());
-    let (_,_,status)=rapoo::latest_status(target,None,Duration::from_millis(100))?;
+    let (_,_,status,fence)=rapoo::latest_status_fenced(target,None,Duration::from_millis(100))?;
     let after=open(target,&interfaces)?.add_stage(token,&status,x,y)?;
-    sync_after(target,&after);
+    sync_after(target,&fence,&after);
     Ok(())
 }
 
@@ -373,9 +480,9 @@ pub(super) fn remove_stage(api:&HidApi,target:&Target,stage:DpiStage,context:Sta
     let interfaces=super::enumeration::scan(api)?.interfaces;
     let key=channel::collection_group(target.hid()?);let lock=channel::lock(&key);
     let _guard=lock.lock().unwrap_or_else(|p|p.into_inner());
-    let (_,_,status)=rapoo::latest_status(target,None,Duration::from_millis(100))?;
+    let (_,_,status,fence)=rapoo::latest_status_fenced(target,None,Duration::from_millis(100))?;
     let after=open(target,&interfaces)?.remove_stage(stage,token,&status)?;
-    sync_after(target,&after);
+    sync_after(target,&fence,&after);
     Ok(())
 }
 
@@ -617,5 +724,169 @@ mod tests {
         assert!(!dpi.stage_editable);
         assert_eq!(rate.current,Some(125));
         assert!(!rate.writable);
+        let target = Target::new(BackendId::Rapoo, &interface("readonly", 2, 2), 0);
+        let snapshot = rapoo::read_with_status_for_test(&target, &stale, (dpi, rate));
+        assert_eq!(snapshot.dpi.stages.len(), 7);
+        assert_eq!(snapshot.polling_rate.current, Some(125));
+        assert!(!snapshot.dpi.stage_editable);
+        assert!(!snapshot.polling_rate.writable);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum WriteFault { Reject, Ignore, LostAck, Disconnect, ProfileChange, ExternalChange }
+
+    struct FaultyReports {
+        inner: Reports,
+        fail_at: usize,
+        fault: WriteFault,
+        disconnected: bool,
+        attempts: Vec<(u32, Vec<u8>)>,
+        reject_restore: bool,
+    }
+
+    impl Channel for FaultyReports {
+        fn send(&mut self, packet: &[u8]) -> Result<(), String> {
+            if self.disconnected { return Err("disconnected".into()); }
+            if packet[2] != 0xa5 { return self.inner.send(packet); }
+            let register = u32::from_le_bytes(packet[4..8].try_into().unwrap());
+            self.attempts.push((register, packet[8..8 + packet[3] as usize].to_vec()));
+            let attempt = self.attempts.len();
+            if attempt != self.fail_at && !(self.reject_restore && attempt > self.fail_at) {
+                return self.inner.send(packet);
+            }
+            if self.reject_restore && attempt > self.fail_at || matches!(self.fault, WriteFault::Reject) {
+                self.inner.pending.clear();
+                self.inner.pending.push_back(vec![8, 0]);
+                return Ok(());
+            }
+            match self.fault {
+                WriteFault::Ignore => {
+                    self.inner.accept = false;
+                    let result = self.inner.send(packet);
+                    self.inner.accept = true;
+                    result
+                }
+                WriteFault::LostAck => {
+                    self.inner.lose_ack = true;
+                    let result = self.inner.send(packet);
+                    self.inner.lose_ack = false;
+                    result
+                }
+                WriteFault::Disconnect => {
+                    self.disconnected = true;
+                    Err("disconnected".into())
+                }
+                WriteFault::ProfileChange => {
+                    self.inner.change_profile = true;
+                    self.inner.send(packet)
+                }
+                WriteFault::ExternalChange => {
+                    self.inner.send(packet)?;
+                    self.inner.pending.clear();
+                    self.inner.pending.push_back(vec![8, 0]);
+                    Ok(())
+                }
+                WriteFault::Reject => unreachable!(),
+            }
+        }
+
+        fn receive(&mut self) -> Result<Vec<u8>, String> {
+            if self.disconnected { Err("disconnected".into()) } else { self.inner.receive() }
+        }
+    }
+
+    fn fault_session(fail_at: usize, fault: WriteFault) -> Session<FaultyReports> {
+        let mut inner = Reports::new();
+        inner.memory.insert(address(2, ENABLE_GEAR), 2);
+        inner.memory.insert(address(2, ACTIVE), 2);
+        Session::new(FaultyReports { inner, fail_at, fault, disconnected: false,
+            attempts: Vec::new(), reject_restore: false }, &interface("fault-test", 2, 2))
+    }
+
+    fn removal_status() -> Dpi {
+        Dpi { current: Some(1600), current_y: Some(1600), active_stage: Some(2),
+            profile: Some(2), ..Default::default() }
+    }
+
+    #[test]
+    fn stage_removal_rejection_or_ignored_write_restores_each_confirmed_prefix() {
+        for fault in [WriteFault::Reject, WriteFault::Ignore] {
+            for fail_at in 1..=6 {
+                let mut session = fault_session(fail_at, fault);
+                let before = session.config().unwrap();
+                let result = session.remove_stage(DpiStage { index: 0, value: 400 },
+                    before.token(), &removal_status());
+                assert!(result.is_err(), "{fault:?}, write {fail_at}");
+                assert_eq!(session.config().unwrap(), before, "{fault:?}, write {fail_at}");
+                assert_eq!(session.channel.attempts.len(), fail_at + fail_at - 1);
+                assert_eq!(session.channel.inner.memory[&address(2, ENABLE_GEAR)], 2);
+                if fail_at > 1 { assert!(result.unwrap_err().contains("已恢复原配置")); }
+            }
+        }
+    }
+
+    #[test]
+    fn lost_ack_is_confirmed_without_repeating_any_forward_write() {
+        for fail_at in 1..=6 {
+            let mut session = fault_session(fail_at, WriteFault::LostAck);
+            let before = session.config().unwrap();
+            let after = session.remove_stage(DpiStage { index: 0, value: 400 },
+                before.token(), &removal_status()).unwrap();
+            assert_eq!(session.channel.attempts.len(), 6);
+            assert_eq!(Config::axis(&after.x, 0), 800);
+            assert_eq!(Config::axis(&after.y, 0), 800);
+            assert_eq!(Config::axis(&after.x, 1), 1600);
+            assert_eq!(after.active(), 1);
+            assert_eq!(after.x[14], 1);
+        }
+    }
+
+    #[test]
+    fn disconnected_or_changed_profile_stops_writes_without_unverified_restoration() {
+        for fault in [WriteFault::Disconnect, WriteFault::ProfileChange, WriteFault::ExternalChange] {
+            for fail_at in 1..=6 {
+                let mut session = fault_session(fail_at, fault);
+                let before = session.config().unwrap();
+                assert!(session.remove_stage(DpiStage { index: 0, value: 400 },
+                    before.token(), &removal_status()).is_err());
+                assert_eq!(session.channel.attempts.len(), fail_at);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_rollback_stops_before_other_registers_and_reports_incomplete_restore() {
+        let mut session = fault_session(3, WriteFault::Reject);
+        session.channel.reject_restore = true;
+        let before = session.config().unwrap();
+        let error = session.remove_stage(DpiStage { index: 0, value: 400 },
+            before.token(), &removal_status()).unwrap_err();
+        assert!(error.contains("恢复未完成"));
+        assert_eq!(session.channel.attempts.len(), 4);
+        assert_eq!(session.channel.inner.memory[&address(2, ENABLE_GEAR)], 2);
+        assert_eq!(session.channel.inner.memory[&address(2, ACTIVE)], 2);
+    }
+
+    #[test]
+    fn expanding_stages_enables_destination_before_selecting_it() {
+        let mut before = session().config().unwrap();
+        before.x[14] = 0;
+        before.x[16] = 0;
+        let mut after = before.clone();
+        after.x[14] = 1;
+        after.x[16] = 1;
+        let offsets: Vec<_> = before.changes_to(&after).into_iter().map(|change| change.offset).collect();
+        assert_eq!(offsets, [ENABLE_GEAR, ACTIVE]);
+        let offsets: Vec<_> = after.changes_to(&before).into_iter().map(|change| change.offset).collect();
+        assert_eq!(offsets, [ACTIVE, ENABLE_GEAR]);
+    }
+
+    #[test]
+    fn config_verification_cannot_extend_an_expired_transaction() {
+        let mut session = session();
+        let deadline = Instant::now() - Duration::from_millis(1);
+        assert!(session.read_fresh_config(deadline).is_err());
+        assert_eq!(session.deadline, deadline);
+        assert!(session.channel.pending.is_empty());
     }
 }
