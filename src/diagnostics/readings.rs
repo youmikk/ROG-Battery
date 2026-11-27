@@ -71,7 +71,8 @@ impl Timeline {
             let lifetime = state.lifetime.map(|value| value.as_millis().to_string()).unwrap_or_else(|| "unknown".into());
             let battery = state.battery.as_ref().and_then(Battery::display_percent)
                 .map(|value| value.label(false)).unwrap_or_else(|| "unknown".into());
-            let line = format!("at_ms={} seq={} device={device:016x} channel={channel} {} sample={sample} age_ms={age} lifetime_ms={lifetime} connected={} quality={:?} last_percent={battery} displayed={}\n",
+            let charging = charging(state.battery.as_ref());
+            let line = format!("at_ms={} seq={} device={device:016x} channel={channel} {} sample={sample} age_ms={age} lifetime_ms={lifetime} connected={} quality={:?} last_percent={battery} charging={charging} displayed={}\n",
                 event.at_ms, event.sequence, event.surface.name(), state.connected, state.quality, state.displayed);
             bytes += line.len();
             lines.push_back(line);
@@ -86,6 +87,12 @@ impl Timeline {
 }
 
 static TIMELINE: OnceLock<Mutex<Timeline>> = OnceLock::new();
+
+fn charging(battery: Option<&Battery>) -> &'static str {
+    match battery.and_then(|battery| battery.charging) {
+        Some(true) => "true", Some(false) => "false", None => "unknown",
+    }
+}
 
 pub fn observe(surface: Surface, reading: &DeviceReading, measured: Option<Instant>,
     channel: Option<&str>, lifetime: Option<Duration>, displayed: bool, now: Instant) {
@@ -105,6 +112,7 @@ pub fn report(reading: &DeviceReading, measured: Option<Instant>, lifetime: Dura
         super::unix_millis(), lifetime.as_millis());
     let _ = writeln!(report, "Last measured battery: {}", reading.battery.as_ref()
         .and_then(Battery::display_percent).map(|value| value.label(true)).unwrap_or_else(|| "unknown".into()));
+    let _ = writeln!(report, "Last measured charging: {}", charging(reading.battery.as_ref()));
     report.push_str(&TIMELINE.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner()).render(device));
     report
 }
@@ -148,11 +156,30 @@ mod tests {
         timeline.observe(2, Surface::Published, recovered, now + Duration::from_secs(20), 21000);
         let report = timeline.render(1);
         assert!(report.contains("sample-expired"));
-        assert!(report.contains("age_ms=8000 lifetime_ms=8000 connected=true quality=Stale last_percent=75 displayed=false"));
+        assert!(report.contains("age_ms=8000 lifetime_ms=8000 connected=true quality=Stale last_percent=75 charging=false displayed=false"));
         assert!(report.contains("main-input"));
         assert!(report.contains("taskbar-input"));
         assert!(report.contains("at_ms=21000"));
         assert!(!report.contains("device=0000000000000002"));
+    }
+
+    #[test]
+    fn charging_transitions_are_visible_even_when_the_percentage_does_not_change() {
+        let now = Instant::now();
+        let mut timeline = Timeline::default();
+        let mut sample = state(now);
+        for charging in [Some(false), Some(true), None] {
+            sample.battery.as_mut().unwrap().charging = charging;
+            timeline.observe(1, Surface::Published, sample.clone(), now, 1000);
+        }
+        sample.battery = None;
+        timeline.observe(1, Surface::Published, sample, now, 1000);
+        assert_eq!(timeline.events.len(), 4);
+        let report = timeline.render(1);
+        assert!(report.contains("last_percent=75 charging=false"));
+        assert!(report.contains("last_percent=75 charging=true"));
+        assert!(report.contains("last_percent=75 charging=unknown"));
+        assert!(report.contains("last_percent=unknown charging=unknown"));
     }
 
     #[test]

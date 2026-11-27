@@ -47,6 +47,33 @@ struct Event<'a> {
     codes: Vec<ErrorCode>,
     codes_truncated: bool,
     location: Option<String>,
+    network: Option<NetworkFields>,
+}
+
+struct NetworkFields {
+    step: &'static str,
+    os_error: u32,
+    http_status: u16,
+    elapsed_ms: u64,
+    attempt: u32,
+}
+
+fn network_fields(value: &str) -> Option<NetworkFields> {
+    let mut fields = value.split_ascii_whitespace();
+    let step = match fields.next()?.strip_prefix("step=")? {
+        "open" => "open", "configure" => "configure", "connect" => "connect",
+        "request" => "request", "send" => "send", "receive" => "receive",
+        "headers" => "headers", "status" => "status", "content_type" => "content_type",
+        "deadline" => "deadline", "read" => "read", "response_size" => "response_size",
+        _ => return None,
+    };
+    let os_error = u32::try_from(decimal(fields.next()?.strip_prefix("os_error=")?, 10)?).ok()?;
+    let http_status = u16::try_from(decimal(fields.next()?.strip_prefix("http_status=")?, 3)?).ok()?;
+    if http_status != 0 && !(100..=599).contains(&http_status) { return None; }
+    let elapsed_ms = decimal(fields.next()?.strip_prefix("elapsed_ms=")?, 20)?;
+    let attempt = u32::try_from(decimal(fields.next()?.strip_prefix("attempt=")?, 10)?).ok()?;
+    if attempt == 0 || fields.next().is_some() { return None; }
+    Some(NetworkFields { step, os_error, http_status, elapsed_ms, attempt })
 }
 
 fn operation(value: &str) -> &'static str {
@@ -64,6 +91,7 @@ fn operation(value: &str) -> &'static str {
         "device_worker_start_failed" => "device_worker_start_failed",
         "device_identified" => "device_identified",
         "feedback_storage_failed" => "feedback_storage_failed",
+        "feedback_network_failed" => "feedback_network_failed",
         "history_update_failed" => "history_update_failed",
         "history_shutdown_failed" => "history_shutdown_failed",
         "link_enumeration_failed" => "link_enumeration_failed",
@@ -114,7 +142,7 @@ fn known_source(path: &str) -> bool {
     let Some(stem) = file.strip_suffix(".rs") else { return false; };
     let names: &[&str] = match directory {
         "src" => &[
-            "audio", "autostart", "backup", "chart", "cli", "commands", "device", "devices",
+            "audio", "autostart", "backup", "capture", "chart", "cli", "commands", "device", "devices",
             "diagnostics", "dwm", "dynlight", "feedback", "gui", "hid", "history", "i18n",
             "linkstate", "main", "mock", "notifications", "ops", "paths", "proto", "report",
             "settings", "snapshot", "taskbar_widget", "tray_icon", "tray_prefs", "win32", "winrt",
@@ -138,7 +166,8 @@ fn known_source(path: &str) -> bool {
             "titlebar", "tray_popup", "viewdata", "widget",
         ],
         "src/ui/feedback" => &["layout", "state"],
-        "src/feedback" => &["client", "inventory", "software"],
+        "src/gui" => &["device_workers", "rog_refresh", "rapoo_devices"],
+        "src/feedback" => &["capture", "client", "export", "inventory", "software"],
         "src/diagnostics" => &["readings"],
         "src/history" => &["devices", "format", "predict", "store", "tracker"],
         "src/store" => &["api", "mod", "restart", "state"],
@@ -205,6 +234,10 @@ impl Event<'_> {
     }
 
     fn read_message(&mut self, value: &str) {
+        if self.operation == "feedback_network_failed" {
+            self.network = network_fields(value);
+            return;
+        }
         for (marker, hresult, parenthesized) in [
             ("os error ", false, false), ("os_error=", false, false),
             ("GetLastError=", false, false), ("GetLastError()=", false, false),
@@ -248,6 +281,12 @@ impl Event<'_> {
             }
         }
         if self.codes_truncated { line.push_str("; error_codes_truncated=true"); }
+        if let Some(network) = self.network {
+            let _ = write!(line, "; step={}; os_error={}; http_status={}; elapsed_ms={}; attempt={}",
+                network.step, network.os_error, network.http_status, network.elapsed_ms, network.attempt);
+        } else if self.operation == "feedback_network_failed" {
+            line.push_str("; network_fields=missing_or_invalid");
+        }
         if self.operation == "panic" {
             let _ = write!(line, "; source={}", self.location.as_deref().unwrap_or("missing_or_unapproved"));
         }
@@ -267,7 +306,7 @@ fn parse_record(record: &str) -> Option<Event<'_>> {
     };
     let mut event = Event {
         timestamp, version: None, operation: "panic", failed: panic,
-        elapsed: None, codes: Vec::new(), codes_truncated: false, location: None,
+        elapsed: None, codes: Vec::new(), codes_truncated: false, location: None, network: None,
     };
     let mut field = lines.next().unwrap_or_default();
     if let Some(value) = field.strip_prefix("版本: ") {
@@ -295,6 +334,7 @@ fn parse_record(record: &str) -> Option<Event<'_>> {
 
 #[derive(Default)]
 struct Summary {
+    network_only: bool,
     events: VecDeque<String>,
     older_events_omitted: usize,
     unparsed_records: usize,
@@ -305,6 +345,7 @@ struct Summary {
 impl Summary {
     fn push_record(&mut self, record: &str) {
         let Some(event) = parse_record(record) else { self.unparsed_records += 1; return; };
+        if self.network_only && event.operation != "feedback_network_failed" { return; }
         self.events.push_back(event.render());
         if self.events.len() > MAX_EVENTS {
             self.events.pop_front();
@@ -313,8 +354,13 @@ impl Summary {
     }
 }
 
+#[cfg(test)]
 fn summarize(log: &str) -> Summary {
-    let mut summary = Summary::default();
+    summarize_filtered(log, false)
+}
+
+fn summarize_filtered(log: &str, network_only: bool) -> Summary {
+    let mut summary = Summary { network_only, ..Summary::default() };
     let mut start = None;
     let mut offset = 0;
     for line in log.split_inclusive('\n') {
@@ -334,9 +380,15 @@ fn summarize(log: &str) -> Summary {
     summary
 }
 
+#[cfg(test)]
 fn summarize_tail(bytes: &[u8], earlier_bytes_omitted: u64, short_read: bool) -> (String, Vec<String>) {
+    summarize_tail_filtered(bytes, earlier_bytes_omitted, short_read, false)
+}
+
+fn summarize_tail_filtered(bytes: &[u8], earlier_bytes_omitted: u64, short_read: bool,
+    network_only: bool) -> (String, Vec<String>) {
     let log = String::from_utf8_lossy(bytes);
-    let summary = summarize(&log);
+    let summary = summarize_filtered(&log, network_only);
     let status = format!(
         "available; safe summary only; tail_bytes={}; byte_limit={MAX_LOG_BYTES}; earlier_bytes_omitted={earlier_bytes_omitted}; short_read={short_read}; invalid_utf8={}; events_kept={}; event_limit={MAX_EVENTS}; older_events_omitted={}; unparsed_records={}; leading_fragment_omitted={}; trailing_record_omitted={}",
         bytes.len(), matches!(log, std::borrow::Cow::Owned(_)), summary.events.len(),
@@ -345,7 +397,12 @@ fn summarize_tail(bytes: &[u8], earlier_bytes_omitted: u64, short_read: bool) ->
     (status, summary.events.into_iter().collect())
 }
 
+#[cfg(test)]
 fn log_summary(path: &Path) -> (String, Vec<String>) {
+    log_summary_filtered(path, false)
+}
+
+fn log_summary_filtered(path: &Path, network_only: bool) -> (String, Vec<String>) {
     let read = (|| -> std::io::Result<_> {
         let mut file = std::fs::File::open(path)?;
         let length = file.metadata()?.len();
@@ -358,17 +415,77 @@ fn log_summary(path: &Path) -> (String, Vec<String>) {
         Ok((bytes, offset, short_read))
     })();
     match read {
-        Ok((bytes, offset, short_read)) => summarize_tail(&bytes, offset, short_read),
+        Ok((bytes, offset, short_read)) => summarize_tail_filtered(&bytes, offset, short_read, network_only),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ("not recorded yet".into(), Vec::new()),
         Err(error) => (format!("unavailable; os_error={}",
             error.raw_os_error().map(|code| code.to_string()).unwrap_or_else(|| "missing".into())), Vec::new()),
     }
 }
 
+fn stored_summary(path: &Path, fallback: &crate::diagnostics::LogFallback,
+    legacy: impl FnOnce() -> Vec<std::path::PathBuf>, network_only: bool) -> (String, Vec<String>) {
+    let limit = if network_only { 1 } else { MAX_EVENTS };
+    let mut memory = VecDeque::new();
+    let mut persisted = Vec::new();
+    for record in &fallback.records {
+        let Some(event) = parse_record(&record.text) else { continue; };
+        if network_only && event.operation != "feedback_network_failed" { continue; }
+        let event = event.render();
+        if record.persisted { persisted.push(event.clone()); }
+        memory.push_back(event);
+        if memory.len() > limit { memory.pop_front(); }
+    }
+    let mut status = vec![format!(
+        "memory_records={}; memory_limit_bytes=65536; memory_limit_records=64; memory_records_dropped={}; write_failures={}; last_write_os_error={}",
+        fallback.records.len(), fallback.records_dropped, fallback.failures,
+        fallback.last_os_error.map(|code| code.to_string()).unwrap_or_else(|| "missing".into()))];
+    let mut events = VecDeque::new();
+    let mut read = |path: &Path, source: &str| {
+        if events.len() + memory.len() >= limit { return limit; }
+        let (source_status, source_events) = log_summary_filtered(path, network_only);
+        status.push(format!("{source}: {source_status}"));
+        for event in source_events.into_iter().rev() {
+            if let Some(index) = persisted.iter().rposition(|entry| entry == &event) {
+                persisted.remove(index);
+                continue;
+            }
+            events.push_front(event);
+            if events.len() + memory.len() >= limit { break; }
+        }
+        events.len() + memory.len()
+    };
+    let mut kept = read(path, "current");
+    for generation in 1..=crate::diagnostics::LOG_BACKUPS {
+        if kept >= limit { break; }
+        kept = read(&crate::diagnostics::rotated_path(path, generation), &format!("rotation_{generation}"));
+    }
+    if kept == 0 {
+        for (index, path) in legacy().into_iter().rev().filter(|old| old != path).enumerate() {
+            if read(&path, &format!("legacy_{index}")) >= limit { break; }
+        }
+    }
+    events.extend(memory);
+    (status.join("\nLog source "), events.into_iter().collect())
+}
+
+fn diagnostic_summary(network_only: bool) -> (String, Vec<String>) {
+    stored_summary(&crate::diagnostics::log_path(), &crate::diagnostics::log_fallback(),
+        crate::diagnostics::legacy_log_paths, network_only)
+}
+
+pub fn network_summary() -> String {
+    let (status, events) = diagnostic_summary(true);
+    let Some(event) = events.last() else {
+        return "Latest network failure: not recorded in the bounded log sample.\n".into();
+    };
+    format!("Latest network failure (safe fields only; sampled disk logs or current-run memory)\n{}\n{event}\n",
+        status.lines().next().unwrap_or_default())
+}
+
 pub fn collect() -> String {
-    let (status, events) = log_summary(&crate::diagnostics::log_path());
+    let (status, events) = diagnostic_summary(false);
     let distribution = if crate::autostart::is_packaged() { "Microsoft Store / MSIX" } else { "Portable" };
-    let mut report = format!("App: X-Battery {}\nSystem: {}\nDistribution: {distribution}\nLog: {status}\nSoftware log summary\nTimeline: append order; time_unix_s is wall-clock UTC seconds, not monotonic; version is per event.\nLimits: latest complete records within the byte/event caps; omitted counts describe only the sampled tail unless named earlier_bytes_omitted.\nMissing: missing_or_invalid means absent or rejected metadata; missing_or_unapproved source is not exported; absent codes/timings are not proof of success.\nSafety: known operations, numeric codes and approved relative Rust locations only; no raw messages, panic payloads or backtraces.\n",
+    let mut report = format!("App: X-Battery {}\nSystem: {}\nDistribution: {distribution}\nLog: {status}\nSoftware log summary\nTimeline: legacy logs, disk rotations, then current-run memory; append order within each source; time_unix_s is wall-clock UTC seconds, not monotonic; version is per event.\nLimits: latest complete records within the byte/event caps; omitted counts describe only each sampled tail unless named earlier_bytes_omitted.\nMissing: missing_or_invalid means absent or rejected metadata; missing_or_unapproved source is not exported; absent codes/timings are not proof of success.\nSafety: known operations, numeric codes, fixed network stages and approved relative Rust locations only; no raw messages, panic payloads or backtraces.\n",
         valid_version(crate::gui::APP_VERSION).unwrap_or("missing_or_invalid"), super::system_version());
     for event in events {
         let _ = writeln!(report, "{event}");
@@ -414,6 +531,14 @@ mod tests {
         for private in ["Alice", "Users", "settings.ini", "private-", "token=", "serial", "step="] {
             assert!(!summary.contains(private), "{private}");
         }
+    }
+
+    #[test]
+    fn a_complete_new_log_does_not_report_a_leading_fragment() {
+        let summary = summarize(&record(1, "1.4.11", "device_identified", "ok"));
+        assert_eq!(summary.events.len(), 1);
+        assert!(!summary.leading_fragment_omitted);
+        assert!(!summary.trailing_record_omitted);
     }
 
     #[test]
@@ -486,6 +611,8 @@ mod tests {
     fn every_current_event_call_has_an_explicit_operation() {
         for source in [include_str!("../gui.rs"), include_str!("../settings.rs"),
             include_str!("../gui/device_workers.rs"), include_str!("../gui/rog_refresh.rs"),
+            include_str!("../gui/rapoo_devices.rs"), include_str!("../capture.rs"),
+            include_str!("capture.rs"), include_str!("export.rs"),
             include_str!("client.rs"), include_str!("../taskbar_widget.rs"),
             include_str!("../store/api.rs"), include_str!("../store/mod.rs"),
             include_str!("../store/restart.rs"), include_str!("../main.rs")] {
@@ -560,6 +687,12 @@ mod tests {
     fn panic_locations_require_known_repo_sources_and_valid_coordinates() {
         for (location, expected) in [("src/gui.rs:4274:9", "src/gui.rs:4274:9"),
             ("src\\feedback\\software.rs:10:2", "src/feedback/software.rs:10:2"),
+            ("src/capture.rs:1:2", "src/capture.rs:1:2"),
+            ("src/feedback/capture.rs:1:2", "src/feedback/capture.rs:1:2"),
+            ("src/feedback/export.rs:1:2", "src/feedback/export.rs:1:2"),
+            ("src/gui/device_workers.rs:1:2", "src/gui/device_workers.rs:1:2"),
+            ("src/gui/rog_refresh.rs:1:2", "src/gui/rog_refresh.rs:1:2"),
+            ("src/gui/rapoo_devices.rs:1:2", "src/gui/rapoo_devices.rs:1:2"),
             ("src/backends/rapoo.rs:150:1", "src/backends/rapoo.rs:150:1")] {
             let log = format!("--- 1 ---\nX-Battery 崩溃信息\n版本: 1.4.8\n位置: {location}\n消息: private-payload\n线程: private-thread\n回溯:\nC:\\private\\file.rs\n");
             let summary = rendered(&log);
@@ -621,5 +754,128 @@ mod tests {
         let (status, events) = log_summary(&path);
         assert_eq!(status, "not recorded yet");
         assert!(events.is_empty());
+    }
+
+    fn network_record(stamp: u64, attempt: u32) -> String {
+        record(stamp, "1.4.11", "feedback_network_failed",
+            &format!("step=send os_error=12002 http_status=0 elapsed_ms=15000 attempt={attempt}"))
+    }
+
+    #[test]
+    fn network_events_preserve_only_fixed_stages_and_numeric_fields() {
+        for step in ["open", "configure", "connect", "request", "send", "receive", "headers",
+            "status", "content_type", "deadline", "read", "response_size"] {
+            let log = network_record(1, 2).replace("step=send", &format!("step={step}"));
+            let summary = rendered(&log);
+            assert!(summary.contains(&format!("step={step}; os_error=12002; http_status=0; elapsed_ms=15000; attempt=2")));
+        }
+        for status in [100, 200, 403, 429, 503, 599] {
+            let log = network_record(1, 1).replace("http_status=0", &format!("http_status={status}"));
+            assert!(rendered(&log).contains(&format!("http_status={status};")));
+        }
+    }
+
+    #[test]
+    fn malformed_network_fields_cannot_export_credentials_urls_or_partial_numbers() {
+        for (original, replacement) in [
+            ("step=send", "step=https://private/send"), ("step=send", "step=private"),
+            ("os_error=12002", "os_error=4294967296"), ("os_error=12002", "os_error=12002private"),
+            ("http_status=0", "http_status=99"), ("http_status=0", "http_status=600"),
+            ("http_status=0", "http_status=403/private"), ("elapsed_ms=15000", "elapsed_ms=-1"),
+            ("elapsed_ms=15000", "elapsed_ms=18446744073709551616"),
+            ("attempt=1", "attempt=0"), ("attempt=1", "attempt=１"),
+            ("attempt=1", "attempt=1 attempt=2"), ("attempt=1", "attempt=1 bearer=private"),
+            ("step=send", "body=private step=send"), ("os_error=12002", "token=os_error=12002"),
+        ] {
+            let summary = rendered(&network_record(1, 1).replace(original, replacement));
+            assert!(summary.ends_with("network_fields=missing_or_invalid"), "{replacement}: {summary}");
+            for excluded in ["private", "step=", "os_error=", "http_status=", "elapsed_ms=", "attempt="] {
+                assert!(!summary.contains(excluded), "{replacement}: {summary}");
+            }
+        }
+        let summary = rendered(&(network_record(1, 1) + "body=private bearer=private https://private/\n"));
+        assert!(summary.ends_with("attempt=1"));
+        assert!(!summary.contains("private"));
+    }
+
+    #[test]
+    fn newest_network_event_is_selected_before_the_general_event_limit() {
+        let scratch = crate::diagnostics::tests::Scratch::new();
+        let path = scratch.0.join("diagnostics.log");
+        let mut log = network_record(20, 1) + &network_record(10, 2);
+        for stamp in 30..100 { log.push_str(&record(stamp, "1.4.11", "device_identified", "private")); }
+        std::fs::write(&path, log).unwrap();
+        let (_, events) = stored_summary(&path, &Default::default(), || panic!("legacy must be lazy"), true);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("time_unix_s=10"));
+        assert!(events[0].ends_with("attempt=2"));
+    }
+
+    #[test]
+    fn memory_network_failure_survives_disk_failure_and_a_later_success_wins() {
+        let scratch = crate::diagnostics::tests::Scratch::new();
+        let path = scratch.0.join("diagnostics.log");
+        std::fs::create_dir(&path).unwrap();
+        let mut fallback = crate::diagnostics::LogFallback {
+            failures: 1, last_os_error: Some(112), ..Default::default()
+        };
+        fallback.records.push_back(crate::diagnostics::MemoryRecord { text: network_record(20, 1), persisted: false });
+        let (status, events) = stored_summary(&path, &fallback, || panic!("memory is sufficient"), true);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].ends_with("attempt=1"));
+        assert!(status.contains("write_failures=1; last_write_os_error=112"));
+        fallback.records.push_back(crate::diagnostics::MemoryRecord { text: network_record(10, 2), persisted: true });
+        let (_, events) = stored_summary(&path, &fallback, Vec::new, true);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].ends_with("attempt=2"));
+    }
+
+    #[test]
+    fn summaries_read_rotations_and_legacy_on_demand_without_modifying_them() {
+        let scratch = crate::diagnostics::tests::Scratch::new();
+        let path = scratch.0.join("diagnostics.log");
+        let legacy = scratch.0.join("legacy-private-location.log");
+        let old_log = network_record(1, 1);
+        std::fs::write(&legacy, &old_log).unwrap();
+        let (status, events) = stored_summary(&path, &Default::default(), || vec![legacy.clone()], true);
+        assert!(status.contains("legacy_0: available"));
+        assert!(!status.contains("private"));
+        assert!(events[0].ends_with("attempt=1"));
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), old_log);
+        assert!(!path.exists());
+        std::fs::write(crate::diagnostics::rotated_path(&path, 1), network_record(2, 2)).unwrap();
+        let (status, events) = stored_summary(&path, &Default::default(), || panic!("rotation is sufficient"), true);
+        assert!(status.contains("rotation_1: available"));
+        assert!(events[0].ends_with("attempt=2"));
+        let (_, events) = stored_summary(&path, &Default::default(), || panic!("no legacy reads after migration"), false);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn summaries_deduplicate_memory_copies_and_never_export_private_device_facts() {
+        let scratch = crate::diagnostics::tests::Scratch::new();
+        let path = scratch.0.join("diagnostics.log");
+        let facts = crate::diagnostics::Facts {
+            version: "1.4.11", operation: "device_read_failed", status: "private-status os_error=5",
+            family: "private-family", frames: 1, elapsed_ms: 100, history_rows: 1,
+            device: Some(&crate::diagnostics::DeviceInfo {
+                key: "private-key".into(), model: "private-alias".into(), receiver_name: "private-name".into(),
+                receiver_serial: "private-serial".into(), receiver_mac: "private-mac".into(),
+                receiver_firmware: "private-firmware".into(), ..Default::default()
+            }),
+        };
+        let fact_record = format!("--- 2 ---\n{}", crate::diagnostics::render(&facts));
+        let earlier = record(1, "1.4.11", "device_identified", "private");
+        std::fs::write(&path, earlier + &fact_record).unwrap();
+        let mut fallback = crate::diagnostics::LogFallback::default();
+        fallback.records.push_back(crate::diagnostics::MemoryRecord { text: fact_record, persisted: true });
+        fallback.records.push_back(crate::diagnostics::MemoryRecord { text: network_record(3, 1), persisted: false });
+        let (status, events) = stored_summary(&path, &fallback, Vec::new, false);
+        assert_eq!(events.len(), 3);
+        assert!(events[0].contains("device_identified"));
+        assert!(events[1].contains("device_read_failed"));
+        assert!(events[2].contains("feedback_network_failed"));
+        assert!(!events.join("\n").contains("private"));
+        assert!(!status.contains("private"));
     }
 }
