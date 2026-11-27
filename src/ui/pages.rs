@@ -232,6 +232,15 @@ pub(super) fn button(p: &mut Painter, ui: &mut Ui, r: R, label: &str, primary: b
     ui.hot(r, act);
 }
 
+fn danger_button(p: &mut Painter, ui: &mut Ui, r: R, label: &str, act: Act) {
+    let hovered = ui.hover == Some(act);
+    let rad = 8.0;
+    let bg = if hovered { with_alpha(p.t.red, 0xD8) } else { p.t.red };
+    p.round(r, rad, bg);
+    p.text(label, r, 12.5, true, p.t.accent_fg, Align::Center);
+    ui.hot(r, act);
+}
+
 /// 数字输入框（`.num`）。`active` = 正在编辑，边框变强调色。
 fn num_box(p: &mut Painter, r: R, text: &str, active: bool) {
     p.round(r, layout::R_CTL, p.t.bg_sunken);
@@ -782,33 +791,37 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
     let pref = d.cfg.tray_for(&device.key);
     let selected = d.cfg.tray_device.as_ref() == Some(&device.key);
     c.h2(p, crate::tr!("设备偏好"), false);
-    let card = c.card(p, layout::ROW_H * 3.0);
-    let area = row_area(card, card.y);
-    let ctl = row_label(
-        p,
-        area,
-        crate::tr!("标准托盘图标设备"),
-        Some(crate::tr!("任务栏电量条会同时显示全部有电量设备")),
-        150.0,
-    );
-    button(
-        p,
-        ui,
-        R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
-        if selected {
-            crate::tr!("已在标准托盘显示")
-        } else {
-            crate::tr!("设为标准托盘图标")
-        },
-        selected,
-        if selected {
-            Act::None
-        } else {
-            Act::ToggleDeviceTray
-        },
-    );
-    row_rule(p, card, area);
-    let area = row_area(card, card.y + layout::ROW_H);
+    let card = c.card(p, layout::ROW_H * if d.cfg.tray_enabled { 3.0 } else { 2.0 });
+    let mut y = card.y;
+    if d.cfg.tray_enabled {
+        let area = row_area(card, y);
+        let ctl = row_label(
+            p,
+            area,
+            crate::tr!("标准托盘图标设备"),
+            Some(crate::tr!("任务栏电量条会同时显示全部有电量设备")),
+            150.0,
+        );
+        button(
+            p,
+            ui,
+            R::new(ctl.x, ctl.cy() - 15.0, 150.0, 30.0),
+            if selected {
+                crate::tr!("已在标准托盘显示")
+            } else {
+                crate::tr!("设为标准托盘图标")
+            },
+            selected,
+            if selected {
+                Act::None
+            } else {
+                Act::ToggleDeviceTray
+            },
+        );
+        row_rule(p, card, area);
+        y += layout::ROW_H;
+    }
+    let area = row_area(card, y);
     let ctl = row_label(
         p,
         area,
@@ -825,7 +838,7 @@ fn device_tray_settings(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) 
         Act::RenameDevice,
     );
     row_rule(p, card, area);
-    let area = row_area(card, card.y + layout::ROW_H * 2.0);
+    let area = row_area(card, y + layout::ROW_H);
     let help = if pref.kind == crate::tray_prefs::TrayKind::Auto {
         crate::trf!(
             "自动识别为{}，可手动纠正",
@@ -2304,9 +2317,26 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
     }
     if has_stages {
         let t = p.t;
-        c.h2(p, crate::tr!("DPI 档位"), true);
         let stages_count = basic.dpi.stages.len();
-        let card_height = stages_count as f32 * 46.0 + 40.0;
+        let can_add = basic.connected && basic.dpi.stage_editable && basic.dpi.max_stages > 1;
+        let can_delete = can_add && stages_count > 1;
+        let delete_mode = can_delete && ui.dpi_delete_mode;
+        if can_delete {
+            let top = c.y + 4.0;
+            let del_btn = R::new(c.x + c.w - 88.0, top, 88.0, 28.0);
+            p.text(crate::tr!("DPI 档位"), R::new(c.x, top, (c.w - 98.0).max(80.0), layout::H2_H),
+                font::H2, true, t.text2, Align::Left);
+            button(p, ui, del_btn, if delete_mode { crate::tr!("完成") } else { crate::tr!("删除档位") },
+                delete_mode, Act::ToggleDpiDeleteMode);
+            c.y = del_btn.bottom().max(top + layout::H2_H) + 10.0;
+        } else {
+            c.h2(p, crate::tr!("DPI 档位"), true);
+        }
+        let max_add = if can_add { usize::from(basic.dpi.max_stages).saturating_sub(stages_count) } else { 0 };
+        let pending = usize::from(ui.new_basic_dpi_count).min(max_add);
+        let show_add = can_add && stages_count + pending < usize::from(basic.dpi.max_stages);
+        let add_h = if show_add { 42.0 } else { 0.0 };
+        let card_height = (stages_count + pending) as f32 * 46.0 + add_h + 40.0;
         let card = c.card(p, card_height);
         let mut row_y = card.y + 4.0;
         for (position, stage) in basic.dpi.stages.iter().enumerate() {
@@ -2326,7 +2356,8 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
                 Align::Left,
             );
             let edit_x = Edit::BasicDpiX(stage.index);
-            if !basic.dpi.stage_y.is_empty() {
+            let dual_axis = !basic.dpi.stage_y.is_empty();
+            let (dirty, dpi_end_x) = if dual_axis {
                 let edit_y = Edit::BasicDpiY(stage.index);
                 let text_x = ui.edit_text(edit_x).map(str::to_string)
                     .unwrap_or_else(|| stage.value.to_string());
@@ -2349,6 +2380,7 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
                     p.text(&text_y, box_y, 12.5, active, if active { t.accent } else { t.text2 }, Align::Center);
                 }
                 p.text("DPI", R::new(box_y.right() + 8.0, row.y, 30.0, row.h), 12.0, false, t.text3, Align::Left);
+                (text_x != stage.value.to_string() || text_y != vertical.to_string(), box_y.right() + 38.0)
             } else {
                 let text = ui.edit_text(edit_x).map(str::to_string)
                     .unwrap_or_else(|| stage.value.to_string());
@@ -2362,32 +2394,85 @@ fn basic_dpi(p: &mut Painter, ui: &mut Ui, basic: &crate::backends::Snapshot,
                     p.text(&text, value_box, 12.5, active, if active { t.accent } else { t.text2 }, Align::Center);
                 }
                 p.text("DPI", R::new(value_box.right() + 8.0, row.y, 30.0, row.h), 12.0, false, t.text3, Align::Left);
+                (text != stage.value.to_string(), value_box.right() + 38.0)
+            };
+            if basic.connected && basic.dpi.stage_editable && dirty {
+                button(p, ui, R::new(dpi_end_x + 8.0, row.cy() - 15.0, 52.0, 30.0),
+                    crate::tr!("确认"), true, Act::ApplyEdit(edit_x));
             }
-            if active {
+            if delete_mode {
+                if active {
+                    p.text(
+                        crate::tr!("当前使用 · 不可删"),
+                        R::new(row.right() - 160.0, row.y, 144.0, row.h),
+                        11.0,
+                        false,
+                        t.text3,
+                        Align::Right,
+                    );
+                } else if let Some(context) = basic.dpi.stage_context() {
+                    danger_button(p, ui, R::new(row.right() - 68.0, row.cy() - 15.0, 54.0, 30.0),
+                        crate::tr!("删除"), Act::BasicDpiStageRemove(*stage, context));
+                }
+            } else if active {
                 p.text(
                     crate::tr!("● 当前使用"),
-                    R::new(row.right() - 146.0, row.y, 76.0, row.h),
+                    R::new(row.right() - 110.0, row.y, 94.0, row.h),
                     11.0,
                     true,
                     t.accent,
-                    Align::Left,
+                    Align::Right,
                 );
             } else if basic.connected && basic.dpi.stage_writable {
-                let switch_button = R::new(row.right() - 124.0, row.cy() - 15.0, 54.0, 30.0);
+                let switch_button = R::new(row.right() - 68.0, row.cy() - 15.0, 54.0, 30.0);
                 if let Some(context) = basic.dpi.stage_context() {
                     button(p, ui, switch_button, crate::tr!("切换"), false, Act::BasicDpiStage(*stage, context));
                 } else if basic.dpi.writable {
                     button(p, ui, switch_button, crate::tr!("切换"), false, Act::BasicDpi(stage.value));
                 }
             }
-            if basic.connected && basic.dpi.stage_editable {
-                let apply_button = R::new(row.right() - 62.0, row.cy() - 15.0, 52.0, 30.0);
-                button(p, ui, apply_button, crate::tr!("应用"), false, Act::ApplyEdit(edit_x));
-            }
             row_y += 46.0;
         }
+        for slot in 0..pending {
+            let row = R::new(card.x, row_y, card.w, 46.0);
+            ui.hot(row, Act::None);
+            p.text(
+                &crate::trf!("档位 {}", stages_count + slot + 1),
+                R::new(card.x + 18.0, row.y, 52.0, row.h),
+                11.5,
+                false,
+                t.text3,
+                Align::Left,
+            );
+            let edit_x = Edit::NewBasicDpiX(slot as u8);
+            let edit_y = Edit::NewBasicDpiY(slot as u8);
+            let text_x = ui.edit_text(edit_x).unwrap_or("");
+            let text_y = ui.edit_text(edit_y).unwrap_or("");
+            p.text("X", R::new(card.x + 74.0, row.y, 14.0, row.h), 11.5, false, t.text3, Align::Left);
+            let box_x = R::new(card.x + 90.0, row.cy() - 15.0, 68.0, 30.0);
+            p.text("Y", R::new(box_x.right() + 10.0, row.y, 14.0, row.h), 11.5, false, t.text3, Align::Left);
+            let box_y = R::new(box_x.right() + 26.0, row.cy() - 15.0, 68.0, 30.0);
+            let has_input = !text_x.trim().is_empty() || !text_y.trim().is_empty();
+            num_box(p, box_x, text_x, ui.focus == Some(edit_x));
+            num_box(p, box_y, text_y, ui.focus == Some(edit_y));
+            ui.hot(box_x, Act::Focus(edit_x));
+            ui.hot(box_y, Act::Focus(edit_y));
+            p.text("DPI", R::new(box_y.right() + 8.0, row.y, 30.0, row.h), 12.0, false, t.text3, Align::Left);
+            if has_input {
+                button(p, ui, R::new(box_y.right() + 46.0, row.cy() - 15.0, 52.0, 30.0),
+                    crate::tr!("确认"), true, Act::ApplyEdit(edit_x));
+            }
+            button(p, ui, R::new(row.right() - 68.0, row.cy() - 15.0, 54.0, 30.0),
+                crate::tr!("取消"), false, Act::RemoveNewBasicDpiStage(slot as u8));
+            row_y += 46.0;
+        }
+        if show_add {
+            button(p, ui, R::new(card.x + 18.0, row_y + 4.0, card.w - 36.0, 32.0),
+                "＋", false, Act::AddBasicDpiStage);
+            row_y += 42.0;
+        }
         p.text_wrap(
-            crate::tr!("保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「应用」即可写入设备。"),
+            crate::tr!("保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「确认」即可写入设备。"),
             R::new(card.x + 18.0, row_y + 6.0, card.w - 36.0, 32.0),
             11.5,
             t.text3,
@@ -2502,7 +2587,12 @@ fn perf(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
             if basic.connected && rate.onboard_mode {
                 let top = c.y + 10.0;
                 let height = note(p, R::new(c.x, top, c.w, 0.0),
-                    crate::tr!("设备当前处于板载内存模式。如需修改回报率，请先在 Logitech G HUB 中关闭板载内存模式，再刷新设备。"), false);
+                    crate::tr!("设备当前处于板载内存模式，暂不支持直接改写板载回报率。请在 Logitech G HUB（写入板载配置后退出）或罗技 OMM 中修改，再刷新设备。"), false);
+                c.y = top + height;
+            } else if basic.connected && basic.target.backend == crate::backends::BackendId::Logitech && rate.writable {
+                let top = c.y + 10.0;
+                let height = note(p, R::new(c.x, top, c.w, 0.0),
+                    crate::tr!("如果切换回报率后选项又跳回原值，通常是后台的 Logitech G HUB 在强制覆盖配置；如需固定生效，建议在 G HUB 写入板载配置后完全退出，或改用罗技 OMM 修改。"), false);
                 c.y = top + height;
             }
         }
@@ -3152,7 +3242,7 @@ fn settings_general(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
 
 fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     c.h2(p, crate::tr!("托盘与任务栏"), true);
-    let card = c.card(p, layout::ROW_H * 3.0);
+    let card = c.card(p, layout::ROW_H * if d.cfg.tray_enabled { 3.0 } else { 2.0 });
     let mut y = card.y;
     // 托盘
     {
@@ -3182,10 +3272,12 @@ fn settings_battery(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
         let sw = R::new(ctl.x + 4.0, ctl.cy() - 10.0, 40.0, 20.0);
         p.switch(sw, d.cfg.taskbar_widget_enabled, true);
         ui.hot(sw, Act::Toggle(Pref::TaskbarWidget));
-        row_rule(p, card, area);
+        if d.cfg.tray_enabled {
+            row_rule(p, card, area);
+        }
         y += layout::ROW_H;
     }
-    {
+    if d.cfg.tray_enabled {
         let area = row_area(card, y);
         let ctl = row_label(
             p,

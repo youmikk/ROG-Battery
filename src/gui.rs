@@ -102,6 +102,8 @@ enum Status {
 pub(crate) enum Cmd {
     BasicDpi { target: crate::backends::Target, dpi: u16 },
     BasicDpiStage { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext },
+    BasicDpiStageAdd { target: crate::backends::Target, context: crate::device::StageContext, x: u16, y: u16 },
+    BasicDpiStageRemove { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext },
     BasicDpiEdit { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext, expected_y: u16, x: u16, y: u16 },
     BasicDpiPreset { target: crate::backends::Target, stage: crate::device::DpiStage, context: crate::device::StageContext, expected_y: u16, value: u16 },
     BasicPollingRate { target: crate::backends::Target, hz: u16 },
@@ -150,6 +152,7 @@ impl Cmd {
     fn basic_target(&self) -> Option<&crate::backends::Target> {
         match self {
             Self::BasicDpi { target, .. } | Self::BasicDpiStage { target, .. }
+                | Self::BasicDpiStageAdd { target, .. } | Self::BasicDpiStageRemove { target, .. }
                 | Self::BasicDpiEdit { target, .. } | Self::BasicDpiPreset { target, .. }
                 | Self::BasicPollingRate { target, .. } => Some(target),
             _ => None,
@@ -164,6 +167,8 @@ impl Cmd {
             Cmd::BasicDpiEdit { stage, x, y, .. } => format!("DPI {} · X {x} / Y {y}", stage.index + 1),
             Cmd::BasicDpiStage { stage, .. } => crate::trf!("DPI 档 {stage} → {dpi}",
                 stage = usize::from(stage.index) + 1, dpi = stage.value),
+            Cmd::BasicDpiStageAdd { x, y, .. } => format!("DPI + · X {x} / Y {y}"),
+            Cmd::BasicDpiStageRemove { stage, .. } => format!("− DPI {} · {}", stage.index + 1, stage.value),
             Cmd::Poll(hz) => crate::trf!("回报率 {hz} Hz", hz = hz),
             Cmd::Dpi { stage, dpi, .. } => {
                 crate::trf!("DPI 档 {stage} → {dpi}", dpi = dpi, stage = stage)
@@ -1402,6 +1407,7 @@ fn mock_basic_snapshot(reading: &crate::device::DeviceReading) -> crate::backend
             configuration_token: None,
             stage_writable: true,
             stage_editable: true,
+            max_stages: 0,
             stage_y,
         },
         polling_rate: crate::device::PollingRate {
@@ -1421,6 +1427,8 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
     let target_key = match cmd {
         Cmd::BasicDpi { target, .. }
         | Cmd::BasicDpiStage { target, .. }
+        | Cmd::BasicDpiStageAdd { target, .. }
+        | Cmd::BasicDpiStageRemove { target, .. }
         | Cmd::BasicDpiEdit { target, .. }
         | Cmd::BasicDpiPreset { target, .. }
         | Cmd::BasicPollingRate { target, .. } => Some(target.key.as_str()),
@@ -1436,6 +1444,27 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
                         basic.dpi.current = Some(stage.value);
                         let vertical = basic.dpi.stage_y.get(&stage.index).copied().unwrap_or(stage.value);
                         basic.dpi.current_y = Some(vertical);
+                    }
+                }
+            }
+        }
+        Cmd::BasicDpiStageAdd { x, y, .. } => {
+            if let Some(key) = target_key {
+                if let Some(device) = state.devices.get_mut(key) {
+                    if let Some(basic) = &mut device.basic {
+                        let idx = basic.dpi.stages.len() as u8;
+                        basic.dpi.stages.push(crate::device::DpiStage { index: idx, value: *x });
+                        basic.dpi.stage_y.insert(idx, *y);
+                    }
+                }
+            }
+        }
+        Cmd::BasicDpiStageRemove { stage, .. } => {
+            if let Some(key) = target_key {
+                if let Some(device) = state.devices.get_mut(key) {
+                    if let Some(basic) = &mut device.basic {
+                        basic.dpi.stages.retain(|saved| saved.index != stage.index);
+                        basic.dpi.stage_y.remove(&stage.index);
                     }
                 }
             }
@@ -1629,7 +1658,17 @@ fn taskbar_strip_content(
             kind: cfg.device_kind(reading),
         })
         .collect::<Vec<_>>();
-    (!items.is_empty()).then_some(crate::taskbar_widget::StripContent { items })
+    Some(if items.is_empty() {
+        crate::taskbar_widget::StripContent {
+            items,
+            empty_label: Some(crate::tr!("暂无设备").to_string()),
+        }
+    } else {
+        crate::taskbar_widget::StripContent {
+            items,
+            empty_label: None,
+        }
+    })
 }
 
 fn dpi_preset_command(cfg: &Settings, basic: &crate::backends::Snapshot, value: u16) -> Option<Cmd> {
@@ -2421,6 +2460,7 @@ fn handle_act(a: Act, env: &UiEnv) {
             env.canvas.with_ui_mut(|u| {
                 u.page = p;
                 u.initial_route_done = true;
+                u.dpi_delete_mode = false;
                 u.set_open_drop(None);
             });
             // 切到需要全量数据的页 → 立刻补一次全量读取。
@@ -2534,6 +2574,13 @@ fn handle_act(a: Act, env: &UiEnv) {
                 env.canvas.repaint_now();
                 return;
             }
+            if let Edit::NewBasicDpiX(_) | Edit::NewBasicDpiY(_) = e {
+                if env.basic().is_some_and(|b| b.connected && b.dpi.stage_editable && b.dpi.max_stages > 1) {
+                    env.canvas.with_ui_mut(|u| u.begin_edit(e, String::new()));
+                }
+                env.canvas.repaint_now();
+                return;
+            }
             if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
                 if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable) {
                     if let Some(original) = crate::ui::widget::BasicDpiDraft::from_snapshot(&basic,index) {
@@ -2599,6 +2646,39 @@ fn handle_act(a: Act, env: &UiEnv) {
                 && basic.dpi.stage_context() == Some(context) && basic.dpi.stages.contains(&stage)) {
                 env.submit(Cmd::BasicDpiStage { target: basic.target, stage, context });
             }
+        }
+        Act::ToggleDpiDeleteMode => {
+            env.canvas.with_ui_mut(|u| {
+                u.dpi_delete_mode = !u.dpi_delete_mode;
+            });
+            env.canvas.repaint_now();
+        }
+        Act::BasicDpiStageRemove(stage, context) => {
+            if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable
+                && b.dpi.max_stages > 1 && b.dpi.stages.len() > 1
+                && b.dpi.active_stage != Some(stage.index)
+                && b.dpi.stage_context() == Some(context)
+                && b.dpi.stages.contains(&stage)) {
+                if basic.dpi.stages.len() <= 2 {
+                    env.canvas.with_ui_mut(|u| u.dpi_delete_mode = false);
+                }
+                env.submit(Cmd::BasicDpiStageRemove { target: basic.target, stage, context });
+            }
+        }
+        Act::AddBasicDpiStage => {
+            if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable && b.dpi.max_stages > 1) {
+                env.canvas.with_ui_mut(|u| {
+                    let used = basic.dpi.stages.len() + usize::from(u.new_basic_dpi_count);
+                    if used < usize::from(basic.dpi.max_stages) {
+                        u.new_basic_dpi_count += 1;
+                    }
+                });
+                env.canvas.repaint_now();
+            }
+        }
+        Act::RemoveNewBasicDpiStage(slot) => {
+            env.canvas.with_ui_mut(|u| u.remove_new_basic_dpi(slot));
+            env.canvas.repaint_now();
         }
         Act::BasicPollingRate(hz) => {
             if let Some(basic) = env.basic().filter(|b| b.connected && b.polling_rate.writable
@@ -3033,6 +3113,29 @@ fn apply_edit(env: &UiEnv, e: Edit) {
         update_dpi_presets(env, Act::ApplyEdit(Edit::DpiPreset(index)), value);
         return;
     }
+    if let Edit::NewBasicDpiX(slot) | Edit::NewBasicDpiY(slot) = e {
+        if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable && b.dpi.max_stages > 1) {
+            if let Some(context) = basic.dpi.stage_context() {
+                let (raw_x, raw_y) = env.canvas.with_ui(|u| (
+                    u.edit_text(Edit::NewBasicDpiX(slot)).unwrap_or("").trim().to_string(),
+                    u.edit_text(Edit::NewBasicDpiY(slot)).unwrap_or("").trim().to_string(),
+                ));
+                let parsed = match (raw_x.is_empty(), raw_y.is_empty()) {
+                    (false, true) => raw_x.parse::<u16>().ok().map(|v| (v, v)),
+                    (true, false) => raw_y.parse::<u16>().ok().map(|v| (v, v)),
+                    (false, false) => raw_x.parse::<u16>().ok().zip(raw_y.parse::<u16>().ok()),
+                    (true, true) => None,
+                };
+                if let Some((x, y)) = parsed.filter(|(x, y)| basic.dpi.values.contains(x) && basic.dpi.values.contains(y)) {
+                    env.submit(Cmd::BasicDpiStageAdd { target: basic.target, context, x, y });
+                    env.canvas.with_ui_mut(|u| u.remove_new_basic_dpi(slot));
+                    return;
+                }
+            }
+        }
+        env.say(crate::tr!("DPI 不在设备报告的可用范围内"));
+        return;
+    }
     if let Edit::BasicDpiX(index) | Edit::BasicDpiY(index) = e {
         if let Some(basic) = env.basic().filter(|b| b.connected && b.dpi.stage_editable) {
             let current = crate::ui::widget::BasicDpiDraft::from_snapshot(&basic,index);
@@ -3074,7 +3177,7 @@ fn apply_edit(env: &UiEnv, e: Edit) {
     let st = env.state();
 
     match e {
-        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiPreset(_) => return,
+        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::NewBasicDpiX(_) | Edit::NewBasicDpiY(_) | Edit::DpiPreset(_) => return,
         Edit::LowWarn => {
             let txt = env.canvas.with_ui(|u| u.edit_text(e).map(str::to_string));
             let Some(v) = txt.as_deref().and_then(parse_num) else {
@@ -3208,6 +3311,13 @@ fn toggle_pref(env: &UiEnv, p: Pref) {
             let on = !env.cfg().tray_enabled;
             if env.set_cfg(|c| c.tray_enabled = on).is_err() { return; }
             env.tray.set_visibility(on);
+            if !on {
+                env.canvas.with_ui_mut(|u| {
+                    if u.open_drop() == Some(Drop::TrayDevice) {
+                        u.set_open_drop(None);
+                    }
+                });
+            }
             // 关掉托盘时如果窗口是隐藏的，用户就再也找不到程序了。
             if !on && !env.cfg().taskbar_widget_enabled {
                 env.window.set_visible(true);
@@ -3452,7 +3562,7 @@ fn edit_initial(e: Edit, st: Option<&proto::State>) -> String {
     let known = st.filter(|s| !crate::ui::pages::placeholder_state(s));
     let hex = |c: [u8; 3]| format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
     match e {
-        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiPreset(_) => String::new(),
+        Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::NewBasicDpiX(_) | Edit::NewBasicDpiY(_) | Edit::DpiPreset(_) => String::new(),
         Edit::LowWarn => known.map(|s| s.low_warn.to_string()).unwrap_or_default(),
         Edit::Dpi(i) => known
             .map(|s| s.dpi((i as usize) & 3).to_string())
@@ -4735,6 +4845,15 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                 }
                 if wp == crate::taskbar_widget::CLICK_CLOSE {
                     popup_tray.hide();
+                } else if wp == crate::taskbar_widget::CLICK_OPEN_MAIN {
+                    popup_tray.hide();
+                    canvas_tray.with_ui_mut(|u| {
+                        u.page = Page::Home;
+                        u.initial_route_done = true;
+                    });
+                    win32::ShowWindow(hwnd, 9);
+                    win32::SetForegroundWindow(hwnd);
+                    canvas_tray.repaint_now();
                 } else if wp == crate::taskbar_widget::CLICK_OPEN {
                     let Some(rect) = taskbar_strip.screen_rect() else { return Some(0); };
                     let (readings, cfg, dpi, generation) = {
@@ -6029,7 +6148,9 @@ mod backend_tests {
         assert_eq!(strip.items[1].level.map(|level| level.value), Some(64));
         assert!(!strip.items[1].charging);
         assert_eq!(strip.items[1].kind, crate::tray_prefs::TrayKind::Headset);
-        assert!(taskbar_strip_content(&readings[2..], &cfg).is_none());
+        let empty = taskbar_strip_content(&readings[2..], &cfg).unwrap();
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.empty_label.as_deref(), Some(crate::tr!("暂无设备")));
     }
 
     #[test]
@@ -6480,7 +6601,9 @@ mod backend_tests {
             assert!(shared.readings[0].connected);
             assert_eq!(shared.devices["langtu"].basic_status.as_ref().unwrap().measured_at, Some(now));
             assert_eq!(shared.readings[0].battery_text(true), if seconds < 120 { "≈78%" } else { "—" });
-            assert_eq!(taskbar_strip_content(&shared.readings, &shared.cfg).is_some(), seconds < 120);
+            let strip = taskbar_strip_content(&shared.readings, &shared.cfg).unwrap();
+            assert_eq!(!strip.items.is_empty(), seconds < 120);
+            assert_eq!(strip.empty_label.as_deref(), (seconds >= 120).then(|| crate::tr!("暂无设备")));
         }
         let woke = now + Duration::from_secs(241);
         sample.battery_at = Some(woke);

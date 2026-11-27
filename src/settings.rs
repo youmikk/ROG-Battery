@@ -50,7 +50,7 @@ impl Default for Settings {
             // 0.07 %/天量级，可忽略。取 15 秒唯一的代价是鼠标休眠时更频繁地
             // 撞上超时（一次 MISS 要等满 1200ms），所以默认 60 秒。
             refresh_interval_sec: 60,
-            tray_enabled: true,
+            tray_enabled: false,
             taskbar_widget_enabled: true,
             notify_low_battery: true,
             close_mode: "ask".to_string(),
@@ -414,6 +414,20 @@ mod preset_tests {
         let (fallback, warnings) =
             Settings::parse_collect("taskbar_widget_enabled=maybe");
         assert!(fallback.taskbar_widget_enabled);
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn tray_enabled_defaults_to_false_and_roundtrips() {
+        let mut cfg = Settings::default();
+        assert!(!cfg.tray_enabled);
+        assert!(cfg.taskbar_widget_enabled);
+        cfg.tray_enabled = true;
+        let (loaded, warnings) = Settings::parse_collect(&cfg.to_text());
+        assert!(warnings.is_empty());
+        assert!(loaded.tray_enabled);
+        let (fallback, warnings) = Settings::parse_collect("tray_enabled=maybe");
+        assert!(!fallback.tray_enabled);
         assert_eq!(warnings.len(), 1);
     }
 }

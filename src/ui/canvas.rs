@@ -1736,4 +1736,85 @@ mod animation_tests {
         fixture.canvas.repaint_now();
         fixture.dispatch_timer(ANIM_TIMER_ID);
     }
+
+    #[test]
+    fn tray_device_controls_hide_when_tray_disabled_and_return_when_enabled() {
+        use crate::ui::widget::{Act, Drop, Page, Pref, SettingsSection};
+        let fixture = TestCanvas::new();
+        let readings = vec![crate::device::DeviceReading {
+            key: "0123456789abcdef".into(),
+            name: "First test mouse".into(),
+            family: crate::device::DeviceFamily::Mouse,
+            connected: true,
+            battery: Some(crate::device::Battery {
+                percent: Some(80),
+                charging: Some(false),
+                estimated_percent: None,
+                voltage_mv: None,
+                approximate: false,
+                level: None,
+            }),
+            ..Default::default()
+        }, crate::device::DeviceReading {
+            key: "fedcba9876543210".into(),
+            name: "Second test mouse".into(),
+            family: crate::device::DeviceFamily::Mouse,
+            connected: true,
+            ..Default::default()
+        }];
+        fixture.canvas.with_ui_mut(|ui| {
+            ui.sync_devices(&readings);
+            ui.selected_device = Some("fedcba9876543210".into());
+        });
+        let tray_enabled = Rc::new(std::cell::Cell::new(false));
+        let tray_flag = Rc::clone(&tray_enabled);
+        let estimate = crate::history::Estimate::default();
+        let audio = crate::audio::Snapshot::default();
+        fixture.canvas.set_painter(Box::new(move |inner, fonts, ui, args| {
+            let mut cfg = crate::settings::Settings::default();
+            cfg.tray_enabled = tray_flag.get();
+            cfg.tray_device = Some("0123456789abcdef".into());
+            let data = Data {
+                selected: Some(&readings[1]), state: None, ident: None, link_mode: "",
+                status: String::new(), plot: None, estimate: &estimate, rows: 0,
+                cfg: &cfg, autostart_text: "", autostart_on: false,
+                native_notifications_supported: false, version: "test",
+                readings: &readings, audio: &audio, basic: None,
+                store: crate::store::View {
+                    phase: crate::store::Phase::Unsupported, available: false,
+                    home_visible: false, failure: None, last_checked_day: None,
+                },
+            };
+            draw_frame(inner, fonts, ui, args, &crate::ui::theme::LIGHT, &data)
+        }));
+
+        for enabled in [false, true] {
+            tray_enabled.set(enabled);
+            fixture.canvas.with_ui_mut(|ui| ui.page = Page::Battery);
+            fixture.canvas.repaint_now();
+            let has_device_btn = fixture.canvas.with_ui(|ui| {
+                ui.hots.iter().any(|h| h.act == Act::ToggleDeviceTray)
+            });
+            let has_rename_btn = fixture.canvas.with_ui(|ui| {
+                ui.hots.iter().any(|h| h.act == Act::RenameDevice)
+            });
+            assert_eq!(has_device_btn, enabled);
+            assert!(has_rename_btn);
+
+            fixture.canvas.with_ui_mut(|ui| {
+                ui.page = Page::Settings;
+                ui.settings_section = SettingsSection::Battery;
+            });
+            fixture.canvas.repaint_now();
+            let has_tray_drop = fixture.canvas.with_ui(|ui| {
+                ui.hots.iter().any(|h| h.act == Act::OpenDrop(Drop::TrayDevice))
+            });
+            let has_switches = fixture.canvas.with_ui(|ui| {
+                ui.hots.iter().any(|h| h.act == Act::Toggle(Pref::TrayEnabled))
+                    && ui.hots.iter().any(|h| h.act == Act::Toggle(Pref::TaskbarWidget))
+            });
+            assert_eq!(has_tray_drop, enabled);
+            assert!(has_switches);
+        }
+    }
 }

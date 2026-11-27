@@ -437,6 +437,14 @@ pub trait DeviceBackend {
         _stage: crate::device::DpiStage, _context: crate::device::StageContext, _expected_y: u16, _x: u16, _y: u16) -> Result<(), String> {
         Err("设备不支持 DPI 档位编辑".into())
     }
+    fn add_dpi_stage(&self, _api: &HidApi, _target: &Target,
+        _context: crate::device::StageContext, _x: u16, _y: u16) -> Result<(), String> {
+        Err("设备不支持新增 DPI 档位".into())
+    }
+    fn remove_dpi_stage(&self, _api: &HidApi, _target: &Target,
+        _stage: crate::device::DpiStage, _context: crate::device::StageContext) -> Result<(), String> {
+        Err("设备不支持删除 DPI 档位".into())
+    }
     fn set_polling_rate(&self, _api: &HidApi, _target: &Target, _hz: u16) -> Result<(), String> {
         Err("设备不支持回报率设置".into())
     }
@@ -662,7 +670,24 @@ pub fn edit_dpi_stage(target: &Target, stage: crate::device::DpiStage, context: 
     match target.backend {
         BackendId::CompX => compx::CompX.edit_dpi_stage(&api, target, stage, context, expected_y, x, y),
         BackendId::Razer => razer::Razer.edit_dpi_stage(&api, target, stage, context, expected_y, x, y),
+        BackendId::Rapoo => rapoo::Rapoo.edit_dpi_stage(&api, target, stage, context, expected_y, x, y),
         _ => Err("设备不支持 DPI 档位编辑".into()),
+    }
+}
+
+pub fn add_dpi_stage(target: &Target, context: crate::device::StageContext, x: u16, y: u16) -> Result<(), String> {
+    let api = HidApi::load()?;
+    match target.backend {
+        BackendId::Rapoo => rapoo::Rapoo.add_dpi_stage(&api, target, context, x, y),
+        _ => Err("设备不支持新增 DPI 档位".into()),
+    }
+}
+
+pub fn remove_dpi_stage(target: &Target, stage: crate::device::DpiStage, context: crate::device::StageContext) -> Result<(), String> {
+    let api = HidApi::load()?;
+    match target.backend {
+        BackendId::Rapoo => rapoo::Rapoo.remove_dpi_stage(&api, target, stage, context),
+        _ => Err("设备不支持删除 DPI 档位".into()),
     }
 }
 
@@ -672,6 +697,7 @@ pub fn set_polling_rate(target: &Target, hz: u16) -> Result<(), String> {
         BackendId::CompX => compx::CompX.set_polling_rate(&api, target, hz),
         BackendId::Logitech => logitech::Logitech.set_polling_rate(&api, target, hz),
         BackendId::Razer => razer::Razer.set_polling_rate(&api, target, hz),
+        BackendId::Rapoo => rapoo::Rapoo.set_polling_rate(&api, target, hz),
         _ => Err("设备不支持回报率设置".into()),
     }
 }

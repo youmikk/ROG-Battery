@@ -40,6 +40,8 @@ const WM_DISPLAYCHANGE: u32 = 0x007e;
 const WM_MOUSEACTIVATE: u32 = 0x0021;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+const CS_DBLCLKS: u32 = 0x0008;
 const WM_CANCELMODE: u32 = 0x001f;
 const WM_DPICHANGED: u32 = 0x02e0;
 const WM_THEMECHANGED: u32 = 0x031a;
@@ -50,15 +52,32 @@ const MA_NOACTIVATE: isize = 3;
 pub const CLICK_QUERY_OPEN: usize = 1;
 pub const CLICK_OPEN: usize = 2;
 pub const CLICK_CLOSE: usize = 3;
+pub const CLICK_OPEN_MAIN: usize = 4;
 
 #[derive(Clone, Copy, Default)]
 struct ClickGesture {
     pressed: Option<(usize, bool)>,
+    suppress_release: Option<usize>,
 }
 
 impl ClickGesture {
     fn press(&mut self, window: usize, popup_visible: bool) {
+        self.suppress_release = None;
         self.pressed = Some((window, popup_visible));
+    }
+
+    fn double_click(&mut self, window: usize) {
+        self.pressed = None;
+        self.suppress_release = Some(window);
+    }
+
+    fn take_suppressed_release(&mut self, window: usize) -> bool {
+        if self.suppress_release == Some(window) {
+            self.suppress_release = None;
+            true
+        } else {
+            false
+        }
     }
 
     fn release(&mut self, window: usize, inside: bool) -> Option<usize> {
@@ -69,6 +88,9 @@ impl ClickGesture {
     fn cancel(&mut self, window: usize) {
         if self.pressed.is_some_and(|(pressed_window, _)| pressed_window == window) {
             self.pressed = None;
+        }
+        if self.suppress_release == Some(window) {
+            self.suppress_release = None;
         }
     }
 }
@@ -188,6 +210,7 @@ extern "system" {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StripContent {
     pub items: Vec<StripItem>,
+    pub empty_label: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,12 +250,36 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
             }
             0
         }
+        WM_LBUTTONDBLCLK => {
+            CLICK_GESTURE.with(|cell| {
+                let mut gesture = cell.get();
+                gesture.double_click(hwnd as usize);
+                cell.set(gesture);
+            });
+            if unsafe { GetCapture() } == hwnd { unsafe { ReleaseCapture(); } }
+            let notify = NOTIFY_WINDOW.load(Ordering::Relaxed) as Handle;
+            let message = CLICK_MESSAGE.load(Ordering::Relaxed);
+            if !notify.is_null() && message != 0 {
+                unsafe { PostMessageW(notify, message, CLICK_OPEN_MAIN, 0) };
+            }
+            0
+        }
         WM_LBUTTONUP => {
             let mut rect = Rect::default();
             let x = (lp as u16) as i16 as i32;
             let y = ((lp >> 16) as u16) as i16 as i32;
             let inside = unsafe { GetClientRect(hwnd, &mut rect) } != 0
                 && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+            let suppressed = CLICK_GESTURE.with(|cell| {
+                let mut gesture = cell.get();
+                let suppressed = gesture.take_suppressed_release(hwnd as usize);
+                cell.set(gesture);
+                suppressed
+            });
+            if suppressed {
+                if unsafe { GetCapture() } == hwnd { unsafe { ReleaseCapture(); } }
+                return 0;
+            }
             let action = CLICK_GESTURE.with(|cell| {
                 let mut gesture = cell.get();
                 let action = gesture.release(hwnd as usize, inside);
@@ -503,7 +550,10 @@ impl TaskbarWidget {
         let dpi = unsafe { GetDpiForWindow(taskbar) };
         let scale = (if dpi == 0 { 96 } else { dpi }) as f32 / 96.0;
         let content = self.content.borrow().clone();
-        let Some(content) = content.filter(|content| !content.items.is_empty()) else {
+        let Some(content) = content.filter(|content| {
+            !content.items.is_empty()
+                || content.empty_label.as_deref().is_some_and(|label| !label.is_empty())
+        }) else {
             self.hide_now(hwnd);
             return;
         };
@@ -511,7 +561,7 @@ impl TaskbarWidget {
         if !layout.as_ref().is_some_and(|(old, light, old_dpi, _)| {
             old == &content && *light == self.light.get() && *old_dpi == dpi
         }) {
-            let Some(measured) = render::Layout::new(&content.items, self.light.get(), scale) else {
+            let Some(measured) = render::Layout::new(&content, self.light.get(), scale) else {
                 self.hide_now(hwnd);
                 return;
             };
@@ -618,7 +668,7 @@ fn create_strip_window(taskbar: Handle) -> Handle {
         let cursor = unsafe { LoadCursorW(ptr::null_mut(), 32512usize as *const u16) };
         let class = WndClassExW {
             cb_size: core::mem::size_of::<WndClassExW>() as u32,
-            style: 0,
+            style: CS_DBLCLKS,
             wnd_proc: Some(window_proc),
             cls_extra: 0,
             wnd_extra: 0,
@@ -767,6 +817,9 @@ mod tests {
         assert_eq!(gesture.release(10, false), None);
         gesture.press(10, false);
         assert_eq!(gesture.release(20, true), None);
+        gesture.double_click(10);
+        assert!(gesture.take_suppressed_release(10));
+        assert!(!gesture.take_suppressed_release(10));
     }
 
     #[test]

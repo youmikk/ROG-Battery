@@ -131,7 +131,7 @@ impl<C: Channel> Session<C> {
         let info = self.rate_info(target)?.ok_or("设备不支持回报率设置")?;
         if !info.rate.writable {
             return Err(if info.rate.onboard_mode {
-                "当前处于板载内存模式，请在 G HUB 中关闭板载内存模式后刷新设备，再修改回报率。"
+                "当前处于板载内存模式，暂不支持直接改写板载回报率；请在 Logitech G HUB（写入板载后退出）或罗技 OMM 中修改，或关闭板载内存模式后再试。"
             } else { "当前模式不允许回报率写入" }.into());
         }
         let raw = info.choices.iter().find(|(_,v)| *v == hz).ok_or("回报率不在此连接的可用范围内")?.0;
@@ -400,9 +400,8 @@ impl<C: Channel> Session<C> {
             if payload.len() < 5 || payload[..3] != [0, axis, page] {
                 return Err("设备返回的 DPI 列表无效".into());
             }
-            // 长回报有 13 字节数据区，末尾奇数字节不构成一个 DPI 值。
-            let length = (payload.len() - 3) & !1;
-            bytes.extend_from_slice(&payload[3..3 + length]);
+            // 列表按大端 16 位字流分页拆包；13 字节长回报会在页尾把单个 DPI 值拆成高/低半字。
+            bytes.extend_from_slice(&payload[3..]);
             match decode_dpi_list(&bytes) {
                 Ok(values) => return Ok(values),
                 Err(DpiListError::Incomplete) => (),
@@ -1472,6 +1471,40 @@ mod tests {
         assert_eq!(dpi.values.len(), 43_901);
         assert_eq!(dpi.values.first(), Some(&100));
         assert_eq!(dpi.values.last(), Some(&44_000));
+        assert!(dpi.writable);
+        assert!(steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extended_dpi_preserves_odd_trailing_byte_across_long_report_pages() {
+        let page0 = [0, 0, 0, 0x00, 0x64, 0xe0, 0x01, 0x00, 0xc8, 0xe0, 0x02, 0x01, 0xf4, 0xe0, 0x05, 0x03];
+        let page1 = [0, 0, 1, 0xe8, 0xe0, 0x0a, 0x07, 0xd0, 0xe0, 0x14, 0x13, 0x88, 0xe0, 0x32, 0x27, 0x10];
+        let page2 = [0, 0, 2, 0x00, 0x00];
+        let page0_y = [0, 1, 0, 0x00, 0x64, 0xe0, 0x01, 0x00, 0xc8, 0xe0, 0x02, 0x01, 0xf4, 0xe0, 0x05, 0x03];
+        let page1_y = [0, 1, 1, 0xe8, 0xe0, 0x0a, 0x07, 0xd0, 0xe0, 0x14, 0x13, 0x88, 0xe0, 0x32, 0x27, 0x10];
+        let page2_y = [0, 1, 2, 0x00, 0x00];
+        let script = vec![
+            ping(),
+            data(0, 0, &[0x22, 1], &[0]),
+            data(0, 0, &[0x22, 2], &[9]),
+            data(9, 0, &[], &[1]),
+            data(9, 1, &[0], &[0, 5, 0x0f]),
+            data(9, 2, &[0, 0, 0], &page0),
+            data(9, 2, &[0, 0, 1], &page1),
+            data(9, 2, &[0, 0, 2], &page2),
+            data(9, 2, &[0, 1, 0], &page0_y),
+            data(9, 2, &[0, 1, 1], &page1_y),
+            data(9, 2, &[0, 1, 2], &page2_y),
+            data(9, 5, &[0], &[0, 0x06, 0x40, 0x03, 0x20, 0x06, 0x40, 0x03, 0x20, 2]),
+        ];
+        let (channel, steps) = channel(script);
+        let dpi = Session::from_channel(channel, &target()).unwrap().dpi().unwrap();
+        assert_eq!(dpi.current, Some(1600));
+        assert_eq!(dpi.current_y, Some(1600));
+        assert!(dpi.values.contains(&1000));
+        assert!(dpi.values.contains(&1600));
+        assert_eq!(dpi.values.first(), Some(&100));
+        assert_eq!(dpi.values.last(), Some(&10_000));
         assert!(dpi.writable);
         assert!(steps.lock().unwrap().is_empty());
     }

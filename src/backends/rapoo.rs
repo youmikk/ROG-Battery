@@ -1,6 +1,6 @@
 //! nRF54L 鼠标持续状态报告；配置访问使用独立的兄弟集合。
 use super::*;
-use crate::hid::HidDevice;
+use crate::{device::PollingRate, hid::HidDevice};
 use std::{
     collections::BTreeMap,
     sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex, OnceLock},
@@ -41,6 +41,19 @@ impl StatusState {
 
     fn confirmed_after(&self,now:Instant,after:Option<Instant>)->Option<&(Instant,Option<(Battery,Dpi)>,usize)> {
         self.recent(now).filter(|s|after.is_none_or(|after|s.0>after))
+    }
+
+    /// 在板载写入已校验成功后同步缓存的 DPI 状态，避免排序或增删改变活动档位索引时触发误判回退。
+    fn sync_dpi(&mut self, profile: u8, active: u8, x: u16, y: u16) {
+        if self.failed {
+            return;
+        }
+        if let Some((_, Some((_, dpi)), _)) = self.sample.as_mut() {
+            dpi.profile = Some(u16::from(profile));
+            dpi.active_stage = Some(active);
+            dpi.current = Some(x);
+            dpi.current_y = Some(y);
+        }
     }
 }
 
@@ -202,7 +215,7 @@ pub(crate) fn device_signature(target: &Target) -> Option<DeviceSignature> {
 }
 
 // 型号与协议归属：Rapoo AHUB 官方 VT_nrf54L 清单。
-fn model(pid: u16) -> Option<&'static str> {
+pub(super) fn model(pid: u16) -> Option<&'static str> {
     match pid {
         0x464d => Some("Rapoo ESM612ACE"),
         0x4681 => Some("Rapoo ESM612MAX"),
@@ -285,6 +298,10 @@ fn model(pid: u16) -> Option<&'static str> {
     }
 }
 
+pub(super) fn is_cybercafe(pid: u16) -> bool {
+    matches!(pid, 0x4631 | 0x4632 | 0x4633 | 0x4635 | 0x4637 | 0x4640 | 0x464d | 0x4681)
+}
+
 fn is_control(interface: &HidInterface) -> bool {
     interface.vendor_id == VID
         && model(interface.product_id).is_some()
@@ -340,11 +357,11 @@ fn offline_snapshot(target: &Target) -> Snapshot {
 
 fn read_with(target: &Target,
     mut read_status: impl FnMut(Duration) -> Result<Option<(Instant, Battery, Dpi)>, String>,
-    read_config: impl FnOnce(&Dpi) -> Result<Dpi, String>) -> Result<Snapshot, String> {
+    read_config: impl FnOnce(&Dpi) -> Result<(Dpi, PollingRate), String>) -> Result<Snapshot, String> {
     let Some((mut taken, mut battery, status)) = read_status(FIRST_REPORT_WAIT)? else {
         return Ok(offline_snapshot(target));
     };
-    let mut dpi = read_config(&status).unwrap_or(status);
+    let (mut dpi, mut polling_rate) = read_config(&status).unwrap_or((status, Default::default()));
     match read_status(Duration::ZERO) {
         Ok(Some((new_taken, new_battery, new_status))) => {
             taken = new_taken;
@@ -352,14 +369,18 @@ fn read_with(target: &Target,
             if dpi.profile != new_status.profile || dpi.active_stage != new_status.active_stage
                 || dpi.current != new_status.current || dpi.current_y != new_status.current_y {
                 dpi = new_status;
+                polling_rate = Default::default();
             }
         },
         Ok(None) => return Ok(offline_snapshot(target)),
-        Err(_) => dpi.disable_writes(),
+        Err(_) => {
+            dpi.disable_writes();
+            polling_rate.writable = false;
+        }
     }
     Ok(Snapshot {
         target: target.clone(), battery: Some(battery), dpi, connected: true,
-        battery_unavailable: false, battery_at: Some(taken), polling_rate: Default::default(),
+        battery_unavailable: false, battery_at: Some(taken), polling_rate,
     })
 }
 
@@ -396,6 +417,29 @@ impl DeviceBackend for Rapoo {
         if !is_control(target.hid()?) {return Err(crate::tr!("此雷柏型号尚未适配").into());}
         super::rapoo_config::switch(api,target,stage,context)
     }
+
+    fn edit_dpi_stage(&self, api: &HidApi, target: &Target, stage: crate::device::DpiStage,
+        context: crate::device::StageContext, expected_y: u16, x: u16, y: u16) -> Result<(), String> {
+        if !is_control(target.hid()?) { return Err(crate::tr!("此雷柏型号尚未适配").into()); }
+        super::rapoo_config::edit(api, target, stage, context, expected_y, x, y)
+    }
+
+    fn add_dpi_stage(&self, api: &HidApi, target: &Target,
+        context: crate::device::StageContext, x: u16, y: u16) -> Result<(), String> {
+        if !is_control(target.hid()?) { return Err(crate::tr!("此雷柏型号尚未适配").into()); }
+        super::rapoo_config::add_stage(api, target, context, x, y)
+    }
+
+    fn remove_dpi_stage(&self, api: &HidApi, target: &Target,
+        stage: crate::device::DpiStage, context: crate::device::StageContext) -> Result<(), String> {
+        if !is_control(target.hid()?) { return Err(crate::tr!("此雷柏型号尚未适配").into()); }
+        super::rapoo_config::remove_stage(api, target, stage, context)
+    }
+
+    fn set_polling_rate(&self, api: &HidApi, target: &Target, hz: u16) -> Result<(), String> {
+        if !is_control(target.hid()?) { return Err(crate::tr!("此雷柏型号尚未适配").into()); }
+        super::rapoo_config::set_rate(api, target, hz)
+    }
 }
 
 pub(super) fn latest_status(target:&Target,after:Option<Instant>,wait:Duration)->Result<(Instant,Battery,Dpi),String> {
@@ -429,6 +473,22 @@ fn status_from_session(target: &Target, session: &StatusReader, after: Option<In
     result.ok_or_else(||crate::tr!("暂未收到设备状态更新，请轻动鼠标唤醒后再试").into())
 }
 
+/// 将已校验的板载 DPI 档位写入结果同步到状态监听缓存，防止刷新竞态短暂退化为只读页。
+pub(super) fn sync_status_dpi(target: &Target, profile: u8, active: u8, x: u16, y: u16) {
+    let Ok(interface) = target.hid() else {
+        return;
+    };
+    let session = {
+        let sessions = readers().lock().unwrap_or_else(|error| error.into_inner());
+        sessions.get(&interface.path).cloned()
+    };
+    let Some(session) = session else {
+        return;
+    };
+    session.state.lock().unwrap_or_else(|error| error.into_inner()).sync_dpi(profile, active, x, y);
+    session.changed.notify_all();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,7 +513,7 @@ mod tests {
                     let mut offline = report();
                     offline[7] = 0;
                     session.state.lock().unwrap().receive(&offline, Instant::now());
-                    if configuration_succeeds { Ok(status.clone()) }
+                    if configuration_succeeds { Ok((status.clone(), Default::default())) }
                     else { Err("configuration unavailable".into()) }
                 }).unwrap();
             assert!(!sample.connected);
@@ -520,12 +580,14 @@ mod tests {
                 session.state.lock().unwrap().failed = true;
                 let mut configured = status.clone();
                 configured.writable = true;
-                Ok(configured)
+                let rate = PollingRate { current: Some(1000), values: vec![500, 1000], writable: true, ..Default::default() };
+                Ok((configured, rate))
             }).unwrap();
         assert!(sample.connected);
         assert_eq!(sample.battery.unwrap().percent, Some(75));
         assert_eq!(sample.battery_at, Some(measured));
         assert!(!sample.dpi.writable);
+        assert!(!sample.polling_rate.writable);
     }
 
     #[test]
@@ -544,7 +606,8 @@ mod tests {
                 session.state.lock().unwrap().receive(&updated, updated_at);
                 let mut configured = status.clone();
                 configured.writable = true;
-                Ok(configured)
+                let rate = PollingRate { current: Some(1000), values: vec![500, 1000], writable: true, ..Default::default() };
+                Ok((configured, rate))
             }).unwrap();
         assert!(sample.connected);
         let battery = sample.battery.unwrap();
@@ -553,6 +616,8 @@ mod tests {
         assert_eq!(sample.battery_at, Some(updated_at));
         assert_eq!(sample.dpi.current, Some(1200));
         assert!(!sample.dpi.writable);
+        assert!(!sample.polling_rate.writable);
+        assert!(sample.polling_rate.values.is_empty());
     }
 
     #[test]
@@ -712,5 +777,21 @@ mod tests {
         assert_eq!(wired.model, "Rapoo VT1");
         assert_eq!(rx.role, LinkRole::Receiver);
         assert_eq!(wired.role, LinkRole::Wired);
+    }
+
+    #[test]
+    fn sync_dpi_updates_cached_stage_without_touching_battery_or_timestamp() {
+        let now = Instant::now();
+        let mut state = StatusState::default();
+        state.receive(&report(), now);
+        state.sync_dpi(2, 1, 400, 400);
+        let sample = state.recent(now + Duration::from_secs(1)).unwrap();
+        assert_eq!(sample.0, now);
+        let (battery, dpi) = sample.1.as_ref().unwrap();
+        assert_eq!(battery.percent, Some(75));
+        assert_eq!(dpi.profile, Some(2));
+        assert_eq!(dpi.active_stage, Some(1));
+        assert_eq!(dpi.current, Some(400));
+        assert_eq!(dpi.current_y, Some(400));
     }
 }

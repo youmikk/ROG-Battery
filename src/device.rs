@@ -239,6 +239,7 @@ pub struct Dpi {
     pub configuration_token: Option<u64>,
     pub stage_writable: bool,
     pub stage_editable: bool,
+    pub max_stages: u8,
     pub stage_y: std::collections::BTreeMap<u8, u16>,
 }
 

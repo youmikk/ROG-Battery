@@ -118,7 +118,8 @@ macro_rules! tr {
     ("回报率") => { if $crate::i18n::english() { "Polling rate" } else { "回报率" } };
     ("有线回报率") => { if $crate::i18n::english() { "Wired polling rate" } else { "有线回报率" } };
     ("无线回报率") => { if $crate::i18n::english() { "Wireless polling rate" } else { "无线回报率" } };
-    ("设备当前处于板载内存模式。如需修改回报率，请先在 Logitech G HUB 中关闭板载内存模式，再刷新设备。") => { if $crate::i18n::english() { "On-board memory mode is active. Turn it off in Logitech G HUB and refresh the device to change the polling rate." } else { "设备当前处于板载内存模式。如需修改回报率，请先在 Logitech G HUB 中关闭板载内存模式，再刷新设备。" } };
+    ("设备当前处于板载内存模式，暂不支持直接改写板载回报率。请在 Logitech G HUB（写入板载配置后退出）或罗技 OMM 中修改，再刷新设备。") => { if $crate::i18n::english() { "On-board memory mode is active and direct onboard polling-rate writes are not supported. Update it in Logitech G HUB (save to on-board memory, then exit) or Logitech OMM, and refresh the device." } else { "设备当前处于板载内存模式，暂不支持直接改写板载回报率。请在 Logitech G HUB（写入板载配置后退出）或罗技 OMM 中修改，再刷新设备。" } };
+    ("如果切换回报率后选项又跳回原值，通常是后台的 Logitech G HUB 在强制覆盖配置；如需固定生效，建议在 G HUB 写入板载配置后完全退出，或改用罗技 OMM 修改。") => { if $crate::i18n::english() { "If the polling rate reverts after switching, Logitech G HUB is likely overwriting it in the background. To make changes stick, save to on-board memory in G HUB and quit G HUB completely, or use Logitech OMM." } else { "如果切换回报率后选项又跳回原值，通常是后台的 Logitech G HUB 在强制覆盖配置；如需固定生效，建议在 G HUB 写入板载配置后完全退出，或改用罗技 OMM 修改。" } };
     ("越高越跟手，也越耗电") => { if $crate::i18n::english() { "Higher rates improve response and use more power" } else { "越高越跟手，也越耗电" } };
     ("当前档位") => { if $crate::i18n::english() { "Active stage" } else { "当前档位" } };
     ("同时决定设备的 DPI 和档位指示灯") => { if $crate::i18n::english() { "Sets the DPI and stage indicator color" } else { "同时决定设备的 DPI 和档位指示灯" } };
@@ -155,6 +156,7 @@ macro_rules! tr {
     ("显示托盘图标") => { if $crate::i18n::english() { "Show tray icons" } else { "显示托盘图标" } };
     ("在任务栏显示电量") => { if $crate::i18n::english() { "Show battery on the taskbar" } else { "在任务栏显示电量" } };
     ("显示全部有电量设备，点击打开快速查看") => { if $crate::i18n::english() { "Show every device with battery data; click to open quick view" } else { "显示全部有电量设备，点击打开快速查看" } };
+    ("暂无设备") => { if $crate::i18n::english() { "No devices" } else { "暂无设备" } };
     ("低电量系统通知") => { if $crate::i18n::english() { "Low battery notifications" } else { "低电量系统通知" } };
     ("低于 20% 时通过 Windows 通知提醒") => { if $crate::i18n::english() { "Notify through Windows below 20%" } else { "低于 20% 时通过 Windows 通知提醒" } };
     ("隐藏托盘图标后，可通过主窗口或任务栏入口使用") => { if $crate::i18n::english() { "When off, use the main window or taskbar strip" } else { "隐藏托盘图标后，可通过主窗口或任务栏入口使用" } };
@@ -195,7 +197,11 @@ macro_rules! tr {
     ("最小化到系统托盘（在后台继续运行）") => { if $crate::i18n::english() { "Minimize to tray (keep running in the background)" } else { "最小化到系统托盘（在后台继续运行）" } };
     ("直接退出程序") => { if $crate::i18n::english() { "Quit application" } else { "直接退出程序" } };
     ("记住我的选择，下次不再提示") => { if $crate::i18n::english() { "Remember my choice" } else { "记住我的选择，下次不再提示" } };
+    ("确认") => { if $crate::i18n::english() { "Confirm" } else { "确认" } };
     ("取消") => { if $crate::i18n::english() { "Cancel" } else { "取消" } };
+    ("删除档位") => { if $crate::i18n::english() { "Delete stages" } else { "删除档位" } };
+    ("完成") => { if $crate::i18n::english() { "Done" } else { "完成" } };
+    ("当前使用 · 不可删") => { if $crate::i18n::english() { "In use · locked" } else { "当前使用 · 不可删" } };
     ("确定") => { if $crate::i18n::english() { "OK" } else { "确定" } };
     ("不缓存（每次实时读取）") => { if $crate::i18n::english() { "No cache" } else { "不缓存（每次实时读取）" } };
     ("每次询问") => { if $crate::i18n::english() { "Ask every time" } else { "每次询问" } };
@@ -351,7 +357,7 @@ macro_rules! tr {
     ("「永不」休眠会显著增加耗电，设备闲置时不会自动休眠。") => { if $crate::i18n::english() { "Never sleeping increases power use. The device will stay awake when idle." } else { "「永不」休眠会显著增加耗电，设备闲置时不会自动休眠。" } };
     ("DPI 预设") => { if $crate::i18n::english() { "DPI presets" } else { "DPI 预设" } };
     ("保存在鼠标板载内存中；点击切换即可直接在硬件上生效。") => { if $crate::i18n::english() { "Saved in mouse onboard memory; clicks take effect immediately." } else { "保存在鼠标板载内存中；点击切换即可直接在硬件上生效。" } };
-    ("保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「应用」即可写入设备。") => { if $crate::i18n::english() { "Saved in mouse onboard memory, step 50 DPI. Click Switch to change stage, click Apply to write to device." } else { "保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「应用」即可写入设备。" } };
+    ("保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「确认」即可写入设备。") => { if $crate::i18n::english() { "Saved in mouse onboard memory, step 50 DPI. Click Switch to change stage, click Confirm to write to device." } else { "保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「确认」即可写入设备。" } };
     ("预设保存在软件中。点击「切换」可切换当前 DPI，修改数值后点击「应用」即可保存预设。") => { if $crate::i18n::english() { "Presets stay in the app. Click Switch to change DPI, click Apply to save presets." } else { "预设保存在软件中。点击「切换」可切换当前 DPI，修改数值后点击「应用」即可保存预设。" } };
     ("当前回报率") => { if $crate::i18n::english() { "Current polling rate" } else { "当前回报率" } };
     ("托盘与任务栏") => { if $crate::i18n::english() { "Tray and Taskbar" } else { "托盘与任务栏" } };
@@ -375,6 +381,7 @@ macro_rules! trf {
     ("按最近 {} 个采样估算 · 变化 ≈{:+.1} %/h", $($args:tt)*) => { if $crate::i18n::english() { format!("Based on {} recent samples · Change ≈{:+.1} %/h", $($args)*) } else { format!("按最近 {} 个采样估算 · 变化 ≈{:+.1} %/h", $($args)*) } };
     ("{} 个采样点", $($args:tt)*) => { if $crate::i18n::english() { format!("{} samples", $($args)*) } else { format!("{} 个采样点", $($args)*) } };
     ("档位 {}", $($args:tt)*) => { if $crate::i18n::english() { format!("Stage {}", $($args)*) } else { format!("档位 {}", $($args)*) } };
+    ("启用 {count} 个档位", $($args:tt)*) => { if $crate::i18n::english() { format!("{count} active stages", $($args)*) } else { format!("启用 {count} 个档位", $($args)*) } };
     ("{} 颗灯珠 · {}", $($args:tt)*) => { if $crate::i18n::english() { format!("{} LEDs · {}", $($args)*) } else { format!("{} 颗灯珠 · {}", $($args)*) } };
     ("历史文件保存位置（{status}）", $($args:tt)*) => { if $crate::i18n::english() { format!("History file ({status})", $($args)*) } else { format!("历史文件保存位置（{status}）", $($args)*) } };
     ("设置文件保存位置（{status}）", $($args:tt)*) => { if $crate::i18n::english() { format!("Settings file ({status})", $($args)*) } else { format!("设置文件保存位置（{status}）", $($args)*) } };
@@ -567,7 +574,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "设备返回的回报率列表无效" => "Invalid polling rate list returned by the device",
         "无法读取当前回报率" => "Could not read the current polling rate",
         "当前模式不允许回报率写入" => "Polling rate writes are not available in the current mode",
-        "当前处于板载内存模式，请在 G HUB 中关闭板载内存模式后刷新设备，再修改回报率。" => "On-board memory mode is active. Turn it off in G HUB, then refresh the device before changing the polling rate.",
+        "当前处于板载内存模式，暂不支持直接改写板载回报率；请在 Logitech G HUB（写入板载后退出）或罗技 OMM 中修改，或关闭板载内存模式后再试。" => "On-board memory mode is active and direct onboard polling-rate writes are not supported. Change it in Logitech G HUB (save to on-board memory and quit) or Logitech OMM, or turn off on-board memory first.",
         "设备连接已变化，请刷新后重试" => "Device connection changed; refresh and try again",
         "请求数据格式超出设备限制" => "Request length exceeds the device limit",
         "设备暂未响应，请唤醒或检查连接后重试" => "No response from the device. Wake it or check the connection and try again.",
@@ -636,6 +643,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "显示托盘图标" => "Show tray icons",
         "在任务栏显示电量" => "Show battery on the taskbar",
         "显示全部有电量设备，点击打开快速查看" => "Show every device with battery data; click to open quick view",
+        "暂无设备" => "No devices",
         "低电量系统通知" => "Low battery notifications",
         "低于 20% 时通过 Windows 通知提醒" => "Notify through Windows below 20%",
         "隐藏托盘图标后，可通过主窗口或任务栏入口使用" => "When off, use the main window or taskbar strip",
@@ -833,6 +841,11 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "抬起距离已更新，设备原有的表面校准已重置。" => "Lift-off distance updated; the device's previous surface calibration was reset.",
         "「永不」休眠会显著增加耗电，设备闲置时不会自动休眠。" => "Never sleeping increases power use. The device will stay awake when idle.",
         "启用档数" => "Active stages",
+        "设备不支持新增 DPI 档位" => "This device does not support adding DPI stages",
+        "设备不支持删除 DPI 档位" => "This device does not support removing DPI stages",
+        "至少需保留 1 个 DPI 档位" => "Keep at least 1 DPI stage",
+        "当前使用档位无法删除" => "The active DPI stage cannot be deleted",
+        "DPI 档位数量已达上限" => "Maximum number of DPI stages reached",
         "按 DPI 升序排列；减少档数时保留收起的数值" => "Sorted by DPI. Hidden values are kept when reducing the stage count.",
         "读取到的设备 DPI 配置异常，请刷新重试" => "Unexpected Rapoo DPI data. Refresh and try again.",
         "等待设备配置响应超时，请唤醒后重试" => "Timed out waiting for Rapoo configuration. Wake the mouse and try again.",
@@ -853,7 +866,7 @@ pub(super) fn lookup(language: super::Language, text: &str) -> &str {
         "删除" => "Delete",
         "DPI 预设" => "DPI presets",
         "保存在鼠标板载内存中；点击切换即可直接在硬件上生效。" => "Saved in mouse onboard memory; clicks take effect immediately.",
-        "保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「应用」即可写入设备。" => "Saved in mouse onboard memory, step 50 DPI. Click Switch to change stage, click Apply to write to device.",
+        "保存在鼠标板载内存中，步进 50 DPI。点击「切换」可切换档位，修改数值后点击「确认」即可写入设备。" => "Saved in mouse onboard memory, step 50 DPI. Click Switch to change stage, click Confirm to write to device.",
         "预设保存在软件中。点击「切换」可切换当前 DPI，修改数值后点击「应用」即可保存预设。" => "Presets stay in the app. Click Switch to change DPI, click Apply to save presets.",
         "当前回报率" => "Current polling rate",
         "接收器固件低于 0008" => "Receiver firmware is below 0008",

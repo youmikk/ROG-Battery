@@ -1,6 +1,5 @@
 //! Native taskbar text at its measured size, without stretching glyph outlines.
 
-use super::StripItem;
 use crate::{tray_prefs::TrayKind, win32::Handle};
 use std::{mem, ptr};
 use winapi::{shared::windef::{HDC, HGDIOBJ, SIZE}, um::wingdi::*};
@@ -157,11 +156,10 @@ fn glyph(kind: TrayKind) -> &'static str {
     }
 }
 
-struct Item { icon: Mask, label: Mask, charge: Option<Mask>, color: u32 }
+struct Item { icon: Mask, label: Mask, charge: Option<Mask>, icon_color: u32, color: u32 }
 
 pub(super) struct Layout {
     items: Vec<Item>,
-    foreground: u32,
     charge_color: u32,
     padding: i32,
     icon_gap: i32,
@@ -170,21 +168,35 @@ pub(super) struct Layout {
 }
 
 impl Layout {
-    pub fn new(items: &[StripItem], light: bool, scale: f32) -> Option<Self> {
-        if items.is_empty() || !scale.is_finite() || scale <= 0.0 { return None; }
+    pub fn new(content: &super::StripContent, light: bool, scale: f32) -> Option<Self> {
+        if !scale.is_finite() || scale <= 0.0 { return None; }
         let text = native_font(&[("Segoe UI Variable Text", 13.0), ("Segoe UI", 12.0)], scale, FW_SEMIBOLD)?;
         let icons = native_font(&[("Segoe Fluent Icons", 16.0), ("Segoe MDL2 Assets", 16.0)], scale, FW_SEMIBOLD)?;
         let foreground = if light { 0xff16_1917 } else { 0xfff2_f5f1 };
+        let muted = if light { 0xff5a_615c } else { 0xffa8_b0aa };
         let red = if light { 0xffc4_2b1c } else { 0xffff_6b6b };
-        let items = items.iter().map(|item| Some(Item {
-            icon: Mask::text(glyph(item.kind), &icons, light)?,
-            label: Mask::text(&item.level.map(|v| v.label(true)).unwrap_or_else(|| "—".into()), &text, light)?,
-            charge: if item.charging && item.level.is_some() {
-                Some(Mask::charging_bolt(scale))
-            } else { None },
-            color: if item.level.is_some_and(|v| v.value <= 20) { red } else { foreground },
-        })).collect::<Option<Vec<_>>>()?;
-        Some(Self { items, foreground,
+        let items = if !content.items.is_empty() {
+            content.items.iter().map(|item| Some(Item {
+                icon: Mask::text(glyph(item.kind), &icons, light)?,
+                label: Mask::text(&item.level.map(|v| v.label(true)).unwrap_or_else(|| "—".into()), &text, light)?,
+                charge: if item.charging && item.level.is_some() {
+                    Some(Mask::charging_bolt(scale))
+                } else { None },
+                icon_color: foreground,
+                color: if item.level.is_some_and(|v| v.value <= 20) { red } else { foreground },
+            })).collect::<Option<Vec<_>>>()?
+        } else if let Some(empty_label) = content.empty_label.as_deref().filter(|s| !s.is_empty()) {
+            vec![Item {
+                icon: Mask::text(glyph(TrayKind::Generic), &icons, light)?,
+                label: Mask::text(empty_label, &text, light)?,
+                charge: None,
+                icon_color: muted,
+                color: muted,
+            }]
+        } else {
+            return None;
+        };
+        Some(Self { items,
             charge_color: crate::ui::theme::CHARGING_GREEN,
             padding: px(6.0, scale), icon_gap: px(4.0, scale),
             device_gap: px(10.0, scale), charge_gap: px(2.0, scale),
@@ -211,7 +223,7 @@ impl Layout {
         let mut raster = Raster { width, height, pixels: vec![0x0100_0000; (width * height) as usize] };
         let mut x = self.padding;
         for item in &self.items[..count] {
-            raster.mask(&item.icon, x, self.foreground);
+            raster.mask(&item.icon, x, item.icon_color);
             x += item.icon.width + self.icon_gap;
             raster.mask(&item.label, x, item.color);
             x += item.label.width;
@@ -255,9 +267,13 @@ impl Raster {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{StripContent, StripItem};
     use super::*;
     fn item(value: u8, kind: TrayKind) -> StripItem {
         StripItem { level: Some(crate::device::BatteryPercent { value, approximate: false }), charging: false, kind }
+    }
+    fn content(items: Vec<StripItem>) -> StripContent {
+        StripContent { items, empty_label: None }
     }
 
     #[test]
@@ -265,8 +281,8 @@ mod tests {
         let items = [item(75, TrayKind::Mouse), item(100, TrayKind::Keyboard),
             item(18, TrayKind::Headset), item(67, TrayKind::Gamepad)];
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let layout = Layout::new(&items, true, scale).expect("native fonts");
-            let one = Layout::new(&items[..1], true, scale).unwrap();
+            let layout = Layout::new(&content(items.to_vec()), true, scale).expect("native fonts");
+            let one = Layout::new(&content(items[..1].to_vec()), true, scale).unwrap();
             assert_eq!(one.width(1), layout.width(1));
             assert!(one.items[0].icon.width > 0);
             assert!(layout.width(2) < (130.0 * scale) as i32);
@@ -285,7 +301,7 @@ mod tests {
             for light in [true, false] {
                 let mut data = item(100, TrayKind::Keyboard);
                 data.charging = true;
-                let layout = Layout::new(&[data], light, scale).unwrap();
+                let layout = Layout::new(&content(vec![data]), light, scale).unwrap();
                 let mark = layout.items[0].charge.as_ref().unwrap();
                 assert_eq!((mark.width, mark.height), (px(8.0, scale), px(12.0, scale)));
                 assert!(mark.alpha.iter().filter(|&&a| a == 255).count() >= (12.0 * scale * scale) as usize);
@@ -306,7 +322,7 @@ mod tests {
                     let mut data = item(value, TrayKind::Mouse);
                     data.charging = value == 100;
                     data.level.as_mut().unwrap().approximate = value == 5;
-                    let layout = Layout::new(&[data], light, scale).unwrap();
+                    let layout = Layout::new(&content(vec![data]), light, scale).unwrap();
                     let label = &layout.items[0].label;
                     assert!(label.height <= px(11.0, scale) + 1);
                     assert!(label.height >= px(7.0, scale));
@@ -321,6 +337,25 @@ mod tests {
                         assert!([0, 8, 16].into_iter().all(|s| (pixel >> s) & 255 <= pixel >> 24));
                     }
                     // Empty space is a hit target too; clicks must not fall through to Explorer.
+                    assert!(raster.pixels.iter().all(|pixel| pixel >> 24 != 0));
+                    let bitmap = raster.bitmap().expect("native DIB");
+                    unsafe { crate::win32::DeleteObject(bitmap); }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_placeholder_renders_muted_icon_and_label_at_every_taskbar_scale() {
+        assert!(Layout::new(&content(Vec::new()), true, 1.0).is_none());
+        for label in ["暂无设备", "No devices"] {
+            let empty = StripContent { items: Vec::new(), empty_label: Some(label.into()) };
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                for light in [true, false] {
+                    let layout = Layout::new(&empty, light, scale).expect("empty placeholder");
+                    assert_eq!(layout.visible_count(layout.width(1)), 1);
+                    assert_eq!(layout.visible_count(layout.width(1) - 1), 0);
+                    let raster = layout.raster(1, px(40.0, scale)).unwrap();
                     assert!(raster.pixels.iter().all(|pixel| pixel >> 24 != 0));
                     let bitmap = raster.bitmap().expect("native DIB");
                     unsafe { crate::win32::DeleteObject(bitmap); }

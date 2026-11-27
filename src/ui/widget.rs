@@ -95,6 +95,8 @@ pub enum Edit {
     Dpi(u8),
     BasicDpiX(u8),
     BasicDpiY(u8),
+    NewBasicDpiX(u8),
+    NewBasicDpiY(u8),
     DpiPreset(u8),
     /// 性能页：第 N 档 DPI 的颜色（0–3），6 位十六进制。
     DpiColor(u8),
@@ -116,7 +118,8 @@ impl Edit {
     /// 最多几位。
     pub fn max_len(self) -> usize {
         match self {
-            Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_) | Edit::DpiPreset(_) => 5,
+            Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_)
+            | Edit::NewBasicDpiX(_) | Edit::NewBasicDpiY(_) | Edit::DpiPreset(_) => 5,
             Edit::DpiColor(_) | Edit::LightColor => 6,
             Edit::LowWarn => 3,
         }
@@ -192,6 +195,10 @@ pub enum Act {
     BasicDpi(u16),
     UseDpiPreset(u16),
     BasicDpiStage(crate::device::DpiStage, crate::device::StageContext),
+    ToggleDpiDeleteMode,
+    BasicDpiStageRemove(crate::device::DpiStage, crate::device::StageContext),
+    AddBasicDpiStage,
+    RemoveNewBasicDpiStage(u8),
     BasicPollingRate(u16),
     DpiPresetMode(bool),
     DpiPresetCount(u8),
@@ -272,7 +279,8 @@ impl Act {
     /// 本地动作（切页、改本地设置）照常执行。
     pub fn needs_device(self) -> bool {
         match self {
-            Act::ApplyEdit(Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_)) | Act::CommitSlide(Slide::Tune) => true,
+            Act::ApplyEdit(Edit::Dpi(_) | Edit::BasicDpiX(_) | Edit::BasicDpiY(_)
+                | Edit::NewBasicDpiX(_) | Edit::NewBasicDpiY(_)) | Act::CommitSlide(Slide::Tune) => true,
             Act::Backup | Act::Restore | Act::RefreshLighting => true,
             Act::Toggle(p) => p.needs_device(),
             Act::PickDrop(d, _) => d.needs_device(),
@@ -419,6 +427,8 @@ pub struct Ui {
     /// 线性查找比哈希更快也更好读。
     pub edits: Vec<(Edit, String)>,
     pub basic_dpi_drafts: std::collections::BTreeMap<u8, BasicDpiDraft>,
+    pub new_basic_dpi_count: u8,
+    pub dpi_delete_mode: bool,
     /// 「草稿还是设备原值的副本、用户一个字符都没改过」的那个输入框。
     ///
     /// 有它才能做到**第一次敲键就替换掉预填值**：DPI 框点进去时草稿是
@@ -528,6 +538,8 @@ impl Default for Ui {
             focus: None,
             edits: Vec::new(),
             basic_dpi_drafts: Default::default(),
+            new_basic_dpi_count: 0,
+            dpi_delete_mode: false,
             edit_fresh: None,
             hots: Vec::new(),
             chrome: Vec::new(),
@@ -584,9 +596,6 @@ impl Ui {
         }
         if !self.initial_route_done && !devices.is_empty() {
             self.initial_route_done = true;
-            if self.page == Page::Home && devices.len() == 1 {
-                self.select_device(&devices[0].key);
-            }
         }
         if let Some(key) = &self.selected_device {
             if !devices.iter().any(|d| &d.key == key) {
@@ -606,6 +615,8 @@ impl Ui {
         self.focus = None;
         self.edits.clear();
         self.basic_dpi_drafts.clear();
+        self.new_basic_dpi_count = 0;
+        self.dpi_delete_mode = false;
         self.chart = None;
         self.live.fill(None);
     }
@@ -825,6 +836,33 @@ impl Ui {
         }
         if self.focus == Some(e) {
             self.focus = None;
+        }
+    }
+
+    pub fn remove_new_basic_dpi(&mut self, slot: u8) {
+        if self.new_basic_dpi_count == 0 || slot >= self.new_basic_dpi_count {
+            return;
+        }
+        self.new_basic_dpi_count -= 1;
+        let mut next = Vec::with_capacity(self.edits.len());
+        for (edit, text) in std::mem::take(&mut self.edits) {
+            match edit {
+                Edit::NewBasicDpiX(i) if i == slot => {}
+                Edit::NewBasicDpiY(i) if i == slot => {}
+                Edit::NewBasicDpiX(i) if i > slot => next.push((Edit::NewBasicDpiX(i - 1), text)),
+                Edit::NewBasicDpiY(i) if i > slot => next.push((Edit::NewBasicDpiY(i - 1), text)),
+                other => next.push((other, text)),
+            }
+        }
+        self.edits = next;
+        self.focus = match self.focus {
+            Some(Edit::NewBasicDpiX(i) | Edit::NewBasicDpiY(i)) if i == slot => None,
+            Some(Edit::NewBasicDpiX(i)) if i > slot => Some(Edit::NewBasicDpiX(i - 1)),
+            Some(Edit::NewBasicDpiY(i)) if i > slot => Some(Edit::NewBasicDpiY(i - 1)),
+            other => other,
+        };
+        if let Some(Edit::NewBasicDpiX(i) | Edit::NewBasicDpiY(i)) = self.edit_fresh {
+            if i >= slot { self.edit_fresh = None; }
         }
     }
 
@@ -1178,6 +1216,15 @@ mod drag_tests {
         assert!(!ui.wheel(-1.0, 100.0));
         ui.on_press(120.0, 110.0, 0.0);
         assert_eq!(ui.on_release(10.0, 10.0, 0.0), None);
+    }
+
+    #[test]
+    fn initial_single_device_stays_on_home_all_devices_page() {
+        let mut ui = Ui::default();
+        ui.sync_devices(&readings(&["mouse"]));
+        assert_eq!(ui.page, Page::Home);
+        assert!(ui.selected_device.is_none());
+        assert!(ui.initial_route_done);
     }
 
     #[test]
