@@ -716,6 +716,9 @@ fn device_header(p: &mut Painter, ui: &mut Ui, d: &Data, c: &mut Cursor) {
     let visible_tabs: Vec<_> = tabs
         .into_iter()
         .filter(|(page, _)| {
+            if d.selected.is_some_and(|reading| reading.is_discovering()) {
+                return *page == Page::Battery;
+            }
             if let Some(basic) = d.basic {
                 if matches!(page, Page::Light | Page::Keys)
                     || (*page == Page::Perf
@@ -867,7 +870,7 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     }
     if matches!(ui.page, Page::Perf | Page::Light | Page::Keys)
         && d.selected
-            .is_some_and(|r| d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse)
+            .is_some_and(|r| r.is_discovering() || d.cfg.device_kind(r) != crate::tray_prefs::TrayKind::Mouse)
     {
         ui.page = Page::Battery;
         ui.set_open_drop(None);
@@ -879,6 +882,7 @@ pub fn page(p: &mut Painter, ui: &mut Ui, d: &Data, f: &Frame) {
     ui.locked = !d.state.is_some_and(|s| !placeholder_state(s));
     if let Some(basic) = d.basic { ui.locked = !basic.connected ||
         !(basic.dpi.writable || basic.dpi.stage_writable || basic.dpi.stage_editable || basic.polling_rate.writable); }
+    ui.locked |= d.selected.is_some_and(|reading| reading.is_discovering());
 
     let mut c = Cursor::new(f);
     if !matches!(ui.page, Page::Home | Page::Settings) {
@@ -1224,6 +1228,74 @@ fn draw_device_micro_icon(
     }
 }
 
+fn home_device_labels(reading: &crate::device::DeviceReading) -> (&'static str, &'static str) {
+    if reading.is_discovering() {
+        return (super::feedback::text("已发现", "Discovered"),
+            super::feedback::text("正在确认连接与电量", "Checking connection and battery"));
+    }
+    let status = if !reading.connected {
+        crate::tr!("未连接")
+    } else if reading.is_charging() {
+        crate::tr!("正在充电")
+    } else {
+        crate::tr!("已连接")
+    };
+    let hint = if !reading.connected {
+        crate::tr!("连接后更新读数")
+    } else if reading.is_charging() {
+        crate::tr!("正在为设备充电")
+    } else if let Some(level) = reading.coarse_level() {
+        crate::i18n::battery_level(level)
+    } else if reading.is_low() {
+        crate::tr!("电量偏低")
+    } else if reading.display_percent().is_some() {
+        crate::tr!("使用中")
+    } else {
+        crate::tr!("电量未知")
+    };
+    (status, hint)
+}
+
+fn home_empty_message(discovery_pending: bool) -> &'static str {
+    if discovery_pending {
+        super::feedback::text("正在查找设备…", "Finding devices…")
+    } else {
+        crate::tr!("连接设备后会自动显示。")
+    }
+}
+
+#[cfg(test)]
+mod device_label_tests {
+    use super::{home_device_labels, home_empty_message};
+    use crate::device::{Battery, DeviceReading, ReadingQuality};
+
+    #[test]
+    fn discovering_empty_home_only_asks_for_a_connection_after_scanning() {
+        assert_eq!(home_empty_message(true), crate::ui::feedback::text("正在查找设备…", "Finding devices…"));
+        assert_eq!(home_empty_message(false), crate::tr!("连接设备后会自动显示。"));
+        assert_ne!(home_empty_message(true), home_empty_message(false));
+    }
+
+    #[test]
+    fn discovering_card_is_distinct_from_offline_and_live_devices() {
+        let mut reading = DeviceReading { quality: ReadingQuality::Discovering, ..Default::default() };
+        assert_eq!(home_device_labels(&reading), (crate::ui::feedback::text("已发现", "Discovered"),
+            crate::ui::feedback::text("正在确认连接与电量", "Checking connection and battery")));
+        assert_eq!(reading.battery_text(true), "—");
+        reading.quality = ReadingQuality::Unknown;
+        assert_eq!(home_device_labels(&reading), (crate::tr!("未连接"), crate::tr!("连接后更新读数")));
+        reading.connected = true;
+        assert_eq!(home_device_labels(&reading), (crate::tr!("已连接"), crate::tr!("电量未知")));
+        reading.quality = ReadingQuality::Live;
+        reading.battery = Some(Battery { percent: Some(0), estimated_percent: None, charging: Some(false),
+            voltage_mv: None, approximate: false, level: None });
+        assert_eq!(home_device_labels(&reading), (crate::tr!("已连接"), crate::tr!("电量偏低")));
+        assert_eq!(reading.battery_text(true), "0%");
+        reading.battery.as_mut().unwrap().charging = Some(true);
+        assert_eq!(home_device_labels(&reading), (crate::tr!("正在充电"), crate::tr!("正在为设备充电")));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn home_device_card(
     p: &mut Painter,
@@ -1322,13 +1394,7 @@ fn home_device_card(
     } else {
         p.circle(dot_x, dot_center_y, 3.0, t.accent);
     }
-    let status = if !connected {
-        crate::tr!("未连接")
-    } else if charging {
-        crate::tr!("正在充电")
-    } else {
-        crate::tr!("已连接")
-    };
+    let (status, hint) = home_device_labels(dev);
     p.text(
         status,
         R::new(dot_x + 8.0, first_line_y - 2.0, text_width - 70.0, 18.0),
@@ -1345,19 +1411,6 @@ fn home_device_card(
         t.text,
         Align::Left,
     );
-    let hint = if !connected {
-        crate::tr!("连接后更新读数")
-    } else if charging {
-        crate::tr!("正在为设备充电")
-    } else if let Some(level) = dev.coarse_level() {
-        crate::i18n::battery_level(level)
-    } else if dev.is_low() {
-        crate::tr!("电量偏低")
-    } else if displayed.is_some() {
-        crate::tr!("使用中")
-    } else {
-        crate::tr!("电量未知")
-    };
     p.text(
         hint,
         R::new(info_x, r.y + 74.0, text_width, 20.0),
@@ -1407,7 +1460,7 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     }
     if d.readings.is_empty() {
         p.text(
-            crate::tr!("连接设备后会自动显示。"),
+            home_empty_message(d.discovery_pending),
             R::new(c.x, c.y + 32.0, c.w, 30.0),
             14.0,
             false,
@@ -1505,6 +1558,7 @@ fn home(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
 fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
     let t = p.t;
     let selected = d.selected;
+    let discovering = selected.is_some_and(|reading| reading.is_discovering());
     let displayed = match selected {
         Some(reading) => reading.display_percent(),
         None => d.state.map(|state| crate::device::BatteryPercent { value: state.power, approximate: false }),
@@ -1535,7 +1589,9 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         t.text,
         Align::Center,
     );
-    let status = if !connected {
+    let status = if discovering {
+        super::feedback::text("已发现", "Discovered")
+    } else if !connected {
         crate::tr!("未连接")
     } else if charging {
         crate::tr!("正在充电")
@@ -1553,7 +1609,9 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         Align::Center,
     );
     let x = hero.x + 166.0;
-    let remaining = if !connected {
+    let remaining = if discovering {
+        super::feedback::text("正在确认连接与电量", "Checking connection and battery").to_string()
+    } else if !connected {
         crate::tr!("等待设备连接").to_string()
     } else if d.estimate.known && d.estimate.percent_per_hour > 0.0 {
         d.estimate.localized_text()
@@ -1572,7 +1630,9 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         t.text,
         Align::Left,
     );
-    let link = if connected {
+    let link = if discovering {
+        ""
+    } else if connected {
         link_text(d)
     } else {
         crate::tr!("连接后更新读数")
@@ -1585,7 +1645,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         t.text2,
         Align::Left,
     );
-    if let Some(st) = d.state {
+    if let Some(st) = d.state.filter(|_| !discovering) {
         if selected.is_some_and(|r| d.cfg.device_kind(r) == crate::tray_prefs::TrayKind::Mouse) {
             p.text(
                 &format!(
@@ -1600,7 +1660,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
                 Align::Left,
             );
         }
-    } else if let Some(basic) = d.basic {
+    } else if let Some(basic) = d.basic.filter(|_| !discovering) {
         if selected.is_some_and(|reading| d.cfg.device_kind(reading) == crate::tray_prefs::TrayKind::Mouse) {
             let mut parts = Vec::new();
             if let Some(dpi) = basic.dpi.current {
@@ -1626,7 +1686,7 @@ fn battery(p: &mut Painter, ui: &mut Ui, d: &Data, _f: &Frame, c: &mut Cursor) {
         headset_audio(p, ui, d, c);
     }
     device_tray_settings(p, ui, d, c);
-    if d.basic.is_none() && d.state.is_some()
+    if !discovering && d.basic.is_none() && d.state.is_some()
         && selected.is_some_and(|reading| d.cfg.device_kind(reading) == crate::tray_prefs::TrayKind::Mouse)
     {
         rog_battery_settings(p, ui, d, c);

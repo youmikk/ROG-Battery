@@ -312,7 +312,11 @@ impl<C: Channel> Session<C> {
     fn normal_mode(&mut self) -> bool {
         self.query(0, 0x84, 2, &[], 2).is_ok_and(|r| r == [0, 0])
     }
+    #[cfg(test)]
     fn read_snapshot(&mut self, target: &Target) -> Result<Snapshot, String> {
+        self.read_snapshot_with_detail(target, true)
+    }
+    fn read_snapshot_with_detail(&mut self, target: &Target, detail: bool) -> Result<Snapshot, String> {
         let mut target = target.clone();
         target.key = target.unverified_key();
         target.verified_identity = false;
@@ -338,7 +342,7 @@ impl<C: Channel> Session<C> {
             Some((battery, at)) => (Some(battery), Some(at)),
             None => (None, None),
         };
-        let mut dpi = self.dpi();
+        let mut dpi = if detail { self.dpi() } else { Dpi::default() };
         let mut polling_rate = if dpi.current.is_some() {
             target.family = DeviceFamily::Mouse;
             self.rate()
@@ -350,7 +354,7 @@ impl<C: Channel> Session<C> {
         }
         if target.verified_identity {
             if let Some(caps) = razer_capabilities::for_product(target.hid()?.product_id)
-                .filter(|_| self.normal_mode())
+                .filter(|_| detail && self.normal_mode())
             {
                 dpi.values = (100..=caps.max_dpi).collect();
                 dpi.write_effect = Some(if caps.dpi_storage == 0 { crate::device::DpiWriteEffect::Current }
@@ -666,7 +670,7 @@ impl DeviceBackend for Razer {
     fn discover(&self, _: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         Ok(discover_targets(interfaces))
     }
-    fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
+    fn read(&self, _: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
         if !control(target.hid()?) {
             return Err(crate::tr!("设备通信数据格式异常").into());
         }
@@ -676,7 +680,7 @@ impl DeviceBackend for Razer {
             feature::FeatureChannel::open_with_length(target.hid()?, LENGTH)?,
             target.hid()?,
         );
-        s.read_snapshot(target)
+        s.read_snapshot_with_detail(target, detail)
     }
     fn set_dpi(&self, _: &HidApi, target: &Target, dpi: u16) -> Result<(), String> {
         with_session(target, |s| s.numeric(target, dpi))
@@ -1187,6 +1191,7 @@ mod tests {
         table_reads: usize,
         change_table_at: usize,
         corrupt_neighbor: bool,
+        requests: Vec<(u8, u8)>,
     }
     impl Mouse {
         fn new() -> Self {
@@ -1217,6 +1222,7 @@ mod tests {
                 table_reads: 0,
                 change_table_at: usize::MAX,
                 corrupt_neighbor: false,
+                requests: Vec::new(),
             }
         }
     }
@@ -1225,6 +1231,7 @@ mod tests {
             assert_eq!(p.len(), 91);
             assert_eq!(p[89], checksum(p));
             let (class, cmd) = (p[7], p[8]);
+            self.requests.push((class, cmd));
             let getter = cmd | 0x80;
             let tx = if class == 4 && getter == 0x86 {
                 0xff
@@ -1335,6 +1342,45 @@ mod tests {
             StageContext::Configuration(table.token()),
         )
     }
+    #[test]
+    fn lightweight_snapshot_skips_settings_and_detail_restores_full_capabilities() {
+        let (mut session, target) = mouse();
+        session.channel.requests.clear();
+        session.channel.identity_reads = 0;
+        let lightweight = session.read_snapshot_with_detail(&target, false).unwrap();
+        assert_eq!(lightweight.battery.as_ref().unwrap().percent, Some(50));
+        assert!(lightweight.target.verified_identity && lightweight.battery_at.is_some());
+        assert_eq!(lightweight.dpi, Dpi::default());
+        assert_eq!(lightweight.polling_rate, PollingRate::default());
+        assert_eq!(session.channel.identity_reads, 2);
+        assert!(session.channel.requests.iter().all(|command|
+            matches!(command, (0, 0x82) | (7, 0x80) | (7, 0x84))));
+        assert_eq!(session.channel.table_reads, 0);
+        let detailed = session.read_snapshot_with_detail(&target, true).unwrap();
+        assert_eq!(detailed.battery, lightweight.battery);
+        assert_eq!(detailed.target.key, lightweight.target.key);
+        assert_eq!(detailed.dpi.current, Some(800));
+        assert!(detailed.dpi.stage_writable && detailed.polling_rate.writable);
+        assert!(session.channel.table_reads > 0);
+        assert!(session.channel.writes.is_empty());
+    }
+
+    #[test]
+    fn lightweight_snapshot_rejects_replacement_and_does_not_reuse_old_identity() {
+        let (mut replaced, target) = mouse();
+        replaced.channel.replace_after_battery = true;
+        assert!(replaced.read_snapshot_with_detail(&target, false).is_err());
+        let (mut unknown, target) = mouse();
+        unknown.channel.identity_available = false;
+        let snapshot = unknown.read_snapshot_with_detail(&target, false).unwrap();
+        assert!(!snapshot.target.verified_identity);
+        assert_eq!(snapshot.target.key, target.unverified_key());
+        assert_eq!(snapshot.dpi, Dpi::default());
+        assert_eq!(snapshot.polling_rate, PollingRate::default());
+        assert!(unknown.numeric(&snapshot.target, 1600).is_err());
+        assert!(unknown.channel.writes.is_empty() && replaced.channel.writes.is_empty());
+    }
+
     #[test]
     fn snapshot_rejects_a_mouse_replaced_after_its_battery_reply() {
         let (mut session, target) = mouse();

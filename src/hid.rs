@@ -1031,12 +1031,19 @@ pub fn open_links(hid: &HidApi) -> Result<Vec<Link>, String> {
 }
 
 pub fn scan_links(hid: &HidApi) -> Result<LinkScan, String> {
+    scan_links_with_discovery(hid, |_, _| {})
+}
+
+pub fn scan_links_with_discovery(
+    hid: &HidApi,
+    discovered: impl FnMut(&EnumerateReport, &std::collections::BTreeMap<String, String>),
+) -> Result<LinkScan, String> {
     let mut instances = std::collections::BTreeMap::new();
     let mut report = enumerate_all_report_with(hid, |path, instance| {
         instances.insert(path.to_string(), instance);
     })?;
     report.interfaces.retain(|interface| interface.vendor_id == VID_ASUS);
-    scan_links_with(
+    scan_links_observed_with(
         report,
         |interface| usb_physical_group(*instances.get(&interface.path)?, interface),
         |iface| {
@@ -1050,18 +1057,36 @@ pub fn scan_links(hid: &HidApi) -> Result<LinkScan, String> {
             let mut device = HidDevice::open(iface).map_err(|_| ())?;
             device.xfer_checked(1, 0xA0, 0x00, &[], 2500)
         },
+        discovered,
     )
 }
 
+#[cfg(test)]
 fn scan_links_with(
     report: EnumerateReport,
     physical_group: impl FnMut(&HidInterface) -> Option<String>,
     wired_report_id: impl FnMut(&HidInterface) -> Option<u8>,
     pairing_table: impl FnMut(&HidInterface) -> Result<Option<Vec<u8>>, ()>,
 ) -> Result<LinkScan, String> {
+    scan_links_observed_with(report, physical_group, wired_report_id, pairing_table, |_, _| {})
+}
+
+fn scan_links_observed_with(
+    report: EnumerateReport,
+    mut physical_group: impl FnMut(&HidInterface) -> Option<String>,
+    wired_report_id: impl FnMut(&HidInterface) -> Option<u8>,
+    pairing_table: impl FnMut(&HidInterface) -> Result<Option<Vec<u8>>, ()>,
+    mut discovered: impl FnMut(&EnumerateReport, &std::collections::BTreeMap<String, String>),
+) -> Result<LinkScan, String> {
+    let groups = report.interfaces.iter().filter_map(|interface|
+        physical_group(interface).filter(|group| !group.is_empty())
+            .map(|group| (interface.path.to_ascii_lowercase(), group.to_ascii_lowercase())))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    discovered(&report, &groups);
     let present_channels = report.interfaces.iter().map(|interface| interface.path.to_ascii_lowercase())
         .chain(report.skipped.iter().map(|skipped| skipped.path.to_ascii_lowercase())).collect();
-    let links = discover_links_with(report, physical_group, wired_report_id, pairing_table)?;
+    let links = discover_links_with(report,
+        |interface| groups.get(&interface.path.to_ascii_lowercase()).cloned(), wired_report_id, pairing_table)?;
     Ok(LinkScan { links, present_channels })
 }
 
@@ -1174,6 +1199,33 @@ mod link_tests {
         let mut frame = vec![0x01, 0xA0, 0x00, 0x01, 0x00, 0x65, 0x1B, 0x03, 0x05];
         frame.resize(64, 0);
         frame
+    }
+
+    #[test]
+    fn discovery_callback_precedes_all_protocol_probes_and_preserves_presence() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut wired = interface("wired", USAGE_PAGE_MOUSE_CTRL);
+        wired.product_id = PID_MOUSE_WIRED;
+        let mut discovered = report(vec![wired, interface("control", USAGE_PAGE_DONGLE_CTRL),
+            interface("mouse", USAGE_PAGE_MOUSE_CTRL)]);
+        discovered.skipped.push(Skipped { path: "blocked".into(), reason: "busy".into() });
+        let scan = scan_links_observed_with(discovered,
+            |interface| Some(if interface.path == "wired" { "Wired" } else { "Receiver" }.into()),
+            |_| { events.borrow_mut().push("wired"); Some(1) },
+            |_| { events.borrow_mut().push("pairing"); Ok(Some(captured_omni_pairing())) },
+            |report, groups| {
+                assert!(events.borrow().is_empty());
+                assert_eq!(report.interfaces.len(), 3);
+                assert_eq!(report.skipped[0].path, "blocked");
+                assert_eq!(groups["control"], "receiver");
+                assert_eq!(groups["mouse"], "receiver");
+                assert_eq!(groups["wired"], "wired");
+                events.borrow_mut().push("discovered");
+            }).unwrap();
+        assert_eq!(*events.borrow(), vec!["discovered", "wired", "pairing"]);
+        assert_eq!(scan.links.len(), 2);
+        assert_eq!(scan.present_channels, ["wired", "control", "mouse", "blocked"]
+            .into_iter().map(String::from).collect());
     }
 
     #[test]

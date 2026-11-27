@@ -221,7 +221,11 @@ impl<C: Channel> Session<C> {
         }
         target
     }
+    #[cfg(test)]
     fn snapshot(&mut self) -> Result<Snapshot, String> {
+        self.snapshot_with_detail(true)
+    }
+    fn snapshot_with_detail(&mut self, detail: bool) -> Result<Snapshot, String> {
         self.active()?;
         let mut identity = self.identify().ok();
         let battery = self.query(4, 0, 0, &[]).ok().and_then(|r| battery(&r));
@@ -233,8 +237,10 @@ impl<C: Channel> Session<C> {
                 _ => (),
             }
         }
-        self.renew();
-        let dpi = identity.and_then(|id| self.config(id).ok()).map(|c| c.dpi()).unwrap_or_default();
+        let dpi = if detail {
+            self.renew();
+            identity.and_then(|id| self.config(id).ok()).map(|c| c.dpi()).unwrap_or_default()
+        } else { Dpi::default() };
         if battery.is_none() && dpi.current.is_none() { return Err(UNAVAILABLE.into()); }
         Ok(Snapshot { target: self.target(identity), battery, battery_at, battery_unavailable: false,
             connected: true, dpi, polling_rate: Default::default() })
@@ -277,8 +283,8 @@ impl DeviceBackend for Dareu {
     fn discover(&self, api: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         Ok(candidates(interfaces).into_iter().filter(|i| proven(api, i)).map(candidate).collect())
     }
-    fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        with_session(api, target, |s| s.snapshot())
+    fn read(&self, api: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
+        with_session(api, target, |s| s.snapshot_with_detail(detail))
     }
     fn set_dpi_stage(&self, api: &HidApi, target: &Target, stage: DpiStage, context: StageContext) -> Result<(), String> {
         let StageContext::Configuration(token) = context else { return Err(CHANGED.into()); };
@@ -375,6 +381,38 @@ mod tests {
         let mut s = session(0x1114);
         let sample = s.snapshot().unwrap();
         (s, sample.target, sample.dpi.configuration_token.unwrap())
+    }
+
+    #[test]
+    fn lightweight_snapshot_skips_config_and_later_detail_reads_full_table() {
+        let mut session = session(0x1114);
+        let lightweight = session.snapshot_with_detail(false).unwrap();
+        assert_eq!(lightweight.battery.as_ref().unwrap().percent, Some(76));
+        assert!(lightweight.target.verified_identity && lightweight.battery_at.is_some());
+        assert_eq!(lightweight.dpi, Dpi::default());
+        assert_eq!(session.channel.commands.iter().map(|packet| packet[1]).collect::<Vec<_>>(), [3, 1, 4, 1]);
+        assert_eq!(session.channel.read_count, 0);
+        let detailed = session.snapshot_with_detail(true).unwrap();
+        assert_eq!(lightweight.target.key, detailed.target.key);
+        assert_eq!(lightweight.battery, detailed.battery);
+        assert_eq!(detailed.dpi.stages.len(), 5);
+        assert!(detailed.dpi.stage_writable && session.channel.read_count > 0);
+        assert!(session.channel.writes.is_empty());
+    }
+
+    #[test]
+    fn lightweight_snapshot_keeps_identity_checks_and_unverified_devices_readonly() {
+        let mut replaced = session(0x1114);
+        replaced.channel.replace_at_battery = true;
+        assert!(replaced.snapshot_with_detail(false).is_err());
+        let mut unknown = session(0x1114);
+        unknown.channel.drop_command = Some(1);
+        let reading = unknown.snapshot_with_detail(false).unwrap();
+        assert!(!reading.target.verified_identity);
+        assert_eq!(reading.dpi, Dpi::default());
+        assert_eq!(reading.battery.unwrap().percent, Some(76));
+        assert_eq!(unknown.channel.read_count, 0);
+        assert!(unknown.channel.writes.is_empty() && replaced.channel.writes.is_empty());
     }
 
     #[test]

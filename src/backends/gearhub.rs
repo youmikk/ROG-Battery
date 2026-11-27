@@ -210,11 +210,15 @@ impl<C: Channel> Session<C> {
         Snapshot { target: self.target(id), connected: false, battery: None, battery_at: None,
             battery_unavailable: true, dpi: Dpi::default(), polling_rate: Default::default() }
     }
+    #[cfg(test)]
     fn snapshot(&mut self) -> Result<Snapshot, String> {
+        self.snapshot_with_detail(true)
+    }
+    fn snapshot_with_detail(&mut self, detail: bool) -> Result<Snapshot, String> {
         let is_wireless = wireless(&self.interface);
         if is_wireless && !self.status().ok_or(UNAVAILABLE)?.online { return Ok(self.offline(None)); }
         let id = self.id().ok_or(UNAVAILABLE)?;
-        let config = self.config(id);
+        let config = detail.then(|| self.config(id)).flatten();
         if self.id() != Some(id) { return Err(CHANGED.into()); }
         let (battery, battery_at) = if is_wireless {
             let status = self.status().ok_or(UNAVAILABLE)?;
@@ -258,8 +262,8 @@ impl DeviceBackend for GearHub {
     fn discover(&self, api: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         Ok(candidates(interfaces).into_iter().filter(|i| proven(api, i)).map(candidate).collect())
     }
-    fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        with_session(api, target, |s| s.snapshot())
+    fn read(&self, api: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
+        with_session(api, target, |s| s.snapshot_with_detail(detail))
     }
     fn set_dpi_stage(&self, api: &HidApi, target: &Target, stage: DpiStage, context: StageContext) -> Result<(), String> {
         let StageContext::Configuration(token) = context else { return Err(CHANGED.into()); };
@@ -294,13 +298,14 @@ mod tests {
         pending: Option<Block>, relay: Option<Block>, selected: bool, wireless: bool,
         echo: bool, apply: bool, lose_completion: bool, corrupt_neighbor: bool,
         swap_identity: bool, change_options: bool, reads: usize, bad_dpi: bool,
+        replace_at_identity: bool,
     }
     impl Fake {
         fn new(wireless: bool) -> Self {
             Self { options: hex(OPTIONS), dpi: hex(DPI), status: hex(STATUS), id: hex(ID),
                 wireless, apply: true, sent: Vec::new(), pending: None, relay: None, selected: false,
                 echo: false, lose_completion: false, corrupt_neighbor: false, swap_identity: false,
-                change_options: false, reads: 0, bad_dpi: false }
+                change_options: false, reads: 0, bad_dpi: false, replace_at_identity: false }
         }
     }
     impl Channel for Fake {
@@ -315,7 +320,13 @@ mod tests {
                 0x8f | 0xd3 | 0xd4 => {
                     assert_eq!(body[..8].iter().fold(0u8, |sum, b| sum.wrapping_add(*b)), 255);
                     let r = match body[0] {
-                        0x8f => self.id,
+                        0x8f => {
+                            let current = self.id;
+                            if std::mem::take(&mut self.replace_at_identity) {
+                                self.id[1..5].copy_from_slice(&2285u32.to_le_bytes());
+                            }
+                            current
+                        },
                         0xd3 => self.options,
                         0xd4 => {
                             assert_eq!(body[1], self.options[8], "must query the live profile");
@@ -353,6 +364,43 @@ mod tests {
     fn choose_last(s: &mut Session<Fake>) -> Result<(), String> {
         let target = s.target(Some(AJ179_PRO)); let config = captured_config();
         s.switch(&target, config.dpi().stages[4], config.token())
+    }
+
+    #[test]
+    fn lightweight_snapshot_skips_options_and_table_on_both_transports() {
+        for wireless in [false, true] {
+            let mut session = session(wireless);
+            let lightweight = session.snapshot_with_detail(false).unwrap();
+            assert!(lightweight.connected && lightweight.target.verified_identity);
+            assert_eq!(lightweight.battery.as_ref().and_then(|battery| battery.percent), wireless.then_some(85));
+            assert_eq!(lightweight.battery_at.is_some(), wireless);
+            assert_eq!(lightweight.dpi, Dpi::default());
+            assert_eq!(lightweight.polling_rate, PollingRate::default());
+            assert_eq!(session.channel.reads, 0);
+            assert!(session.channel.sent.iter().all(|packet| matches!(packet[0], 0xf6 | 0xf7 | 0xfc | 0x8f)));
+            assert_eq!(session.channel.sent.iter().filter(|packet| packet[0] == 0x8f).count(), 2);
+            let detailed = session.snapshot_with_detail(true).unwrap();
+            assert_eq!(lightweight.target.key, detailed.target.key);
+            assert_eq!(lightweight.battery, detailed.battery);
+            assert_eq!(detailed.dpi, captured_config().dpi());
+            assert_eq!(detailed.polling_rate, captured_config().rate());
+            assert_eq!(session.channel.reads, 2);
+        }
+    }
+
+    #[test]
+    fn lightweight_snapshot_keeps_identity_fence_and_offline_state() {
+        let mut replaced = session(true);
+        replaced.channel.replace_at_identity = true;
+        assert!(replaced.snapshot_with_detail(false).is_err());
+        let mut offline = session(true);
+        offline.channel.status[4] = 1;
+        let snapshot = offline.snapshot_with_detail(false).unwrap();
+        assert!(!snapshot.connected && snapshot.battery.is_none());
+        assert!(!snapshot.target.verified_identity);
+        assert_eq!(snapshot.dpi, Dpi::default());
+        assert_eq!(offline.channel.sent.iter().map(|packet| packet[0]).collect::<Vec<_>>(), [0xf7]);
+        assert_eq!(replaced.channel.reads, 0);
     }
 
     #[test]

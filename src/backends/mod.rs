@@ -400,7 +400,7 @@ impl Snapshot {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Poll {
     pub snapshots: Vec<Snapshot>,
     /// None 表示枚举失败，不提供拔出设备的证据。
@@ -517,11 +517,48 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
     if backend == BackendId::XInput { return xinput::poll(); }
     if backend == BackendId::Bluetooth { return bluetooth::poll(); }
     let api = HidApi::load()?;
+    let scan = discover_backend(backend)?;
+    let mut poll = scan.presence;
+    poll.snapshots = read_targets(scan.targets, |target| provider(backend).read(&api, target, detail));
+    Ok(poll)
+}
+
+#[derive(Clone)]
+pub struct BackendScan {
+    pub targets: Vec<Target>,
+    pub presence: Poll,
+}
+
+pub fn discover_backend(backend: BackendId) -> Result<BackendScan, String> {
+    let api = HidApi::load()?;
     let enumeration = enumeration::scan(&api)?;
-    let present_channels = enumeration.interfaces.iter().map(|i|i.path.clone())
-        .chain(enumeration.skipped.iter().map(|i|i.path.clone())).collect();
-    let interfaces = enumeration.interfaces;
-    let provider: &dyn DeviceBackend = match backend {
+    let present_channels = enumeration.interfaces.iter().map(|interface| interface.path.clone())
+        .chain(enumeration.skipped.iter().map(|interface| interface.path.clone())).collect();
+    let targets = provider(backend).discover(&api, &enumeration.interfaces)?;
+    let presence = Poll {
+        legacy_key_migrations: legacy_key_migrations(&targets, &enumeration.skipped),
+        present_channels: Some(present_channels),
+        ..Default::default()
+    };
+    Ok(BackendScan { targets, presence })
+}
+
+pub fn read_target(target: &Target, detail: bool) -> Result<Snapshot, String> {
+    provider(target.backend).read(&HidApi::load()?, target, detail)
+}
+
+pub fn communication_group(target: &Target) -> String {
+    target.hid().map(channel::collection_group).unwrap_or_else(|_| target.channel_key())
+}
+
+pub fn has_configuration(backend: BackendId) -> bool {
+    matches!(backend, BackendId::Logitech | BackendId::Rapoo | BackendId::Razer | BackendId::CompX
+        | BackendId::Dareu | BackendId::MchoseMouse | BackendId::Aula | BackendId::GearHub
+        | BackendId::PageCommand)
+}
+
+fn provider(backend: BackendId) -> &'static dyn DeviceBackend {
+    match backend {
         BackendId::Rog => &rog::Rog,
         BackendId::Logitech => &logitech::Logitech,
         BackendId::LogitechHeadset => &logitech_headset::LogitechHeadset,
@@ -585,13 +622,7 @@ pub fn poll_backend(backend: BackendId, detail: bool) -> Result<Poll, String> {
         BackendId::FifineHt6 => &fifine_ht6::FifineHt6,
         BackendId::Thunderobot => &thunderobot::Thunderobot,
         BackendId::Akg => &akg::Akg,
-    };
-    let mut poll = Poll { present_channels: Some(present_channels),
-        ..Default::default() };
-    let targets = provider.discover(&api, &interfaces)?;
-    poll.legacy_key_migrations = legacy_key_migrations(&targets, &enumeration.skipped);
-    poll.snapshots = read_targets(targets, |target| provider.read(&api, target, detail));
-    Ok(poll)
+    }
 }
 
 fn legacy_key_migrations(targets: &[Target], skipped: &[crate::hid::Skipped])

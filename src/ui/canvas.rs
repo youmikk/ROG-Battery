@@ -1508,6 +1508,7 @@ mod animation_tests {
             let audio = crate::audio::Snapshot::default();
             self.canvas.set_painter(Box::new(move |inner, fonts, ui, args| {
                 let data = Data {
+                    discovery_pending: false,
                     selected: Some(&readings[0]), state: None, ident: None, link_mode: "",
                     status: String::new(), plot: None, estimate: &estimate, rows: 0,
                     cfg: &cfg, autostart_text: "", autostart_on: false,
@@ -1775,6 +1776,7 @@ mod animation_tests {
             cfg.tray_enabled = tray_flag.get();
             cfg.tray_device = Some("0123456789abcdef".into());
             let data = Data {
+                discovery_pending: false,
                 selected: Some(&readings[1]), state: None, ident: None, link_mode: "",
                 status: String::new(), plot: None, estimate: &estimate, rows: 0,
                 cfg: &cfg, autostart_text: "", autostart_on: false,

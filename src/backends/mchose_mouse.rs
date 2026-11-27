@@ -195,7 +195,11 @@ impl<C: Channel> Session<C> {
         let raw = self.query(0x67, |r| dpi(r, m, is_wireless).is_some())?;
         Config::new(raw, state, is_wireless)
     }
+    #[cfg(test)]
     fn snapshot(&mut self) -> Result<Snapshot, String> {
+        self.snapshot_with_detail(true)
+    }
+    fn snapshot_with_detail(&mut self, detail: bool) -> Result<Snapshot, String> {
         let is_wireless = wireless(&self.interface);
         if is_wireless {
             match self.link() {
@@ -208,7 +212,7 @@ impl<C: Channel> Session<C> {
         let battery_at = state.battery.as_ref().map(|_| Instant::now());
         if !state.online { return Ok(self.offline(Some(&state))); }
         let mut dpi_reading = Dpi::default();
-        if let Some(config) = state.battery.as_ref().and_then(|_| self.config(&state)) {
+        if let Some(config) = state.battery.as_ref().filter(|_| detail).and_then(|_| self.config(&state)) {
             // Alternate Report11 commands before checking the paired identity
             // again. A repeated same-command buffer alone is not freshness.
             if is_wireless {
@@ -287,8 +291,8 @@ impl DeviceBackend for MchoseMouse {
     fn discover(&self, api: &HidApi, interfaces: &[HidInterface]) -> Result<Vec<Target>, String> {
         Ok(candidates(interfaces).into_iter().filter(|i| proven(api, i)).map(candidate).collect())
     }
-    fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        with_session(api, target, |s| s.snapshot())
+    fn read(&self, api: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
+        with_session(api, target, |s| s.snapshot_with_detail(detail))
     }
     fn set_dpi_stage(&self, api: &HidApi, target: &Target, stage: DpiStage, context: StageContext) -> Result<(), String> {
         let StageContext::Configuration(token) = context else { return Err(CHANGED.into()); };
@@ -383,6 +387,40 @@ mod tests {
     fn session() -> Session<Reports> {
         let i = interface(0x5253, 0x1020, "a");
         Session { channel: Reports::new(i.clone()), interface: i }
+    }
+
+    #[test]
+    fn lightweight_snapshot_skips_configuration_and_detail_still_checks_the_table() {
+        for interface in [interface(0x5253, 0x1020, "radio"), interface(0x3837, 0x4015, "cable")] {
+            let mut session = Session { channel: Reports::new(interface.clone()), interface };
+            let lightweight = session.snapshot_with_detail(false).unwrap();
+            assert!(lightweight.target.verified_identity && lightweight.battery.is_some());
+            assert!(lightweight.battery_at.is_some());
+            assert_eq!(lightweight.dpi, Dpi::default());
+            let expected = if wireless(&session.interface) { vec![3, 6, 3] } else { vec![6] };
+            assert_eq!(session.channel.sent, expected);
+            assert_eq!(session.channel.config_queries, 0);
+            let detailed = session.snapshot_with_detail(true).unwrap();
+            assert_eq!(detailed.battery, lightweight.battery);
+            assert_eq!(detailed.target.key, lightweight.target.key);
+            assert!(!detailed.dpi.stages.is_empty());
+            assert_eq!(session.channel.config_queries, 2);
+            assert!(session.channel.writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn lightweight_snapshot_keeps_link_and_identity_validation() {
+        let mut disconnected = session();
+        disconnected.channel.disconnect_after = true;
+        let snapshot = disconnected.snapshot_with_detail(false).unwrap();
+        assert!(!snapshot.connected && snapshot.battery.is_none());
+        assert_eq!(disconnected.channel.config_queries, 0);
+        let mut invalid = session();
+        invalid.channel.status[..2].fill(0);
+        assert!(invalid.snapshot_with_detail(false).is_err());
+        assert_eq!(invalid.channel.config_queries, 0);
+        assert!(invalid.channel.writes.is_empty());
     }
 
     #[test]

@@ -59,6 +59,9 @@ fn operation(value: &str) -> &'static str {
         "device_rename_failed" => "device_rename_failed",
         "device_open_failed" => "device_open_failed",
         "device_read_failed" => "device_read_failed",
+        "device_detail_failed" => "device_detail_failed",
+        "device_discovery_failed" => "device_discovery_failed",
+        "device_worker_start_failed" => "device_worker_start_failed",
         "device_identified" => "device_identified",
         "feedback_storage_failed" => "feedback_storage_failed",
         "history_update_failed" => "history_update_failed",
@@ -482,6 +485,7 @@ mod tests {
     #[test]
     fn every_current_event_call_has_an_explicit_operation() {
         for source in [include_str!("../gui.rs"), include_str!("../settings.rs"),
+            include_str!("../gui/device_workers.rs"), include_str!("../gui/rog_refresh.rs"),
             include_str!("client.rs"), include_str!("../taskbar_widget.rs"),
             include_str!("../store/api.rs"), include_str!("../store/mod.rs"),
             include_str!("../store/restart.rs"), include_str!("../main.rs")] {
@@ -491,7 +495,7 @@ mod tests {
                 assert_eq!(operation(name), name);
             }
         }
-        for name in ["device_open_failed", "device_read_failed", "device_identified"] {
+        for name in ["device_open_failed", "device_read_failed", "device_detail_failed", "device_identified"] {
             assert_eq!(operation(name), name);
         }
         assert_eq!(operation("taskbar_widget_private"), "unknown_operation");

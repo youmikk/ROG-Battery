@@ -87,9 +87,14 @@ pub enum ReadingQuality {
     Cached,
     Stale,
     Unknown,
+    Discovering,
 }
 
 impl DeviceReading {
+    pub fn is_discovering(&self) -> bool {
+        self.quality == ReadingQuality::Discovering
+    }
+
     pub fn display_percent(&self) -> Option<BatteryPercent> {
         (self.connected && matches!(self.quality, ReadingQuality::Live | ReadingQuality::Cached))
             .then(|| self.battery.as_ref()?.display_percent()).flatten()
@@ -180,6 +185,52 @@ impl Battery {
 #[cfg(test)]
 mod battery_display_tests {
     use super::*;
+
+    #[test]
+    fn discovering_never_exposes_unconfirmed_battery_or_charge() {
+        let mut reading = DeviceReading { quality: ReadingQuality::Discovering, ..Default::default() };
+        assert!(reading.is_discovering());
+        assert!(!reading.connected);
+        assert!(reading.battery.is_none());
+        assert_eq!(reading.battery_text(true), "—");
+        for connected in [false, true] {
+            for percent in [None, Some(0), Some(75)] {
+                for charging in [false, true] {
+                    reading.connected = connected;
+                    reading.battery = Some(Battery { percent, estimated_percent: Some(10),
+                        charging: Some(charging), voltage_mv: Some(3600), approximate: false,
+                        level: Some(BatteryLevel::Critical) });
+                    assert_eq!(reading.percent(), None);
+                    assert_eq!(reading.display_percent(), None);
+                    assert_eq!(reading.coarse_level(), None);
+                    assert_eq!(reading.battery_text(false), "—");
+                    assert!(!reading.is_charging());
+                    assert!(!reading.is_low());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn discovering_becomes_a_real_reading_without_hiding_zero_percent() {
+        let mut reading = DeviceReading { quality: ReadingQuality::Discovering, ..Default::default() };
+        assert_eq!(reading.battery_text(true), "—");
+        reading.connected = true;
+        reading.quality = ReadingQuality::Live;
+        reading.battery = Some(Battery { percent: Some(0), estimated_percent: None,
+            charging: Some(false), voltage_mv: None, approximate: false, level: None });
+        assert!(!reading.is_discovering());
+        assert_eq!(reading.battery_text(true), "0%");
+        assert!(reading.is_low());
+        reading.battery.as_mut().unwrap().charging = Some(true);
+        assert!(reading.is_charging());
+        assert!(!reading.is_low());
+        reading.connected = false;
+        reading.quality = ReadingQuality::Stale;
+        assert!(!reading.is_discovering());
+        assert_eq!(reading.battery_text(true), "—");
+        assert!(!reading.is_charging());
+    }
 
     #[test]
     fn estimates_keep_the_prefix_without_turning_into_exact_samples() {

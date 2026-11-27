@@ -206,6 +206,30 @@ impl<C: Channel> Session<C> {
     fn open(channel: C, i: &HidInterface) -> Self {
         Self { channel, interface: i.clone(), id: None, layout: None }
     }
+    fn snapshot(&mut self, original: &Target, detail: bool) -> Result<Snapshot, String> {
+        let power_only = power_only(&self.interface);
+        if !power_only { self.identify(); }
+        let identity = self.id;
+        let battery = self.battery();
+        let battery_at = battery.as_ref().map(|_| Instant::now());
+        let config = (detail && !power_only).then(|| self.config().ok()).flatten();
+        if battery.is_none() && config.is_none() {
+            return Err("设备暂未响应，请唤醒或检查连接后重试".into());
+        }
+        if !detail && identity.is_some() {
+            self.identify();
+            if self.id != identity { return Err("设备身份已变化，请刷新后重试".into()); }
+        }
+        let mut target = original.clone();
+        target.key = target.unverified_key();
+        target.verified_identity = false;
+        let target = self.target(&target);
+        let (dpi, polling_rate) = config.map(|config| (config.dpi, config.rate)).unwrap_or_default();
+        if battery.is_none() && dpi.current.is_none() && polling_rate.current.is_none() {
+            return Err("设备暂未响应，请唤醒或检查连接后重试".into());
+        }
+        Ok(Snapshot { target, battery, battery_at, battery_unavailable: false, dpi, polling_rate, connected: true })
+    }
     fn query(&mut self, command: u8, address: u16, data: &[u8], len: usize) -> Result<Vec<u8>, String> {
         if len > 10 || data.len() > 10 { return Err("请求数据格式超出设备限制".into()); }
         let started = Instant::now();
@@ -439,7 +463,7 @@ impl DeviceBackend for CompX {
         Ok(interfaces.iter().filter(|i|
             control(i) && (!power_only(i) || power_only_proven(api, i))).map(candidate).collect())
     }
-    fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot,String> {
+    fn read(&self, api: &HidApi, target: &Target, detail: bool) -> Result<Snapshot,String> {
         if !control(target.hid()?) { return Err("暂未找到可用的设备设置通道".into()); }
         if power_only(target.hid()?) && !power_only_proven(api, target.hid()?) {
             return Err("暂未识别到设备电量上报格式".into());
@@ -447,16 +471,7 @@ impl DeviceBackend for CompX {
         let lock = channel_lock(&target.hid()?.path);
         let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut s = Session::open(DeviceChannel::open(target.hid()?)?, target.hid()?);
-        if !power_only(target.hid()?) { s.identify(); }
-        let battery = s.battery(); let battery_at = battery.as_ref().map(|_| Instant::now());
-        let config = (!power_only(target.hid()?)).then(|| s.config().ok()).flatten();
-        if battery.is_none() && config.is_none() { return Err("设备暂未响应，请唤醒或检查连接后重试".into()); }
-        let target = s.target(target);
-        let (dpi,polling_rate) = config.map(|c| (c.dpi,c.rate)).unwrap_or_default();
-        if battery.is_none() && dpi.current.is_none() && polling_rate.current.is_none() {
-            return Err("设备暂未响应，请唤醒或检查连接后重试".into());
-        }
-        Ok(Snapshot { target, battery, battery_at, battery_unavailable: false, dpi, polling_rate, connected: true })
+        s.snapshot(target, detail)
     }
     fn set_dpi(&self, api: &HidApi, target: &Target, dpi: u16) -> Result<(),String> {
         with_session(target, |s| {
@@ -499,6 +514,7 @@ mod tests {
         id: [u8;2], profile: u8, memory: BTreeMap<u16,u8>,
         writes: Vec<(u16,Vec<u8>)>, ack: bool, accept: bool,
         change_profile: bool, change_identity: bool, wrong_address: bool, change_stage: bool,
+        commands: Vec<u8>, identity_after_battery: Option<[u8; 2]>,
     }
     impl Reports {
         fn new(id: [u8;2]) -> Self {
@@ -509,7 +525,8 @@ mod tests {
                 for (offset,byte) in bytes.into_iter().enumerate() { memory.insert(address+offset as u16,byte); }
             }
             Self { id,profile:0,memory,writes:Vec::new(),ack:false,accept:true,
-                change_profile:false,change_identity:false,wrong_address:false,change_stage:false }
+                change_profile:false,change_identity:false,wrong_address:false,change_stage:false,
+                commands:Vec::new(),identity_after_battery:None }
         }
         fn bytes(&self, address:u16, len:usize) -> Vec<u8> {
             (0..len).map(|offset| *self.memory.get(&(address + offset as u16)).unwrap_or(&0)).collect()
@@ -524,11 +541,15 @@ mod tests {
     impl Channel for Reports {
         fn exchange(&mut self,p:&[u8],matcher:&mut dyn FnMut(&[u8])->bool) -> Option<Vec<u8>> {
             assert_eq!(p.len(),17); assert_eq!(sum(p),85);
+            self.commands.push(p[1]);
             let address=u16::from_be_bytes([p[3],p[4]]);let len=usize::from(p[5]);
             let response=match p[1] {
                 0x10 => Self::response(0x10,0,&self.id),
                 0x0e => Self::response(0x0e,0,&[self.profile]),
-                4 => Self::response(4,0,&[0,0,0x0e,0x10]),
+                4 => {
+                    if let Some(identity) = self.identity_after_battery.take() { self.id = identity; }
+                    Self::response(4,0,&[0,0,0x0e,0x10])
+                },
                 8 => Self::response(8,if self.wrong_address {address.wrapping_add(2)} else {address},&self.bytes(address,len)),
                 7 => {
                     let data=&p[6..6+len]; self.writes.push((address,data.to_vec()));
@@ -557,6 +578,66 @@ mod tests {
     fn interface() -> HidInterface { HidInterface { path:"transcript".into(),serial:String::new(),
         product:String::new(),vendor_id:0x373b,product_id:0x1000,usage_page:0xff02,usage:2,
         input_len:17,output_len:17,feature_len:0 } }
+    #[test]
+    fn lightweight_snapshot_skips_configuration_and_detail_keeps_full_readback() {
+        let interface = receiver();
+        let target = candidate(&interface);
+        let mut session = Session::open(Reports::new([2, 27]), &interface);
+        let lightweight = session.snapshot(&target, false).unwrap();
+        assert!(lightweight.connected && lightweight.target.verified_identity);
+        assert_eq!(lightweight.battery.as_ref().unwrap().percent, Some(0));
+        assert!(lightweight.battery_at.is_some());
+        assert_eq!(lightweight.dpi, Dpi::default());
+        assert_eq!(lightweight.polling_rate, PollingRate::default());
+        assert_eq!(session.channel.commands, [0x10, 4, 0x10]);
+        let detailed = session.snapshot(&target, true).unwrap();
+        assert_eq!(lightweight.target.key, detailed.target.key);
+        assert_eq!(lightweight.battery, detailed.battery);
+        assert_eq!(detailed.dpi.stages.len(), 2);
+        assert!(detailed.dpi.stage_writable);
+        assert_eq!(detailed.polling_rate.current, Some(1000));
+        assert!(session.channel.commands.contains(&8));
+        assert!(session.channel.commands.contains(&0x0e));
+        assert!(session.channel.writes.is_empty());
+    }
+
+    #[test]
+    fn lightweight_snapshot_rejects_replacement_and_never_reuses_unverified_identity() {
+        let interface = receiver();
+        let mut target = candidate(&interface);
+        target.key = "previous-device".into();
+        target.verified_identity = true;
+        for identity in [[2, 39], [0, 0]] {
+            let mut reports = Reports::new([2, 27]);
+            reports.identity_after_battery = Some(identity);
+            let mut session = Session::open(reports, &interface);
+            assert!(session.snapshot(&target, false).is_err());
+            assert_eq!(session.channel.commands, [0x10, 4, 0x10]);
+        }
+        let mut session = Session::open(Reports::new([0, 0]), &interface);
+        let snapshot = session.snapshot(&target, false).unwrap();
+        assert!(!snapshot.target.verified_identity);
+        assert_eq!(snapshot.target.key, target.unverified_key());
+        assert_eq!(snapshot.dpi, Dpi::default());
+        assert!(session.check(&snapshot.target).is_err());
+        assert!(session.channel.writes.is_empty());
+    }
+
+    #[test]
+    fn power_only_models_keep_battery_only_io_in_both_modes() {
+        let mut interface = receiver();
+        interface.product_id = 0xf503;
+        let target = candidate(&interface);
+        for detail in [false, true] {
+            let mut session = Session::open(Reports::new([2, 27]), &interface);
+            let snapshot = session.snapshot(&target, detail).unwrap();
+            assert_eq!(snapshot.battery.unwrap().percent, Some(0));
+            assert!(!snapshot.target.verified_identity);
+            assert_eq!(snapshot.dpi, Dpi::default());
+            assert_eq!(session.channel.commands, [4]);
+        }
+    }
+
     #[test]
     fn layouts_roundtrip_every_supported_value_with_independent_axes() {
         for id in [[1,8],[1,52],[2,12],[2,32],[2,39]] {

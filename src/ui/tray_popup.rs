@@ -1666,6 +1666,55 @@ fn push_visible_hit(hits: &mut Vec<(R, Action)>, visible: R, hit: R, action: Act
     }
 }
 
+fn device_row_status(reading: &DeviceReading) -> &'static str {
+    if reading.is_discovering() {
+        super::feedback::text("正在确认连接与电量", "Checking connection and battery")
+    } else if !reading.connected {
+        crate::tr!("未连接")
+    } else if reading.quality == crate::device::ReadingQuality::Cached {
+        crate::tr!("上次记录")
+    } else if reading.quality == crate::device::ReadingQuality::Stale {
+        crate::tr!("等待设备上报")
+    } else if reading.is_charging() {
+        crate::tr!("正在充电")
+    } else if let Some(level) = reading.coarse_level() {
+        crate::i18n::battery_level(level)
+    } else if reading.is_low() {
+        crate::tr!("电量偏低")
+    } else if reading.display_percent().is_some() {
+        crate::tr!("已连接")
+    } else {
+        crate::tr!("电量未知")
+    }
+}
+
+#[cfg(test)]
+mod device_status_tests {
+    use super::device_row_status;
+    use crate::device::{Battery, DeviceReading, ReadingQuality};
+
+    #[test]
+    fn discovering_tray_status_does_not_claim_offline_or_a_battery_sample() {
+        let mut reading = DeviceReading { quality: ReadingQuality::Discovering, ..Default::default() };
+        assert_eq!(device_row_status(&reading), crate::ui::feedback::text("正在确认连接与电量", "Checking connection and battery"));
+        assert_eq!(reading.battery_text(false), "—");
+        reading.quality = ReadingQuality::Unknown;
+        assert_eq!(device_row_status(&reading), crate::tr!("未连接"));
+        reading.connected = true;
+        assert_eq!(device_row_status(&reading), crate::tr!("电量未知"));
+        reading.quality = ReadingQuality::Live;
+        reading.battery = Some(Battery { percent: Some(75), estimated_percent: None, charging: Some(true),
+            voltage_mv: None, approximate: false, level: None });
+        assert_eq!(device_row_status(&reading), crate::tr!("正在充电"));
+        reading.quality = ReadingQuality::Cached;
+        assert_eq!(device_row_status(&reading), crate::tr!("上次记录"));
+        reading.quality = ReadingQuality::Stale;
+        assert_eq!(device_row_status(&reading), crate::tr!("等待设备上报"));
+        reading.connected = false;
+        assert_eq!(device_row_status(&reading), crate::tr!("未连接"));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_device_row(
     p: &mut Painter,
@@ -1732,22 +1781,10 @@ fn draw_device_row(
         ink,
         Align::Left,
     );
-    let status = if !d.connected {
-        crate::tr!("未连接")
-    } else if d.quality == crate::device::ReadingQuality::Cached {
-        crate::tr!("上次记录")
-    } else if d.quality == crate::device::ReadingQuality::Stale {
-        crate::tr!("等待设备上报")
-    } else if d.is_charging() {
-        crate::tr!("正在充电")
-    } else if let Some(level) = d.coarse_level() {
-        crate::i18n::battery_level(level)
-    } else if d.is_low() {
-        crate::tr!("电量偏低")
-    } else {
-        if d.display_percent().is_some() { crate::tr!("已连接") } else { crate::tr!("电量未知") }
-    };
-    let mut meta = format!("{} · {status}", kind.label());
+    let status = device_row_status(d);
+    let mut meta = format!("{} · {status}", if d.is_discovering() {
+        super::feedback::text("已发现", "Discovered")
+    } else { kind.label() });
     if cfg.tray_device.as_ref() == Some(&d.key) {
         meta.push_str(" · ");
         meta.push_str(crate::tr!("托盘显示"));

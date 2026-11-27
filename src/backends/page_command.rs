@@ -182,7 +182,11 @@ impl<C: Channel> Session<C> {
         );
         (matches!(vid, 0x373e | 0x37b0 | 0x36a7) && pid != 0 && pid != 65535).then_some((vid, pid))
     }
+    #[cfg(test)]
     fn read(&mut self, target: &Target) -> Option<Snapshot> {
+        self.read_with_detail(target, true)
+    }
+    fn read_with_detail(&mut self, target: &Target, detail: bool) -> Option<Snapshot> {
         let battery = self
             .query(self.address, 0, 0x83, 2, &[], 2, None)
             .and_then(|r| parse_battery(&r));
@@ -197,7 +201,7 @@ impl<C: Channel> Session<C> {
         };
         let mut dpi = Dpi::default();
         let mut rate = PollingRate::default();
-        if let Some(max) = layout {
+        if let Some(max) = layout.filter(|_| detail) {
             if let Some(profile) = self.profile() {
                 let stages = self
                     .query(self.address, 1, 0x81, 10, &[profile, max], 2, Some(profile))
@@ -230,6 +234,8 @@ impl<C: Channel> Session<C> {
             return None;
         }
         let mut target = target.clone();
+        target.key = target.unverified_key();
+        target.verified_identity = false;
         if let Some((vid, pid)) = paired {
             target.key = crate::device::stable_key(&format!(
                 "{}:{vid:04x}:{pid:04x}",
@@ -313,7 +319,7 @@ impl DeviceBackend for PageCommand {
             .map(candidate)
             .collect())
     }
-    fn read(&self, _: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
+    fn read(&self, _: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
         if !control(target.hid()?) {
             return Err(crate::tr!("设备通信数据格式异常").into());
         }
@@ -324,7 +330,7 @@ impl DeviceBackend for PageCommand {
             interface: target.hid()?.clone(),
             address: target_address(target.hid()?),
         };
-        s.read(target)
+        s.read_with_detail(target, detail)
             .ok_or_else(|| crate::i18n::translate("设备暂未响应，请唤醒或检查连接后重试").into())
     }
 }
@@ -404,14 +410,27 @@ mod tests {
         profile_reads: u8,
         change_profile: bool,
         wrong_profile: bool,
-        queries: usize,
+        skip_battery: bool,
+        paired: Option<(u16, u16)>,
+        requests: Vec<Vec<u8>>,
     }
     impl Channel for Mouse {
         fn send(&mut self, p: &[u8]) -> bool {
-            self.queries += 1;
+            self.requests.push(p.to_vec());
+            if self.skip_battery && (p[5], p[6]) == (0, 0x83) {
+                self.pending.clear();
+                return false;
+            }
             let mut profile = 2;
             let data = match (p[5], p[6]) {
                 (0, 0x83) => vec![0, 75],
+                (0, 0x8b) => {
+                    let (vendor, product) = self.paired.unwrap_or_default();
+                    let mut data = vec![0, 0];
+                    data.extend_from_slice(&vendor.to_be_bytes());
+                    data.extend_from_slice(&product.to_be_bytes());
+                    data
+                }
                 (0, 0x85) => {
                     self.profile_reads += 1;
                     if self.change_profile && self.profile_reads > 1 {
@@ -451,10 +470,90 @@ mod tests {
                 profile_reads: 0,
                 change_profile: false,
                 wrong_profile: false,
-                queries: 0,
+                skip_battery: false,
+                paired: None,
+                requests: Vec::new(),
             },
             interface: interface(),
             address: 2,
+        }
+    }
+    #[test]
+    fn lightweight_read_keeps_pairing_without_configuration_and_full_read_restores_settings() {
+        for product in [9, 1, 3] {
+            let mut session = session();
+            session.interface.product_id = product;
+            session.channel.paired = Some((0x37b0, 9));
+            let target = candidate(&session.interface);
+            let lightweight = session.read_with_detail(&target, false).unwrap();
+            let mut expected = vec![packet(2, 0, 0x83, 2, &[]).to_vec()];
+            if product != 9 {
+                expected.push(packet(1, 0, 0x8b, 6, &[2]).to_vec());
+            }
+            assert_eq!(session.channel.requests, expected);
+            assert_eq!(lightweight.battery.as_ref().unwrap().percent, Some(75));
+            assert!(lightweight.connected && lightweight.battery_at.is_some());
+            assert_eq!(lightweight.target.verified_identity, product != 9);
+            assert_eq!(lightweight.dpi, Dpi::default());
+            assert_eq!(lightweight.polling_rate, PollingRate::default());
+
+            session.channel.requests.clear();
+            let detailed = session.read_with_detail(&lightweight.target, true).unwrap();
+            expected.extend([
+                packet(2, 0, 0x85, 1, &[]).to_vec(),
+                packet(2, 1, 0x81, 10, &[2, 6]).to_vec(),
+                packet(2, 1, 0x82, 2, &[2]).to_vec(),
+                packet(2, 1, 0x80, 2, &[2]).to_vec(),
+                packet(2, 0, 0x85, 1, &[]).to_vec(),
+            ]);
+            assert_eq!(session.channel.requests, expected);
+            assert_eq!(detailed.target.key, lightweight.target.key);
+            assert_eq!(detailed.battery, lightweight.battery);
+            assert_eq!(detailed.dpi.current, Some(1600));
+            assert_eq!(detailed.dpi.current_y, Some(3200));
+            assert_eq!(detailed.dpi.stages.len(), 2);
+            assert_eq!(detailed.dpi.active_stage, Some(1));
+            assert_eq!(detailed.polling_rate.current, Some(4000));
+            assert!(!detailed.dpi.writable && !detailed.dpi.stage_writable
+                && !detailed.dpi.stage_editable && !detailed.polling_rate.writable);
+        }
+    }
+    #[test]
+    fn missing_battery_fails_lightweight_read_but_preserves_full_configuration() {
+        let mut session = session();
+        session.channel.skip_battery = true;
+        let target = candidate(&session.interface);
+        assert!(session.read_with_detail(&target, false).is_none());
+        assert_eq!(session.channel.requests, vec![packet(2, 0, 0x83, 2, &[]).to_vec()]);
+        let detailed = session.read_with_detail(&target, true).unwrap();
+        assert!(detailed.connected);
+        assert!(detailed.battery.is_none() && detailed.battery_at.is_none());
+        assert_eq!(detailed.dpi.current, Some(1600));
+        assert_eq!(detailed.polling_rate.current, Some(4000));
+        assert!(!detailed.dpi.writable && !detailed.dpi.stage_writable
+            && !detailed.dpi.stage_editable && !detailed.polling_rate.writable);
+    }
+    #[test]
+    fn missing_pairing_never_reuses_verified_identity_or_queries_configuration() {
+        for detail in [false, true] {
+            let mut session = session();
+            session.interface.product_id = 1;
+            session.channel.paired = Some((0x37b0, 9));
+            let target = candidate(&session.interface);
+            let known = session.read_with_detail(&target, false).unwrap();
+            assert!(known.target.verified_identity);
+            session.channel.paired = None;
+            session.channel.requests.clear();
+            let unknown = session.read_with_detail(&known.target, detail).unwrap();
+            assert_eq!(unknown.target.key, target.key);
+            assert!(!unknown.target.verified_identity);
+            assert_eq!(unknown.battery, known.battery);
+            assert_eq!(unknown.dpi, Dpi::default());
+            assert_eq!(unknown.polling_rate, PollingRate::default());
+            assert_eq!(session.channel.requests, vec![
+                packet(2, 0, 0x83, 2, &[]).to_vec(),
+                packet(1, 0, 0x8b, 6, &[2]).to_vec(),
+            ]);
         }
     }
     #[test]
@@ -495,7 +594,7 @@ mod tests {
         let r = s.read(&t).unwrap();
         assert!(r.battery.is_some());
         assert!(r.dpi.stages.is_empty());
-        assert_eq!(s.channel.queries, 1);
+        assert_eq!(s.channel.requests.len(), 1);
         s.interface.vendor_id = 0x373e;
         s.interface.product_id = 0x0032;
         assert_eq!(target_address(&s.interface), 0);

@@ -263,12 +263,16 @@ impl<C: Channel> Session<C> {
         t.verified_identity = true;
         t
     }
+    #[cfg(test)]
     fn snapshot(&mut self) -> Result<Snapshot, String> {
+        self.snapshot_with_detail(true)
+    }
+    fn snapshot_with_detail(&mut self, detail: bool) -> Result<Snapshot, String> {
         self.identify().ok_or(UNAVAILABLE)?;
         self.online().ok_or(UNAVAILABLE)?;
         let battery = self.query(9).and_then(|r| battery(r[0]));
         let battery_at = battery.as_ref().map(|_| Instant::now());
-        let config = self.config();
+        let config = detail.then(|| self.config()).flatten();
         self.identify().ok_or(CHANGED)?;
         self.online().ok_or(UNAVAILABLE)?;
         if battery.is_none() && config.is_none() {
@@ -360,8 +364,8 @@ impl DeviceBackend for Aula {
             .map(candidate)
             .collect())
     }
-    fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
-        with_session(api, target, |s| s.snapshot())
+    fn read(&self, api: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
+        with_session(api, target, |s| s.snapshot_with_detail(detail))
     }
     fn set_dpi_stage(
         &self,
@@ -523,6 +527,38 @@ mod tests {
     fn session() -> Session<Fake> {
         Session::new(Fake::new(), &interface(0x0138, "one"))
     }
+    #[test]
+    fn lightweight_snapshot_skips_config_and_detail_preserves_capabilities() {
+        let mut session = session();
+        let lightweight = session.snapshot_with_detail(false).unwrap();
+        assert!(lightweight.target.verified_identity && lightweight.battery_at.is_some());
+        assert_eq!(lightweight.battery.as_ref().unwrap().percent, Some(63));
+        assert_eq!(lightweight.dpi, Dpi::default());
+        assert_eq!(lightweight.polling_rate, PollingRate::default());
+        assert_eq!(session.channel.sent.iter().map(|packet| packet[2]).collect::<Vec<_>>(), [5, 7, 9, 5, 7]);
+        assert_eq!(session.channel.config_reads, 0);
+        let detailed = session.snapshot_with_detail(true).unwrap();
+        assert_eq!(detailed.battery, lightweight.battery);
+        assert_eq!(detailed.target.key, lightweight.target.key);
+        assert_eq!(detailed.dpi, config().dpi());
+        assert_eq!(detailed.polling_rate, config().rate());
+        assert_eq!(session.channel.config_reads, 2);
+        assert!(session.channel.writes().is_empty());
+    }
+
+    #[test]
+    fn lightweight_snapshot_keeps_identity_and_battery_failure_checks() {
+        let mut replaced = session();
+        replaced.channel.replace_at_battery = true;
+        assert!(replaced.snapshot_with_detail(false).is_err());
+        let mut missing_battery = session();
+        missing_battery.channel.skip_battery = true;
+        assert!(missing_battery.snapshot_with_detail(false).is_err());
+        assert_eq!(missing_battery.channel.config_reads, 0);
+        assert_eq!(replaced.channel.config_reads, 0);
+        assert!(missing_battery.channel.writes().is_empty() && replaced.channel.writes().is_empty());
+    }
+
     fn switch(s: &mut Session<Fake>) -> Result<(), String> {
         s.switch(
             &s.target(),

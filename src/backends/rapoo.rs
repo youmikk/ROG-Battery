@@ -375,12 +375,19 @@ fn offline_snapshot(target: &Target) -> Snapshot {
     }
 }
 
-fn read_with(target: &Target,
+fn read_with_detail(target: &Target, detail: bool,
     mut read_status: impl FnMut(Duration) -> Result<Option<(Instant, Battery, Dpi)>, String>,
     read_config: impl FnOnce(&Dpi) -> Result<(Dpi, PollingRate), String>) -> Result<Snapshot, String> {
-    let Some((mut taken, mut battery, status)) = read_status(FIRST_REPORT_WAIT)? else {
+    let wait = if detail { FIRST_REPORT_WAIT } else { Duration::ZERO };
+    let Some((mut taken, mut battery, status)) = read_status(wait)? else {
         return Ok(offline_snapshot(target));
     };
+    if !detail {
+        return Ok(Snapshot {
+            target: target.clone(), battery: Some(battery), dpi: status, connected: true,
+            battery_unavailable: false, battery_at: Some(taken), polling_rate: Default::default(),
+        });
+    }
     let (mut dpi, mut polling_rate) = read_config(&status).unwrap_or_else(|_| (status.clone(), Default::default()));
     match read_status(Duration::ZERO) {
         Ok(Some((new_taken, new_battery, new_status))) => {
@@ -402,6 +409,13 @@ fn read_with(target: &Target,
         target: target.clone(), battery: Some(battery), dpi, connected: true,
         battery_unavailable: false, battery_at: Some(taken), polling_rate,
     })
+}
+
+#[cfg(test)]
+fn read_with(target: &Target,
+    read_status: impl FnMut(Duration) -> Result<Option<(Instant, Battery, Dpi)>, String>,
+    read_config: impl FnOnce(&Dpi) -> Result<(Dpi, PollingRate), String>) -> Result<Snapshot, String> {
+    read_with_detail(target, true, read_status, read_config)
 }
 
 #[cfg(test)]
@@ -433,12 +447,12 @@ impl DeviceBackend for Rapoo {
             .collect())
     }
 
-    fn read(&self, api: &HidApi, target: &Target, _: bool) -> Result<Snapshot, String> {
+    fn read(&self, api: &HidApi, target: &Target, detail: bool) -> Result<Snapshot, String> {
         if !is_control(target.hid()?) {
             return Err(crate::tr!("此雷柏型号尚未适配").into());
         }
         // Configuration failure never clears independently received battery data.
-        read_with(target, |wait| latest_sample(target, None, wait),
+        read_with_detail(target, detail, |wait| latest_sample(target, None, wait),
             |status| super::rapoo_config::read(api, target, status))
     }
 
@@ -568,6 +582,65 @@ mod tests {
         (Dpi { current: status.current, current_y: status.current_y, profile: Some(2),
             values, stages, stage_y, configuration_token: Some(42), ..Default::default() },
             PollingRate { current: Some(125), values: vec![125, 500, 1000], ..Default::default() })
+    }
+
+    #[test]
+    fn lightweight_status_never_waits_or_reads_configuration() {
+        let target = test_target();
+        let session = StatusReader::default();
+        let measured = Instant::now();
+        session.state.lock().unwrap().receive(&report(), measured);
+        let expected = parse_status(&report()).unwrap();
+        let mut reads = 0;
+        let snapshot = read_with_detail(&target, false, |wait| {
+            reads += 1;
+            assert_eq!(wait, Duration::ZERO);
+            status_from_session(&target, &session, None, wait)
+        }, |_| panic!("lightweight read must not open configuration channel")).unwrap();
+        assert_eq!(reads, 1);
+        assert_eq!(snapshot.battery, Some(expected.0));
+        assert_eq!(snapshot.battery_at, Some(measured));
+        assert_eq!(snapshot.dpi, expected.1);
+        assert!(!snapshot.dpi.writable && !snapshot.dpi.stage_writable && !snapshot.dpi.stage_editable);
+        assert_eq!(snapshot.polling_rate, PollingRate::default());
+    }
+
+    #[test]
+    fn lightweight_status_distinguishes_pending_sample_from_offline() {
+        let target = test_target();
+        let session = StatusReader::default();
+        let pending = read_with_detail(&target, false, |wait| {
+            assert_eq!(wait, Duration::ZERO);
+            status_from_session(&target, &session, None, wait)
+        }, |_| panic!("no configuration read without a sample"));
+        assert_eq!(pending.unwrap_err(), crate::tr!("暂未收到设备状态更新，请轻动鼠标唤醒后再试"));
+        let mut offline = report();
+        offline[7] = 0;
+        session.state.lock().unwrap().receive(&offline, Instant::now());
+        let snapshot = read_with_detail(&target, false,
+            |wait| status_from_session(&target, &session, None, wait),
+            |_| panic!("no configuration read for offline device")).unwrap();
+        assert!(!snapshot.connected);
+        assert!(snapshot.battery.is_none() && snapshot.battery_at.is_none());
+    }
+
+    #[test]
+    fn detailed_status_keeps_initial_wait_configuration_and_final_recheck() {
+        let (battery, status) = parse_status(&report()).unwrap();
+        let configured = readonly_configuration(&status);
+        let measured = Instant::now();
+        let mut waits = Vec::new();
+        let mut configuration_reads = 0;
+        let snapshot = read_with_detail(&test_target(), true, |wait| {
+            waits.push(wait);
+            Ok(Some((measured, battery.clone(), status.clone())))
+        }, |_| {
+            configuration_reads += 1;
+            Ok(configured.clone())
+        }).unwrap();
+        assert_eq!(waits, [FIRST_REPORT_WAIT, Duration::ZERO]);
+        assert_eq!(configuration_reads, 1);
+        assert_eq!((snapshot.dpi, snapshot.polling_rate), configured);
     }
 
     #[test]

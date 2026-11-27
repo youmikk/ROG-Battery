@@ -67,6 +67,8 @@ Portable users can exit the app and replace the executable. This README describe
 3. Click the numeric tray icon or taskbar strip to open quick view. Click a supported mouse or headset to expand its controls, and click again to collapse them.
 4. Open **Settings → Battery & tray** for display options. Device details let you change names, types and the standard tray selection.
 
+At startup, discovered devices or receivers appear first, and battery readings update as each device responds. DPI, polling rate and other settings load afterward in the background. Communication through a shared receiver stays sequential. Devices awaiting a response show “Checking connection and battery”.
+
 ### Taskbar and device preferences
 
 The standard Windows tray icon displays one selected device. The taskbar strip shows devices with valid battery readings in the saved order. When space is limited, it displays only complete device items; other devices remain accessible in quick view.

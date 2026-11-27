@@ -19,6 +19,8 @@ use crate::ui::widget::{Act, Drop, Edit, Page, Pref, Slide};
 use crate::win32;
 
 mod rapoo_devices;
+mod device_workers;
+mod rog_refresh;
 
 /// 托盘图标。**编进 exe**，不是运行时读文件。
 ///
@@ -511,146 +513,6 @@ fn reconcile_rog_identity(records: &mut BTreeMap<String, DeviceSnapshot>, link: 
     same
 }
 
-fn refresh_devices(shared: &Arc<Mutex<Shared>>, full: bool, generation: u64) -> Option<Quick> {
-    let scan = crate::win32::HidApi::load().and_then(|api| hid::scan_links(&api));
-    let scan = match scan {
-        Ok(scan) => scan,
-        Err(e) => {
-            crate::diagnostics::event_once("link_enumeration_failed", &e);
-            let mut s = lock_shared(shared);
-            if outcome_is_stale(generation, s.write_gen) { return None; }
-            let lifetime = rog_sample_lifetime(&s.cfg);
-            for device in s.devices.values_mut() {
-                if device.basic.is_some() { continue; }
-                mark_rog_unread(device, None, std::time::Instant::now(), lifetime);
-            }
-            s.rebuild_readings();
-            s.quick = None;
-            s.full = None;
-            s.status = Status::Error(e);
-            return None;
-        }
-    };
-    let (mut records, active, mut primary, ttl) = {
-        let s = lock_shared(shared);
-        (
-            s.devices.iter().filter(|(_, device)| device.basic.is_none()).map(|(key, device)| (key.clone(), device.clone())).collect::<BTreeMap<_, _>>(),
-            s.active_key.clone(),
-            s.primary_key.clone(),
-            Duration::from_secs(s.cfg.cache_ttl_sec),
-        )
-    };
-    let mut sample = None;
-    let mut seen = std::collections::BTreeSet::new();
-    for link in scan.links {
-        let link_key = link.device_key();
-        let previous = records
-            .values()
-            .filter(|d| d.link.as_ref().is_some_and(|l| l.device_key() == link_key))
-            .max_by_key(|device| (device.reading.connected, device.battery_at))
-            .cloned();
-        let needs_full = previous.as_ref().is_none_or(|d| d.state.is_none())
-            || (full
-                && previous
-                    .as_ref()
-                    .is_some_and(|d| d.full_at.elapsed() >= ttl)
-                && active
-                    .as_ref()
-                    .is_none_or(|k| previous.as_ref().is_some_and(|d| &d.reading.key == k)));
-        let out = match crate::backends::rog::fetch(&link, needs_full) {
-            Ok(out) => out,
-            Err(error) => {
-                let device = diagnostic_link(&link);
-                let facts = diagnostic_facts(
-                    "device_open_failed",
-                    &error,
-                    crate::device::DeviceFamily::Unknown.noun(),
-                    0,
-                    0,
-                    Some(&device),
-                );
-                crate::diagnostics::record_device_once(&facts);
-                continue;
-            }
-        };
-        let previous = reconcile_rog_identity(&mut records, &link, &out.snapshot.identity).or(previous);
-        let Some(record) = rog_record(&link, &out, previous.as_ref()) else { continue; };
-        let key = record.reading.key.clone();
-        if previous.is_none() && key != link_key {
-            let mut s = lock_shared(shared);
-            if outcome_is_stale(generation, s.write_gen) { return None; }
-            if !s.key_aliases.contains_key(&link_key) && s.promote_device_key(&link_key, &key) {
-                s.device_keys_dirty = true;
-            }
-        }
-        if let Some(old) = previous.as_ref().filter(|old| {
-            old.reading.key != key
-                && (old.ident.device_id().is_none() || old.ident.same_device(&record.ident))
-        }) {
-            let mut s = lock_shared(shared);
-            if outcome_is_stale(generation, s.write_gen) {
-                return None;
-            }
-            records.remove(&old.reading.key);
-            if s.promote_device_key(&old.reading.key, &key) {
-                s.device_keys_dirty = true;
-            }
-            primary = s.primary_key.clone();
-        }
-        if !seen.insert(key.clone()) {
-            continue;
-        }
-        let family = record.reading.family;
-        if let Some(previous) = previous.as_ref().filter(|previous| previous.reading.key != key) {
-            if let Some(old) = records.get_mut(&previous.reading.key) {
-                old.reading.connected = false;
-            }
-        }
-        if needs_full && !record.ident.model_name.trim().is_empty() {
-            let device = diagnostic_device(&record);
-            let facts = diagnostic_facts(
-                "device_identified",
-                "设备已识别",
-                family.noun(),
-                out.frames_read,
-                out.elapsed.as_millis(),
-                Some(&device),
-            );
-            crate::diagnostics::record_device_once(&facts);
-        }
-        {
-            let mut s = lock_shared(shared);
-            if outcome_is_stale(generation, s.write_gen) {
-                return None;
-            }
-            if primary.as_ref().is_none_or(|k| k == &key)
-                && (s.primary_key.is_none() || s.primary_key.as_ref() == Some(&key))
-            {
-                sample = apply_rog_outcome(&out, &record, &mut s, generation);
-            }
-        }
-        records.insert(key, record);
-    }
-    let mut s = lock_shared(shared);
-    if !outcome_is_stale(generation, s.write_gen) {
-        let lifetime = rog_sample_lifetime(&s.cfg);
-        for device in records.values_mut().filter(|device| !seen.contains(&device.reading.key)) {
-            mark_rog_unread(device, Some(&scan.present_channels), std::time::Instant::now(), lifetime);
-        }
-        if s.primary_key.as_ref().is_some_and(|key| !seen.contains(key)) {
-            s.full = None;
-            s.quick = None;
-            s.status = if s.primary_key.as_ref().and_then(|key| records.get(key))
-                .is_some_and(|device| device.reading.connected) {
-                Status::Asleep
-            } else {
-                Status::Error(crate::tr!("所选设备已断开，请重新连接").into())
-            };
-        }
-        s.replace_rog_records(records);
-    }
-    sample
-}
 
 fn merge_additional(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll) {
     merge_additional_at(shared, backend, poll, std::time::Instant::now());
@@ -704,9 +566,76 @@ fn coalesce_rapoo_paired_poll(shared: &mut Shared, poll: &mut crate::backends::P
     }
 }
 
-fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, mut poll: crate::backends::Poll,
+fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId, poll: crate::backends::Poll,
     now: std::time::Instant) {
+    merge_additional_update(shared, backend, poll, now, Publication::Complete);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Publication { Complete, Presence, Battery, Detail }
+
+fn dpi_context_changed(live: &crate::device::Dpi, stored: &crate::device::Dpi) -> bool {
+    [(live.current, stored.current), (live.current_y, stored.current_y), (live.profile, stored.profile)]
+        .iter().any(|(new, old)| new.is_some() && new != old)
+        || live.active_stage.is_some_and(|stage| Some(stage) != stored.active_stage)
+}
+
+fn preserve_configuration(snapshot: &mut crate::backends::Snapshot, previous: &DeviceSnapshot,
+    now: std::time::Instant) {
+    let Some(stored) = &previous.basic else { return; };
+    if !snapshot.connected || !stored.connected || !snapshot.target.same_channel(&stored.target)
+        || snapshot.target.key != stored.target.key || snapshot.target.verified_identity != stored.target.verified_identity {
+        return;
+    }
+    let live = snapshot.dpi.clone();
+    if dpi_context_changed(&live, &stored.dpi) { return; }
+    snapshot.dpi = stored.dpi.clone();
+    for (stored, live) in [(&mut snapshot.dpi.current, live.current),
+        (&mut snapshot.dpi.current_y, live.current_y), (&mut snapshot.dpi.profile, live.profile)] {
+        if live.is_some() { *stored = live; }
+    }
+    if live.active_stage.is_some() { snapshot.dpi.active_stage = live.active_stage; }
+    snapshot.polling_rate = stored.polling_rate.clone();
+    if now.saturating_duration_since(previous.full_at) >= Duration::from_secs(30) {
+        snapshot.disable_writes();
+    }
+}
+
+fn merge_additional_update(shared: &mut Shared, backend: crate::backends::BackendId,
+    mut poll: crate::backends::Poll, now: std::time::Instant, publication: Publication) {
+    let incoming: Vec<_> = poll.snapshots.iter().map(|snapshot| snapshot.target.clone()).collect();
     if backend==crate::backends::BackendId::Rapoo {
+        if let Some(paths) = &poll.present_channels {
+            shared.rapoo_endpoint_snapshots.retain(|(path, _), _|
+                paths.iter().any(|present| present.eq_ignore_ascii_case(path)));
+        }
+        for snapshot in &poll.snapshots {
+            let mut endpoint = snapshot.clone();
+            endpoint.disable_writes();
+            shared.rapoo_endpoint_snapshots.insert(
+                (endpoint.target.channel_key().to_ascii_lowercase(), endpoint.target.address), endpoint);
+        }
+        if matches!(publication, Publication::Battery | Publication::Detail) {
+            let siblings: Vec<_> = shared.rapoo_endpoint_snapshots.values()
+                .filter(|snapshot| snapshot.target.backend == backend
+                    && !incoming.iter().any(|target| target.same_channel(&snapshot.target))
+                    && poll.present_channels.as_ref().is_some_and(|paths| paths.iter()
+                        .any(|path| path.eq_ignore_ascii_case(&snapshot.target.channel_key())))
+                    && crate::backends::rapoo::device_signature(&snapshot.target).is_some_and(|signature|
+                        !signature.serial.trim().is_empty() && incoming.iter().any(|target|
+                            crate::backends::rapoo::device_signature(target).is_some_and(|other|
+                                other.model == signature.model && other.serial == signature.serial))))
+                .cloned().map(|mut snapshot| {
+                    if let Some(previous) = shared.rapoo_devices.card_key(&snapshot.target)
+                        .and_then(|key| shared.devices.get(key)) {
+                        snapshot.target.key = previous.reading.key.clone();
+                        preserve_configuration(&mut snapshot, previous, now);
+                    }
+                    snapshot.target.key = snapshot.target.unverified_key();
+                    snapshot
+                }).collect();
+            poll.snapshots.extend(siblings);
+        }
         for snapshot in &poll.snapshots {
             let Ok(i)=snapshot.target.hid() else {continue;};
             let old=crate::device::stable_key(&format!("{}:{:04x}:{:04x}:{}:{}",backend.name(),i.vendor_id,i.product_id,i.serial,snapshot.target.address));
@@ -723,6 +652,7 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
         coalesce_rapoo_paired_poll(shared, &mut poll);
     }
     for device in shared.devices.values_mut() {
+        if matches!(publication, Publication::Battery | Publication::Detail) { continue; }
         if let Some(basic) = &mut device.basic {
             if basic.target.backend != backend { continue; }
             let connection = poll.present_channels.as_ref().and_then(|paths| {
@@ -733,6 +663,9 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
                 (!present).then_some(false)
             });
             let status = device.basic_status.get_or_insert_with(Default::default);
+            if publication == Publication::Presence && connection.is_none()
+                && shared.source_discoveries.get(&backend).is_some_and(|scan|
+                    scan.targets.iter().any(|target| target.same_channel(&basic.target))) { continue; }
             status.observe(connection, None, now, backend.sample_lifetime());
             if backend == crate::backends::BackendId::XInput && connection == Some(false) {
                 // A slot can be reused by a different controller after disconnection.
@@ -802,12 +735,21 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
                 shared.device_keys_dirty = true;
             }
         }
+        if previous.as_ref().is_some_and(|previous| previous.verified_identity && !snapshot.target.verified_identity) {
+            for device in shared.devices.values_mut().filter(|device| device.basic.as_ref()
+                .is_some_and(|basic| basic.target.same_channel(&snapshot.target))) {
+                if let Some(basic) = &mut device.basic { basic.disable_writes(); }
+                if let Some(status) = &mut device.basic_status {
+                    status.observe(None, None, now, backend.sample_lifetime());
+                    device.reading.quality = status.quality;
+                }
+            }
+            continue;
+        }
         if let Some(previous) = previous.filter(|previous| previous.key != snapshot.target.key) {
             if snapshot.target.verified_identity && !previous.verified_identity {
                 if shared.promote_device_key(&previous.key, &snapshot.target.key) { shared.device_keys_dirty = true; }
                 shared.devices.remove(&previous.key);
-            } else if previous.verified_identity && !snapshot.target.verified_identity {
-                continue;
             } else if let Some(device) = shared.devices.get_mut(&previous.key) {
                 if let Some(status) = &mut device.basic_status {
                     status.observe(Some(false), None, now, backend.sample_lifetime());
@@ -823,11 +765,19 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
             shared.history_tracker.interrupt(&key);
         }
         let previous = shared.devices.get(&key);
+        let battery_only = publication == Publication::Battery || (publication == Publication::Detail
+            && !incoming.iter().any(|target| target.same_channel(&snapshot.target)));
+        if battery_only {
+            if let Some(previous) = previous { preserve_configuration(&mut snapshot, previous, now); }
+        }
+        let full_at = if battery_only {
+            previous.map(|previous| previous.full_at).unwrap_or(now)
+        } else { now };
         let mut status = previous.and_then(|device| device.basic_status.clone()).unwrap_or_default();
         status.observe_sample(Some(snapshot.connected), snapshot.battery.as_ref(), snapshot.battery_at,
             now, backend.sample_lifetime());
         if snapshot.battery_unavailable { status.clear_battery(); }
-        if snapshot.dpi.current.is_none() {
+        if snapshot.dpi.current.is_none() && !(battery_only && snapshot.dpi.profile.is_some()) {
             if let Some(previous) = previous.and_then(|device| device.basic.as_ref()) {
                 snapshot.dpi = previous.dpi.clone();
                 snapshot.dpi.disable_writes();
@@ -852,7 +802,7 @@ fn merge_additional_at(shared: &mut Shared, backend: crate::backends::BackendId,
             });
         shared.devices.insert(key, DeviceSnapshot { reading, ident, state: None, link,
             battery_at: status.measured_at,
-            full_at: now, basic: Some(snapshot), basic_status: Some(status) });
+            full_at, basic: Some(snapshot), basic_status: Some(status) });
     }
     shared.rebuild_readings();
 }
@@ -864,12 +814,20 @@ struct Shared {
     refresh_generation: u64,
     completed_requests: BTreeMap<crate::backends::BackendId, u64>,
     source_write_gen: BTreeMap<crate::backends::BackendId, u64>,
+    source_channel_gen: BTreeMap<(crate::backends::BackendId, String), u64>,
     source_pending: BTreeMap<crate::backends::BackendId, VecDeque<Cmd>>,
     source_busy: std::collections::BTreeSet<crate::backends::BackendId>,
+    source_running: BTreeMap<crate::backends::BackendId, usize>,
+    source_discoveries: BTreeMap<crate::backends::BackendId, crate::backends::BackendScan>,
+    source_completed: BTreeMap<(crate::backends::BackendId, String), u64>,
+    discovery_pending: std::collections::BTreeSet<crate::backends::BackendId>,
+    rog_discoveries: Vec<hid::HidInterface>,
     devices: std::collections::BTreeMap<String, DeviceSnapshot>,
     rapoo_devices: rapoo_devices::Devices,
+    rapoo_endpoint_snapshots: BTreeMap<(String, u8), crate::backends::Snapshot>,
     key_aliases: std::collections::BTreeMap<String, String>,
     active_key: Option<String>,
+    detail_key: Option<String>,
     primary_key: Option<String>,
     /// 最近一次**全量**快照里解析出的状态。`None` = 还没读全过。
     ///
@@ -960,6 +918,7 @@ impl Shared {
         if changed { self.rebuild_readings(); }
     }
 
+    #[cfg(test)]
     fn replace_rog_records(&mut self, records: BTreeMap<String, DeviceSnapshot>) {
         self.devices.retain(|_, device| device.basic.is_some());
         self.devices.extend(records);
@@ -975,6 +934,7 @@ impl Shared {
     }
 
     fn replace_mock_readings(&mut self, readings: Vec<crate::device::DeviceReading>) {
+        self.discovery_pending.clear();
         let now = std::time::Instant::now();
         let mut old_devices = std::mem::take(&mut self.devices);
         self.devices = readings
@@ -1030,6 +990,8 @@ impl Shared {
                 &device.reading, Some(device), &self.cfg, true, now);
         }
         self.readings = self.devices.values().map(|device| device.reading.clone()).collect();
+        self.readings.extend(device_workers::pending_readings(self));
+        self.readings.extend(rog_refresh::pending_readings(self));
         self.sort_readings();
         self.observe_history();
     }
@@ -1101,12 +1063,21 @@ impl Shared {
             completed_requests: std::iter::once(crate::backends::BackendId::Rog).chain(crate::backends::ADDITIONAL_BACKENDS)
                 .map(|backend| (backend, 0)).collect(),
             source_write_gen: Default::default(),
+            source_channel_gen: Default::default(),
             source_pending: Default::default(),
             source_busy: Default::default(),
+            source_running: Default::default(),
+            source_discoveries: Default::default(),
+            source_completed: Default::default(),
+            discovery_pending: std::iter::once(crate::backends::BackendId::Rog)
+                .chain(crate::backends::ADDITIONAL_BACKENDS).collect(),
+            rog_discoveries: Vec::new(),
             devices: Default::default(),
             rapoo_devices: Default::default(),
+            rapoo_endpoint_snapshots: Default::default(),
             key_aliases: Default::default(),
             active_key: None,
+            detail_key: None,
             primary_key: None,
             full: None,
             ident: None,
@@ -1150,7 +1121,7 @@ impl Shared {
             }
         }
         self.key_aliases.insert(old.to_string(), new.to_string());
-        for selected in [&mut self.active_key, &mut self.primary_key] {
+        for selected in [&mut self.active_key, &mut self.primary_key, &mut self.detail_key] {
             if selected.as_deref() == Some(old) {
                 *selected = Some(new.to_string());
             }
@@ -1863,7 +1834,9 @@ impl TrayCtl {
                         r.battery.as_ref().and_then(|battery| battery.display_percent()).map(|level| level.label(true))
                             .or_else(|| r.coarse_level().map(|level| crate::i18n::battery_level(level).to_string()))
                             .unwrap_or_else(|| crate::tr!("电量未知").to_string()),
-                        if !r.connected {
+                        if r.is_discovering() {
+                            crate::ui::feedback::text("（正在确认连接与电量）", " (checking connection and battery)")
+                        } else if !r.connected {
                             crate::tr!("（上次记录，未连接）")
                         } else if r.quality == crate::device::ReadingQuality::Cached {
                             crate::tr!("（上次记录，等待更新）")
@@ -3612,12 +3585,15 @@ fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
     if let Some(target) = cmd.basic_target() {
         let backend = target.backend;
         if backend != crate::backends::BackendId::Rog {
+            let group = crate::backends::communication_group(target);
             let mut state = lock_shared(shared);
             if state.store_update_pending { return false; }
             let queue = state.source_pending.entry(backend).or_default();
             if queue.len() >= MAX_PENDING { return false; }
             queue.push_back(cmd);
             let generation = state.source_write_gen.entry(backend).or_default();
+            *generation = generation.wrapping_add(1);
+            let generation = state.source_channel_gen.entry((backend, group)).or_default();
             *generation = generation.wrapping_add(1);
             state.source_busy.insert(backend);
             drop(state);
@@ -4052,6 +4028,8 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                 let readings = s.readings.clone();
                 ui.sync_devices(&readings);
                 s.active_key = ui.selected_device.clone();
+                s.detail_key = matches!(ui.page, Page::Perf | Page::Light | Page::Keys)
+                    .then(|| ui.selected_device.clone()).flatten();
                 let now = std::time::Instant::now();
                 for reading in readings.iter().filter(|reading| ui.page == crate::ui::widget::Page::Home
                     || ui.selected_device.as_ref() == Some(&reading.key)) {
@@ -4084,9 +4062,15 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                     .as_ref()
                     .map(|l| l.mode.clone())
                     .unwrap_or_default();
+            } else if selected.is_some() {
+                state = None;
+                ident = None;
+                link_mode.clear();
+                err_text.clear();
             }
             let audio = audio_p.snapshot();
             let data = crate::ui::viewdata::Data {
+                discovery_pending: !lock_shared(&shared_p).discovery_pending.is_empty(),
                 selected,
                 state: state.as_ref(),
                 ident: ident.as_ref(),
@@ -4195,27 +4179,47 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
         std::thread::spawn(move || {
             if crate::mock::enabled() { return; }
             let mut seen = 0;
+            let mut workers = device_workers::Workers::default();
             while signal_t.wait_for_work_with_limit(&mut seen, backend.publish_interval_limit_ms()) {
-                for _ in 0..MAX_PENDING * 2 {
-                    let command = lock_shared(&shared_t).source_pending.get_mut(&backend).and_then(VecDeque::pop_front);
-                    let Some(command) = command else { break; };
-                    let result = run_cmd(&command, None);
-                    lock_shared(&shared_t).results.push_back(result);
-                    sender_t.notice();
-                }
-                let generation = {
+                if matches!(backend, crate::backends::BackendId::Bluetooth | crate::backends::BackendId::XInput) {
+                    let generation = *lock_shared(&shared_t).source_write_gen.get(&backend).unwrap_or(&0);
+                    let poll = crate::backends::poll_backend(backend, false).unwrap_or_default();
                     let mut state = lock_shared(&shared_t);
-                    if state.source_pending.get(&backend).is_none_or(VecDeque::is_empty) { state.source_busy.remove(&backend); }
-                    *state.source_write_gen.get(&backend).unwrap_or(&0)
-                };
-                let snapshots = crate::backends::poll_backend(backend, true).unwrap_or_default();
-                let mut state = lock_shared(&shared_t);
-                state.publish_additional(backend, snapshots, generation, seen);
-                if state.device_keys_dirty {
-                    if settings::save(&state.cfg).is_ok() { state.device_keys_dirty = false; }
-                    else { tray_log("device identity preferences save failed"); }
+                    state.discovery_pending.remove(&backend);
+                    state.publish_additional(backend, poll, generation, seen);
+                } else {
+                    match crate::backends::discover_backend(backend) {
+                        Ok(scan) => {
+                            {
+                                let mut state = lock_shared(&shared_t);
+                                state.discovery_pending.remove(&backend);
+                                if scan.targets.is_empty() { state.source_discoveries.remove(&backend); }
+                                else { state.source_discoveries.insert(backend, scan.clone()); }
+                                state.source_completed.retain(|(source, group), _| *source != backend
+                                    || scan.targets.iter().any(|target| crate::backends::communication_group(target) == *group));
+                                merge_additional_update(&mut state, backend, scan.presence.clone(),
+                                    std::time::Instant::now(), Publication::Presence);
+                                device_workers::cancel_missing_commands(&mut state, backend, &scan.targets);
+                                if scan.targets.is_empty() { state.complete_refresh(backend, seen); }
+                            }
+                            workers.update(backend, &scan, seen, &shared_t, &signal_t, sender_t);
+                        }
+                        Err(error) => {
+                            crate::diagnostics::event_once("device_discovery_failed", &error);
+                            let mut state = lock_shared(&shared_t);
+                            state.discovery_pending.remove(&backend);
+                            merge_additional(&mut state, backend, Default::default());
+                            state.complete_refresh(backend, seen);
+                        }
+                    }
                 }
-                drop(state);
+                {
+                    let mut state = lock_shared(&shared_t);
+                    if state.device_keys_dirty {
+                        if settings::save(&state.cfg).is_ok() { state.device_keys_dirty = false; }
+                        else { tray_log("device identity preferences save failed"); }
+                    }
+                }
                 sender_t.notice();
             }
         })
@@ -4301,7 +4305,7 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                     s.want_full = false;
                     (full, s.write_gen)
                 };
-                refresh_devices(&shared_t, full, gen_at_read);
+                rog_refresh::run(&shared_t, full, gen_at_read, sender_t);
                 lock_shared(&shared_t).complete_rog_refresh(gen_at_read, seen);
 
                 let wake_probe = {
@@ -4951,6 +4955,9 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                 crate::diagnostics::event_once("settings_shutdown_failed", &error);
             }
             s.write_gen = s.write_gen.wrapping_add(1);
+            for generation in s.source_channel_gen.values_mut() {
+                *generation = generation.wrapping_add(1);
+            }
             for backend in crate::backends::ADDITIONAL_BACKENDS {
                 let generation = s.source_write_gen.entry(backend).or_default();
                 *generation = generation.wrapping_add(1);
@@ -6298,6 +6305,63 @@ mod backend_tests {
         assert!(!shared.cfg.device_names.contains_key("z-replacement-serial"));
     }
     #[test]
+    fn incremental_identity_loss_revokes_writes_without_renewing_the_previous_sample() {
+        for backend in [BackendId::Logitech, BackendId::Razer] {
+            for publication in [Publication::Battery, Publication::Detail] {
+                for same_key in [false, true] {
+                    let mut known = snapshot(backend, "known", 75);
+                    if backend == BackendId::Razer {
+                        known.target.hid_mut().path = "hid#vid_1532&pid_00c1&mi_00&col01#7&aaaa&0&0001#{hid}".into();
+                    }
+                    known.target.verified_identity = true;
+                    known.dpi = Dpi { current: Some(800), writable: true, stage_writable: true,
+                        stage_editable: true, ..Default::default() };
+                    known.polling_rate = crate::device::PollingRate { current: Some(1000),
+                        writable: true, ..Default::default() };
+                    let mut other = known.clone();
+                    other.target.key = "other".into();
+                    other.target.hid_mut().path = "other-interface".into();
+                    let mut shared = Shared::new(Settings::default());
+                    let now = std::time::Instant::now();
+                    known.battery_at = Some(now);
+                    merge_additional_at(&mut shared, backend, vec![known.clone(), other.clone()].into(), now);
+                    let before = shared.devices[&known.target.key].clone();
+                    let untouched = shared.devices[&other.target.key].clone();
+                    let mut unknown = known.clone();
+                    unknown.target.verified_identity = false;
+                    if backend == BackendId::Razer {
+                        unknown.target.hid_mut().path = "hid#vid_1532&pid_00c1&mi_00&col02#7&aaaa&0&0002#{hid}".into();
+                    }
+                    if !same_key { unknown.target.key = unknown.target.unverified_key(); }
+                    unknown.battery.as_mut().unwrap().percent = Some(12);
+                    unknown.battery_at = Some(now + Duration::from_secs(1));
+                    unknown.dpi = Dpi::default();
+                    unknown.polling_rate = Default::default();
+                    merge_additional_update(&mut shared, backend, vec![unknown].into(),
+                        now + Duration::from_secs(1), publication);
+                    assert_eq!(shared.devices.len(), 2);
+                    let current = &shared.devices[&known.target.key];
+                    let basic = current.basic.as_ref().unwrap();
+                    assert!(!basic.dpi.writable && !basic.dpi.stage_writable
+                        && !basic.dpi.stage_editable && !basic.polling_rate.writable);
+                    assert_eq!(basic.dpi.current, Some(800));
+                    assert_eq!(basic.battery, known.battery);
+                    assert_eq!(basic.battery_at, known.battery_at);
+                    assert_eq!(current.reading.percent(), Some(75));
+                    assert_eq!(current.reading.quality, crate::device::ReadingQuality::Cached);
+                    assert!(current.reading.connected);
+                    assert!(!current.basic_status.as_ref().unwrap().connection_known);
+                    assert_eq!(current.battery_at, before.battery_at);
+                    assert_eq!(current.full_at, before.full_at);
+                    assert_eq!(shared.devices[&other.target.key].reading, untouched.reading);
+                    assert_eq!(shared.devices[&other.target.key].basic.as_ref().unwrap().dpi, other.dpi);
+                    assert!(shared.devices[&other.target.key].basic.as_ref().unwrap().polling_rate.writable);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn partial_dpi_read_preserves_independent_live_rate_but_failed_poll_disables_all_writes() {
         let mut shared=Shared::new(Settings::default());
         let mut first=snapshot(BackendId::CompX,"compx",75);
@@ -7141,6 +7205,164 @@ mod backend_tests {
         let mut poll = crate::backends::Poll::from_snapshots(present.iter().map(|sample| (*sample).clone()).collect());
         poll.snapshots = snapshots;
         poll
+    }
+
+    #[test]
+    fn rapoo_incremental_both_endpoints_offline_in_either_order_keeps_one_offline_card() {
+        for reverse in [false, true] {
+            for publication in [Publication::Battery, Publication::Detail] {
+                let mut receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+                let mut wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+                let now = std::time::Instant::now();
+                receiver.battery_at = Some(now);
+                wired.battery_at = Some(now);
+                let mut shared = Shared::new(Settings::default());
+                shared.source_discoveries.insert(BackendId::Rapoo, crate::backends::BackendScan {
+                    targets: vec![receiver.target.clone(), wired.target.clone()],
+                    presence: rapoo_poll(Vec::new(), &[&receiver, &wired]),
+                });
+                merge_additional_at(&mut shared, BackendId::Rapoo,
+                    rapoo_poll(vec![receiver.clone(), wired.clone()], &[&receiver, &wired]), now);
+                assert_eq!(shared.devices.len(), 1);
+                assert_eq!(shared.readings.len(), 1);
+                let key = shared.readings[0].key.clone();
+                let endpoints = if reverse { [&wired, &receiver] } else { [&receiver, &wired] };
+                for (index, endpoint) in endpoints.iter().enumerate() {
+                    let mut offline = (*endpoint).clone();
+                    offline.connected = false;
+                    offline.battery = None;
+                    offline.battery_at = None;
+                    offline.battery_unavailable = true;
+                    offline.dpi = Dpi::default();
+                    offline.polling_rate = Default::default();
+                    merge_additional_update(&mut shared, BackendId::Rapoo,
+                        rapoo_poll(vec![offline], &[&receiver, &wired]),
+                        now + Duration::from_secs(index as u64 + 1), publication);
+                    assert_eq!(shared.devices.len(), 1);
+                    assert_eq!(shared.readings.len(), 1);
+                    assert_eq!(shared.readings[0].key, key);
+                    let current = &shared.devices[&key];
+                    assert_eq!(current.reading.connected, index == 0);
+                    assert_eq!(current.basic.as_ref().unwrap().connected, index == 0);
+                    if index == 0 {
+                        assert!(current.basic.as_ref().unwrap().target.same_channel(&endpoints[1].target));
+                        assert_eq!(current.reading.percent(), Some(58));
+                        assert_eq!(current.full_at, now);
+                    } else {
+                        let basic = current.basic.as_ref().unwrap();
+                        assert!(!basic.dpi.writable && !basic.dpi.stage_writable
+                            && !basic.dpi.stage_editable && !basic.polling_rate.writable);
+                        assert!(current.reading.battery.is_none());
+                        assert!(current.basic_status.as_ref().unwrap().connection_known);
+                    }
+                }
+                let mut recovered = endpoints[0].clone();
+                recovered.battery.as_mut().unwrap().percent = Some(59);
+                recovered.battery_at = Some(now + Duration::from_secs(3));
+                recovered.dpi = Dpi::default();
+                recovered.polling_rate = Default::default();
+                merge_additional_update(&mut shared, BackendId::Rapoo,
+                    rapoo_poll(vec![recovered.clone()], &[&receiver, &wired]),
+                    now + Duration::from_secs(3), Publication::Battery);
+                assert_eq!(shared.readings.len(), 1);
+                assert!(shared.readings[0].connected);
+                assert_eq!(shared.readings[0].percent(), Some(59));
+                assert_eq!(shared.readings[0].key, key);
+                assert!(shared.devices[&key].basic.as_ref().unwrap().target.same_channel(&recovered.target));
+            }
+        }
+    }
+
+    #[test]
+    fn rapoo_cached_endpoint_never_restores_revoked_writes_or_survives_removal() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let now = std::time::Instant::now();
+        let mut shared = Shared::new(Settings::default());
+        shared.source_discoveries.insert(BackendId::Rapoo, crate::backends::BackendScan {
+            targets: vec![receiver.target.clone(), wired.target.clone()],
+            presence: rapoo_poll(Vec::new(), &[&receiver, &wired]),
+        });
+        merge_additional_at(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![receiver.clone(), wired.clone()], &[&receiver, &wired]), now);
+        let key = shared.readings[0].key.clone();
+        shared.devices.get_mut(&key).unwrap().basic.as_mut().unwrap().disable_writes();
+        let mut offline = receiver.clone();
+        offline.connected = false;
+        offline.battery = None;
+        offline.battery_at = None;
+        offline.battery_unavailable = true;
+        offline.dpi = Dpi::default();
+        offline.polling_rate = Default::default();
+        merge_additional_update(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![offline.clone()], &[&receiver, &wired]),
+            now + Duration::from_secs(1), Publication::Battery);
+        let current = &shared.devices[&key];
+        assert!(current.reading.connected);
+        assert_eq!(current.full_at, now);
+        assert_eq!(shared.readings.len(), 1);
+        let basic = current.basic.as_ref().unwrap();
+        assert!(!basic.dpi.stage_writable && !basic.dpi.stage_editable && !basic.polling_rate.writable);
+        assert_eq!(basic.battery_at, wired.battery_at);
+        merge_additional_update(&mut shared, BackendId::Rapoo,
+            rapoo_poll(Vec::new(), &[&receiver]), now + Duration::from_secs(2), Publication::Presence);
+        assert_eq!(shared.rapoo_endpoint_snapshots.len(), 1);
+        merge_additional_update(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![offline.clone()], &[&receiver]), now + Duration::from_secs(2), Publication::Battery);
+        merge_additional_update(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![offline], &[&receiver, &wired]),
+            now + Duration::from_secs(3), Publication::Battery);
+        assert_eq!(shared.readings.len(), 1);
+        assert!(!shared.devices[&key].reading.connected);
+        assert_eq!(shared.rapoo_endpoint_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn rapoo_incremental_battery_keeps_paired_configuration_without_refreshing_its_age() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        let key = shared.readings[0].key.clone();
+        let before = shared.devices[&key].clone();
+        for endpoint in [&receiver, &wired] {
+            let mut light = endpoint.clone();
+            light.dpi = Default::default();
+            light.polling_rate = Default::default();
+            merge_additional_update(&mut shared, BackendId::Rapoo,
+                rapoo_poll(vec![light], &[&receiver, &wired]), std::time::Instant::now(), Publication::Battery);
+            assert_eq!(shared.devices.len(), 1);
+            assert_eq!(shared.readings[0].key, key);
+            assert_eq!(shared.devices[&key].full_at, before.full_at);
+            let snapshot = shared.devices[&key].basic.as_ref().unwrap();
+            assert!(snapshot.target.same_channel(&wired.target));
+            assert_eq!(snapshot.dpi, wired.dpi);
+            assert_eq!(snapshot.polling_rate, wired.polling_rate);
+        }
+    }
+
+    #[test]
+    fn rapoo_incremental_offline_receiver_preserves_wired_device_and_unplug_switches_endpoint() {
+        let receiver = rapoo_endpoint(0x1415, "receiver", "pair", false);
+        let wired = rapoo_endpoint(0x4615, "wired", "pair", true);
+        let mut shared = Shared::new(Settings::default());
+        merge_additional(&mut shared, BackendId::Rapoo, vec![receiver.clone(), wired.clone()].into());
+        let key = shared.readings[0].key.clone();
+        merge_additional_update(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![receiver.clone()], &[&receiver, &wired]), std::time::Instant::now(), Publication::Battery);
+        assert_eq!(shared.devices.len(), 1);
+        assert!(shared.devices[&key].reading.connected);
+        assert_eq!(shared.devices[&key].reading.percent(), Some(58));
+        assert!(shared.devices[&key].basic.as_ref().unwrap().dpi.stage_editable);
+        let mut live_receiver = rapoo_endpoint(0x1415, "receiver", "pair", true);
+        live_receiver.dpi = Default::default();
+        live_receiver.polling_rate = Default::default();
+        merge_additional_update(&mut shared, BackendId::Rapoo,
+            rapoo_poll(vec![live_receiver.clone()], &[&live_receiver]), std::time::Instant::now(), Publication::Battery);
+        assert_eq!(shared.devices.len(), 1);
+        let snapshot = shared.devices[&key].basic.as_ref().unwrap();
+        assert!(snapshot.target.same_channel(&receiver.target));
+        assert!(!snapshot.dpi.stage_editable && !snapshot.polling_rate.writable);
     }
 
     #[test]

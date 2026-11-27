@@ -734,7 +734,7 @@ impl<C: Channel> Session<C> {
         if !self.legacy && (detail || target.family == DeviceFamily::Unknown) {
             self.identify(&mut target);
         }
-        let mut dpi = if target.family == DeviceFamily::Mouse {
+        let mut dpi = if detail && target.family == DeviceFamily::Mouse {
             self.dpi_with_stages()
         } else {
             Dpi::default()
@@ -743,7 +743,7 @@ impl<C: Channel> Session<C> {
             dpi.writable = false;
             dpi.stage_writable = false;
         }
-        let polling_rate = if target.family == DeviceFamily::Mouse {
+        let polling_rate = if detail && target.family == DeviceFamily::Mouse {
             self.rate_info(&target).ok().flatten().map(|info| info.rate).unwrap_or_default()
         } else {
             Default::default()
@@ -2048,11 +2048,6 @@ mod tests {
             },
             data(0, 0, &[0x10, 4], &[1]),
             data(1, 1, &[], &[65, 4, 0]),
-            data(0, 0, &[0x81, 0], &[0]),
-            data(0, 0, &[0x22, 1], &[0]),
-            data(0, 0, &[0x22, 2], &[0]),
-            data(0, 0, &[0x80, 0x61], &[0]),
-            data(0, 0, &[0x80, 0x60], &[0]),
         ]);
         let snapshot = Session::from_channel(channel, &target())
             .unwrap()
@@ -2070,6 +2065,7 @@ mod tests {
         after_battery: Option<Option<[u8; 4]>>,
         after_rate: bool,
         identity_reads: usize,
+        requests: Vec<Vec<u8>>,
     }
 
     impl Channel for SnapshotChannel {
@@ -2077,6 +2073,7 @@ mod tests {
 
         fn transact(&mut self, packet: &[u8], _: u32,
             matcher: &mut dyn FnMut(&[u8]) -> bool) -> Option<Vec<u8>> {
+            self.requests.push(packet.to_vec());
             let payload = match (packet[2], packet[3] >> 4) {
                 (0, 1) => vec![2, 0, 0x5a],
                 (0, 0) => match &packet[4..6] {
@@ -2107,6 +2104,36 @@ mod tests {
             response[4..4 + payload.len()].copy_from_slice(&payload);
             assert!(matcher(&response));
             Some(response)
+        }
+    }
+
+    #[test]
+    fn lightweight_mouse_snapshot_skips_configuration_and_preserves_identity_checks() {
+        let target = target();
+        let channel = SnapshotChannel { unit: Some([1, 2, 3, 4]), ..Default::default() };
+        let mut session = Session::from_channel(channel, &target).unwrap();
+        let lightweight = session.read_snapshot(&target, false).unwrap();
+        assert_eq!(lightweight.battery.as_ref().unwrap().percent, Some(65));
+        assert!(lightweight.target.verified_identity && lightweight.battery_at.is_some());
+        assert_eq!(lightweight.dpi, Dpi::default());
+        assert_eq!(lightweight.polling_rate, crate::device::PollingRate::default());
+        assert_eq!(session.device.identity_reads, 2);
+        for packet in &session.device.requests {
+            match (packet[2], packet[3] >> 4) {
+                (0, 0) => assert!(matches!(&packet[4..6], [0, 3] | [0x10, 4])),
+                (0, 1) | (3, 0) | (1, 1) => (),
+                _ => panic!("unexpected lightweight query: {packet:?}"),
+            }
+        }
+        let detailed = session.read_snapshot(&target, true).unwrap();
+        assert_eq!(lightweight.target.key, detailed.target.key);
+        assert_eq!(lightweight.battery, detailed.battery);
+        assert_eq!(detailed.polling_rate.current, Some(1000));
+        assert!(detailed.polling_rate.writable);
+        assert_eq!(session.device.identity_reads, 4);
+        for feature in [ONBOARD_PROFILES, ADJUSTABLE_DPI, EXTENDED_DPI, REPORT_RATE] {
+            assert!(session.device.requests.iter().any(|packet|
+                packet[2] == 0 && packet[3] >> 4 == 0 && packet[4..6] == feature.to_be_bytes()));
         }
     }
 
@@ -2159,7 +2186,7 @@ mod tests {
         let channel = SnapshotChannel { unit: Some([1, 2, 3, 4]),
             after_rate: true, ..Default::default() };
         let mut session = Session::from_channel(channel, &target).unwrap();
-        assert!(session.read_snapshot(&target, false).is_err());
+        assert!(session.read_snapshot(&target, true).is_err());
         assert!(!session.device.after_rate);
         assert_eq!(session.device.identity_reads, 2);
     }

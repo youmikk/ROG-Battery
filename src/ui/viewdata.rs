@@ -6,6 +6,7 @@
 
 #[derive(Clone)]
 pub struct Data<'a> {
+    pub discovery_pending: bool,
     pub selected: Option<&'a crate::device::DeviceReading>,
     /// 设备状态。`None` = 还没读到（首帧 / 后台线程正在读）。
     pub state: Option<&'a crate::proto::State>,
