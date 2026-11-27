@@ -2,67 +2,111 @@ use super::*;
 use std::path::PathBuf;
 
 pub fn export_draft(draft: &Draft, root: &Path) -> Result<PathBuf, String> {
-    save(draft, crate::gui::APP_VERSION, None, None, root)
+    local_files::register_locked(&history_path(), || save(draft, crate::gui::APP_VERSION, None, None, root))
 }
 
 pub fn export_local(request_id: &str, root: &Path) -> Result<PathBuf, String> {
     if !uuid(request_id) { return Err(invalid()); }
-    let entry = with_history(false, |history| history.entries.iter()
-        .find(|entry| entry.request_id == request_id).cloned().ok_or_else(damaged))?;
-    save(&entry.draft, &entry.app_version, Some(&entry.public()), entry.pending_reply.as_ref().map(|reply| reply.body.as_str()), root)
+    with_locked_history_at(&history_path(), true, |path, history| {
+        let entry = history.entries.iter().find(|entry| entry.request_id == request_id).ok_or_else(damaged)?;
+        local_files::register(path, || save(&entry.draft, &entry.app_version, Some(&entry.public()),
+            entry.pending_reply.as_ref().map(|reply| reply.body.as_str()), root))
+    })
 }
 
-fn save(draft: &Draft, version: &str, receipt: Option<&Entry>, followup: Option<&str>, root: &Path) -> Result<PathBuf, String> {
-    save_with(draft, version, receipt, followup, root, |path, bytes| {
-        let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+pub(super) fn save(draft: &Draft, version: &str, receipt: Option<&Entry>, followup: Option<&str>, root: &Path) -> Result<local_files::Bundle, String> {
+    save_with(draft, version, receipt, followup, root, |file, bytes| {
         file.write_all(bytes)?;
         file.sync_all()
     })
 }
 
 fn save_with(draft: &Draft, version: &str, receipt: Option<&Entry>, followup: Option<&str>, root: &Path,
-    mut write: impl FnMut(&Path, &[u8]) -> std::io::Result<()>) -> Result<PathBuf, String> {
+    write: impl FnMut(&mut File, &[u8]) -> std::io::Result<()>) -> Result<local_files::Bundle, String> {
     let report = fallback_version(draft, version)?.markdown;
-    let folder = root.join(format!("X-Battery-feedback-{}-{}", now(), new_uuid()?));
-    fs::create_dir(&folder).map_err(|error| storage_io_error(("创建导出目录", "Create export directory"), error))?;
-    let result = (|| {
-        let mut attachments = Vec::new();
-        for (index, image) in draft.images.iter().enumerate() {
-            let extension = match image.mime_type.as_str() {
-                "image/png" => "png", "image/jpeg" => "jpg", "image/webp" => "webp", _ => return Err(invalid()),
-            };
-            let name = format!("screenshot-{}.{}", index + 1, extension);
-            let bytes = STANDARD.decode(&image.data_base64).map_err(|_| invalid())?;
-            write(&folder.join(&name), &bytes).map_err(|error| storage_io_error(("导出截图", "Export screenshot"), error))?;
-            attachments.push(name);
-        }
-        if let Some(capture) = &draft.capture {
-            let bytes = STANDARD.decode(&capture.data_base64).map_err(|_| invalid())?;
-            write(&folder.join("raw.jsonl"), &bytes).map_err(|error| storage_io_error(("导出采集", "Export capture"), error))?;
-            attachments.push("raw.jsonl".into());
-        }
-        if let Some(body) = followup {
-            write(&folder.join("follow-up.txt"), body.as_bytes())
-                .map_err(|error| storage_io_error(("导出补充说明", "Export follow-up"), error))?;
-            attachments.push("follow-up.txt".into());
-        }
-        let manifest = serde_json::json!({
-            "schema": 1, "appVersion": version, "category": draft.category, "device": draft.device,
-            "description": draft.description, "diagnostics": draft.diagnostics, "attachments": attachments,
-            "receipt": receipt,
-        });
-        let manifest = serde_json::to_vec_pretty(&manifest).map_err(|_| invalid())?;
-        write(&folder.join("feedback.json"), &manifest).map_err(|error| storage_io_error(("导出反馈", "Export feedback"), error))?;
-        write(&folder.join("report.md"), report.as_bytes()).map_err(|error| storage_io_error(("导出说明", "Export report"), error))?;
-        let network = crate::feedback::software::network_summary();
-        write(&folder.join("network-summary.txt"), network.as_bytes())
-            .map_err(|error| storage_io_error(("导出网络诊断", "Export network diagnostics"), error))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&folder);
+    let folder = format!("X-Battery-feedback-{}-{}", now(), new_uuid()?);
+    let mut contents = Vec::new();
+    let mut attachments = Vec::new();
+    for (index, image) in draft.images.iter().enumerate() {
+        let name = local_files::image_name(index, &image.mime_type)?;
+        let bytes = STANDARD.decode(&image.data_base64).map_err(|_| invalid())?;
+        contents.push((name.clone(), bytes));
+        attachments.push(name);
     }
-    result.map(|()| folder)
+    if let Some(capture) = &draft.capture {
+        let bytes = STANDARD.decode(&capture.data_base64).map_err(|_| invalid())?;
+        contents.push(("raw.jsonl".into(), bytes));
+        attachments.push("raw.jsonl".into());
+    }
+    if let Some(body) = followup {
+        contents.push(("follow-up.txt".into(), body.as_bytes().to_vec()));
+        attachments.push("follow-up.txt".into());
+    }
+    let manifest = serde_json::json!({
+        "schema": 1, "appVersion": version, "category": draft.category, "device": draft.device,
+        "description": draft.description, "diagnostics": draft.diagnostics, "attachments": attachments,
+        "receipt": receipt,
+    });
+    let manifest = serde_json::to_vec_pretty(&manifest).map_err(|_| invalid())?;
+    contents.push(("feedback.json".into(), manifest));
+    contents.push(("report.md".into(), report.into_bytes()));
+    let network = crate::feedback::software::network_summary();
+    contents.push(("network-summary.txt".into(), network.into_bytes()));
+    let binding = receipt.map(|entry| local_files::Binding::Request(entry.request_id.clone()))
+        .map_or_else(|| local_files::Binding::draft(draft), Ok)?;
+    local_files::write_bundle(root, &folder, binding, contents, write)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Manifest {
+    schema: u8, app_version: String, category: String, device: Device, description: String,
+    diagnostics: Option<String>, attachments: Vec<String>, receipt: Option<Entry>,
+}
+
+pub(super) fn legacy_binding(contents: &std::collections::BTreeMap<String, Vec<u8>>, history: &History)
+    -> Result<Option<local_files::Binding>, String> {
+    let Some(bytes) = contents.get("feedback.json") else { return Ok(None); };
+    let Ok(manifest) = serde_json::from_slice::<Manifest>(bytes) else { return Ok(None); };
+    if manifest.schema != 1 || !valid_version(&manifest.app_version) { return Ok(None); }
+    let mut names: BTreeSet<_> = ["feedback.json", "report.md", "network-summary.txt"].into_iter().collect();
+    for name in &manifest.attachments {
+        if !names.insert(name) { return Ok(None); }
+    }
+    if contents.len() != names.len() || !contents.keys().all(|name| names.contains(name.as_str())) { return Ok(None); }
+    let mut draft = Draft { category: manifest.category, device: manifest.device,
+        description: manifest.description, diagnostics: manifest.diagnostics, images: Vec::new(), capture: None };
+    for name in &manifest.attachments {
+        let Some(bytes) = contents.get(name) else { return Ok(None); };
+        if name == "raw.jsonl" {
+            let Ok(capture) = capture(bytes) else { return Ok(None); };
+            draft.capture = Some(capture);
+        } else if name == "follow-up.txt" {
+            let Ok(body) = std::str::from_utf8(bytes) else { return Ok(None); };
+            if !text(body, 1, 2000, true) { return Ok(None); }
+        } else {
+            let mime = match name.rsplit_once('.').map(|(_, suffix)| suffix) {
+                Some("png") => "image/png", Some("jpg") => "image/jpeg", Some("webp") => "image/webp", _ => return Ok(None),
+            };
+            if name != &local_files::image_name(draft.images.len(), mime)? { return Ok(None); }
+            let Ok(image) = image(name, mime, bytes) else { return Ok(None); };
+            draft.images.push(image);
+        }
+    }
+    let Ok(report) = fallback_version(&draft, &manifest.app_version) else { return Ok(None); };
+    if contents.get("report.md").map(Vec::as_slice) != Some(report.markdown.as_bytes()) { return Ok(None); }
+    if !contents.get("network-summary.txt").is_some_and(|bytes| bytes.starts_with(b"Latest network failure")) { return Ok(None); }
+    if let Some(receipt) = manifest.receipt {
+        let Some(entry) = history.entries.iter().find(|entry| entry.request_id == receipt.request_id) else { return Ok(None); };
+        if draft.category != entry.draft.category || draft.device != entry.draft.device
+            || draft.description != entry.draft.description || draft.diagnostics != entry.draft.diagnostics
+            || manifest.app_version != entry.app_version || receipt.category != draft.category
+            || receipt.device != draft.device || receipt.description != draft.description {
+            return Ok(None);
+        }
+        return Ok(Some(local_files::Binding::Request(receipt.request_id)));
+    }
+    Ok(Some(local_files::Binding::draft(&draft)?))
 }
 
 #[cfg(test)]
@@ -79,7 +123,7 @@ mod tests {
         draft.images.push(screenshot);
         let raw = raw_capture("AABBCC");
         draft.capture = Some(capture(&raw).unwrap());
-        let folder = save(&draft, "1.4.9", None, Some("Pending follow-up"), &scratch.0).unwrap();
+        let folder = save(&draft, "1.4.9", None, Some("Pending follow-up"), &scratch.0).unwrap().path;
         assert_eq!(fs::read(folder.join("screenshot-1.png")).unwrap(), original);
         assert_eq!(fs::read(folder.join("raw.jsonl")).unwrap(), raw);
         assert_eq!(fs::read_to_string(folder.join("follow-up.txt")).unwrap(), "Pending follow-up");

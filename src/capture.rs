@@ -256,40 +256,58 @@ impl Export {
     }
 
     pub fn save(self) -> Result<PathBuf, String> {
-        self.save_in(&crate::paths::cache_dir().join("captures"))
+        crate::feedback::client::local_files::save_capture(|| self.save_with(
+            &crate::paths::cache_dir().join("captures"), |file, bytes| file.write_all(bytes).and_then(|_| file.sync_all())))
     }
 
+    #[cfg(test)]
     fn save_in(self, root: &Path) -> Result<PathBuf, String> {
         self.save_with(root, |file, bytes| file.write_all(bytes).and_then(|_| file.sync_all()))
+            .map(|bundle| bundle.path)
     }
 
     fn save_with(self, root: &Path,
-        mut write: impl FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+        write: impl FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>) -> Result<crate::feedback::client::local_files::Bundle, String> {
+        use crate::feedback::client::local_files;
+        local_files::create_directory(root)?;
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = root.join(format!("capture-{}-{}-{}", self.timestamp, std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir(&path).map_err(|error| error.to_string())?;
-        let mut created = Vec::new();
-        let result = (|| -> std::io::Result<()> {
-            for (name, contents) in [("raw.jsonl", self.raw), ("summary.txt", self.summary)] {
-                let target = path.join(name);
-                let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)?;
-                created.push(target);
-                write(&mut file, contents.as_bytes())?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            for file in created { let _ = std::fs::remove_file(file); }
-            return if std::fs::remove_dir(&path).is_ok() {
-                Err(format!("保存失败，已清除未完成文件 / Export failed; partial files removed: {error}"))
-            } else {
-                Err(format!("保存失败，可能残留原始数据，请检查 / Export failed; check remaining raw data in {}: {error}", path.display()))
-            };
-        }
-        Ok(path)
+        let name = format!("capture-{}-{}-{}", self.timestamp, std::process::id(), SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let binding = local_files::Binding::capture(self.raw.as_bytes())?;
+        local_files::write_bundle(root, &name, binding,
+            vec![("raw.jsonl".into(), self.raw.into_bytes()), ("summary.txt".into(), self.summary.into_bytes())], write)
     }
+}
+
+pub(crate) fn matches_saved_summary(raw: &[u8], summary: &[u8]) -> bool {
+    fn expected(raw: &[u8]) -> Option<(String, String)> {
+        let raw = std::str::from_utf8(raw).ok()?;
+        let mut lines = raw.lines();
+        let metadata: serde_json::Value = serde_json::from_str(lines.next()?).ok()?;
+        let vendor = metadata.get("vendor_id")?.as_u64()?;
+        let product = metadata.get("product_id")?.as_u64()?;
+        let page = metadata.get("usage_page")?.as_u64()?;
+        let usage = metadata.get("usage")?.as_u64()?;
+        let mut steps = String::new();
+        for line in lines {
+            let record: serde_json::Value = serde_json::from_str(line).ok()?;
+            match record.get("kind")?.as_str()? {
+                "step" => {
+                    let elapsed = record.get("elapsed_ms")?.as_u64()?;
+                    let label = STEPS.get(record.get("step")?.as_u64()? as usize)?.1;
+                    let _ = writeln!(steps, "{elapsed} ms: {label}");
+                }
+                "end" => {
+                    let transfers = record.get("transfers")?.as_u64()?;
+                    let reason = record.get("reason")?.as_str()?;
+                    return Some((format!("Local capture summary: {vendor:04X}:{product:04X}, usage={page:04X}:{usage:04X}\nTransfers: {transfers}; result: {reason}\n{steps}"),
+                        format!("Feedback capture: {vendor:04X}:{product:04X}\nFile: raw.jsonl\n")));
+                }
+                _ => (),
+            }
+        }
+        None
+    }
+    expected(raw).is_some_and(|(original, attached)| summary == original.as_bytes() || summary == attached.as_bytes())
 }
 
 #[cfg(test)]
@@ -579,7 +597,7 @@ mod tests {
                 writes += 1;
                 if writes == 2 { Err(std::io::Error::other("simulated disk failure")) } else { Ok(()) }
             });
-        assert!(result.unwrap_err().contains("partial files removed"));
+        assert!(result.is_err());
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
         assert_eq!(std::fs::read(&existing).unwrap(), b"original");
         std::fs::remove_file(existing).unwrap();

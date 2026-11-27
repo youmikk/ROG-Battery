@@ -28,6 +28,8 @@ pub use capture_attachment::{capture, Capture};
 #[path = "export.rs"]
 mod export;
 pub use export::{export_draft, export_local};
+#[path = "local_files.rs"]
+pub(crate) mod local_files;
 
 const REPOSITORY: &str = "https://github.com/youmikk/X-Battery";
 // Existing encrypted history and cached relay receipts use the former URL.
@@ -203,6 +205,8 @@ struct StoredEntry {
     url: Option<String>,
     pending_reply: Option<StoredReply>,
     last_reply: Option<FinishedReply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_identity: Option<local_files::Identity>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -733,6 +737,9 @@ fn read_history(path: &Path) -> Result<History, String> {
 
 fn save_history(path: &Path, history: &History) -> Result<(), String> {
     validate_history(history)?;
+    if history.entries.is_empty() {
+        return local_files::remove_history(path);
+    }
     let plain = serde_json::to_vec(history).map_err(|_| storage_error())?;
     if plain.len() > MAX_HISTORY - 65536 { return Err(storage_error()); }
     let encrypted = crypt(&plain, true)?;
@@ -770,13 +777,31 @@ fn lock_history(path: &Path) -> Result<File, String> {
 }
 
 fn with_history<T>(write: bool, action: impl FnOnce(&mut History) -> Result<T, String>) -> Result<T, String> {
+    with_history_at(&history_path(), write, |_, history| action(history))
+}
+
+fn with_history_at<T>(path: &Path, write: bool,
+    action: impl FnOnce(&Path, &mut History) -> Result<T, String>) -> Result<T, String> {
+    with_locked_history_at(path, write, |path, history| {
+        let result = action(path, history)?;
+        if write { save_history(path, history)?; }
+        Ok(result)
+    })
+}
+
+fn with_locked_history_at<T>(path: &Path, write: bool,
+    action: impl FnOnce(&Path, &mut History) -> Result<T, String>) -> Result<T, String> {
+    with_storage_lock_at(path, write, |path| {
+        let mut history = read_history(path)?;
+        action(path, &mut history)
+    })
+}
+
+fn with_storage_lock_at<T>(path: &Path, write: bool,
+    action: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
     let _guard = HISTORY_LOCK.get_or_init(Default::default).lock().map_err(|_| damaged())?;
-    let path = history_path();
-    let _history_lock = if write { Some(lock_history(&path)?) } else { None };
-    let mut history = read_history(&path)?;
-    let result = action(&mut history)?;
-    if write { save_history(&path, &history)?; }
-    Ok(result)
+    let _history_lock = if write { Some(lock_history(path)?) } else { None };
+    action(path)
 }
 
 fn valid_number(number: u64) -> bool { number > 0 && number <= MAX_NUMBER }
@@ -848,7 +873,25 @@ fn remove_entries(history: &mut History, request_ids: &[String]) -> Result<(), S
 }
 
 pub fn delete_local(request_ids: &[String]) -> Result<(), String> {
-    with_history(true, |history| remove_entries(history, request_ids))
+    delete_local_at(&history_path(), request_ids, &local_files::legacy_roots())
+}
+
+fn delete_local_at(path: &Path, request_ids: &[String], roots: &[std::path::PathBuf]) -> Result<(), String> {
+    if request_ids.len() > MAX_ENTRIES || request_ids.iter().any(|id| !uuid(id)) {
+        return Err(invalid());
+    }
+    if request_ids.is_empty() { return Ok(()); }
+    with_locked_history_at(path, true, |path, history| {
+        for entry in &mut history.entries {
+            if entry.local_identity.is_none() && entry.status == Status::Pending {
+                entry.local_identity = Some(local_files::Identity::of(&entry.draft)?);
+            }
+        }
+        local_files::delete_for(path, history, request_ids, roots)?;
+        remove_entries(history, request_ids)?;
+        save_history(path, history)?;
+        local_files::finish_delete(path, history)
+    })
 }
 
 pub fn load_draft(request_id: &str) -> Result<Draft, String> {
@@ -907,7 +950,10 @@ fn prepare_entry(history: &mut History, draft: Draft, version: &str) -> Result<S
     let time = now();
     let entry = StoredEntry { request_id: new_uuid()?, reply_key: random::<32>()?.iter().map(|b| format!("{b:02x}")).collect(),
         app_version: version.into(), draft, created_at: time, updated_at: time, status: Status::Pending,
-        number: None, url: None, pending_reply: None, last_reply: None };
+        number: None, url: None, pending_reply: None, last_reply: None,
+        local_identity: None };
+    let mut entry = entry;
+    entry.local_identity = Some(local_files::Identity::of(&entry.draft)?);
     history.entries.push(entry.clone());
     Ok(entry)
 }
@@ -949,6 +995,9 @@ fn complete_entry(history: &mut History, stored: &StoredEntry, receipt: CreateRe
     item.number = Some(receipt.number);
     item.url = Some(format!("{REPOSITORY}/issues/{}", receipt.number));
     item.updated_at = now().max(item.updated_at);
+    if item.local_identity.is_none() {
+        item.local_identity = Some(local_files::Identity::of(&item.draft)?);
+    }
     // Images remain available for pending retries; completed receipts no
     // longer need large local attachment copies.
     item.draft.images.clear();
@@ -1236,7 +1285,7 @@ mod tests {
     fn stored() -> StoredEntry {
         StoredEntry { request_id: REQUEST.into(), reply_key: "ab".repeat(32), app_version: "1.4.12".into(),
             draft: draft(), created_at: 1, updated_at: 1, status: Status::Pending, number: None, url: None,
-            pending_reply: None, last_reply: None }
+            pending_reply: None, last_reply: None, local_identity: None }
     }
 
     #[test]
@@ -1262,6 +1311,7 @@ mod tests {
         remove_entries(&mut history, &[first.request_id, second.request_id]).unwrap();
         save_history(&scratch.history(), &history).unwrap();
         assert!(read_history(&scratch.history()).unwrap().entries.is_empty());
+        assert!(!scratch.history().exists());
     }
 
     pub(super) struct Scratch(pub(super) std::path::PathBuf);
