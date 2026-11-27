@@ -31,6 +31,7 @@ const BODY_TOP: f32 = 91.0;
 const FOOTER: f32 = 66.0;
 const SLOTS: usize = 156;
 const DEVICE_PAGE_SIZE: usize = 12;
+const HISTORY_PAGE_SIZE: usize = 20;
 
 fn back_view(view: View, submitted: bool) -> View {
     if matches!(view, View::Thread | View::Success) {
@@ -46,6 +47,9 @@ enum Action {
     Close,
     Back,
     History,
+    HistoryPage(usize),
+    DeleteLocal(String),
+    ClearHistory,
     Devices,
     Device(usize),
     UnknownDevice(usize),
@@ -76,7 +80,7 @@ enum Action {
 }
 impl Action {
     fn enabled(&self, model: &Model) -> bool {
-        if model.task == Some(Task::CaptureExport) { return matches!(self, Self::Close); }
+        if matches!(model.task, Some(Task::CaptureExport | Task::HistoryDelete)) { return matches!(self, Self::Close); }
         if matches!(self, Self::Capture) && (model.software || (model.capture.is_none()
             && !model.selected.and_then(|index| model.devices.get(index))
                 .is_some_and(|device| device.capture_interface.is_some()))) { return false; }
@@ -146,6 +150,7 @@ struct Label {
 }
 enum ResultMessage {
     History(Result<Vec<client::Entry>, String>),
+    Deleted(Vec<String>, Result<(), String>),
     Submitted(Result<client::SubmitOutcome, String>, Option<String>),
     Thread(
         Result<client::Thread, String>,
@@ -899,7 +904,19 @@ impl Controls {
                     ));
                     y = 120.0;
                 }
-                for (i, entry) in s.entries.iter().enumerate().take(128) {
+                let page = s.history_page.min(s.entries.len().saturating_sub(1) / HISTORY_PAGE_SIZE);
+                if s.entries.len() > HISTORY_PAGE_SIZE {
+                    if page > 0 { self.button(Action::HistoryPage(page - 1), text("上一页", "Previous"), "",
+                        R::new(25.0, y, 100.0, 32.0), Style::Card, false); }
+                    self.label(format!("{} / {}", page + 1, s.entries.len().div_ceil(HISTORY_PAGE_SIZE)),
+                        270.0, y, 120.0, 32.0, 12.0, false, true);
+                    if (page + 1) * HISTORY_PAGE_SIZE < s.entries.len() {
+                        self.button(Action::HistoryPage(page + 1), text("下一页", "Next"), "",
+                            R::new(535.0, y, 100.0, 32.0), Style::Card, false);
+                    }
+                    y += 42.0;
+                }
+                for (i, entry) in s.entries.iter().enumerate().skip(page * HISTORY_PAGE_SIZE).take(HISTORY_PAGE_SIZE) {
                     self.button(
                         Action::Entry(i),
                         entry
@@ -912,7 +929,7 @@ impl Controls {
                             entry.device.name,
                             category_label(&entry.category)
                         ),
-                        R::new(25.0, y, 610.0, 103.0),
+                        R::new(25.0, y, 490.0, 103.0),
                         Style::History,
                         false,
                     );
@@ -924,6 +941,8 @@ impl Controls {
                             .unwrap_or_else(|| text("待确认", "Unconfirmed").into()),
                         short_date(entry.created_at)
                     ));
+                    self.button(Action::DeleteLocal(entry.request_id.clone()), text("删除本地记录", "Delete locally"), "",
+                        R::new(523.0, y + 34.0, 112.0, 36.0), Style::Card, false);
                     y += 112.0;
                 }
                 self.label(
@@ -1149,6 +1168,10 @@ impl Controls {
         );
         self.update_frame();
         let fy = target - FOOTER + 15.0;
+        if s.view == View::History && !s.entries.is_empty() {
+            self.button(Action::ClearHistory, text("清空本地记录", "Clear local history"), "",
+                R::new(25.0, fy, 160.0, 36.0), Style::Plain, true);
+        }
         let (primary, label) = match s.view {
             View::Form => (
                 Action::Submit,
@@ -1554,6 +1577,16 @@ impl Controls {
                 self.set_view(View::History);
                 self.work(Task::History, || ResultMessage::History(client::load_history()));
             }
+            Action::HistoryPage(page) => {
+                self.state.borrow_mut().history_page = page;
+                self.scroll.set(0.0);
+                self.rebuild();
+            }
+            Action::DeleteLocal(id) => self.delete_local(vec![id]),
+            Action::ClearHistory => {
+                let ids = self.state.borrow().entries.iter().map(|entry| entry.request_id.clone()).collect();
+                self.delete_local(ids);
+            }
             Action::Devices => {
                 let mut s = self.state.borrow_mut();
                 s.menu = !s.menu;
@@ -1797,6 +1830,19 @@ impl Controls {
             }
         }
     }
+    fn delete_local(&self, request_ids: Vec<String>) {
+        if request_ids.is_empty() { return; }
+        let prompt = text("删除这些本地记录及附件？已提交的 GitHub 议题会保留，应用内的跟进入口将移除。",
+            "Delete these local records and attachments? Submitted GitHub issues remain, but their in-app follow-up access will be removed.");
+        let prompt: Vec<u16> = prompt.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = text("删除本地反馈", "Delete local feedback").encode_utf16().chain(Some(0)).collect();
+        if unsafe { wu::MessageBoxW(self.window.handle.hwnd().unwrap(), prompt.as_ptr(), title.as_ptr(),
+            wu::MB_YESNO | wu::MB_ICONQUESTION | wu::MB_DEFBUTTON2) } != wu::IDYES { return; }
+        self.work(Task::HistoryDelete, move || {
+            let result = client::delete_local(&request_ids);
+            ResultMessage::Deleted(request_ids, result)
+        });
+    }
     fn choose_images(&self) {
         let remaining = 3usize.saturating_sub(self.state.borrow().images.len());
         if remaining == 0 {
@@ -1884,6 +1930,17 @@ impl Controls {
                 ResultMessage::History(result) => match result {
                     Ok(entries) => self.state.borrow_mut().entries = entries,
                     Err(e) => self.state.borrow_mut().error = e,
+                },
+                ResultMessage::Deleted(ids, result) => match result {
+                    Ok(()) => {
+                        let reset = self.state.borrow_mut().remove_local_entries(&ids);
+                        if reset {
+                            crate::capture::clear();
+                            *self.capture_folder.borrow_mut() = None;
+                            self.reset_inputs();
+                        }
+                    }
+                    Err(error) => self.state.borrow_mut().error = error,
                 },
                 ResultMessage::Submitted(result, pending) => match result {
                     Ok(outcome) => {

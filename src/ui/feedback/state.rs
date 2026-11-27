@@ -21,6 +21,7 @@ pub(super) enum Task {
     Fallback,
     SoftwareDiagnostics,
     CaptureExport,
+    HistoryDelete,
 }
 
 impl Task {
@@ -53,6 +54,7 @@ pub(super) struct Model {
     pub(super) capture: Option<client::Capture>,
     pub(super) attach_capture: bool,
     pub(super) entries: Vec<client::Entry>,
+    pub(super) history_page: usize,
     pub(super) current: Option<client::Entry>,
     pub(super) thread: Option<client::Thread>,
     pub(super) draft_retry: Option<String>,
@@ -89,6 +91,7 @@ impl Default for Model {
             capture: None,
             attach_capture: true,
             entries: Vec::new(),
+            history_page: 0,
             current: None,
             thread: None,
             draft_retry: None,
@@ -181,7 +184,7 @@ impl Model {
     }
 
     fn reopen_mode(&mut self, devices: Vec<Candidate>, history: bool, software: bool) -> bool {
-        if self.task == Some(Task::CaptureExport) { return false; }
+        if matches!(self.task, Some(Task::CaptureExport | Task::HistoryDelete)) { return false; }
         self.latest_devices = devices;
         if !history {
             self.latest_software = software;
@@ -213,6 +216,21 @@ impl Model {
         self.entries.insert(0, entry.clone());
         self.entries.truncate(128);
         self.current = Some(entry);
+    }
+
+    pub(super) fn remove_local_entries(&mut self, request_ids: &[String]) -> bool {
+        for entry in &self.entries {
+            if request_ids.contains(&entry.request_id) {
+                if let Some(number) = entry.number { self.reply_drafts.remove(&number); }
+            }
+        }
+        self.entries.retain(|entry| !request_ids.contains(&entry.request_id));
+        let reset = self.current.as_ref().is_some_and(|entry| request_ids.contains(&entry.request_id))
+            || self.draft_retry.as_ref().is_some_and(|id| request_ids.contains(id));
+        if reset { self.new_form(); }
+        self.view = View::History;
+        self.history_page = self.history_page.min(self.entries.len().saturating_sub(1) / super::HISTORY_PAGE_SIZE);
+        reset
     }
 
     pub(super) fn confirm_reply(&mut self, number: u64, sent: &str) {
@@ -349,6 +367,26 @@ mod tests {
         model.record_entry(entry(1));
         model.record_entry(entry(1));
         assert_eq!(model.entries.len(), 1);
+    }
+
+    #[test]
+    fn deleting_the_current_record_clears_its_draft_and_ignores_late_results() {
+        let mut model = Model::default();
+        let removed = entry(1);
+        model.record_entry(entry(2));
+        model.record_entry(removed.clone());
+        model.reply_drafts.insert(1, "unsent reply".into());
+        model.reply_drafts.insert(2, "keep reply".into());
+        model.draft_retry = Some(removed.request_id.clone());
+        let generation = model.begin_task(Task::Submit).unwrap();
+        assert!(model.remove_local_entries(&[removed.request_id]));
+        assert!(!model.finish_task(generation));
+        assert!(model.current.is_none());
+        assert!(model.draft_retry.is_none());
+        assert!(!model.reply_drafts.contains_key(&1));
+        assert!(model.reply_drafts.contains_key(&2));
+        assert_eq!(model.entries.len(), 1);
+        assert_eq!(model.view, View::History);
     }
 
     #[test]

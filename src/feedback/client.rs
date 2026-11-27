@@ -777,6 +777,18 @@ pub fn load_history() -> Result<Vec<Entry>, String> {
     with_history(false, |history| Ok(history.entries.iter().rev().map(StoredEntry::public).collect()))
 }
 
+fn remove_entries(history: &mut History, request_ids: &[String]) -> Result<(), String> {
+    if request_ids.len() > MAX_ENTRIES || request_ids.iter().any(|id| !uuid(id)) {
+        return Err(invalid());
+    }
+    history.entries.retain(|entry| !request_ids.contains(&entry.request_id));
+    Ok(())
+}
+
+pub fn delete_local(request_ids: &[String]) -> Result<(), String> {
+    with_history(true, |history| remove_entries(history, request_ids))
+}
+
 pub fn load_draft(request_id: &str) -> Result<Draft, String> {
     if !uuid(request_id) { return Err(invalid()); }
     with_history(false, |history| history.entries.iter().find(|entry| entry.request_id == request_id)
@@ -828,8 +840,8 @@ fn prepare_entry(history: &mut History, draft: Draft, version: &str) -> Result<S
     if let Some(entry) = history.entries.iter().find(|e| e.status == Status::Pending && e.draft == draft) {
         return Ok(entry.clone());
     }
-    if history.entries.len() >= MAX_ENTRIES { return Err(message("本地反馈记录已达到上限，请通过 GitHub 提交。",
-        "The local feedback history is full. Please submit on GitHub.")); }
+    if history.entries.len() >= MAX_ENTRIES { return Err(message("本地反馈记录已满，请在“我的反馈”中删除旧记录后提交。",
+        "Local feedback history is full. Delete old records in My feedback, then submit.")); }
     let time = now();
     let entry = StoredEntry { request_id: new_uuid()?, reply_key: random::<32>()?.iter().map(|b| format!("{b:02x}")).collect(),
         app_version: version.into(), draft, created_at: time, updated_at: time, status: Status::Pending,
@@ -1159,6 +1171,31 @@ mod tests {
         StoredEntry { request_id: REQUEST.into(), reply_key: "ab".repeat(32), app_version: "1.4.12".into(),
             draft: draft(), created_at: 1, updated_at: 1, status: Status::Pending, number: None, url: None,
             pending_reply: None, last_reply: None }
+    }
+
+    #[test]
+    fn deleting_local_records_persists_without_removing_newer_entries() {
+        let scratch = Scratch::new();
+        let mut first = stored();
+        first.draft.images.push(screenshot());
+        let mut second = stored();
+        second.request_id = new_uuid().unwrap();
+        let mut history = History { schema: 1, entries: vec![first.clone(), second.clone()] };
+        save_history(&scratch.history(), &history).unwrap();
+        let original_size = fs::metadata(scratch.history()).unwrap().len();
+        remove_entries(&mut history, &[first.request_id.clone()]).unwrap();
+        save_history(&scratch.history(), &history).unwrap();
+        let remaining = read_history(&scratch.history()).unwrap();
+        assert_eq!(remaining.entries.len(), 1);
+        assert_eq!(remaining.entries[0].request_id, second.request_id);
+        assert!(fs::metadata(scratch.history()).unwrap().len() < original_size);
+        assert!(complete_entry(&mut history, &first, CreateReceipt {
+            number: 42, url: format!("{REPOSITORY}/issues/42"), reply_access: true,
+        }).is_err());
+        assert_eq!(history.entries.len(), 1);
+        remove_entries(&mut history, &[first.request_id, second.request_id]).unwrap();
+        save_history(&scratch.history(), &history).unwrap();
+        assert!(read_history(&scratch.history()).unwrap().entries.is_empty());
     }
 
     struct Scratch(std::path::PathBuf);
