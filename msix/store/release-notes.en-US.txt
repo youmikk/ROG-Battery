@@ -1,11 +1,9 @@
-1.4.11
+1.5.0
 
-- Check for updates on the first launch each day and show prompts on Home. Choose Update now to download, install and reopen the app.
-- Add battery support for GANSS GS3104T-Pro, LANGTU T98 and CHERRY PIXIU75.
-- Add battery support for HyperX Cloud Alpha Wireless, Cloud II Wireless and AKG N9 Hybrid.
-- Add battery support for THUNDEROBOT ML903 NearLink Se and MCHOSE V7 Pro, and improve A7 V3 Ultra+ receiver detection.
-- Improve battery reading for Razer Naga V2 HyperSpeed, Basilisk V3 X HyperSpeed, DeathAdder V3 HyperSpeed and Basilisk V3 Pro 35K receivers.
-- Add battery support for SteelSeries Arctis 7+, 7P+ and 7X+.
-- Add communication capture to device feedback, with action markers, previews, local export and attachment uploads without a GitHub account.
-- Fix capture results and upload controls, with capture restart and upload retry support.
-- Simplify update, feedback and capture text.
+- Show discovered devices and battery readings first, then load DPI and polling-rate settings in the background.
+- Improve mouse DPI presets and quick switching, and fix Rapoo configuration writes, recovery from temporary failures and state updates.
+- Double-click the taskbar battery strip to open the main window; keep an entry available when battery readings are unavailable.
+- Show system devices, support status and VID/PID in device feedback.
+- Right-click feedback history to export, delete or resend. Deleting a record also cleans up local exports and captures with a verified association.
+- Improve offline feedback, diagnostic snapshots and communication capture, add network error details and bound local storage use.
+- Use the custom feedback domain and improve recovery after connection failures and rate limits.

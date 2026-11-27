@@ -51,12 +51,13 @@ Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard gene
 
 Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
 
-## Latest release: 1.4.11
+## Latest release: 1.5.0
 
-- Store installations show update prompts on Home. Choose Update now to download, install and reopen the app.
-- Add battery support for selected GANSS, LANGTU, CHERRY, HyperX, AKG, THUNDEROBOT, MCHOSE and SteelSeries models, and improve four Razer receiver paths.
-- Add communication capture to device feedback, with action markers, previews, local export and attachment uploads without a GitHub account.
-- Fix capture results and upload controls, and simplify update and feedback text.
+- Show discovered devices and battery readings first, then load DPI and polling-rate settings in the background.
+- Improve mouse DPI presets and quick switching, and fix Rapoo configuration writes, failure recovery and state updates.
+- Double-click the taskbar battery strip to open the main window; keep an entry available when battery readings are unavailable.
+- Show system devices, support status and VID/PID in feedback, with context-menu actions to export, delete and resend history entries.
+- Improve offline feedback, associated file cleanup and communication capture; use the custom feedback domain and improve retries.
 
 Portable users can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store updates become available after Store review. See the [full changelog](CHANGELOG.md).
 
