@@ -1,4 +1,4 @@
-import { Github, GithubRejected } from "./github.mjs";
+import { Github, GithubRejected, GithubRateLimited } from "./github.mjs";
 import { feedback, reply } from "./validation.mjs";
 import { HttpError, configuration, digestSecret, constantEqual, randomId, json, errorResponse,
   readJson, bearer, publicText, publicTitle, diagnosticText, MAX_REQUEST_BYTES, encoder } from "./security.mjs";
@@ -57,7 +57,7 @@ export class FeedbackCoordinator {
     this.storage = state.storage;
     this.env = env;
     this.now = dependencies.now ?? Date.now;
-    this.github = new Github(env.GITHUB_TOKEN, env.GITHUB_AUTHOR_LOGIN, dependencies.fetch ?? fetch);
+    this.github = new Github(env.GITHUB_TOKEN, env.GITHUB_AUTHOR_LOGIN, dependencies.fetch ?? fetch, this.now);
     this.queues = new Map();
     this.activeByIp = new Map();
     this.activeRequests = 0;
@@ -252,12 +252,12 @@ export class FeedbackCoordinator {
   }
 
   async send(recordKey, record) {
-    // Persist sending before the external side effect. After this point neither
-    // a client retry nor an alarm may issue a second POST for the same request.
-    const { title, body, ...journal } = record;
-    record = { ...journal, state: "sending", nextCheckAt: this.now() + 5_000 };
+    if (record.retryAt > this.now()) throw new GithubRateLimited(Math.ceil((record.retryAt - this.now()) / 1000));
+    const nextCheckAt = this.now() + 5_000;
+    await this.schedule(nextCheckAt);
+    const { title, body, retryAt, ...journal } = record;
+    record = { ...journal, state: "sending", nextCheckAt };
     await this.storage.put(recordKey, record);
-    await this.schedule(record.nextCheckAt);
     try {
       const receipt = record.kind === "issue"
         ? await this.github.createIssue(title, body)
@@ -265,6 +265,14 @@ export class FeedbackCoordinator {
       await this.complete(recordKey, record, receipt);
       return json(receipt, 201);
     } catch (error) {
+      if (error instanceof GithubRateLimited) {
+        const rateLimitAttempts = (record.rateLimitAttempts ?? 0) + 1;
+        const retryAfter = Math.max(error.retryAfter, Math.min(3600, 60 * 2 ** Math.min(rateLimitAttempts - 1, 6)));
+        const retryAt = this.now() + retryAfter * 1000;
+        await this.storage.put(recordKey, { ...record, state: "prepared", title, body, retryAt, rateLimitAttempts });
+        await this.schedule(retryAt);
+        throw new GithubRateLimited(retryAfter);
+      }
       if (error instanceof GithubRejected) {
         await this.storage.put(recordKey, { ...record, state: "rejected", rejectedAt: this.now() });
         throw new HttpError(502, "github_rejected", "GitHub rejected this submission. Contact the app maintainer.");
@@ -340,56 +348,69 @@ export class FeedbackCoordinator {
   alarm() {
     return this.exclusive("maintenance", async () => {
       const now = this.now();
-      const ratePageFull = await this.exclusive("rates", async () => {
-        const rateCursor = await this.storage.get("scan:rate");
-        const expiredRates = await this.storage.list({ prefix: "rate:", limit: 1000,
-          ...(rateCursor ? { startAfter: rateCursor } : {}) });
-        if (expiredRates.size === 1000) await this.storage.put("scan:rate", [...expiredRates.keys()].at(-1));
-        else await this.storage.delete("scan:rate");
-        for (const [key, value] of expiredRates) {
-          if (value.expiresAt < now) await this.storage.delete(key);
-        }
-        return expiredRates.size === 1000;
-      });
-      let checked = 0;
-      let next = now + (ratePageFull ? 60_000 : HOUR);
-      for (const prefix of ["request:", "reply:"]) {
-        const cursor = await this.storage.get(`scan:${prefix}`);
-        const rows = await this.storage.list({ prefix, limit: 250, ...(cursor ? { startAfter: cursor } : {}) });
-        if (rows.size === 250) {
-          await this.storage.put(`scan:${prefix}`, [...rows.keys()].at(-1));
-          next = Math.min(next, now + 60_000);
-        } else await this.storage.delete(`scan:${prefix}`);
-        for (const [key, snapshot] of rows) {
-          const scope = snapshot.kind === "reply" ? `issue:${snapshot.number}` : key;
-          if (this.queues.has(scope)) {
-            next = Math.min(next, now + 5_000);
-            continue;
+      let next = now + HOUR;
+      try {
+        const ratePageFull = await this.exclusive("rates", async () => {
+          const rateCursor = await this.storage.get("scan:rate");
+          const expiredRates = await this.storage.list({ prefix: "rate:", limit: 1000,
+            ...(rateCursor ? { startAfter: rateCursor } : {}) });
+          if (expiredRates.size === 1000) await this.storage.put("scan:rate", [...expiredRates.keys()].at(-1));
+          else await this.storage.delete("scan:rate");
+          for (const [key, value] of expiredRates) {
+            if (value.expiresAt < now) await this.storage.delete(key);
           }
-          await this.exclusive(scope, async () => {
-            const record = await this.storage.get(key);
-            if (!record) return;
-            if (["sending", "pending"].includes(record.state)) {
-              if (record.nextCheckAt <= now && checked < 3) {
-                checked++;
-                await this.reconcile(key, record);
-              } else next = Math.min(next, Math.max(now + 5_000, record.nextCheckAt));
+          return expiredRates.size === 1000;
+        });
+        if (ratePageFull) next = Math.min(next, now + 60_000);
+        let checked = 0;
+        for (const prefix of ["request:", "reply:"]) {
+          const cursor = await this.storage.get(`scan:${prefix}`);
+          const rows = await this.storage.list({ prefix, limit: 250, ...(cursor ? { startAfter: cursor } : {}) });
+          if (rows.size === 250) {
+            await this.storage.put(`scan:${prefix}`, [...rows.keys()].at(-1));
+            next = Math.min(next, now + 60_000);
+          } else await this.storage.delete(`scan:${prefix}`);
+          for (const [key, snapshot] of rows) {
+            const scope = snapshot.kind === "reply" ? `issue:${snapshot.number}` : key;
+            if (this.queues.has(scope)) {
+              next = Math.min(next, now + 5_000);
+              continue;
             }
-            if (["uploading", "prepared", "rejected"].includes(record.state) && record.createdAt + DAY < now
-              && (record.state !== "rejected" || record.attachments?.length)) {
-              for (const attachment of record.attachments ?? []) await this.env.ATTACHMENTS.delete(`attachments/${attachment.id}`);
-              const { title, body, ...minimal } = record;
-              await this.storage.put(key, { ...minimal, state: "rejected", attachments: [] });
+            try {
+              await this.exclusive(scope, async () => {
+                let record = await this.storage.get(key);
+                if (!record) return;
+                const retrying = record.state === "prepared" && record.retryAt !== undefined;
+                if (retrying || ["sending", "pending"].includes(record.state)) {
+                  const due = retrying ? record.retryAt : record.nextCheckAt;
+                  if (due <= now && checked < 3) {
+                    checked++;
+                    if (retrying) await this.send(key, record);
+                    else await this.reconcile(key, record);
+                  } else next = Math.min(next, Math.max(now + 5_000, due));
+                }
+                if (!retrying && ["uploading", "prepared", "rejected"].includes(record.state) && record.createdAt + DAY < now
+                  && (record.state !== "rejected" || record.attachments?.length)) {
+                  const { title, body, ...minimal } = record;
+                  record = { ...minimal, state: "rejected" };
+                  await this.storage.put(key, record);
+                  for (const attachment of record.attachments ?? []) await this.env.ATTACHMENTS.delete(`attachments/${attachment.id}`);
+                  await this.storage.put(key, { ...record, attachments: [] });
+                }
+              });
+            } catch (error) {
+              next = Math.min(next, now + (error instanceof GithubRateLimited ? error.retryAfter * 1000 : 60_000));
             }
-          });
+          }
         }
+      } catch {
+        next = Math.min(next, now + 60_000);
+      } finally {
+        await this.exclusive("alarm-time", async () => {
+          const scheduled = await this.storage.getAlarm();
+          await this.storage.setAlarm(scheduled > now ? Math.min(scheduled, next) : next);
+        });
       }
-      // Alarm callbacks replace their own due time; retaining the fired value
-      // would cause scheduled cleanup/reconciliation to stop after one run.
-      await this.exclusive("alarm-time", async () => {
-        const scheduled = await this.storage.getAlarm();
-        await this.storage.setAlarm(scheduled > now ? Math.min(scheduled, next) : next);
-      });
     });
   }
 }

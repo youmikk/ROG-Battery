@@ -1369,3 +1369,293 @@ test("capture submissions share feedback quotas and replays do not consume new i
   assert.equal(state.bucket.puts, 3);
   assert.equal(state.github.issues.length, 3);
 });
+
+async function recoverableSubmission(kind) {
+  const state = setup();
+  if (kind === "reply") assert.equal((await state.coordinator.fetch(request("/feedback", body()))).status, 201);
+  const payload = kind === "issue" ? body({ capture: captureFile() })
+    : { schema: 1, requestId: UUID, body: "恢复后的补充回复。" };
+  const path = kind === "issue" ? "/feedback" : "/feedback/123/replies";
+  return { ...state, payload,
+    recordKey: kind === "issue" ? `request:${UUID}` : `reply:123:${UUID}`,
+    send: (coordinator = state.coordinator) => coordinator.fetch(request(path, payload, { key: kind === "reply" ? KEY : undefined })),
+    restart: () => new FeedbackCoordinator({ storage: state.storage }, state.env, { fetch: state.github.fetch, now: state.now }),
+  };
+}
+
+for (const kind of ["issue", "reply"]) {
+  for (const status of [403, 429]) {
+    test(`${kind} retries explicit GitHub ${status} rate limits after the durable deadline without losing content`, async () => {
+      const state = await recoverableSubmission(kind);
+      const fetch = state.github.fetch;
+      const attempts = [];
+      state.github.fetch = async (input, init) => {
+        if (init.method === "POST") {
+          attempts.push(init.body);
+          if (attempts.length === 1) return Response.json({ message: "API rate limit exceeded" },
+            { status, headers: { "Retry-After": "120", "X-RateLimit-Remaining": "0" } });
+        }
+        return fetch(input, init);
+      };
+      const first = await state.send(state.restart());
+      assert.equal(first.status, 429);
+      assert.equal(first.headers.get("Retry-After"), "120");
+      assert.equal((await first.json()).error.retryable, true);
+      const deferred = await state.storage.get(state.recordKey);
+      assert.equal(deferred.state, "prepared");
+      assert.ok(deferred.body.includes("r-battery-"));
+      const puts = state.bucket.puts;
+      const restarted = state.restart();
+      state.advance(119000);
+      assert.equal((await state.send(restarted)).status, 429);
+      state.storage.scheduled = null;
+      await restarted.alarm();
+      assert.equal(attempts.length, 1);
+      state.advance(1000);
+      const results = await Promise.all([state.send(restarted), state.send(restarted)]);
+      assert.deepEqual(results.map(result => result.status), [201, 200]);
+      assert.equal(attempts.length, 2);
+      assert.equal(attempts[0], attempts[1]);
+      assert.equal(state.bucket.puts, puts);
+      assert.equal(state.github.issues.length, 1);
+      assert.equal(state.github.comments.length, kind === "reply" ? 1 : 0);
+      assert.equal((await state.storage.get(state.recordKey)).state, "complete");
+    });
+  }
+
+  test(`${kind} survives a pre-send alarm failure with its prepared body intact`, async () => {
+    const state = await recoverableSubmission(kind);
+    const setAlarm = state.storage.setAlarm.bind(state.storage);
+    let fail = true;
+    state.storage.scheduled = state.now() + 3600000;
+    state.storage.setAlarm = async when => {
+      if (fail && when === state.now() + 5000) { fail = false; throw new Error("Alarm unavailable"); }
+      return setAlarm(when);
+    };
+    const postsBefore = state.github.calls.filter(call => call.method === "POST").length;
+    assert.equal((await state.send()).status, 503);
+    assert.equal(fail, false);
+    const prepared = await state.storage.get(state.recordKey);
+    assert.equal(prepared.state, "prepared");
+    assert.ok(prepared.body.includes("r-battery-"));
+    assert.equal(state.github.calls.filter(call => call.method === "POST").length, postsBefore);
+    const restarted = state.restart();
+    assert.equal((await state.send(restarted)).status, 201);
+    assert.equal((await state.send(restarted)).status, 200);
+    assert.equal(state.github.calls.filter(call => call.method === "POST").length, postsBefore + 1);
+  });
+
+  test(`${kind} alarm retries a rate-limited write, then reconciles a lost successful response`, async () => {
+    const state = await recoverableSubmission(kind);
+    const fetch = state.github.fetch;
+    let attempts = 0;
+    state.github.fetch = async (input, init) => {
+      if (init.method === "POST" && ++attempts === 1) return new Response("{}", { status: 429 });
+      return fetch(input, init);
+    };
+    assert.equal((await state.send(state.restart())).status, 429);
+    state.advance(60000);
+    state.github.loseIssueResponse = kind === "issue";
+    state.github.loseCommentResponse = kind === "reply";
+    const restarted = state.restart();
+    state.storage.scheduled = null;
+    await restarted.alarm();
+    assert.equal(attempts, 2);
+    assert.equal((await state.storage.get(state.recordKey)).state, "pending");
+    state.advance(6000);
+    assert.equal((await state.send(state.restart())).status, 200);
+    assert.equal(attempts, 2);
+    assert.equal(state.github.issues.length, 1);
+    assert.equal(state.github.comments.length, kind === "reply" ? 1 : 0);
+  });
+}
+
+for (const [headers, message, seconds] of [
+  [{ "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": String(BASE_TIME / 1000 + 180) }, "", 180],
+  [{ "Retry-After": "90" }, "", 90],
+  [{}, "You have exceeded a secondary rate limit.", 60],
+]) {
+  test(`GitHub 403 rate-limit classification honors ${JSON.stringify(headers)} ${message}`, async () => {
+    const state = await recoverableSubmission("issue");
+    state.github.fetch = async () => Response.json({ message }, { status: 403, headers });
+    const result = await state.send(state.restart());
+    assert.equal(result.status, 429);
+    assert.equal(result.headers.get("Retry-After"), String(seconds));
+    assert.equal((await state.storage.get(state.recordKey)).state, "prepared");
+  });
+}
+
+for (const stateName of ["uploading", "prepared"]) {
+  test(`${stateName} cleanup becomes terminal before partial R2 deletion can break a later submission`, async () => {
+    const state = setup();
+    const payload = body({ capture: captureFile(), images: [{ name: "screen.png", mimeType: "image/png", dataBase64: PNG }] });
+    const put = state.bucket.put.bind(state.bucket);
+    const putRecord = state.storage.put.bind(state.storage);
+    if (stateName === "uploading") {
+      state.bucket.put = async (...args) => { await put(...args); if (state.bucket.puts === 2) throw new Error("Upload response lost"); };
+    } else {
+      state.storage.put = async (key, record) => { if (record.state === "sending") throw new Error("Journal unavailable"); return putRecord(key, record); };
+    }
+    assert.equal((await state.coordinator.fetch(request("/feedback", payload))).status, 503);
+    state.storage.put = putRecord;
+    state.bucket.put = put;
+    const remove = state.bucket.delete.bind(state.bucket);
+    let deletions = 0;
+    state.bucket.delete = async key => { if (++deletions === 2) throw new Error("Second delete unavailable"); return remove(key); };
+    state.advance(25 * 3600000);
+    state.storage.scheduled = null;
+    await state.coordinator.alarm();
+    assert.equal(state.bucket.data.size, 1);
+    const terminal = await state.storage.get(`request:${UUID}`);
+    assert.equal(terminal.state, "rejected");
+    assert.equal(terminal.body, undefined);
+    assert.equal(terminal.attachments.length, 2);
+    assert.equal((await state.coordinator.fetch(request("/feedback", payload))).status, 502);
+    assert.equal(state.github.calls.filter(call => call.method === "POST").length, 0);
+    assert.ok(state.storage.scheduled > state.now());
+    state.advance(60000);
+    await state.coordinator.alarm();
+    assert.equal(state.bucket.data.size, 0);
+    assert.deepEqual((await state.storage.get(`request:${UUID}`)).attachments, []);
+  });
+}
+
+test("cleanup checkpoint failure deletes no objects and preserves a safe client retry", async () => {
+  const state = setup();
+  const payload = body({ images: [{ name: "screen.png", mimeType: "image/png", dataBase64: PNG }] });
+  const put = state.storage.put.bind(state.storage);
+  state.storage.put = async (key, record) => { if (record.state === "sending") throw new Error("Before POST"); return put(key, record); };
+  assert.equal((await state.coordinator.fetch(request("/feedback", payload))).status, 503);
+  state.storage.put = async (key, record) => { if (record.state === "rejected") throw new Error("Before delete"); return put(key, record); };
+  state.advance(25 * 3600000);
+  state.storage.scheduled = null;
+  await state.coordinator.alarm();
+  assert.equal(state.bucket.data.size, 1);
+  assert.equal((await state.storage.get(`request:${UUID}`)).state, "prepared");
+  state.storage.put = put;
+  assert.equal((await state.coordinator.fetch(request("/feedback", payload))).status, 201);
+  assert.equal(state.bucket.data.size, 1);
+});
+
+test("a repeatedly failing cleanup does not block later recovery or exhaust future alarms", async () => {
+  const state = setup();
+  state.github.reject = 422;
+  const abandoned = body({ requestId: "05a526bf-b747-4d42-81e8-d1036d01f983",
+    images: [{ name: "screen.png", mimeType: "image/png", dataBase64: PNG }] });
+  assert.equal((await state.coordinator.fetch(request("/feedback", abandoned))).status, 502);
+  state.github.reject = 0;
+  state.github.loseIssueResponse = true;
+  assert.equal((await state.coordinator.fetch(request("/feedback", body()))).status, 202);
+  const remove = state.bucket.delete.bind(state.bucket);
+  state.bucket.delete = async () => { throw new Error("R2 unavailable"); };
+  state.advance(25 * 3600000);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    state.storage.scheduled = null;
+    await state.coordinator.alarm();
+    assert.ok(state.storage.scheduled > state.now());
+    assert.equal((await state.storage.get(`request:${UUID}`)).state, "complete");
+    state.advance(60000);
+  }
+  state.bucket.delete = remove;
+  await state.coordinator.alarm();
+  assert.equal(state.bucket.data.size, 0);
+  assert.equal(state.github.issues.length, 1);
+});
+
+test("an alarm scan failure still arms the next maintenance run", async () => {
+  const state = setup();
+  const list = state.storage.list.bind(state.storage);
+  state.storage.list = async () => { throw new Error("Scan unavailable"); };
+  state.storage.scheduled = null;
+  await state.coordinator.alarm();
+  assert.ok(state.storage.scheduled > state.now());
+  state.storage.list = list;
+  state.advance(60000);
+  state.storage.scheduled = null;
+  await state.coordinator.alarm();
+  assert.ok(state.storage.scheduled > state.now());
+});
+
+test("repeated rate limits back off and preserve attachments beyond abandoned-upload expiry", async () => {
+  const state = await recoverableSubmission("issue");
+  const fetch = state.github.fetch;
+  let attempts = 0;
+  state.github.fetch = async (input, init) => {
+    if (init.method === "POST") {
+      attempts++;
+      if (attempts <= 2) return new Response("{}", { status: 429,
+        headers: attempts === 1 ? { "Retry-After": "86400" } : {} });
+    }
+    return fetch(input, init);
+  };
+  const first = await state.send(state.restart());
+  assert.equal(first.status, 429);
+  assert.equal(first.headers.get("Retry-After"), "86400");
+  state.advance(25 * 3600000);
+  const restarted = state.restart();
+  state.storage.scheduled = null;
+  await restarted.alarm();
+  assert.equal(attempts, 2);
+  assert.equal(state.bucket.data.size, 1);
+  assert.equal((await state.storage.get(state.recordKey)).state, "prepared");
+  const limited = await state.send(restarted);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("Retry-After"), "120");
+  state.advance(60000);
+  assert.equal((await state.send(state.restart())).status, 429);
+  assert.equal(attempts, 2);
+  state.advance(60000);
+  assert.equal((await state.send(state.restart())).status, 201);
+  assert.equal(attempts, 3);
+  assert.equal(state.github.issues.length, 1);
+  assert.equal(state.bucket.puts, 1);
+  assert.equal(state.bucket.data.size, 1);
+});
+
+test("a failed rate-limit checkpoint never permits an unjournaled second POST", async () => {
+  const state = await recoverableSubmission("issue");
+  const fetch = state.github.fetch;
+  let attempts = 0;
+  state.github.fetch = async (input, init) => {
+    if (init.method === "POST") { attempts++; return new Response("{}", { status: 429 }); }
+    return fetch(input, init);
+  };
+  const put = state.storage.put.bind(state.storage);
+  state.storage.put = async (key, value) => {
+    if (value.state === "prepared" && value.retryAt !== undefined) throw new Error("Retry checkpoint unavailable");
+    return put(key, value);
+  };
+  assert.equal((await state.send(state.restart())).status, 503);
+  assert.equal((await state.storage.get(state.recordKey)).state, "sending");
+  state.storage.put = put;
+  state.advance(60000);
+  assert.equal((await state.send(state.restart())).status, 202);
+  assert.equal(attempts, 1);
+});
+
+test("a failed final cleanup checkpoint remains terminal and deletion can be repeated", async () => {
+  const state = setup();
+  const payload = body({ capture: captureFile() });
+  state.github.reject = 422;
+  assert.equal((await state.coordinator.fetch(request("/feedback", payload))).status, 502);
+  const put = state.storage.put.bind(state.storage);
+  let fail = true;
+  state.storage.put = async (key, value) => {
+    if (fail && key === `request:${UUID}` && value.state === "rejected" && !value.attachments.length) {
+      fail = false;
+      throw new Error("Final cleanup checkpoint unavailable");
+    }
+    return put(key, value);
+  };
+  state.advance(25 * 3600000);
+  state.storage.scheduled = null;
+  await state.coordinator.alarm();
+  assert.equal(fail, false);
+  assert.equal(state.bucket.data.size, 0);
+  assert.equal((await state.storage.get(`request:${UUID}`)).attachments.length, 1);
+  assert.equal((await state.coordinator.fetch(request("/feedback", payload))).status, 502);
+  assert.equal(state.github.calls.filter(call => call.method === "POST").length, 1);
+  state.advance(60000);
+  await state.coordinator.alarm();
+  assert.deepEqual((await state.storage.get(`request:${UUID}`)).attachments, []);
+});

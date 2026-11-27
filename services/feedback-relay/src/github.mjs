@@ -6,11 +6,18 @@ export class GithubRejected extends Error {
   constructor(status) { super("GitHub rejected the request."); this.status = status; }
 }
 
+export class GithubRateLimited extends HttpError {
+  constructor(retryAfter) {
+    super(429, "github_rate_limited", "GitHub is rate limiting feedback. Try again later.", true, retryAfter);
+  }
+}
+
 export class Github {
-  constructor(token, author, fetchImpl = fetch) {
+  constructor(token, author, fetchImpl = fetch, now = Date.now) {
     this.token = token;
     this.author = author.toLowerCase();
     this.fetch = fetchImpl.bind(globalThis);
+    this.now = now;
   }
 
   authored(value) { return value?.user?.login?.toLowerCase() === this.author; }
@@ -31,9 +38,25 @@ export class Github {
       signal: AbortSignal.timeout(8_000),
     });
     if (!response.ok) {
+      if ([403, 429].includes(response.status)) {
+        const retryAfter = Number(response.headers.get("Retry-After"));
+        const reset = Number(response.headers.get("X-RateLimit-Reset"));
+        const exhausted = response.headers.get("X-RateLimit-Remaining") === "0";
+        const delay = Number.isSafeInteger(retryAfter) && retryAfter > 0 ? retryAfter : 0;
+        let limited = response.status === 429 || exhausted || delay > 0;
+        if (!limited) {
+          const details = await response.json().catch(() => null);
+          limited = typeof details?.message === "string" && /rate limit|abuse detection/i.test(details.message);
+        }
+        if (limited) {
+          const untilReset = exhausted && Number.isSafeInteger(reset) && reset > 0
+            ? Math.max(0, reset - Math.floor(this.now() / 1000)) : 0;
+          throw new GithubRateLimited(Math.max(delay, untilReset) || 60);
+        }
+      }
       // Only an explicit rejection is safe to distinguish from a lost POST
       // response. 5xx/timeouts remain uncertain and are reconciled, never resent.
-      if ([400, 401, 403, 404, 410, 422, 429].includes(response.status)) throw new GithubRejected(response.status);
+      if ([400, 401, 403, 404, 410, 422].includes(response.status)) throw new GithubRejected(response.status);
       throw new HttpError(502, "github_unavailable", "GitHub is temporarily unavailable.", true);
     }
     const value = await response.json();
