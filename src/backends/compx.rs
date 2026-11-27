@@ -1,5 +1,5 @@
 //! Report 8 / 16-byte CompX configuration channel, independent of the keyboard protocol.
-//! Wire format and sensor layouts are documented in PROTOCOLS.md.
+//! Wire format and sensor layouts are documented in docs/PROTOCOLS.md.
 use super::*;
 use crate::{device::{DpiStage, PollingRate}, hid::HidDevice};
 use std::{sync::{Arc, Mutex}, time::{Duration, Instant}};

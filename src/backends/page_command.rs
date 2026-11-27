@@ -1,5 +1,5 @@
 //! Read-only CompX page/command Feature Report family (distinct from EEPROM16).
-//! Lamzu/WLMouse protocol evidence and exceptions are listed in PROTOCOLS.md.
+//! Lamzu/WLMouse protocol evidence and exceptions are listed in docs/PROTOCOLS.md.
 use super::*;
 use crate::device::{DpiStage, PollingRate};
 use std::time::{Duration, Instant};

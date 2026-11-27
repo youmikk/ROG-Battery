@@ -1,4 +1,4 @@
-//! Read-only Arctis/Nova B0 status. Model-specific layouts are documented in PROTOCOLS.md.
+//! Read-only Arctis/Nova B0 status. Model-specific layouts are documented in docs/PROTOCOLS.md.
 use super::*;
 use crate::hid::HidDevice;
 use std::time::Instant;

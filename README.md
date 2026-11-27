@@ -1,6 +1,6 @@
 # X-Battery
 
-**简体中文** | [English](README.en.md)
+**简体中文** | [English](docs/README.en.md)
 
 X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能显示旧名称。
 
@@ -12,7 +12,7 @@ X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#系统要求)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-X--Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
 
-[下载绿色版](https://github.com/youmikk/X-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [设备兼容性](COMPATIBILITY.md) · [更新日志](CHANGELOG.md)
+[下载绿色版](https://github.com/youmikk/X-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=zh-CN) · [设备兼容性](docs/COMPATIBILITY.md) · [更新日志](CHANGELOG.md)
 
 ## 主要功能
 
@@ -38,7 +38,7 @@ X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能
 
 ## 品牌与设备范围
 
-下表按设备类型列出已接入适配的品牌与协议。**仅覆盖部分型号和连接方式，不代表品牌全系兼容，也不代表所有型号均已实机验证。** 具体型号、充电语义、DPI 能力及验证状态以[设备兼容性说明](COMPATIBILITY.md)为准。
+下表按设备类型列出已接入适配的品牌与协议。**仅覆盖部分型号和连接方式，不代表品牌全系兼容，也不代表所有型号均已实机验证。** 具体型号、充电语义、DPI 能力及验证状态以[设备兼容性说明](docs/COMPATIBILITY.md)为准。
 
 | 设备类型 | 已接入的品牌与协议范围 |
 | --- | --- |
@@ -51,7 +51,7 @@ X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能
 
 例如，雷柏 VT 系列与 MT 系列、VGN 鼠标与键盘、狼蛛不同代际键盘会使用不同协议；同名系列或共用接收器编号不能直接推断兼容。通用蓝牙路径只显示 Windows 已经提供的电量，蓝牙缓存不提供充电状态时显示为未知；仅支持 BLE / GATT 的设备可能需要后续单独接入。新增适配中的不少型号已完成协议回归，仍需对应设备实机验收。
 
-完整资料：[多品牌兼容性](COMPATIBILITY.md) · [ASUS / ROG 型号目录](docs/ROG_MODELS.md) · [雷柏 nRF54L 型号表](docs/RAPOO_MODELS.md) · [协议研究](PROTOCOLS.md)
+完整资料：[多品牌兼容性](docs/COMPATIBILITY.md) · [ASUS / ROG 型号目录](docs/ROG_MODELS.md) · [雷柏 nRF54L 型号表](docs/RAPOO_MODELS.md) · [协议研究](docs/PROTOCOLS.md)
 
 ## 最新版本：1.5.0
 
@@ -98,7 +98,7 @@ X-Battery 原名 R Battery，源码已完成更名；已发布安装包仍可能
 
 ### 设备没有显示电量
 
-先确认[兼容性说明](COMPATIBILITY.md)中的具体型号和连接方式，唤醒设备后等待后台读取或点击刷新。厂商驱动占用控制接口时可能影响读取，可退出相关软件后重试。接收器已连接并不一定表示设备正在回报有效电量。
+先确认[兼容性说明](docs/COMPATIBILITY.md)中的具体型号和连接方式，唤醒设备后等待后台读取或点击刷新。厂商驱动占用控制接口时可能影响读取，可退出相关软件后重试。接收器已连接并不一定表示设备正在回报有效电量。
 
 仍无法读取时，可在 **设置 → 关于 → 反馈设备** 中提供型号、连接方式、问题描述，以及可选的诊断摘要。
 

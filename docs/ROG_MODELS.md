@@ -2,7 +2,7 @@
 
 **简体中文** | [English](ROG_MODELS.en.md)
 
-[返回项目介绍](../README.md) · [多品牌兼容性说明](../COMPATIBILITY.md)
+[返回项目介绍](../README.md) · [多品牌兼容性说明](COMPATIBILITY.md)
 
 本页保留 ASUS / ROG 的内置识别目录，其他品牌及逐型号功能范围见兼容性说明。目录收录表示程序能够匹配对应型号，不代表所有功能都已在该硬件上验证。
 

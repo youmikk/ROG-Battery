@@ -5,7 +5,7 @@
 Repository: https://github.com/evren-oct/vigil-watt
 Revision: c97adc389b60b0e945a62cddacbaaace39887723
 
-Protocol parsing/transport research and recorded regression fixtures for THUNDEROBOT ML903 NearLink Se and AKG N9 Hybrid refer to VigilWatt's Thunderobot and Akg modules, tests and hardware documentation. Upstream credits KNA7022 (PR #25) and endermiteDOTcn (PR #44). Our hardware transport, UI and integration are maintained separately. See PROTOCOLS.md for evidence and validation boundaries.
+Protocol parsing/transport research and recorded regression fixtures for THUNDEROBOT ML903 NearLink Se and AKG N9 Hybrid refer to VigilWatt's Thunderobot and Akg modules, tests and hardware documentation. Upstream credits KNA7022 (PR #25) and endermiteDOTcn (PR #44). Our hardware transport, UI and integration are maintained separately. See docs/PROTOCOLS.md for evidence and validation boundaries.
 
 LANGTU T98 protocol research and reconstructed battery prefixes refer to VigilWatt's Langtu module and hardware documentation, credited upstream to YyingnLL / haloneko. The local Rust adapter and lifecycle integration are independently implemented; reconstructed vectors are distinguished from complete recorded frames.
 

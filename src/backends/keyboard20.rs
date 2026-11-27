@@ -1,4 +1,4 @@
-//! Read-only Report 0x13 keyboard status. Transport evidence is in PROTOCOLS.md.
+//! Read-only Report 0x13 keyboard status. Transport evidence is in docs/PROTOCOLS.md.
 use super::*;
 use crate::hid::HidDevice;
 use std::{

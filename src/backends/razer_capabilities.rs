@@ -1,5 +1,5 @@
 //! Connection-specific protocol facts, kept separate from the shared Razer codec.
-//! See PROTOCOLS.md for source revisions and evidence; none are locally hardware-verified.
+//! See docs/PROTOCOLS.md for source revisions and evidence; none are locally hardware-verified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatteryProtocol {
     pub name: &'static str,

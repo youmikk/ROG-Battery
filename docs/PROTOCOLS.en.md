@@ -4,7 +4,7 @@
 
 ## Adaptation evidence and validation
 
-This section covers selected protocols; the full device scope is in [compatibility](COMPATIBILITY.en.md). Implementation, synthetic tests, upstream hardware observations and this project's hardware validation are separate evidence levels. VigilWatt sources are pinned to `c97adc389b60b0e945a62cddacbaaace39887723`; the model sections below retain specific sources and HyperX cross-checks. Unrecorded firmware versions do not establish compatibility across firmware. See [third-party notices](THIRD_PARTY_NOTICES.md) for license terms.
+This section covers selected protocols; the full device scope is in [compatibility](COMPATIBILITY.en.md). Implementation, synthetic tests, upstream hardware observations and this project's hardware validation are separate evidence levels. VigilWatt sources are pinned to `c97adc389b60b0e945a62cddacbaaace39887723`; the model sections below retain specific sources and HyperX cross-checks. Unrecorded firmware versions do not establish compatibility across firmware. See [third-party notices](../THIRD_PARTY_NOTICES.md) for license terms.
 
 | Device and mode | Upstream evidence | Project validation and remaining checks |
 | --- | --- | --- |
@@ -18,7 +18,7 @@ This section covers selected protocols; the full device scope is in [compatibili
 
 ### Guided capture
 
-[Guided capture](docs/guided-capture.md) observes existing communication for a discovered device and adds timed markers for normal use, charging, power-off and recovery. It does not probe unsupported devices. Nonempty recordings are attached by default when the user submits feedback; attachment can be disabled before submission, and public issues provide a download link. Capturing a frame does not establish its meaning.
+[Guided capture](guided-capture.md) observes existing communication for a discovered device and adds timed markers for normal use, charging, power-off and recovery. It does not probe unsupported devices. Nonempty recordings are attached by default when the user submits feedback; attachment can be disabled before submission, and public issues provide a download link. Capturing a frame does not establish its meaning.
 
 ### Admission criteria
 

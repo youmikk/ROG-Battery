@@ -1,6 +1,6 @@
 # X-Battery
 
-[简体中文](README.md) | **English**
+[简体中文](../README.md) | **English**
 
 X-Battery was previously named R Battery. The source uses the new name; released builds may still display the former name.
 
@@ -12,7 +12,7 @@ Runs as a single executable without administrator rights or a separate backgroun
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#requirements)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-X--Battery-0067B8)](https://apps.microsoft.com/detail/9nrc8hcd4bz7)
 
-[Download portable build](https://github.com/youmikk/X-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Device compatibility](COMPATIBILITY.en.md) · [Changelog (Chinese)](CHANGELOG.md)
+[Download portable build](https://github.com/youmikk/X-Battery/releases/latest) · [Microsoft Store](https://apps.microsoft.com/detail/9nrc8hcd4bz7?hl=en-US) · [Device compatibility](COMPATIBILITY.en.md) · [Changelog (Chinese)](../CHANGELOG.md)
 
 ## Features
 
@@ -49,7 +49,7 @@ The table groups implemented integrations by device type. **Coverage is limited 
 
 Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard generations can use different protocols. A similar name or shared receiver ID does not establish compatibility. The generic Bluetooth path only displays a level that Windows already exposes; charging remains unknown when the Bluetooth cache has no charging state. BLE-only / GATT devices may require a separate integration. Many new integrations have passed protocol tests but still need validation on the corresponding hardware.
 
-Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](docs/ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](docs/RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
+Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
 
 ## Latest release: 1.5.0
 
@@ -59,7 +59,7 @@ Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG
 - Show system devices, support status and VID/PID in feedback, with context-menu actions to export, delete and resend history entries.
 - Improve offline feedback, associated file cleanup and communication capture; use the custom feedback domain and improve retries.
 
-Portable users can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store updates become available after Store review. See the [full changelog](CHANGELOG.md).
+Portable users can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store updates become available after Store review. See the [full changelog](../CHANGELOG.md).
 
 ## Getting started
 
@@ -90,7 +90,7 @@ Microsoft Store installations silently query the official Store on the first lau
 
 Available-update reminders appear only within the **Home device list**, never as popups over hidden windows, tray quick view or device detail pages. Later today hides the Home card for the rest of the day. **Settings → About → Check for updates** bypasses the daily limit. Failures show an error rather than incorrectly reporting that the app is up to date.
 
-Choose Update now to wait for device writes, save settings and battery history, then download, install and restart on Home through Microsoft's official APIs. Windows presents any required system authorization. Failures show the cause and offer a retry. See [Store update implementation (Chinese)](docs/store-updates.md) for details.
+Choose Update now to wait for device writes, save settings and battery history, then download, install and restart on Home through Microsoft's official APIs. Windows presents any required system authorization. Failures show the cause and offer a retry. See [Store update implementation (Chinese)](store-updates.md) for details.
 
 Release information opens the Microsoft Store product page. The app does not scrape undocumented release-note fields or use GitHub or a third-party automatic updater. **Settings → About → Review X-Battery** opens the official Store review entry when clicked. Honest reviews are welcome, entirely optional, and never affect any feature.
 
@@ -112,13 +112,13 @@ Open **Settings → About → Device feedback**, choose a device and category, a
 
 The device list shows VID/PID values and other devices enumerated by Windows. Add the brand and full model when reporting an unrecognized device. Included diagnostics contain the selected device's interface details and the complete HID interface inventory.
 
-Device traffic capture appears below Include device diagnostics. Recordings containing traffic can be uploaded with feedback. Right-click a local feedback entry to export, delete or resend it. See [Device traffic capture](docs/guided-capture.md) for the steps.
+Device traffic capture appears below Include device diagnostics. Recordings containing traffic can be uploaded with feedback. Right-click a local feedback entry to export, delete or resend it. See [Device traffic capture](guided-capture.md) for the steps.
 
-**Official releases use the feedback service and can submit in the app without a GitHub account.** Screenshots, maintainer replies and follow-ups are supported; feedback and selected attachments are public. Self-built versions without a configured service provide Copy report & open GitHub instead. Add screenshots manually; browser submissions do not appear in My feedback. See the [feedback service guide](services/feedback-relay/README.md) for deployment.
+**Official releases use the feedback service and can submit in the app without a GitHub account.** Screenshots, maintainer replies and follow-ups are supported; feedback and selected attachments are public. Self-built versions without a configured service provide Copy report & open GitHub instead. Add screenshots manually; browser submissions do not appear in My feedback. See the [feedback service guide](../services/feedback-relay/README.md) for deployment.
 
 Routine battery monitoring and device settings work offline, without background telemetry or automatic crash reports. Settings, aliases, history, caches, backups and diagnostic logs stay locally. Store installations query Microsoft's official update service on the first launch each day. Downloading, installing, reviewing and feedback network features require user action. The app does not attach device diagnostics, settings or battery history to update requests.
 
-Optional diagnostics contain app and system versions, original device model, VID/PID, type, connection, battery and query results. They exclude serial numbers, file paths, custom aliases, personal settings and raw logs. Descriptions, included diagnostics and screenshots are public, so review them before submitting. In-app feedback history and reply credentials use Windows DPAPI encryption; deleting local history does not remove public GitHub content. See the [privacy policy](PRIVACY.md) for details.
+Optional diagnostics contain app and system versions, original device model, VID/PID, type, connection, battery and query results. They exclude serial numbers, file paths, custom aliases, personal settings and raw logs. Descriptions, included diagnostics and screenshots are public, so review them before submitting. In-app feedback history and reply credentials use Windows DPAPI encryption; deleting local history does not remove public GitHub content. See the [privacy policy](../PRIVACY.md) for details.
 
 | Local data | Default location |
 | --- | --- |

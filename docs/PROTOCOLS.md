@@ -6,7 +6,7 @@
 
 实现、合成测试、上游硬件记录和本项目真机验收是不同证据。下表归纳部分协议的来源与待验证点，不代表完整型号清单；兼容范围见[兼容性](COMPATIBILITY.md)，具体命令、接口和固定源码见各型号章节。固件版本未明确记录时，不能推断所有固件兼容。
 
-VigilWatt 来源固定为 [`c97adc389b60b0e945a62cddacbaaace39887723`](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723)；HyperX 的交叉来源与固定提交见下方型号章节。许可与归属见[第三方声明](THIRD_PARTY_NOTICES.md)。
+VigilWatt 来源固定为 [`c97adc389b60b0e945a62cddacbaaace39887723`](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723)；HyperX 的交叉来源与固定提交见下方型号章节。许可与归属见[第三方声明](../THIRD_PARTY_NOTICES.md)。
 
 | 型号与模式 | 上游证据 | 本项目验证与待验证点 |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ VigilWatt 来源固定为 [`c97adc389b60b0e945a62cddacbaaace39887723`](https://g
 4. 同型号双设备、跨品牌、插拔、休眠和官方软件共存须经实机验证。
 5. 北通须先补无线集合描述符、完整开关机序列及可靠 XInput 关联；不按枚举顺序、型号或电量猜测槽位，不屏蔽无关手柄。
 
-[分步骤采集](docs/guided-capture.md) 旁路记录已发现设备的既有通信，并为正常使用、充电、关机、恢复添加时间标记，不主动探测未适配设备。有数据时默认附带到用户提交的反馈，提交前可关闭，公开议题提供下载链接。采集成功不等于协议已经解释正确。
+[分步骤采集](guided-capture.md) 旁路记录已发现设备的既有通信，并为正常使用、充电、关机、恢复添加时间标记，不主动探测未适配设备。有数据时默认附带到用户提交的反馈，提交前可关闭，公开议题提供下载链接。采集成功不等于协议已经解释正确。
 
 ## 高斯 GANSS GS3104T-Pro
 

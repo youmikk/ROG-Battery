@@ -1,5 +1,5 @@
 //! Dareu Jm mice. Shared receiver PIDs do not identify the paired sensor.
-//! Protocol evidence and hardware limits are recorded in PROTOCOLS.md.
+//! Protocol evidence and hardware limits are recorded in docs/PROTOCOLS.md.
 use super::*;
 use crate::{device::{DpiStage, StageContext}, hid::HidDevice};
 use std::{hash::{BuildHasher, Hasher}, time::{Duration, Instant}};

@@ -1,4 +1,4 @@
-//! MCHOSE G98 V3 battery-only QHW command. See PROTOCOLS.md for evidence.
+//! MCHOSE G98 V3 battery-only QHW command. See docs/PROTOCOLS.md for evidence.
 use super::*;
 use crate::hid::HidDevice;
 use std::{sync::atomic::{AtomicU8, Ordering}, time::Instant};

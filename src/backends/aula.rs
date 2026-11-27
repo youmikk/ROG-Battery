@@ -1,5 +1,5 @@
 //! SC380 PRO receiver. Other AULA mice and keyboards use different protocols.
-//! Model/transport evidence and unverified hardware limits: PROTOCOLS.md.
+//! Model/transport evidence and unverified hardware limits: docs/PROTOCOLS.md.
 use super::feature::FeatureChannel;
 use super::*;
 use crate::device::{DpiStage, PollingRate, StageContext};

@@ -45,6 +45,11 @@ msix/store-credentials.psd1
 !/docs/ROG_MODELS.md
 !/docs/ROG_MODELS.en.md
 !/docs/RAPOO_MODELS.md
+!/docs/COMPATIBILITY.md
+!/docs/COMPATIBILITY.en.md
+!/docs/PROTOCOLS.md
+!/docs/PROTOCOLS.en.md
+!/docs/README.en.md
 /tests/
 /test-results/
 /mock-devices.txt

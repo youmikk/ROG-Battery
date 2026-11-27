@@ -1,5 +1,5 @@
 //! Shared FF90 / 55:65 headset battery protocol, read-only.
-//! ATK and MCHOSE transport/capture evidence: Voltide, pinned in PROTOCOLS.md.
+//! ATK and MCHOSE transport/capture evidence: Voltide, pinned in docs/PROTOCOLS.md.
 use super::*;
 use crate::hid::HidDevice;
 use std::{
