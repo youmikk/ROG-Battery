@@ -6818,6 +6818,62 @@ mod backend_tests {
     }
 
     #[test]
+    fn aula_g9_placeholder_battery_swap_and_silence_remain_isolated() {
+        let backend = BackendId::AulaG9;
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 2000);
+        let now = std::time::Instant::now();
+        let mut shared = Shared::new(Settings::default());
+        let mut first = snapshot(backend, "g9-first", 76);
+        let mut second = snapshot(backend, "g9-second", 35);
+        for sample in [&mut first, &mut second] {
+            sample.target.family = DeviceFamily::Headset;
+            sample.battery_at = Some(now);
+            sample.battery.as_mut().unwrap().charging = Some(true);
+        }
+        let present = |snapshots| crate::backends::Poll { snapshots,
+            present_channels: Some(["g9-first".into(), "g9-second".into()].into_iter().collect()), ..Default::default() };
+        merge_additional_at(&mut shared, backend, present(vec![first.clone(), second.clone()]), now);
+        let unknown = now + Duration::from_secs(2);
+        first.battery_at = Some(unknown);
+        first.battery.as_mut().unwrap().percent = None;
+        first.battery.as_mut().unwrap().charging = None;
+        first.battery_unavailable = true;
+        merge_additional_at(&mut shared, backend, present(vec![first.clone()]), unknown);
+        assert!(shared.devices["g9-first"].reading.connected);
+        assert_eq!(shared.devices["g9-first"].reading.battery_text(true), "—");
+        assert!(!shared.devices["g9-first"].reading.is_charging());
+        assert_eq!(shared.devices["g9-second"].reading.battery_text(true), "35%");
+        let swapped = now + Duration::from_secs(4);
+        first.battery_at = Some(swapped);
+        first.battery_unavailable = false;
+        first.battery.as_mut().unwrap().percent = Some(10);
+        merge_additional_at(&mut shared, backend, present(vec![first.clone()]), swapped);
+        assert_eq!(shared.devices["g9-first"].reading.battery_text(true), "10%");
+        let full = now + Duration::from_secs(6);
+        first.battery_at = Some(full);
+        first.battery.as_mut().unwrap().percent = Some(100);
+        merge_additional_at(&mut shared, backend, present(vec![first]), full);
+        assert_eq!(shared.devices["g9-first"].reading.battery_text(true), "100%");
+        let expired = now + backend.sample_lifetime();
+        merge_additional_at(&mut shared, backend, present(Vec::new()), expired);
+        shared.expire_readings_at(expired);
+        assert_eq!(shared.devices["g9-second"].reading.battery_text(true), "—");
+        assert!(!shared.devices["g9-second"].reading.is_charging());
+        assert_eq!(shared.devices["g9-first"].reading.battery_text(true), "100%");
+        second.battery_at = Some(expired);
+        second.battery.as_mut().unwrap().percent = Some(0);
+        merge_additional_at(&mut shared, backend, present(vec![second.clone()]), expired);
+        assert_eq!(shared.devices["g9-second"].reading.battery_text(true), "0%");
+        assert!(shared.devices["g9-second"].reading.is_charging());
+        let unplugged = crate::backends::Poll { snapshots: Vec::new(),
+            present_channels: Some(["g9-second".into()].into_iter().collect()), ..Default::default() };
+        merge_additional_at(&mut shared, backend, unplugged, expired + Duration::from_secs(1));
+        assert!(!shared.devices["g9-first"].reading.connected);
+        assert!(shared.devices["g9-second"].reading.connected);
+        assert_eq!(shared.devices["g9-second"].reading.family, DeviceFamily::Headset);
+    }
+
+    #[test]
     fn hecate_g5m_cached_samples_and_unknown_flags_do_not_extend_charging() {
         let backend = BackendId::HecateG5m;
         let now = std::time::Instant::now();

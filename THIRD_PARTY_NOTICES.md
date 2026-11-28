@@ -25,6 +25,8 @@ HECATE Wireless Receiver (35BB:D3FB) protocol research and complete STATUS / 50%
 
 HECATE G5M Pro (35BB:D00B) protocol research and reconstructed status/heartbeat prefixes refer to VigilWatt’s Hecate module, codec tests and HECATE hardware notes, credited upstream to xliu. The Rust adapter and per-receiver query scheduling are independently maintained; zero-filled fixtures are reconstructions, not complete recorded captures.
 
+AULA G9 protocol research and reconstructed status fields refer to VigilWatt’s AulaG9 module, AulaG9L9AndVgnV98Tests and AULA hardware notes, credited upstream to wx2995 (PR #31). The Rust read-only transport and lifecycle integration are independently maintained; zero-filled fixtures are reconstructions, not complete raw captures.
+
 MIT License
 
 Copyright (c) 2026 evren
