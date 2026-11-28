@@ -1,9 +1,7 @@
-1.5.0
+1.5.1
 
-- Show discovered devices and battery readings first, then load DPI and polling-rate settings in the background.
-- Improve mouse DPI presets and quick switching, and fix Rapoo configuration writes, recovery from temporary failures and state updates.
-- Double-click the taskbar battery strip to open the main window; keep an entry available when battery readings are unavailable.
-- Show system devices, support status and VID/PID in device feedback.
-- Right-click feedback history to export, delete or resend. Deleting a record also cleans up local exports and captures with a verified association.
-- Improve offline feedback, diagnostic snapshots and communication capture, add network error details and bound local storage use.
-- Use the custom feedback domain and improve recovery after connection failures and rate limits.
+- Add battery integrations for Pulsar X2 V2, Inphic ZHEN / IN9, DELUX M900 Pro, MCHOSE A5 V2 Ultra and AULA L9 Ultra.
+- Add HECATE G5M Pro and D3FB receivers, AULA G9 and Razer Kraken V4 headsets, and the MOJHON GALE2 controller.
+- Improve charging placeholders, echo rejection, query throttling, multi-device isolation and stale-reading expiry.
+- Fix background autostart and window activation on repeated launches.
+- New integrations pass protocol and synthetic regression tests but still require validation on the corresponding hardware; see the compatibility notes for capabilities and limits.

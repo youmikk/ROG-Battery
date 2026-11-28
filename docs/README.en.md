@@ -51,13 +51,13 @@ Rapoo VT and MT models, VGN mice and keyboards, and different AULA keyboard gene
 
 Further details: [Multi-brand compatibility](COMPATIBILITY.en.md) · [ASUS / ROG catalogue](ROG_MODELS.en.md) · [Rapoo nRF54L catalogue (Chinese)](RAPOO_MODELS.md) · [Protocol research](PROTOCOLS.en.md)
 
-## Latest release: 1.5.0
+## Latest release: 1.5.1
 
-- Show discovered devices and battery readings first, then load DPI and polling-rate settings in the background.
-- Improve mouse DPI presets and quick switching, and fix Rapoo configuration writes, failure recovery and state updates.
-- Double-click the taskbar battery strip to open the main window; keep an entry available when battery readings are unavailable.
-- Show system devices, support status and VID/PID in feedback, with context-menu actions to export, delete and resend history entries.
-- Improve offline feedback, associated file cleanup and communication capture; use the custom feedback domain and improve retries.
+- Add battery integrations for Pulsar X2 V2, Inphic ZHEN / IN9, DELUX M900 Pro, MCHOSE A5 V2 Ultra and AULA L9 Ultra.
+- Add HECATE G5M Pro and D3FB receivers, AULA G9 and Razer Kraken V4 headsets, and the MOJHON GALE2 controller.
+- Improve charging placeholders, echo rejection, query throttling, multi-device isolation and stale-reading expiry.
+- Fix background autostart and window activation on repeated launches.
+- New integrations pass protocol and synthetic regression tests but still require validation on the corresponding hardware; see the compatibility notes for capabilities and limits.
 
 Portable users can exit the app and replace the executable. This README describes the current GitHub release; Microsoft Store updates become available after Store review. See the [full changelog](../CHANGELOG.md).
 
