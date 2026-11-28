@@ -6684,7 +6684,7 @@ mod backend_tests {
 
     #[test]
     fn mouse_adapter_samples_expire_independently_and_recover_after_disconnect() {
-        for backend in [BackendId::Pulsar, BackendId::Inphic] {
+        for backend in [BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9] {
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10_000);
         let now = std::time::Instant::now();
         let mut shared = Shared::new(Settings::default());
@@ -6871,7 +6871,7 @@ mod backend_tests {
 
     #[test]
     fn fresh_charging_unknown_clears_percentage_and_shows_charge_in_main_and_tray() {
-        for backend in [BackendId::RapooOffice, BackendId::Headset, BackendId::GameSir] {
+        for backend in [BackendId::RapooOffice, BackendId::Headset, BackendId::GameSir, BackendId::InphicIn9] {
             let mut shared = Shared::new(Settings::default());
             let now = std::time::Instant::now();
             let mut sample = snapshot(backend, "charging", 47);
@@ -6889,6 +6889,69 @@ mod backend_tests {
             merge_additional_at(&mut shared, backend, Vec::new().into(), measured + Duration::from_secs(120));
             assert!(!shared.readings[0].is_charging());
             assert_eq!(shared.readings[0].battery_text(true), "—");
+        }
+    }
+
+    #[test]
+    fn inphic_in9_charge_only_and_unknown_state_clear_numbers_for_one_receiver() {
+        let backend = BackendId::InphicIn9;
+        for had_percentage in [false, true] {
+            let now = std::time::Instant::now();
+            let mut shared = Shared::new(Settings::default());
+            let mut first = snapshot(backend, "in9-first", 12);
+            let mut second = snapshot(backend, "in9-second", 81);
+            first.battery_at = Some(now);
+            second.battery_at = Some(now);
+            shared.cfg.device_order = vec!["in9-first".into(), "in9-second".into(), "other-brand".into()];
+            let mut other = snapshot(BackendId::Logitech, "other-brand", 55);
+            other.battery_at = Some(now);
+            merge_additional_at(&mut shared, BackendId::Logitech, vec![other].into(), now);
+            let presence = |snapshots| crate::backends::Poll { snapshots,
+                present_channels: Some(["in9-first".into(), "in9-second".into()].into_iter().collect()),
+                ..Default::default() };
+            if had_percentage {
+                merge_additional_at(&mut shared, backend, presence(vec![first.clone(), second.clone()]), now);
+                assert!(shared.devices["in9-first"].reading.is_low());
+            }
+            let charging_at = now + Duration::from_secs(10);
+            first.battery_at = Some(charging_at);
+            first.battery.as_mut().unwrap().percent = None;
+            first.battery.as_mut().unwrap().charging = Some(true);
+            merge_additional_at(&mut shared, backend, presence(vec![first.clone(), second]), charging_at);
+            let reading = &shared.devices["in9-first"].reading;
+            assert!(reading.connected && reading.is_charging() && !reading.is_low());
+            assert_eq!(reading.battery_text(true), "—");
+            assert_eq!(low_battery_reading(reading, &mut true), None);
+            assert_eq!(shared.devices["in9-second"].reading.battery_text(true), "81%");
+            assert_eq!(shared.devices["other-brand"].reading.battery_text(true), "55%");
+            let strip = taskbar_strip_content(&shared.readings, &shared.cfg).unwrap();
+            assert_eq!(strip.items.len(), 2);
+            assert_eq!(strip.items[0].level.unwrap().value, 81);
+            assert!(!strip.items[0].charging);
+            merge_additional_at(&mut shared, backend, presence(vec![first.clone()]),
+                charging_at + Duration::from_secs(5));
+            assert!(shared.devices["in9-first"].reading.is_charging());
+            assert_eq!(shared.devices["in9-first"].basic_status.as_ref().unwrap().measured_at, Some(charging_at));
+            let unknown_at = charging_at + Duration::from_secs(10);
+            first.battery_at = Some(unknown_at);
+            first.battery.as_mut().unwrap().charging = None;
+            first.battery_unavailable = true;
+            merge_additional_at(&mut shared, backend, presence(vec![first.clone()]), unknown_at);
+            assert!(shared.devices["in9-first"].reading.battery.is_none());
+            assert!(!shared.devices["in9-first"].reading.is_charging());
+            assert_eq!(low_battery_reading(&shared.devices["in9-first"].reading, &mut true), None);
+            assert_eq!(shared.devices["in9-second"].basic_status.as_ref().unwrap().measured_at, Some(now));
+            assert_eq!(taskbar_strip_content(&shared.readings, &shared.cfg).unwrap().items.len(), 2);
+            let recovered_at = unknown_at + Duration::from_secs(10);
+            first.battery_at = Some(recovered_at);
+            first.battery.as_mut().unwrap().percent = Some(82);
+            first.battery.as_mut().unwrap().charging = Some(false);
+            first.battery_unavailable = false;
+            merge_additional_at(&mut shared, backend, presence(vec![first]), recovered_at);
+            assert_eq!(shared.devices["in9-first"].reading.battery_text(true), "82%");
+            assert!(!shared.devices["in9-first"].reading.is_charging());
+            assert_eq!(shared.devices.len(), 3);
+            assert!(!crate::backends::has_configuration(backend));
         }
     }
 

@@ -72,6 +72,7 @@ pub mod akg;
 pub mod langtu;
 pub mod pulsar;
 pub mod inphic;
+pub mod inphic_in9;
 pub mod mojhon;
 
 pub use crate::device::{Battery, BatteryLevel, Dpi};
@@ -144,10 +145,11 @@ pub enum BackendId {
     LangtuT98,
     Pulsar,
     Inphic,
+    InphicIn9,
     Mojhon,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 65] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 66] = [
     BackendId::Logitech, BackendId::LogitechHeadset, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
@@ -157,7 +159,7 @@ pub const ADDITIONAL_BACKENDS: [BackendId; 65] = [
     BackendId::AtkHoltek, BackendId::FifineHt6, BackendId::MchoseK87s,
     BackendId::Lingbao, BackendId::AulaF108,
     BackendId::RapooMt560, BackendId::MchoseR9, BackendId::AulaV9Pro,
-    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::Akg, BackendId::LangtuT98, BackendId::Pulsar, BackendId::Inphic, BackendId::Mojhon, BackendId::StandardHid,
+    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::Akg, BackendId::LangtuT98, BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9, BackendId::Mojhon, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -228,12 +230,13 @@ impl BackendId {
             Self::LangtuT98 => "LANGTU T98",
             Self::Pulsar => "Pulsar X2 V2",
             Self::Inphic => "Inphic ZHEN",
+            Self::InphicIn9 => "Inphic IN9",
             Self::Mojhon => "MOJHON GALE2",
         }
     }
 
     pub fn precedes_standard(self) -> bool {
-        if matches!(self, Self::Thunderobot | Self::Akg | Self::LangtuT98 | Self::Pulsar | Self::Inphic | Self::Mojhon) { return true; }
+        if matches!(self, Self::Thunderobot | Self::Akg | Self::LangtuT98 | Self::Pulsar | Self::Inphic | Self::InphicIn9 | Self::Mojhon) { return true; }
         if matches!(self, Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
             | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
             | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
@@ -251,6 +254,7 @@ impl BackendId {
             Self::Thunderobot | Self::LangtuT98 | Self::Pulsar => 120,
             Self::Akg => 180,
             Self::Inphic => inphic::SAMPLE_LIFETIME.as_secs(),
+            Self::InphicIn9 => inphic_in9::SAMPLE_LIFETIME.as_secs(),
             Self::Mojhon => mojhon::SAMPLE_LIFETIME.as_secs(),
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
@@ -274,7 +278,7 @@ impl BackendId {
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
             Self::Thunderobot => Some(10_000),
-            Self::Pulsar | Self::Inphic | Self::Mojhon => Some(10_000),
+            Self::Pulsar | Self::Inphic | Self::InphicIn9 | Self::Mojhon => Some(10_000),
             Self::Akg => Some(60_000),
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
@@ -636,6 +640,7 @@ fn provider(backend: BackendId) -> &'static dyn DeviceBackend {
         BackendId::Akg => &akg::Akg,
         BackendId::Pulsar => &pulsar::Pulsar,
         BackendId::Inphic => &inphic::Inphic,
+        BackendId::InphicIn9 => &inphic_in9::InphicIn9,
         BackendId::Mojhon => &mojhon::Mojhon,
     }
 }

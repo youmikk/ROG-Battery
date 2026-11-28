@@ -15,6 +15,8 @@ Pulsar X2 V2 protocol research and recorded STATUS/POWER fixtures refer to Vigil
 
 Inphic ZHEN protocol research and recorded 85% discharging / 84% charging payloads refer to VigilWatt's Inphic module and hardware documentation. Tests prepend the documented report ID; other transport and lifecycle cases are synthetic.
 
+Inphic IN9 protocol research and the complete 81% discharging / charging-placeholder fixtures refer to VigilWatt's Inphic IN9 module, tests, hardware documentation and contributor YyingnLL's issue #40 capture notes. The Rust adapter, per-device scheduling and lifecycle integration are independently maintained; boundary and transport tests use synthetic cases.
+
 MOJHON GALE2 protocol research and recorded identity/battery fixtures refer to VigilWatt's Mojhon module, hardware documentation and USB capture records. Tests add the documented Windows zero report-ID slot and transfer padding. The Rust adapter and lifecycle integration are independently maintained.
 
 MIT License

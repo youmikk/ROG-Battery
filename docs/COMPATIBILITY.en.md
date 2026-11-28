@@ -4,6 +4,14 @@
 
 Upstream records, validation limits and admission criteria are in [Adaptation evidence and validation](PROTOCOLS.en.md#adaptation-evidence-and-validation). Implementation, synthetic tests, upstream hardware observations and this project's hardware validation are distinct evidence levels.
 
+## Inphic IN9
+
+Adds receiver `248A:5B2F / MI_01 Col04 / FF00:0001`, using only 33-byte Feature Report `0C`. Input/output capacities must be zero, with a descriptor-proven sole Feature ID. Discovery publishes the device before background refresh-and-read operations validate the `M9094` model signature. Sequences are isolated per instance; each round permits one retry with a new sequence. Successful queries are spaced at least ten seconds apart, with failed rounds backing off up to sixty seconds.
+
+Discharging samples accept 1–100%; zero is an unfilled-register placeholder. Charging bit 1 publishes charging only and hides the placeholder percentage; unknown power states clear old readings. Failed reads do not renew samples, which expire after 120 seconds. Upstream reports that receivers can still return cached data after mouse power-off, so a reply does not establish that the mouse is awake. Another `5B2E` wired device is never used to infer this receiver's charging state.
+
+Validation replays upstream complete 81% discharging and charging-placeholder frames, plus synthetic retry, timeout and multiple-device cases. No hardware acceptance has been performed here. Sole Feature ID, other firmware, cold starts without the official driver, repeated restarts, sleep caches and official-software coexistence need hardware testing. IN9 and ZHEN have separate adapters; Bluetooth, wired bodies and DPI settings are excluded. See [protocol evidence](PROTOCOLS.en.md#inphic-in9).
+
 ## MOJHON GALE2
 
 Adds the `E2B7:122C / MI_02 / FFAB:0001` vendor interface with 65-byte input/output, no Feature reports, and descriptor-proven sole unnumbered reports. Discovery publishes metadata first. Background reads query `E2`: only `C4_SERVER` authorizes the `04` battery query; `C4_DONGLE` clears the disconnected controller's battery. Identity is checked again before publication. Identical devices retain separate Windows instance identities.
@@ -14,7 +22,7 @@ Protocol replay and synthetic regression use upstream wired/wireless observation
 
 ## Inphic ZHEN
 
-Adds receiver `1D57:FA65 / FF00:0001`, recorded upstream with product string `Inphic KP 8K`. Input capacity must be 5 bytes with descriptor-proven sole report `03`. The separate IN9 protocol is excluded.
+Adds receiver `1D57:FA65 / FF00:0001`, recorded upstream with product string `Inphic KP 8K`. Input capacity must be 5 bytes with descriptor-proven sole report `03`. IN9 uses the separate adapter above.
 
 Passive reads accept `03 76 41 <state> <percentage>` without sending commands. State `01` means discharging, `03` charging, and other states remain unknown. Discovery publishes the device before the background battery read. Each read waits at most 5 seconds or processes 32 frames; silence does not imply disconnect. Samples expire after 90 seconds and the polling interval is capped at 10 seconds. Identical receivers remain separate.
 
