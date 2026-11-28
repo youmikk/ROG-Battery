@@ -852,6 +852,7 @@ fn merge_additional_update(shared: &mut Shared, backend: crate::backends::Backen
 }
 
 struct Shared {
+    mock_mode: bool,
     store_update_pending: bool,
     rog_write_active: bool,
     device_keys_dirty: bool,
@@ -978,6 +979,7 @@ impl Shared {
     }
 
     fn replace_mock_readings(&mut self, readings: Vec<crate::device::DeviceReading>) {
+        self.mock_mode = true;
         self.discovery_pending.clear();
         let now = std::time::Instant::now();
         let mut old_devices = std::mem::take(&mut self.devices);
@@ -1100,6 +1102,7 @@ impl Shared {
 
     fn new(cfg: Settings) -> Shared {
         Shared {
+            mock_mode: false,
             store_update_pending: false,
             rog_write_active: false,
             device_keys_dirty: false,
@@ -1325,22 +1328,19 @@ fn mock_basic_snapshot(reading: &crate::device::DeviceReading) -> crate::backend
     }
 }
 
-fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>) {
-    let link_key = target_link.map(|target| target.device_key().to_string());
-    let target_key = match cmd {
-        Cmd::BasicDpi { target, .. }
-        | Cmd::BasicDpiStage { target, .. }
-        | Cmd::BasicDpiStageAdd { target, .. }
-        | Cmd::BasicDpiStageRemove { target, .. }
-        | Cmd::BasicDpiEdit { target, .. }
-        | Cmd::BasicDpiPreset { target, .. }
-        | Cmd::BasicPollingRate { target, .. } => Some(target.key.as_str()),
-        _ => link_key.as_deref().or(state.active_key.as_deref()),
-    };
+fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd) {
+    let target_key = cmd.basic_target().map(|target| target.key.clone())
+        .or_else(|| state.active_key.clone());
+    if !matches!(cmd, Cmd::AutoStart(_)) && !target_key.as_ref()
+        .and_then(|key| state.devices.get(key)).is_some_and(|device| device.reading.connected) {
+        state.results.push_back(CmdResult { label: cmd.label(), ok: None,
+            err: Some(crate::tr!("所选设备已断开，请重新连接").into()), hint: "" });
+        return;
+    }
 
     match cmd {
         Cmd::BasicDpiStage { stage, .. } => {
-            if let Some(key) = target_key {
+            if let Some(key) = target_key.as_ref() {
                 if let Some(device) = state.devices.get_mut(key) {
                     if let Some(basic) = &mut device.basic {
                         basic.dpi.active_stage = Some(stage.index);
@@ -1352,7 +1352,7 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
             }
         }
         Cmd::BasicDpiStageAdd { x, y, .. } => {
-            if let Some(key) = target_key {
+            if let Some(key) = target_key.as_ref() {
                 if let Some(device) = state.devices.get_mut(key) {
                     if let Some(basic) = &mut device.basic {
                         let idx = basic.dpi.stages.len() as u8;
@@ -1363,7 +1363,7 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
             }
         }
         Cmd::BasicDpiStageRemove { stage, .. } => {
-            if let Some(key) = target_key {
+            if let Some(key) = target_key.as_ref() {
                 if let Some(device) = state.devices.get_mut(key) {
                     if let Some(basic) = &mut device.basic {
                         basic.dpi.stages.retain(|saved| saved.index != stage.index);
@@ -1373,7 +1373,7 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
             }
         }
         Cmd::BasicDpiEdit { stage, x, y, .. } => {
-            if let Some(key) = target_key {
+            if let Some(key) = target_key.as_ref() {
                 if let Some(device) = state.devices.get_mut(key) {
                     if let Some(basic) = &mut device.basic {
                         if let Some(saved) = basic.dpi.stages.iter_mut().find(|saved| saved.index == stage.index) {
@@ -1389,7 +1389,7 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
             }
         }
         Cmd::BasicDpiPreset { stage, value, .. } => {
-            if let Some(key) = target_key {
+            if let Some(key) = target_key.as_ref() {
                 if let Some(device) = state.devices.get_mut(key) {
                     if let Some(basic) = &mut device.basic {
                         if let Some(saved) = basic.dpi.stages.iter_mut().find(|saved| saved.index == stage.index) {
@@ -1405,7 +1405,7 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
             }
         }
         Cmd::BasicDpi { dpi, .. } => {
-            if let Some(key) = target_key {
+            if let Some(key) = target_key.as_ref() {
                 if let Some(device) = state.devices.get_mut(key) {
                     if let Some(basic) = &mut device.basic {
                         basic.dpi.current = Some(*dpi);
@@ -1415,7 +1415,7 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
             }
         }
         Cmd::BasicPollingRate { hz, .. } => {
-            if let Some(key) = target_key {
+            if let Some(key) = target_key.as_ref() {
                 if let Some(device) = state.devices.get_mut(key) {
                     if let Some(basic) = &mut device.basic {
                         basic.polling_rate.current = Some(*hz);
@@ -1424,60 +1424,53 @@ fn apply_mock_cmd(state: &mut Shared, cmd: &Cmd, target_link: Option<&hid::Link>
             }
         }
         Cmd::Stage(stage) => {
-            for device in state.devices.values_mut() {
-                if let Some(device_state) = &mut device.state {
-                    device_state.active_stage = *stage;
-                }
+            if let Some(device_state) = target_key.as_ref().and_then(|key| state.devices.get_mut(key))
+                .and_then(|device| device.state.as_mut()) {
+                device_state.active_stage = *stage;
             }
         }
         Cmd::Dpi { stage, dpi, rgb } => {
-            for device in state.devices.values_mut() {
-                if let Some(device_state) = &mut device.state {
-                    if *stage < proto::DPI_STAGES {
-                        device_state.enc[*stage] = proto::encode_dpi(*dpi);
-                        if let Some(color) = rgb {
-                            device_state.rgb[*stage] = *color;
-                        }
+            if let Some(device_state) = target_key.as_ref().and_then(|key| state.devices.get_mut(key))
+                .and_then(|device| device.state.as_mut()) {
+                if (1..=proto::DPI_STAGES).contains(stage) {
+                    device_state.enc[*stage - 1] = proto::encode_dpi(*dpi);
+                    if let Some(color) = rgb {
+                        device_state.rgb[*stage - 1] = *color;
                     }
                 }
             }
         }
         Cmd::Poll(hz) => {
             let code = proto::poll_code_of(*hz).unwrap_or(3);
-            for device in state.devices.values_mut() {
-                if let Some(device_state) = &mut device.state {
-                    device_state.poll_code = code;
-                }
+            if let Some(device_state) = target_key.as_ref().and_then(|key| state.devices.get_mut(key))
+                .and_then(|device| device.state.as_mut()) {
+                device_state.poll_code = code;
             }
         }
         Cmd::Debounce(code) => {
-            for device in state.devices.values_mut() {
-                if let Some(device_state) = &mut device.state {
-                    device_state.debounce_code = *code;
-                }
+            if let Some(device_state) = target_key.as_ref().and_then(|key| state.devices.get_mut(key))
+                .and_then(|device| device.state.as_mut()) {
+                device_state.debounce_code = *code;
             }
         }
         Cmd::Snap(enabled) => {
-            for device in state.devices.values_mut() {
-                if let Some(device_state) = &mut device.state {
-                    device_state.angle_snap = *enabled;
-                }
+            if let Some(device_state) = target_key.as_ref().and_then(|key| state.devices.get_mut(key))
+                .and_then(|device| device.state.as_mut()) {
+                device_state.angle_snap = *enabled;
             }
         }
         Cmd::Tuning(enabled) => {
-            for device in state.devices.values_mut() {
-                if let Some(device_state) = &mut device.state {
-                    device_state.angle_tuning = *enabled;
-                }
+            if let Some(device_state) = target_key.as_ref().and_then(|key| state.devices.get_mut(key))
+                .and_then(|device| device.state.as_mut()) {
+                device_state.angle_tuning = *enabled;
             }
         }
         Cmd::Light { mode, rgb, .. } => {
-            for device in state.devices.values_mut() {
-                if let Some(device_state) = &mut device.state {
-                    device_state.power = *mode;
-                    if let Some(color) = rgb {
-                        device_state.light_rgb = *color;
-                    }
+            if let Some(device_state) = target_key.as_ref().and_then(|key| state.devices.get_mut(key))
+                .and_then(|device| device.state.as_mut()) {
+                device_state.power = *mode;
+                if let Some(color) = rgb {
+                    device_state.light_rgb = *color;
                 }
             }
         }
@@ -3604,6 +3597,16 @@ const MAX_PENDING: usize = 4;
 /// `Status::Busy` 只表示「后台正在写设备」。读快照期间**不再拒绝新命令**：
 /// 那时设备是空闲的，命令完全可以排队等这一轮读完。
 fn submit(shared: &Arc<Mutex<Shared>>, signal: &Signal, cmd: Cmd) -> bool {
+    {
+        let mut state = lock_shared(shared);
+        if state.store_update_pending { return false; }
+        if state.mock_mode {
+            apply_mock_cmd(&mut state, &cmd);
+            drop(state);
+            signal.request_refresh();
+            return true;
+        }
+    }
     if let Some(target) = cmd.basic_target() {
         let backend = target.backend;
         if backend != crate::backends::BackendId::Rog {
@@ -4260,14 +4263,6 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
                     let readings = crate::mock::readings().unwrap_or_default();
                     let mut state = lock_shared(&shared_t);
                     state.replace_mock_readings(readings);
-                    let mut ran = 0usize;
-                    while let Some((cmd, target)) = state.pending.pop_front() {
-                        apply_mock_cmd(&mut state, &cmd, target.as_ref().map(|target| &target.link));
-                        ran += 1;
-                        if ran >= MAX_PENDING * 2 {
-                            break;
-                        }
-                    }
                     state.want_full = false;
                     state.status = Status::Ok;
                     state.frames = 0;
@@ -5962,8 +5957,8 @@ mod backend_tests {
         let mut shared = Shared::new(Settings::default());
         shared.replace_mock_readings(vec![mouse.clone(), other.clone()]);
         let target = shared.devices["mock-mouse"].basic.as_ref().unwrap().target.clone();
-        apply_mock_cmd(&mut shared, &Cmd::BasicDpi { target: target.clone(), dpi: 2400 }, None);
-        apply_mock_cmd(&mut shared, &Cmd::BasicPollingRate { target, hz: 500 }, None);
+        apply_mock_cmd(&mut shared, &Cmd::BasicDpi { target: target.clone(), dpi: 2400 });
+        apply_mock_cmd(&mut shared, &Cmd::BasicPollingRate { target, hz: 500 });
         shared.replace_mock_readings(vec![mouse, other]);
         let basic = shared.devices["mock-mouse"].basic.as_ref().unwrap();
         assert_eq!(basic.dpi.current, Some(2400));
@@ -5982,14 +5977,100 @@ mod backend_tests {
         };
         let mut shared = Shared::new(Settings::default());
         shared.replace_mock_readings(vec![mouse.clone()]);
+        shared.active_key = Some("mock-rog".into());
         assert!(shared.devices["mock-rog"].basic.is_none());
         assert!(shared.devices["mock-rog"].state.is_some());
-        apply_mock_cmd(&mut shared, &Cmd::Dpi { stage: 2, dpi: 2400, rgb: None }, None);
-        apply_mock_cmd(&mut shared, &Cmd::Poll(500), None);
+        apply_mock_cmd(&mut shared, &Cmd::Dpi { stage: 2, dpi: 2400, rgb: None });
+        apply_mock_cmd(&mut shared, &Cmd::Poll(500));
         shared.replace_mock_readings(vec![mouse]);
         let device_state = shared.devices["mock-rog"].state.as_ref().unwrap();
-        assert_eq!(device_state.enc[2], proto::encode_dpi(2400));
+        assert_eq!(device_state.enc[1], proto::encode_dpi(2400));
         assert_eq!(device_state.poll_code, proto::poll_code_of(500).unwrap());
+    }
+
+    #[test]
+    fn mock_tray_stage_switch_updates_only_its_device_without_hardware_work() {
+        let readings = crate::mock::parse("mouse|Logitech G304|88|0\nmouse|Logitech G304|62|1\n");
+        let selected = readings[1].key.clone();
+        let other = readings[0].key.clone();
+        let mut state = Shared::new(Settings::default());
+        state.replace_mock_readings(readings.clone());
+        state.active_key = Some(other.clone());
+        let target = state.devices[&selected].basic.as_ref().unwrap().target.clone();
+        let shared = Arc::new(Mutex::new(state));
+        let signal = Signal::new(60);
+        for index in [2, 0, 3, 1, 2] {
+            let popup = popup_dpi_states(&lock_shared(&shared));
+            let stage = popup[&selected].stages[index];
+            assert!(submit(&shared, &signal, Cmd::BasicDpiStage {
+                target: target.clone(), stage, context: popup[&selected].context.unwrap(),
+            }));
+            let mut state = lock_shared(&shared);
+            state.replace_mock_readings(readings.clone());
+            let popup = popup_dpi_states(&state);
+            assert_eq!(popup[&selected].current, Some(stage.value));
+            assert_eq!(popup[&selected].active, Some(stage.index));
+            assert_eq!(popup[&other].current, Some(800));
+            assert_eq!(state.results.back().unwrap().err, None);
+            assert!(state.results.back().unwrap().ok.is_some());
+            assert!(state.pending.is_empty() && state.source_pending.is_empty());
+            assert!(!state.writes_pending());
+        }
+    }
+
+    #[test]
+    fn mock_rog_switch_and_edit_use_selected_mouse_and_one_based_stages() {
+        let readings = crate::mock::parse("mouse|ROG HARPE ACE|88|0\nmouse|ROG HARPE ACE|62|1\n");
+        let selected = readings[1].key.clone();
+        let other = readings[0].key.clone();
+        let mut state = Shared::new(Settings::default());
+        state.replace_mock_readings(readings.clone());
+        state.active_key = Some(selected.clone());
+        let shared = Arc::new(Mutex::new(state));
+        let signal = Signal::new(60);
+        assert!(submit(&shared, &signal, Cmd::Dpi { stage: 4, dpi: 2400, rgb: None }));
+        assert!(submit(&shared, &signal, Cmd::Stage(4)));
+        let mut state = lock_shared(&shared);
+        state.active_key = Some(other.clone());
+        state.replace_mock_readings(readings);
+        let popup = popup_dpi_states(&state);
+        assert_eq!(popup[&selected].current, Some(2400));
+        assert_eq!(popup[&selected].active, Some(4));
+        assert_eq!(popup[&other].current, Some(800));
+        assert_eq!(popup[&other].stages[3].value, 3200);
+        assert!(state.results.iter().all(|result| result.err.is_none() && result.ok.is_some()));
+        assert!(!state.writes_pending());
+    }
+
+    #[test]
+    fn mock_disconnected_mouse_does_not_report_a_successful_stage_switch() {
+        let readings = crate::mock::parse("mouse|ROG HARPE ACE|88|0|offline\n");
+        let key = readings[0].key.clone();
+        let mut state = Shared::new(Settings::default());
+        state.replace_mock_readings(readings);
+        state.active_key = Some(key.clone());
+        let shared = Arc::new(Mutex::new(state));
+        assert!(submit(&shared, &Signal::new(60), Cmd::Stage(3)));
+        let state = lock_shared(&shared);
+        assert_eq!(state.devices[&key].state.as_ref().unwrap().active_stage, 2);
+        assert!(state.results.back().unwrap().err.is_some());
+        assert!(state.results.back().unwrap().ok.is_none());
+        assert!(!state.writes_pending());
+    }
+
+    #[test]
+    fn mock_commands_respect_store_update_preparation() {
+        let readings = crate::mock::parse("mouse|Logitech G304|88|0\n");
+        let key = readings[0].key.clone();
+        let mut state = Shared::new(Settings::default());
+        state.replace_mock_readings(readings);
+        state.store_update_pending = true;
+        let target = state.devices[&key].basic.as_ref().unwrap().target.clone();
+        let shared = Arc::new(Mutex::new(state));
+        assert!(!submit(&shared, &Signal::new(60), Cmd::BasicDpi { target, dpi: 1600 }));
+        let state = lock_shared(&shared);
+        assert_eq!(state.devices[&key].basic.as_ref().unwrap().dpi.current, Some(800));
+        assert!(state.results.is_empty());
     }
 
     #[test]
