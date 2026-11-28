@@ -13,6 +13,7 @@ const RATES: [(u8, u16); 7] = [(8, 125), (4, 250), (2, 500), (1, 1000),
 fn control(i: &HidInterface) -> bool {
     matches!(i.vendor_id, 0x3554 | 0x373b) && i.usage_page == 0xff02 && i.usage == 2
         && i.input_len == 17 && i.output_len == 17
+        && (i.vendor_id, i.product_id) != (0x3554, 0xf508)
 }
 
 fn power_only(i: &HidInterface) -> bool {
@@ -510,6 +511,21 @@ fn with_session(target: &Target, f: impl FnOnce(&mut Session<DeviceChannel>) -> 
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn pulsar_receiver_is_reserved_for_its_dedicated_backend() {
+        let mut candidate = interface();
+        candidate.vendor_id = 0x3554;
+        candidate.product_id = 0xf508;
+        assert!(!control(&candidate));
+        let target = Target::new(BackendId::CompX, &candidate, 0);
+        assert!(with_session(&target, |_| panic!("must not open Pulsar as CompX")).is_err());
+        for product_id in [0xf503, 0xf506, 0xfb26, 0xfb3e, 0xfb56, 0xfb57, 0xf58a] {
+            candidate.product_id = product_id;
+            assert!(control(&candidate));
+        }
+    }
+
     struct Reports {
         id: [u8;2], profile: u8, memory: BTreeMap<u16,u8>,
         writes: Vec<(u16,Vec<u8>)>, ack: bool, accept: bool,

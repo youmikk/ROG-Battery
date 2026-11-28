@@ -70,6 +70,7 @@ pub mod xiberia;
 pub mod thunderobot;
 pub mod akg;
 pub mod langtu;
+pub mod pulsar;
 
 pub use crate::device::{Battery, BatteryLevel, Dpi};
 use crate::{device::DeviceFamily, hid::HidInterface, win32::HidApi};
@@ -139,9 +140,10 @@ pub enum BackendId {
     Thunderobot,
     Akg,
     LangtuT98,
+    Pulsar,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 62] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 63] = [
     BackendId::Logitech, BackendId::LogitechHeadset, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
@@ -151,7 +153,7 @@ pub const ADDITIONAL_BACKENDS: [BackendId; 62] = [
     BackendId::AtkHoltek, BackendId::FifineHt6, BackendId::MchoseK87s,
     BackendId::Lingbao, BackendId::AulaF108,
     BackendId::RapooMt560, BackendId::MchoseR9, BackendId::AulaV9Pro,
-    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::Akg, BackendId::LangtuT98, BackendId::StandardHid,
+    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::Akg, BackendId::LangtuT98, BackendId::Pulsar, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -220,11 +222,12 @@ impl BackendId {
             Self::Thunderobot => "THUNDEROBOT ML903 NearLink Se",
             Self::Akg => "AKG N9 Hybrid",
             Self::LangtuT98 => "LANGTU T98",
+            Self::Pulsar => "Pulsar X2 V2",
         }
     }
 
     pub fn precedes_standard(self) -> bool {
-        if matches!(self, Self::Thunderobot | Self::Akg | Self::LangtuT98) { return true; }
+        if matches!(self, Self::Thunderobot | Self::Akg | Self::LangtuT98 | Self::Pulsar) { return true; }
         if matches!(self, Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
             | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
             | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
@@ -239,7 +242,7 @@ impl BackendId {
 
     pub fn sample_lifetime(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
-            Self::Thunderobot | Self::LangtuT98 => 120,
+            Self::Thunderobot | Self::LangtuT98 | Self::Pulsar => 120,
             Self::Akg => 180,
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
@@ -263,6 +266,7 @@ impl BackendId {
     pub fn publish_interval_limit_ms(self) -> Option<u64> {
         match self {
             Self::Thunderobot => Some(10_000),
+            Self::Pulsar => Some(10_000),
             Self::Akg => Some(60_000),
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
@@ -622,6 +626,7 @@ fn provider(backend: BackendId) -> &'static dyn DeviceBackend {
         BackendId::FifineHt6 => &fifine_ht6::FifineHt6,
         BackendId::Thunderobot => &thunderobot::Thunderobot,
         BackendId::Akg => &akg::Akg,
+        BackendId::Pulsar => &pulsar::Pulsar,
     }
 }
 

@@ -28,6 +28,14 @@ VigilWatt 来源固定为 [`c97adc389b60b0e945a62cddacbaaace39887723`](https://g
 
 [分步骤采集](guided-capture.md) 旁路记录已发现设备的既有通信，并为正常使用、充电、关机、恢复添加时间标记，不主动探测未适配设备。有数据时默认附带到用户提交的反馈，提交前可关闭，公开议题提供下载链接。采集成功不等于协议已经解释正确。
 
+## Pulsar X2 V2
+
+来源：VigilWatt 固定提交 `c97adc389b60b0e945a62cddacbaaace39887723` 的 [Pulsar 硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/pulsar.md)、`PulsarCodec.cs`、`PulsarPlugin.cs`、`PulsarCodecTests.cs`；交叉核对 [python-pulsar-mouse-tool `587f3a996a32aaea0f40e671756808f2f37e7fe2`](https://github.com/andrewrabert/python-pulsar-mouse-tool/blob/587f3a996a32aaea0f40e671756808f2f37e7fe2/pulsar.py) 的接口、POWER 字段及校验公式。仅使用后者的协议事实，不移植设置实现。
+
+仅允许 `3554:F508 / MI_01/Col05 / FF02:0002`、双向唯一 `08/17`。STATUS `08 03 00…4A` 与 POWER `08 04 00…49` 均走中断 OUT；末字节等于 `55 - sum(bytes[0..16])` 的低字节。STATUS byte6 只接受 0/1，POWER byte6 为 0–100，byte7 只将 0/1 解释为放电/充电，其余未知；byte8/9 为大端毫伏，0/FFFF 不发布电压。请求回显不产生电量或离线状态。
+
+完整上游记录：离线 STATUS `080300000001006506710000000000006D`；20% 放电、3570 mV POWER `08040000000214000DF200000000000034`。在线、其他百分比、充电及并发场景由这些记录改写并重算校验，属于合成测试。每轮 STATUS→POWER→STATUS，末次断开则丢弃电量；整轮协议等待预算 3.2 秒，单次 1.2 秒，句柄打开、排空和取消收尾不作硬实时保证。复用实例通道锁、枚举缓存和采集日志，不增加常驻线程。协议没有事务号，无法排除跨进程迟到回复；同型号双机、休眠缓存、真实 0%、实际描述符与厂商软件共存待实机验证。
+
 ## 高斯 GANSS GS3104T-Pro
 
 来源为 MIT 许可的 VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`：[GANSS 硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/ganss.md)、[解析器](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/src/VigilWatt.Core/Plugins/Ganss/GanssCodec.cs)。上游 luze258 在 PR #15 提供官方软件捕获，维护者未复测。精确接收器产品串另由 Linux [提交说明 `0eda44edbc17d4f821690d1dc7765f14a28e4550`](https://github.com/torvalds/linux/commit/0eda44edbc17d4f821690d1dc7765f14a28e4550) 交叉确认；只使用身份事实，没有移植该驱动实现。

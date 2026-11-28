@@ -6683,6 +6683,56 @@ mod backend_tests {
     }
 
     #[test]
+    fn pulsar_samples_expire_independently_and_recover_after_disconnect() {
+        let backend = BackendId::Pulsar;
+        let now = std::time::Instant::now();
+        let mut shared = Shared::new(Settings::default());
+        let mut first = snapshot(backend, "pulsar-first", 20);
+        let mut second = snapshot(backend, "pulsar-second", 80);
+        let mut other = snapshot(BackendId::Logitech, "other-mouse", 55);
+        for sample in [&mut first, &mut second, &mut other] { sample.battery_at = Some(now); }
+        merge_additional_at(&mut shared, backend, vec![first.clone(), second.clone()].into(), now);
+        merge_additional_at(&mut shared, BackendId::Logitech, vec![other].into(), now);
+        let poll = |snapshots, present| crate::backends::Poll {
+            snapshots, present_channels: Some(if present {
+                ["pulsar-first".into(), "pulsar-second".into()].into_iter().collect()
+            } else { ["pulsar-second".into()].into_iter().collect() }), ..Default::default()
+        };
+        let next = now + Duration::from_secs(10);
+        second.battery_at = Some(next);
+        second.battery.as_mut().unwrap().charging = Some(true);
+        merge_additional_at(&mut shared, backend, poll(vec![second.clone()], true), next);
+        assert_eq!(shared.devices["pulsar-first"].basic_status.as_ref().unwrap().measured_at, Some(now));
+        assert_eq!(shared.devices["pulsar-first"].reading.battery_text(true), "20%");
+        assert_eq!(shared.devices["other-mouse"].reading.battery_text(true), "55%");
+        let expired = now + backend.sample_lifetime();
+        second.battery_at = Some(expired);
+        merge_additional_at(&mut shared, backend, poll(vec![second.clone()], true), expired);
+        shared.expire_readings_at(expired);
+        assert!(shared.devices["pulsar-first"].reading.connected);
+        assert_eq!(shared.devices["pulsar-first"].reading.battery_text(true), "—");
+        assert_eq!(shared.devices["pulsar-second"].reading.battery_text(true), "80%");
+        assert!(taskbar_strip_content(&shared.readings, &shared.cfg).unwrap().items.iter()
+            .any(|item| item.charging && item.level.is_some_and(|level| level.label(true) == "80%")));
+        first.connected = false;
+        first.battery = None;
+        first.battery_at = None;
+        first.battery_unavailable = true;
+        merge_additional_at(&mut shared, backend, poll(vec![first], true), expired);
+        assert!(!shared.devices["pulsar-first"].reading.connected);
+        assert!(shared.devices["pulsar-second"].reading.connected);
+        let woke = expired + Duration::from_secs(1);
+        let mut first = snapshot(backend, "pulsar-first", 19);
+        first.battery_at = Some(woke);
+        merge_additional_at(&mut shared, backend, poll(vec![first], true), woke);
+        assert!(shared.devices["pulsar-first"].reading.connected);
+        assert_eq!(shared.devices["pulsar-first"].reading.battery_text(true), "19%");
+        merge_additional_at(&mut shared, backend, poll(vec![second], false), woke);
+        assert!(!shared.devices["pulsar-first"].reading.connected);
+        assert!(shared.devices["pulsar-second"].reading.connected);
+    }
+
+    #[test]
     fn headset_query_timeouts_expire_and_explicit_offline_clears_before_wake() {
         for backend in [BackendId::Inzone, BackendId::HyperX] {
         let now = std::time::Instant::now();

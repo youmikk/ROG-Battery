@@ -11,6 +11,8 @@ LANGTU T98 protocol research and reconstructed battery prefixes refer to VigilWa
 
 GANSS GS3104T-Pro protocol research and the recorded 97% regression fixture refer to VigilWatt's Ganss module and hardware documentation, credited upstream to luze258 (PR #15). The local adapter extends the existing independently implemented AULA status transport.
 
+Pulsar X2 V2 protocol research and recorded STATUS/POWER fixtures refer to VigilWatt's Pulsar module, tests and hardware documentation. The Rust transport, discovery and lifecycle integration are independently maintained.
+
 MIT License
 
 Copyright (c) 2026 evren

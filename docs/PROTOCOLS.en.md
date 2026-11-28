@@ -28,6 +28,14 @@ This section covers selected protocols; the full device scope is in [compatibili
 4. Validate identical devices, mixed brands, unplug/reconnect, sleep and official-software coexistence on hardware.
 5. Before enabling Betop, obtain wireless collection descriptors, complete power-off/on captures and reliable XInput linkage. Do not infer slots from enumeration order, model or battery level, or suppress unrelated controllers.
 
+## Pulsar X2 V2
+
+Sources: VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`, `docs/hardware/brands/pulsar.md`, `PulsarCodec.cs`, `PulsarPlugin.cs` and `PulsarCodecTests.cs`. Interface, POWER fields and checksum were cross-checked against `andrewrabert/python-pulsar-mouse-tool` revision `587f3a996a32aaea0f40e671756808f2f37e7fe2`, `pulsar.py`; its settings implementation was not ported.
+
+Admission requires `3554:F508 / MI_01/Col05 / FF02:0002` and sole report `08/17` in both directions. Interrupt OUT requests are STATUS `08 03 00…4A` and POWER `08 04 00…49`. The final byte equals the low byte of `55 - sum(bytes[0..16])`. STATUS byte6 accepts only 0/1. POWER byte6 accepts 0–100; byte7 maps only 0/1 to discharging/charging, otherwise unknown. Bytes8/9 encode big-endian millivolts; 0/FFFF voltage is omitted. Request echoes cannot become battery or disconnection evidence.
+
+Complete upstream captures are offline STATUS `080300000001006506710000000000006D` and 20%, discharging, 3570 mV POWER `08040000000214000DF200000000000034`. Online, other levels, charging and concurrency vectors are modified synthetic cases. Each read follows STATUS→POWER→STATUS and discards battery on final disconnect. Protocol wait budget is 3.2 seconds, at most 1.2 seconds per exchange; handle opening, draining and cancellation are not hard real-time guarantees. Existing instance locks, enumeration cache and capture logging are reused without persistent adapter threads. No transaction ID excludes delayed cross-process replies. Actual descriptors, identical receivers, sleep caches, true zero and vendor-software coexistence require hardware validation.
+
 ## GANSS GS3104T-Pro
 
 MIT-licensed VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`, `docs/hardware/brands/ganss.md` and `GanssCodec.cs`, supplies the protocol and luze258's PR #15 capture. Linux commit message `0eda44edbc17d4f821690d1dc7765f14a28e4550` independently identifies receiver product string `GS3104T-PRO 2.4G`. No Linux driver implementation was ported.

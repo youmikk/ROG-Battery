@@ -4,6 +4,14 @@
 
 Upstream records, validation limits and admission criteria are in [Adaptation evidence and validation](PROTOCOLS.en.md#adaptation-evidence-and-validation). Implementation, synthetic tests, upstream hardware observations and this project's hardware validation are distinct evidence levels.
 
+## Pulsar X2 V2
+
+Adds a dedicated percentage, charging and voltage path for the `3554:F508` 1 kHz receiver, replacing generic CompX probing. It requires `MI_01/Col05 / FF02:0002`, 17-byte input/output and descriptor-proven sole report `08` in both directions. This adapter does not extend wired `F507`, 4 kHz `F509` or DPI settings. The USB product name is preserved when available.
+
+Discovery reads metadata only. Background reads check connection before and after power, validate complete replies and checksums, and reject request echoes. Explicit disconnect clears the current battery; timeouts neither imply disconnect nor renew samples. Samples expire after 120 seconds, publication is capped at 10 seconds, and identical receivers retain separate identities.
+
+Validation covers the upstream complete 20% / 3570 mV capture, synthetic corruption, zero, unknown charge flags and multi-device lifecycle cases. Local hardware, descriptors, charging, sleep, low battery and official-driver coexistence remain unverified. See [protocol evidence](PROTOCOLS.en.md#pulsar-x2-v2).
+
 ## GANSS GS3104T-Pro
 
 Matches the receiver with exact product string `GS3104T-PRO 2.4G`: `05AC:024F / MI_03 / FF60:0061`, 33-byte input/output and sole report ID 0. It shares the established status query with the original AULA F108 Pro; GANSS separately checks the response sum and accepts 2–100%. Charging remains unknown. Same-model receivers retain separate instance-path identities.
