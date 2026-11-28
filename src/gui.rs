@@ -6818,6 +6818,34 @@ mod backend_tests {
     }
 
     #[test]
+    fn batch_query_adapters_preserve_timestamps_and_expire_independently() {
+        for backend in [BackendId::AulaL9, BackendId::MchoseA5, BackendId::RazerKraken] {
+            assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()),60000);
+            let now=std::time::Instant::now();let mut shared=Shared::new(Settings::default());
+            let mut first=snapshot(backend,"batch-first",63);let mut second=snapshot(backend,"batch-second",80);
+            for s in [&mut first,&mut second] {s.battery_at=Some(now);s.battery.as_mut().unwrap().charging=Some(true);
+                s.target.family=if backend==BackendId::RazerKraken {DeviceFamily::Headset} else {DeviceFamily::Mouse};}
+            let present=|snapshots|crate::backends::Poll {snapshots,
+                present_channels:Some(["batch-first".into(),"batch-second".into()].into_iter().collect()),..Default::default()};
+            // Kraken is first published on its later charge round, retaining the POWER timestamp.
+            let published=if backend==BackendId::RazerKraken {now+Duration::from_secs(60)} else {now};
+            merge_additional_at(&mut shared,backend,present(vec![first.clone(),second.clone()]),published);
+            let cached=published+Duration::from_secs(10);
+            merge_additional_at(&mut shared,backend,present(vec![first.clone()]),cached);
+            assert_eq!(shared.devices["batch-first"].basic_status.as_ref().unwrap().measured_at,Some(now));
+            let expired=now+backend.sample_lifetime();second.battery_at=Some(expired);
+            merge_additional_at(&mut shared,backend,present(vec![second]),expired);shared.expire_readings_at(expired);
+            assert_eq!(shared.devices["batch-first"].reading.battery_text(true),"—");
+            assert!(!shared.devices["batch-first"].reading.is_charging());
+            assert_eq!(shared.devices["batch-second"].reading.battery_text(true),"80%");
+            first.battery_at=Some(expired+Duration::from_secs(1));first.battery.as_mut().unwrap().charging=None;
+            first.battery.as_mut().unwrap().percent=Some(0);
+            merge_additional_at(&mut shared,backend,present(vec![first]),expired+Duration::from_secs(1));
+            assert_eq!(shared.devices["batch-first"].reading.battery_text(true),"0%");assert!(!shared.devices["batch-first"].reading.is_charging());
+        }
+    }
+
+    #[test]
     fn aula_g9_placeholder_battery_swap_and_silence_remain_isolated() {
         let backend = BackendId::AulaG9;
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 2000);

@@ -31,6 +31,8 @@ AULA L9 Ultra protocol research and reconstructed status fields refer to VigilWa
 
 MCHOSE A5 V2 Ultra protocol research and the published 100% reply vector refer to VigilWatt’s MchoseA5Codec, MchoseMouseProtocol, codec tests and MCHOSE hardware notes, credited upstream to kaniu. The Rust exact-length transfer, notification gating and lifecycle integration are independently maintained.
 
+Razer Kraken V4 protocol research and complete 63% battery / not-charging replies refer to VigilWatt’s RazerKraken module, codec tests and device notes, credited upstream to kaniu. The Rust alternating query scheduler pairs samples conservatively and preserves the battery measurement time.
+
 MIT License
 
 Copyright (c) 2026 evren

@@ -674,3 +674,9 @@ Usage ID and full input/output capacities are not established upstream. Runtime 
 Supports receiver`3837:100C / FF01:0001` for battery/charging through a separate21-byte Feature11 protocol. It does not inherit configuration writes from other MCHOSE mice.
 
 GET Feature11 is gated by a Report13/F9 notification. Transfers are exactly21 bytes, not the65-byte collection maximum; runtime proof verifies Feature11 size21 and sole input Report13. At most one SET/GET per round, queries at least60 seconds apart and samples expire after120 seconds. The upstream100% discharging vector is22 bytes, one trailing FF beyond its documented transfer size; tests preserve that vector and validate the first21 bytes. Other boundary/transport cases are synthetic. Actual descriptors, notification timing, wake recovery and M HUB coexistence await local hardware acceptance.
+
+## Razer Kraken V4
+
+Supports receiver`1532:056C / FF14:0001`,64-byte bidirectional Report02 for battery/charging. Separate from91-byte Razer Feature and other headset protocols, without settings writes.
+
+The receiver cannot answer two immediate queries, so commands21/2A alternate at least60 seconds apart. A valid battery/charge pair is required for publication; initial display waits roughly one extra round. Paired results retain the battery timestamp and expire after180 seconds; charge replies never renew old percentages. Complete upstream63% discharging frames are replayed; actual descriptors, sleep/full battery, replug and Synapse coexistence await hardware acceptance.
