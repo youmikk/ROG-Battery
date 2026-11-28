@@ -23,6 +23,8 @@ DELUX M900 Pro protocol research and the contributor-recorded 89% discharging / 
 
 HECATE Wireless Receiver (35BB:D3FB) protocol research and complete STATUS / 50% POWER fixtures refer to VigilWatt’s HecateWireless module, HecateWirelessFrameTests, PulsarCodec and HECATE hardware notes, credited upstream to 22469. The Rust transport, admission checks and lifecycle integration are independently maintained; charging semantics remain unknown and all boundary/interface fixtures are synthetic.
 
+HECATE G5M Pro (35BB:D00B) protocol research and reconstructed status/heartbeat prefixes refer to VigilWatt’s Hecate module, codec tests and HECATE hardware notes, credited upstream to xliu. The Rust adapter and per-receiver query scheduling are independently maintained; zero-filled fixtures are reconstructions, not complete recorded captures.
+
 MIT License
 
 Copyright (c) 2026 evren

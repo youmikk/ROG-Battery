@@ -76,6 +76,7 @@ pub mod inphic_in9;
 pub mod mojhon;
 pub mod delux;
 pub mod hecate_wireless;
+pub mod hecate_g5m;
 
 pub use crate::device::{Battery, BatteryLevel, Dpi};
 use crate::{device::DeviceFamily, hid::HidInterface, win32::HidApi};
@@ -151,9 +152,10 @@ pub enum BackendId {
     Mojhon,
     Delux,
     HecateWireless,
+    HecateG5m,
 }
 
-pub const ADDITIONAL_BACKENDS: [BackendId; 68] = [
+pub const ADDITIONAL_BACKENDS: [BackendId; 69] = [
     BackendId::Logitech, BackendId::LogitechHeadset, BackendId::Rapoo, BackendId::Vgn, BackendId::VgnBeiying, BackendId::VgnDragonfly3, BackendId::VgnKeyboard, BackendId::CompX, BackendId::Razer,
     BackendId::PageCommand, BackendId::Headset, BackendId::Keyboard20, BackendId::MchoseQhw, BackendId::MchoseMouse, BackendId::MchoseGlw, BackendId::Edifier, BackendId::EweadnS9, BackendId::EweadnS9Pro, BackendId::Dareu, BackendId::GearHub, BackendId::G3m, BackendId::Cherry, BackendId::Lofree, BackendId::Nova,
     BackendId::EightBitDo, BackendId::Flydigi, BackendId::GameSir, BackendId::Aula, BackendId::Inzone, BackendId::HyperX, BackendId::DualSense, BackendId::XInput, BackendId::Bluetooth,
@@ -163,7 +165,7 @@ pub const ADDITIONAL_BACKENDS: [BackendId; 68] = [
     BackendId::AtkHoltek, BackendId::FifineHt6, BackendId::MchoseK87s,
     BackendId::Lingbao, BackendId::AulaF108,
     BackendId::RapooMt560, BackendId::MchoseR9, BackendId::AulaV9Pro,
-    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::Akg, BackendId::LangtuT98, BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9, BackendId::Mojhon, BackendId::Delux, BackendId::HecateWireless, BackendId::StandardHid,
+    BackendId::DareuEm901, BackendId::AulaHfdMechanical, BackendId::Thunderobot, BackendId::Akg, BackendId::LangtuT98, BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9, BackendId::Mojhon, BackendId::Delux, BackendId::HecateWireless, BackendId::HecateG5m, BackendId::StandardHid,
 ];
 
 impl BackendId {
@@ -238,11 +240,12 @@ impl BackendId {
             Self::Mojhon => "MOJHON GALE2",
             Self::Delux => "DELUX M900 Pro",
             Self::HecateWireless => "HECATE Wireless Receiver",
+            Self::HecateG5m => "HECATE G5M Pro",
         }
     }
 
     pub fn precedes_standard(self) -> bool {
-        if matches!(self, Self::Thunderobot | Self::Akg | Self::LangtuT98 | Self::Pulsar | Self::Inphic | Self::InphicIn9 | Self::Mojhon | Self::Delux | Self::HecateWireless) { return true; }
+        if matches!(self, Self::Thunderobot | Self::Akg | Self::LangtuT98 | Self::Pulsar | Self::Inphic | Self::InphicIn9 | Self::Mojhon | Self::Delux | Self::HecateWireless | Self::HecateG5m) { return true; }
         if matches!(self, Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
             | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
             | Self::AtkNano | Self::EweadnX23 | Self::EweadnX87 | Self::Xiberia
@@ -257,7 +260,7 @@ impl BackendId {
 
     pub fn sample_lifetime(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
-            Self::Thunderobot | Self::LangtuT98 | Self::Pulsar | Self::HecateWireless => 120,
+            Self::Thunderobot | Self::LangtuT98 | Self::Pulsar | Self::HecateWireless | Self::HecateG5m => 120,
             Self::Akg => 180,
             Self::Inphic => inphic::SAMPLE_LIFETIME.as_secs(),
             Self::InphicIn9 => inphic_in9::SAMPLE_LIFETIME.as_secs(),
@@ -286,7 +289,7 @@ impl BackendId {
         match self {
             Self::Thunderobot => Some(10_000),
             Self::Pulsar | Self::Inphic | Self::InphicIn9 | Self::Mojhon | Self::Delux | Self::HecateWireless => Some(10_000),
-            Self::Akg => Some(60_000),
+            Self::Akg | Self::HecateG5m => Some(60_000),
             Self::MchoseK99 | Self::Moondrop | Self::RapooLegacy
                 | Self::RapooOffice | Self::AulaHfd | Self::MchoseMc | Self::AulaF99
                 | Self::AtkNano | Self::EweadnX87 | Self::Xiberia
@@ -651,6 +654,7 @@ fn provider(backend: BackendId) -> &'static dyn DeviceBackend {
         BackendId::Mojhon => &mojhon::Mojhon,
         BackendId::Delux => &delux::Delux,
         BackendId::HecateWireless => &hecate_wireless::HecateWireless,
+        BackendId::HecateG5m => &hecate_g5m::HecateG5m,
     }
 }
 

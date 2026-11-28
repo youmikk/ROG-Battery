@@ -6765,8 +6765,9 @@ mod backend_tests {
 
     #[test]
     fn mouse_adapter_samples_expire_independently_and_recover_after_disconnect() {
-        for backend in [BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9, BackendId::Delux, BackendId::HecateWireless] {
-        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10_000);
+        for backend in [BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9, BackendId::Delux, BackendId::HecateWireless, BackendId::HecateG5m] {
+        let interval = if backend == BackendId::HecateG5m { 60_000 } else { 10_000 };
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), interval);
         let now = std::time::Instant::now();
         let mut shared = Shared::new(Settings::default());
         let mut first = snapshot(backend, "pulsar-first", 20);
@@ -6814,6 +6815,49 @@ mod backend_tests {
         assert!(!shared.devices["pulsar-first"].reading.connected);
         assert!(shared.devices["pulsar-second"].reading.connected);
         }
+    }
+
+    #[test]
+    fn hecate_g5m_cached_samples_and_unknown_flags_do_not_extend_charging() {
+        let backend = BackendId::HecateG5m;
+        let now = std::time::Instant::now();
+        let mut shared = Shared::new(Settings::default());
+        let mut sample = snapshot(backend, "hecate-g5m", 22);
+        sample.battery_at = Some(now);
+        sample.battery.as_mut().unwrap().charging = Some(true);
+        let present = |snapshots| crate::backends::Poll { snapshots,
+            present_channels: Some(["hecate-g5m".into()].into_iter().collect()), ..Default::default() };
+        merge_additional_at(&mut shared, backend, present(vec![sample.clone()]), now);
+        for seconds in [2, 10, 59] {
+            let later = now + Duration::from_secs(seconds);
+            merge_additional_at(&mut shared, backend, present(vec![sample.clone()]), later);
+            assert_eq!(shared.devices["hecate-g5m"].basic_status.as_ref().unwrap().measured_at, Some(now));
+            assert!(shared.readings[0].is_charging());
+        }
+        for seconds in [60, 119, 120] {
+            let later = now + Duration::from_secs(seconds);
+            merge_additional_at(&mut shared, backend, present(Vec::new()), later);
+            shared.expire_readings_at(later);
+            assert_eq!(shared.devices["hecate-g5m"].basic_status.as_ref().unwrap().measured_at, Some(now));
+            assert_eq!(shared.readings[0].battery_text(true), if seconds < 120 { "22%" } else { "—" });
+        }
+        assert!(!shared.readings[0].is_charging());
+        let woke = now + Duration::from_secs(180);
+        sample.battery_at = Some(woke);
+        sample.battery.as_mut().unwrap().percent = Some(31);
+        sample.battery.as_mut().unwrap().charging = None;
+        merge_additional_at(&mut shared, backend, present(vec![sample.clone()]), woke);
+        assert_eq!(shared.readings[0].battery_text(true), "31%");
+        assert_eq!(shared.readings[0].quality, crate::device::ReadingQuality::Live);
+        assert!(!shared.readings[0].is_charging());
+        assert_eq!(shared.devices["hecate-g5m"].basic.as_ref().unwrap().battery.as_ref().unwrap().charging, None);
+        let full = woke + Duration::from_secs(60);
+        sample.battery_at = Some(full);
+        sample.battery.as_mut().unwrap().percent = Some(100);
+        sample.battery.as_mut().unwrap().charging = Some(false);
+        merge_additional_at(&mut shared, backend, present(vec![sample]), full);
+        assert_eq!(shared.readings[0].battery_text(true), "100%");
+        assert!(!shared.readings[0].is_charging());
     }
 
     #[test]

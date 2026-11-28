@@ -648,3 +648,10 @@ Evidence is pinned VigilWatt contributor documentation and the recorded 89% disc
 - Reads percentage, voltage and connection state. Charging remains unknown; no DPI, polling-rate or configuration writes. Online status is checked before and after power; failed queries do not refresh samples, which expire after 120 seconds.
 - Upstream observed this receiver with a G3M Pro upgraded model, but D3FB is not proven exclusive to it. The UI retains the receiver product name without claiming an exact mouse identity.
 - Complete public STATUS / 50%, 3848 mV POWER fixtures and synthetic boundary, multi-receiver, disconnect and expiry regressions are covered. No local hardware acceptance yet: full descriptors, firmware variants, actual zero, charging, sleep caching and HECATE Connect coexistence remain unverified. See [protocol notes](PROTOCOLS.en.md#hecate-wireless-receiver-35bbd3fb).
+
+## HECATE G5M Pro (35BB:D00B)
+
+- Supports the 2.4 GHz receiver `35BB:D00B`, usage `FF1C:0092`, 64-byte input/output and Feature0, with sole Report04 required in both directions at runtime. Matching is separate from the older G3M PRO and D3FB receiver.
+- Reads 1–100% battery and known charging flags, with no voltage, DPI or polling-rate settings. Zero cannot be reliably separated from wake transients/request echoes, so 0% is not published. A full flag means charging has stopped only at 100%; unknown or inconsistent flags remain unknown.
+- Queries are at least 60 seconds apart per receiver, with one status request per round. Heartbeats do not prove mouse connectivity; failed rounds do not refresh samples, which expire after 120 seconds. Successful queries restore the reading. Channel changes may wait for the next query.
+- Upstream documents charging20→22%, cable transitions at31%, full100% comparisons with the official client and successful queries with Connect closed. Local tests reconstruct documented prefixes and use synthetic cases; local hardware acceptance, complete raw frames, actual descriptors, sleep caching, firmware variants and vendor-client coexistence remain unverified. See [protocol notes](PROTOCOLS.en.md#hecate-g5m-pro-35bbd00b).
