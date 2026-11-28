@@ -656,3 +656,24 @@ Documented receiver: 1D57:FA65, usage 000A:0000, input 5/output 0/feature 0. Rec
 The Rust adapter independently implements transport, per-receiver state and lifecycle. Unlike upstream's shared filter and first-probe behavior, it never seeds a percentage from charging or synthesizes a fresh timestamp for held numbers. Initial reads, long gaps and read failures restart an 8-second settling window; no-frame/invalid frames fail without refreshing any sample. A valid charging-only or unknown-full frame clears old percentage in the main UI, tray and taskbar without affecting a second receiver. The implementation has no device write path.
 
 Validation: recorded-vector replay plus synthetic transport, identity, ambiguity, multi-device, unplug, charge-transition, stale-state and GUI lifecycle cases. No real-device claim.
+
+## HECATE Wireless Receiver (35BB:D3FB)
+
+Sources are VigilWatt revision `c97adc389b60b0e945a62cddacbaaace39887723`: [HECATE hardware notes section 2](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/hecate.md), `HecateWirelessPlugin.cs`, `HecateWirelessFrameTests.cs` and `PulsarCodec.cs`. Upstream contributor 22469 recorded firmware 0102 interfaces and complete replies. No mouse-model field is known, and charging is unverified; neither the upstream fixed model name nor Pulsar charging semantics is assumed here.
+
+Admission requires `35BB:D3FB / MI_01&Col05 / FF02:0002 / Input17 Output17` and one candidate management collection per receiver interface. Discovery reads metadata/descriptors only; sole Input/Output Report08 is checked before and after transport. A full raw descriptor is not public, so per-report admission still requires local hardware validation.
+
+Only 17-byte STATUS03 / POWER04 queries are sent, with zero payload and checksum 0x55 minus the first 16 bytes, modulo 256. Complete recorded frames:
+
+```text
+STATUS request 08 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 4A
+STATUS reply   08 03 00 00 00 01 01 31 AF F9 00 00 00 00 00 00 6F
+POWER request  08 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 49
+POWER reply    08 04 00 00 00 02 32 00 0F 08 00 00 00 00 00 00 FE
+```
+
+STATUS byte6 accepts offline/online 0/1. POWER byte6 is 0–100%; bytes8/9 contain big-endian millivolts, with 0/FFFF omitted. POWER byte7 always leaves charging unknown; STATUS bytes7–9 are uninterpreted. Replies require exact length, matching command, checksum, valid values and rejection of request echoes.
+
+Each round runs STATUS→POWER→STATUS and timestamps the POWER result. Explicit offline clears the sample; any timeout or invalid reply prevents publication. Per-transfer limit is 1200ms within a 3200ms round budget; transport drains stale input first. Enumeration, handle opens and kernel cancellation completion are not hard real-time guarantees. Per-instance channel locks isolate receivers; removal never falls back to an identical neighbor. Scheduling has a 10-second publication interval cap and samples expire after 120 seconds. No Feature, DPI, polling-rate or identity commands are sent.
+
+The two replies above are complete public captures; zero/full, unknown charge flags, corruption, disconnect, timeout and multiple-device vectors are synthetic. Local hardware acceptance, power-off caching, wake behavior, firmware variants, actual descriptors, charging semantics and vendor-client coexistence remain unverified.

@@ -6765,7 +6765,7 @@ mod backend_tests {
 
     #[test]
     fn mouse_adapter_samples_expire_independently_and_recover_after_disconnect() {
-        for backend in [BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9, BackendId::Delux] {
+        for backend in [BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9, BackendId::Delux, BackendId::HecateWireless] {
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10_000);
         let now = std::time::Instant::now();
         let mut shared = Shared::new(Settings::default());
@@ -6782,7 +6782,8 @@ mod backend_tests {
         };
         let next = now + Duration::from_secs(10);
         second.battery_at = Some(next);
-        second.battery.as_mut().unwrap().charging = Some(true);
+        let charge_known = backend != BackendId::HecateWireless;
+        second.battery.as_mut().unwrap().charging = charge_known.then_some(true);
         merge_additional_at(&mut shared, backend, poll(vec![second.clone()], true), next);
         assert_eq!(shared.devices["pulsar-first"].basic_status.as_ref().unwrap().measured_at, Some(now));
         assert_eq!(shared.devices["pulsar-first"].reading.battery_text(true), "20%");
@@ -6795,7 +6796,7 @@ mod backend_tests {
         assert_eq!(shared.devices["pulsar-first"].reading.battery_text(true), "—");
         assert_eq!(shared.devices["pulsar-second"].reading.battery_text(true), "80%");
         assert!(taskbar_strip_content(&shared.readings, &shared.cfg).unwrap().items.iter()
-            .any(|item| item.charging && item.level.is_some_and(|level| level.label(true) == "80%")));
+            .any(|item| item.charging == charge_known && item.level.is_some_and(|level| level.label(true) == "80%")));
         first.connected = false;
         first.battery = None;
         first.battery_at = None;

@@ -21,6 +21,8 @@ MOJHON GALE2 protocol research and recorded identity/battery fixtures refer to V
 
 DELUX M900 Pro protocol research and the contributor-recorded 89% discharging / charging vectors refer to VigilWatt’s Delux module, tests and hardware documentation. The Rust read-only transport and per-receiver filter are independently maintained; all other vectors and HID paths are synthetic.
 
+HECATE Wireless Receiver (35BB:D3FB) protocol research and complete STATUS / 50% POWER fixtures refer to VigilWatt’s HecateWireless module, HecateWirelessFrameTests, PulsarCodec and HECATE hardware notes, credited upstream to 22469. The Rust transport, admission checks and lifecycle integration are independently maintained; charging semantics remain unknown and all boundary/interface fixtures are synthetic.
+
 MIT License
 
 Copyright (c) 2026 evren

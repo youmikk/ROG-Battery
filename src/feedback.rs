@@ -285,6 +285,7 @@ pub fn collect_probe() -> Result<String, String> {
             super::backends::BackendId::InphicIn9 => &super::backends::inphic_in9::InphicIn9,
             super::backends::BackendId::Mojhon => &super::backends::mojhon::Mojhon,
             super::backends::BackendId::Delux => &super::backends::delux::Delux,
+            super::backends::BackendId::HecateWireless => &super::backends::hecate_wireless::HecateWireless,
             super::backends::BackendId::Cherry => &super::backends::cherry::Cherry,
             super::backends::BackendId::Lofree => &super::backends::lofree::Lofree,
             super::backends::BackendId::Nova => &super::backends::steelseries::Nova,
