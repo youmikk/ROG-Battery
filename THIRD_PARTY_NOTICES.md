@@ -27,6 +27,8 @@ HECATE G5M Pro (35BB:D00B) protocol research and reconstructed status/heartbeat 
 
 AULA G9 protocol research and reconstructed status fields refer to VigilWatt’s AulaG9 module, AulaG9L9AndVgnV98Tests and AULA hardware notes, credited upstream to wx2995 (PR #31). The Rust read-only transport and lifecycle integration are independently maintained; zero-filled fixtures are reconstructions, not complete raw captures.
 
+AULA L9 Ultra protocol research and reconstructed status fields refer to VigilWatt’s AulaL9Codec, Aula plugin, AulaG9L9AndVgnV98Tests and AULA hardware notes, credited upstream to wx2995 (PR #31). Local transport and scheduling are independently maintained; fixtures reconstruct documented fields rather than complete raw captures.
+
 MIT License
 
 Copyright (c) 2026 evren

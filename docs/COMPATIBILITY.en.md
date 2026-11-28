@@ -662,3 +662,9 @@ Evidence is pinned VigilWatt contributor documentation and the recorded 89% disc
 - Reads0–100%; flag02 confirms charging and other charge flags remain unknown. FirmwareV0.0.4's zero-level/zero-flag signature means unavailable and clears the old percentage; it does not mean an empty battery or power-off. Large changes after battery replacement are allowed.
 - Each read is limited to1.5 seconds/32 frames, publication interval is capped at2 seconds and samples expire after10 seconds. Silence expires the reading without asserting headset power-off; receiver removal follows enumeration.
 - Sources are contributor wx2995's [PR #31](https://github.com/evren-oct/vigil-watt/pull/31) and pinned protocol notes. Neither the upstream maintainer nor this project has retested the hardware. Tests reconstruct documented fields and use synthetic cases; complete frames, actual descriptors, usage ID, firmware variants, actual zero and vendor-client coexistence remain unverified. See [protocol notes](PROTOCOLS.en.md#aula-g9-headset).
+
+## AULA L9 Ultra
+
+Supports receiver `38A6:28FD` on vendor page`FFA8`, reading percentage and charging. Only the`0B 81` status query is sent; charge flags0/1 mean not charging/charging and other flags remain unknown. No DPI or polling-rate settings. Queries are at least60 seconds apart per receiver; samples expire after120 seconds.
+
+Usage ID and full input/output capacities are not established upstream. Runtime descriptor capacities are used (input19–64, output3–64), requiring sole input Report0A/output Report0B and exact reply length. Upstream supplies a reconstructed32-byte test, not a complete capture/descriptor. Local hardware acceptance, low battery, dock charging, sleep caching, capacity/firmware variants and vendor-client coexistence remain unverified.
