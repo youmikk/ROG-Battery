@@ -6765,7 +6765,7 @@ mod backend_tests {
 
     #[test]
     fn mouse_adapter_samples_expire_independently_and_recover_after_disconnect() {
-        for backend in [BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9] {
+        for backend in [BackendId::Pulsar, BackendId::Inphic, BackendId::InphicIn9, BackendId::Delux] {
         assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10_000);
         let now = std::time::Instant::now();
         let mut shared = Shared::new(Settings::default());
@@ -6952,7 +6952,7 @@ mod backend_tests {
 
     #[test]
     fn fresh_charging_unknown_clears_percentage_and_shows_charge_in_main_and_tray() {
-        for backend in [BackendId::RapooOffice, BackendId::Headset, BackendId::GameSir, BackendId::InphicIn9] {
+        for backend in [BackendId::RapooOffice, BackendId::Headset, BackendId::GameSir, BackendId::InphicIn9, BackendId::Delux] {
             let mut shared = Shared::new(Settings::default());
             let now = std::time::Instant::now();
             let mut sample = snapshot(backend, "charging", 47);
@@ -6974,8 +6974,8 @@ mod backend_tests {
     }
 
     #[test]
-    fn inphic_in9_charge_only_and_unknown_state_clear_numbers_for_one_receiver() {
-        let backend = BackendId::InphicIn9;
+    fn charge_only_and_unknown_state_clear_numbers_for_one_receiver() {
+        for backend in [BackendId::InphicIn9, BackendId::Delux] {
         for had_percentage in [false, true] {
             let now = std::time::Instant::now();
             let mut shared = Shared::new(Settings::default());
@@ -7033,6 +7033,7 @@ mod backend_tests {
             assert!(!shared.devices["in9-first"].reading.is_charging());
             assert_eq!(shared.devices.len(), 3);
             assert!(!crate::backends::has_configuration(backend));
+        }
         }
     }
 

@@ -646,3 +646,13 @@ The full Windows request starts `00 AA 10 len addrLo addrHi 00 last 00`. A 33-by
 Only data byte 17 values of 1–100 are accepted. Data byte 16 (work mode) and byte 18 (charging) lack sufficient model-specific evidence and remain uninterpreted. Sample time is the first information page's receipt time, not completion of later pages. Background publication is capped at thirty seconds and samples expire after 120 seconds. At most three pages, 600 ms / 32 frames per page, and two seconds total are allowed. Original F108 Pro, non-C F108ProV2, F99 MAX and other shared-PID models do not enter this reader. No initialization, calibration, lighting, configuration or firmware command is sent.
 
 Public V9Pro+ and CM610 Pro observations remain separate from synthetic MT560, R9 and HFD keyboard data. None constitutes this project's hardware acceptance or whole-brand compatibility.
+
+## DELUX M900 Pro passive status evidence
+
+Source: [VigilWatt c97adc389b60b0e945a62cddacbaaace39887723](https://github.com/evren-oct/vigil-watt/tree/c97adc389b60b0e945a62cddacbaaace39887723), `docs/hardware/brands/delux.md`, `DeluxCodec.cs`, `DeluxPlugin.cs`, `DockChargeFilter.cs`, `DeluxCodecTests.cs`. MIT attribution is retained in THIRD_PARTY_NOTICES.md.
+
+Documented receiver: 1D57:FA65, usage 000A:0000, input 5/output 0/feature 0. Recorded contributor vectors are `03 30 40 01 59` (89%, discharging) and `03 30 40 03 59` (charging). The latter raw percentage is not trusted during dock charging. Flag 02/full-charge is only a synthetic upstream test and is not treated as confirmed telemetry. No complete HID descriptor or local hardware validation is available; report-ID proof is required at runtime. MI/Col positions in local tests are synthetic and are not imposed on real devices.
+
+The Rust adapter independently implements transport, per-receiver state and lifecycle. Unlike upstream's shared filter and first-probe behavior, it never seeds a percentage from charging or synthesizes a fresh timestamp for held numbers. Initial reads, long gaps and read failures restart an 8-second settling window; no-frame/invalid frames fail without refreshing any sample. A valid charging-only or unknown-full frame clears old percentage in the main UI, tray and taskbar without affecting a second receiver. The implementation has no device write path.
+
+Validation: recorded-vector replay plus synthetic transport, identity, ambiguity, multi-device, unplug, charge-transition, stale-state and GUI lifecycle cases. No real-device claim.

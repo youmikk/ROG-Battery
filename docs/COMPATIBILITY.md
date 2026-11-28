@@ -631,3 +631,13 @@ VGN 目前匹配 V98 Pro V3 的 `258A:024E/024F/027E/027F`，只查询已确认�
 FerrisPulse 等项目列出的其他品牌与型号尚未全部接入 X-Battery。其通用型号目录、共享接收器标识和已验证协议需分别核对，不作为本软件已经兼容的声明。
 
 协议资料：[Solaar](https://github.com/pwr-Solaar/Solaar)、[libratbag](https://github.com/libratbag/libratbag)、[USB HID Usage Tables](https://usb.org/document-library/hid-usage-tables-15)、[雷柏 A HUB](https://hub.rapoo.cn/)、[VGN 网页驱动](https://drive.vgnlab.com.cn/)、[FerrisPulse 协议资料](https://github.com/Ferris-echo/FerrisPulse)。协议逻辑独立实现，未复制驱动或开源项目代码。
+
+## DELUX M900 Pro
+
+新增接收器 `1D57:FA65 / 000A:0000` 的被动电量读取。只接受输入 5 字节、无 Output/Feature 的集合，运行时描述符须证明唯一 Input Report 03；同接口存在歧义集合时不读取。与英菲克 ZHEN 共用 VID/PID，但 usage 与帧头不同，不按 USB 号段混认型号。
+
+只用只读句柄接收完整 `03 30 40 <flag> <percent>`，不查询、不修改 DPI 或回报率。放电标志 01 可返回 0–100%；充电标志 03 只显示充电状态，隐藏可能被固件装饰的百分比。未经真机采集确认的满电标志 02 不显示百分比或充满状态。首次连接、读取失败、长时间静默及离开充电状态后至少等待 8 秒，并收到新的放电帧才恢复数字；静默不续期样本，90 秒过期。
+
+各接收器按 Windows 路径及序列元数据隔离，拔插会丢弃旧过滤状态。后台轮询间隔上限 10 秒，每目标只读等待最多 5 秒或处理 32 帧。相同品牌多个接收器的等待会累加。
+
+来源为固定版本 VigilWatt 的贡献者接口记录与 89% 放电/充电向量，本项目没有 M900 Pro 实机。其上游也提示未本机复测、默认关闭；本项目只按上述受限接口和帧匹配接入，不能声称已实机验收。需验证真实描述符、0%、休眠、底座切换、同型号双设备、与英菲克共存及官方软件共存。M900 Ultra/GH8K 属于已有 CompX 适配，不在本次变更范围。

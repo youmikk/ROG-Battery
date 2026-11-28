@@ -19,6 +19,8 @@ Inphic IN9 protocol research and the complete 81% discharging / charging-placeho
 
 MOJHON GALE2 protocol research and recorded identity/battery fixtures refer to VigilWatt's Mojhon module, hardware documentation and USB capture records. Tests add the documented Windows zero report-ID slot and transfer padding. The Rust adapter and lifecycle integration are independently maintained.
 
+DELUX M900 Pro protocol research and the contributor-recorded 89% discharging / charging vectors refer to VigilWatt’s Delux module, tests and hardware documentation. The Rust read-only transport and per-receiver filter are independently maintained; all other vectors and HID paths are synthetic.
+
 MIT License
 
 Copyright (c) 2026 evren

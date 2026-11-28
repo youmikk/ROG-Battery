@@ -633,3 +633,11 @@ For remote adaptation, run `x-battery.exe device-report --probe`. It performs re
 Other brands and models listed by FerrisPulse and similar projects have not all been integrated into X-Battery. Generic catalogues, shared receiver identifiers and validated protocols require separate checks and are not a statement of compatibility with this app.
 
 Protocol references: [Solaar](https://github.com/pwr-Solaar/Solaar), [libratbag](https://github.com/libratbag/libratbag), [USB HID Usage Tables](https://usb.org/document-library/hid-usage-tables-15), [Rapoo A HUB](https://hub.rapoo.cn/), [VGN web driver](https://drive.vgnlab.com.cn/) and [FerrisPulse protocol research](https://github.com/Ferris-echo/FerrisPulse). The implementation does not copy driver or open source project code.
+
+## DELUX M900 Pro
+
+Adds passive battery reception only for `1D57:FA65 / 000A:0000`, Input5/Output0/Feature0, with a runtime descriptor proving sole input report 03. Ambiguous sibling collections are rejected. The shared VID/PID does not identify Inphic ZHEN: its usage and report prefix differ.
+
+Only read-only handles are opened. Exact `03 30 40 <flag> <percent>` frames are accepted. Flag 01 yields 0–100% when settled; flag 03 exposes charging but no potentially decorated percentage. Unrecorded flag 02 exposes neither full-charge nor percentage. Initial connection, failed reads, long silence and leaving charging require at least 8 seconds and a fresh discharging report. Samples expire after 90 seconds without refresh. State is isolated by Windows path and serial metadata and reset on removal. Reads are bounded to 5 seconds/32 reports per receiver; backend polling interval is capped at 10 seconds. Multiple receivers are read sequentially.
+
+Evidence is pinned VigilWatt contributor documentation and the recorded 89% discharging/charging vectors. No local hardware validation; upstream also notes no maintainer retest and defaults the plugin off. Verify descriptors, 0%, sleep, dock transitions, multiple receivers, Inphic coexistence and official-software coexistence on hardware. Existing M900 Ultra/GH8K CompX support is unchanged.
