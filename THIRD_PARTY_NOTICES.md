@@ -29,6 +29,8 @@ AULA G9 protocol research and reconstructed status fields refer to VigilWatt’s
 
 AULA L9 Ultra protocol research and reconstructed status fields refer to VigilWatt’s AulaL9Codec, Aula plugin, AulaG9L9AndVgnV98Tests and AULA hardware notes, credited upstream to wx2995 (PR #31). Local transport and scheduling are independently maintained; fixtures reconstruct documented fields rather than complete raw captures.
 
+MCHOSE A5 V2 Ultra protocol research and the published 100% reply vector refer to VigilWatt’s MchoseA5Codec, MchoseMouseProtocol, codec tests and MCHOSE hardware notes, credited upstream to kaniu. The Rust exact-length transfer, notification gating and lifecycle integration are independently maintained.
+
 MIT License
 
 Copyright (c) 2026 evren

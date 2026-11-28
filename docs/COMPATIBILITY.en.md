@@ -668,3 +668,9 @@ Evidence is pinned VigilWatt contributor documentation and the recorded 89% disc
 Supports receiver `38A6:28FD` on vendor page`FFA8`, reading percentage and charging. Only the`0B 81` status query is sent; charge flags0/1 mean not charging/charging and other flags remain unknown. No DPI or polling-rate settings. Queries are at least60 seconds apart per receiver; samples expire after120 seconds.
 
 Usage ID and full input/output capacities are not established upstream. Runtime descriptor capacities are used (input19–64, output3–64), requiring sole input Report0A/output Report0B and exact reply length. Upstream supplies a reconstructed32-byte test, not a complete capture/descriptor. Local hardware acceptance, low battery, dock charging, sleep caching, capacity/firmware variants and vendor-client coexistence remain unverified.
+
+## MCHOSE A5 V2 Ultra
+
+Supports receiver`3837:100C / FF01:0001` for battery/charging through a separate21-byte Feature11 protocol. It does not inherit configuration writes from other MCHOSE mice.
+
+GET Feature11 is gated by a Report13/F9 notification. Transfers are exactly21 bytes, not the65-byte collection maximum; runtime proof verifies Feature11 size21 and sole input Report13. At most one SET/GET per round, queries at least60 seconds apart and samples expire after120 seconds. The upstream100% discharging vector is22 bytes, one trailing FF beyond its documented transfer size; tests preserve that vector and validate the first21 bytes. Other boundary/transport cases are synthetic. Actual descriptors, notification timing, wake recovery and M HUB coexistence await local hardware acceptance.
