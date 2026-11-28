@@ -28,6 +28,18 @@ This section covers selected protocols; the full device scope is in [compatibili
 4. Validate identical devices, mixed brands, unplug/reconnect, sleep and official-software coexistence on hardware.
 5. Before enabling Betop, obtain wireless collection descriptors, complete power-off/on captures and reliable XInput linkage. Do not infer slots from enumeration order, model or battery level, or suppress unrelated controllers.
 
+## MOJHON GALE2
+
+Sources are VigilWatt revision `c97adc389b60b0e945a62cddacbaaace39887723`: [Mojhon hardware notes](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/mojhon.md), `MojhonCodec.cs`, `MojhonPlugin.cs` and `captures/mojhon-vendor-frames.jsonl`. Upstream supplies Windows interface/descriptor observations, USBPcap records and charging/discharging comparisons with the official assistant. Local transport and lifecycle integration are independently maintained.
+
+Admission requires `E2B7:122C / MI_02 / FFAB:0001` and sole unnumbered 65-byte input/output reports. Read requests are `00 A5 04 <register> <checksum>`, padded to capacity. Only `E2` identity and `04` battery are queried. The checksum sums the protocol frame excluding its final byte, the Windows zero ID slot and trailing padding. `C4_SERVER` and `C4_DONGLE` are identity/catalog evidence; the generic product name `XBOX 360 For Windows` does not identify the model.
+
+Recorded complete battery frames include `A5 06 04 12 00 C1` (18% discharging), `A5 06 04 24 00 D3` (36% discharging) and `A5 06 04 24 01 D4` (36% charging). The equal-percentage unplug comparison supports flags 0/1; unknown flags do not imply full charge. Tests add the documented Windows ID slot and padding. Boundary, corruption, topology and multi-device fixtures are synthetic.
+
+Identity is checked before and after battery retrieval; a dongle-only identity clears the sample. The round budget is 3.2 seconds, with at most 1.2 seconds per exchange and 32 queued frames or candidate replies. An undrained queue blocks the query. Handle opening, system enumeration and driver cancellation are not hard real-time guarantees; expired results are rejected. Diagnostics distinguish silence, invalid data and a disconnected controller while retaining the existing raw capture path.
+
+Model identity is not a unique serial number. This protocol has no transaction ID, so the surrounding checks cannot exclude delayed replies from other programs or earlier requests. Local hardware, same-path re-enumeration, true zero, official-assistant coexistence and wired/wireless switching remain unverified.
+
 ## Inphic ZHEN
 
 Sources are VigilWatt revision `c97adc389b60b0e945a62cddacbaaace39887723`, `docs/hardware/brands/inphic.md` section1, `InphicCodec.cs` and `InphicPlugin.cs`. Upstream records `1D57:FA65`, product `Inphic KP 8K`, battery collection `FF00:0001`, 5-byte input and report03. The separate `FF01:0002` 64-byte output collection is unused. Complete raw descriptors and definitive MI/Col numbers are unavailable; runtime validation checks report ID, capacity and collection instead of inventing interface numbers.

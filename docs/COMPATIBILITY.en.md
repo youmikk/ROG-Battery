@@ -4,6 +4,14 @@
 
 Upstream records, validation limits and admission criteria are in [Adaptation evidence and validation](PROTOCOLS.en.md#adaptation-evidence-and-validation). Implementation, synthetic tests, upstream hardware observations and this project's hardware validation are distinct evidence levels.
 
+## MOJHON GALE2
+
+Adds the `E2B7:122C / MI_02 / FFAB:0001` vendor interface with 65-byte input/output, no Feature reports, and descriptor-proven sole unnumbered reports. Discovery publishes metadata first. Background reads query `E2`: only `C4_SERVER` authorizes the `04` battery query; `C4_DONGLE` clears the disconnected controller's battery. Identity is checked again before publication. Identical devices retain separate Windows instance identities.
+
+Percentages accept 0–100. Charge flags 0/1 mean discharging/charging; other flags remain unknown. Windows transfers include a leading zero ID slot, and replies must match the frame length, register and sum checksum. Failed reads do not renew samples, which expire after 120 seconds; the polling interval is capped at ten seconds. XInput's wired status is not treated as a full battery. Its slots lack a reliable physical-device mapping and may produce a separate entry without a battery. PID `122D` and other models are excluded; wired and wireless instances are not merged.
+
+Protocol replay and synthetic regression use upstream wired/wireless observations and charging/discharging captures. Local hardware, descriptors, power cycles, same-path reconnects, multiple receivers, transport switching and official-assistant coexistence remain unverified. See [protocol evidence](PROTOCOLS.en.md#mojhon-gale2).
+
 ## Inphic ZHEN
 
 Adds receiver `1D57:FA65 / FF00:0001`, recorded upstream with product string `Inphic KP 8K`. Input capacity must be 5 bytes with descriptor-proven sole report `03`. The separate IN9 protocol is excluded.

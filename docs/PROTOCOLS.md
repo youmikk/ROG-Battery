@@ -28,6 +28,18 @@ VigilWatt 来源固定为 [`c97adc389b60b0e945a62cddacbaaace39887723`](https://g
 
 [分步骤采集](guided-capture.md) 旁路记录已发现设备的既有通信，并为正常使用、充电、关机、恢复添加时间标记，不主动探测未适配设备。有数据时默认附带到用户提交的反馈，提交前可关闭，公开议题提供下载链接。采集成功不等于协议已经解释正确。
 
+## 墨将烈风 2（MOJHON GALE2）
+
+来源为 VigilWatt 固定提交 `c97adc389b60b0e945a62cddacbaaace39887723` 的 [Mojhon 硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/mojhon.md)、`MojhonCodec.cs`、`MojhonPlugin.cs` 及 `captures/mojhon-vendor-frames.jsonl`。上游提供 Windows 接口、报告描述符、USBPcap 记录及与官方助手的充放电对照；本项目独立接入现有传输和生命周期。
+
+只匹配 `E2B7:122C / MI_02 / FFAB:0001`、无编号 65 字节双向报告。固定读请求为 `00 A5 04 <寄存器> <校验>` 并补齐容量；`E2` 查询身份，`04` 查询电量。校验为协议帧除末字节外的累加低字节，首个 Windows ID 槽和帧外填充不参与。`C4_SERVER` / `C4_DONGLE` 来自设备身份及官方目录，不能由通用产品名 `XBOX 360 For Windows` 推断型号。
+
+原始完整电量帧包括放电 `A5 06 04 12 00 C1`（18%）、`A5 06 04 24 00 D3`（36%）和充电 `A5 06 04 24 01 D4`（同为36%）。同电量拔线对照支持 flag 0/1 的语义；未知 flag 不推断满电。测试补上 Windows 零 ID 槽和报告填充，其他边界、损坏、路径与多设备场景为合成数据。
+
+仅发送上述两个状态查询，电量前后确认手柄身份，空接收器清除读数。整轮预算 3.2 秒，单次交换上限 1.2 秒；处理最多32帧旧队列或候选回复，排空未完成则不发送查询。句柄打开、系统枚举和驱动取消收尾不作硬实时保证，超过预算的结果不发布。日志区分无回复、错误数据和空接收器离线，沿用原始通信采集。
+
+身份是型号判据，不作为唯一序列号。协议没有事务号，前后核对不能排除其他程序或之前请求的迟到回复。旧句柄、同路径重新枚举、真实0%、官方助手共存、有线与无线切换仍需本项目实机验收。
+
 ## 英菲克 ZHEN
 
 来源为 VigilWatt 固定提交 `c97adc389b60b0e945a62cddacbaaace39887723` 的 [英菲克硬件记录 §1](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/inphic.md)、`InphicCodec.cs` 和 `InphicPlugin.cs`。上游记录 `1D57:FA65`、产品串 `Inphic KP 8K`，电量集合 `FF00:0001`、输入 5 字节、Report03；同设备的 `FF01:0002` 64 字节输出集合不使用。没有原始完整描述符或确定的 MI/Col 编号，运行时检查报告 ID、长度及集合，未固定猜测的接口号。

@@ -6893,6 +6893,82 @@ mod backend_tests {
     }
 
     #[test]
+    fn mojhon_discovery_and_battery_updates_keep_receiver_and_xinput_states_separate() {
+        let backend = BackendId::Mojhon;
+        let now = std::time::Instant::now();
+        let mut shared = Shared::new(Settings::default());
+        let make_sample = |path: &str, percent| {
+            let mut sample = snapshot(backend, path, percent);
+            sample.target.family = DeviceFamily::Gamepad;
+            sample.target.name = "MOJHON GALE2".into();
+            sample.battery_at = Some(now);
+            sample
+        };
+        let mut first = make_sample("mojhon-first", 36);
+        let mut second = make_sample("mojhon-second", 72);
+        let presence = |snapshots| crate::backends::Poll {
+            snapshots,
+            present_channels: Some(["mojhon-first".into(), "mojhon-second".into()].into_iter().collect()),
+            ..Default::default()
+        };
+        shared.source_discoveries.insert(backend, crate::backends::BackendScan {
+            targets: vec![first.target.clone(), second.target.clone()], presence: presence(Vec::new()),
+        });
+        shared.rebuild_readings();
+        assert_eq!(shared.readings.len(), 2);
+        assert!(shared.readings.iter().all(|reading| reading.is_discovering()
+            && reading.family == DeviceFamily::Gamepad && reading.battery_text(true) == "—"));
+        assert!(!crate::backends::has_configuration(backend));
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10_000);
+        first.battery.as_mut().unwrap().charging = Some(true);
+        merge_additional_at(&mut shared, backend, presence(vec![first.clone(), second.clone()]), now);
+        let mut wired = snapshot(BackendId::XInput, "unused", 100);
+        wired.target = crate::backends::xinput::target(0);
+        wired.battery = None;
+        wired.battery_at = None;
+        wired.battery_unavailable = true;
+        let wired_key = wired.target.key.clone();
+        merge_additional_at(&mut shared, BackendId::XInput, vec![wired].into(), now);
+        assert_eq!(shared.devices[&wired_key].reading.battery_text(true), "—");
+        assert_eq!(shared.devices["mojhon-first"].reading.battery_text(true), "36%");
+        assert!(shared.devices["mojhon-first"].reading.is_charging());
+        assert!(taskbar_strip_content(&shared.readings, &shared.cfg).unwrap().items.iter().any(|item|
+            item.kind == crate::tray_prefs::TrayKind::Gamepad && item.charging
+                && item.level.is_some_and(|level| level.label(true) == "36%")));
+        let next = now + Duration::from_secs(10);
+        second.battery_at = Some(next);
+        merge_additional_at(&mut shared, backend, presence(vec![second.clone()]), next);
+        assert_eq!(shared.devices["mojhon-first"].basic_status.as_ref().unwrap().measured_at, Some(now));
+        first.connected = false;
+        first.battery = None;
+        first.battery_at = None;
+        first.battery_unavailable = true;
+        merge_additional_at(&mut shared, backend, presence(vec![first.clone()]), next);
+        assert!(!shared.devices["mojhon-first"].reading.connected);
+        assert_eq!(shared.devices["mojhon-first"].reading.battery_text(true), "—");
+        assert!(!shared.devices["mojhon-first"].reading.is_charging());
+        assert_eq!(shared.devices["mojhon-second"].reading.battery_text(true), "72%");
+        first.connected = true;
+        merge_additional_at(&mut shared, backend, presence(vec![first]), next);
+        assert!(shared.devices["mojhon-first"].reading.connected);
+        assert_eq!(shared.devices["mojhon-first"].reading.battery_text(true), "—");
+        let expired = next + backend.sample_lifetime();
+        shared.expire_readings_at(expired);
+        assert_eq!(shared.devices["mojhon-second"].reading.battery_text(true), "—");
+        let mut recovered = make_sample("mojhon-first", 35);
+        recovered.battery_at = Some(expired);
+        merge_additional_at(&mut shared, backend, presence(vec![recovered]), expired);
+        assert_eq!(shared.devices["mojhon-first"].reading.battery_text(true), "35%");
+        assert_eq!(shared.devices[&wired_key].reading.battery_text(true), "—");
+        shared.source_discoveries.remove(&backend);
+        merge_additional_at(&mut shared, backend, crate::backends::Poll {
+            present_channels: Some(["mojhon-second".into()].into_iter().collect()), ..Default::default()
+        }, expired);
+        assert!(!shared.devices["mojhon-first"].reading.connected);
+        assert!(shared.devices["mojhon-second"].reading.connected);
+    }
+
+    #[test]
     fn xinput_slots_clear_wired_and_replaced_battery_without_affecting_other_devices() {
         let mut shared = Shared::new(Settings::default());
         let backend = BackendId::XInput;
