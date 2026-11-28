@@ -6683,8 +6683,9 @@ mod backend_tests {
     }
 
     #[test]
-    fn pulsar_samples_expire_independently_and_recover_after_disconnect() {
-        let backend = BackendId::Pulsar;
+    fn mouse_adapter_samples_expire_independently_and_recover_after_disconnect() {
+        for backend in [BackendId::Pulsar, BackendId::Inphic] {
+        assert_eq!(Signal::new(60).work_interval_ms(backend.publish_interval_limit_ms()), 10_000);
         let now = std::time::Instant::now();
         let mut shared = Shared::new(Settings::default());
         let mut first = snapshot(backend, "pulsar-first", 20);
@@ -6730,6 +6731,7 @@ mod backend_tests {
         merge_additional_at(&mut shared, backend, poll(vec![second], false), woke);
         assert!(!shared.devices["pulsar-first"].reading.connected);
         assert!(shared.devices["pulsar-second"].reading.connected);
+        }
     }
 
     #[test]

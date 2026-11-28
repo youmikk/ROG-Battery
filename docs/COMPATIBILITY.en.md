@@ -4,6 +4,14 @@
 
 Upstream records, validation limits and admission criteria are in [Adaptation evidence and validation](PROTOCOLS.en.md#adaptation-evidence-and-validation). Implementation, synthetic tests, upstream hardware observations and this project's hardware validation are distinct evidence levels.
 
+## Inphic ZHEN
+
+Adds receiver `1D57:FA65 / FF00:0001`, recorded upstream with product string `Inphic KP 8K`. Input capacity must be 5 bytes with descriptor-proven sole report `03`. The separate IN9 protocol is excluded.
+
+Passive reads accept `03 76 41 <state> <percentage>` without sending commands. State `01` means discharging, `03` charging, and other states remain unknown. Discovery publishes the device before the background battery read. Each read waits at most 5 seconds or processes 32 frames; silence does not imply disconnect. Samples expire after 90 seconds and the polling interval is capped at 10 seconds. Identical receivers remain separate.
+
+Validation covers upstream 85% discharging and 84% charging records, malformed frames, descriptor gates, stale paths and multiple receivers. Local hardware, first-report delay, sleep/wake, charging transitions, true zero, firmware variants and vendor-software coexistence remain unverified. See [protocol evidence](PROTOCOLS.en.md#inphic-zhen).
+
 ## Pulsar X2 V2
 
 Adds a dedicated percentage, charging and voltage path for the `3554:F508` 1 kHz receiver, replacing generic CompX probing. It requires `MI_01/Col05 / FF02:0002`, 17-byte input/output and descriptor-proven sole report `08` in both directions. This adapter does not extend wired `F507`, 4 kHz `F509` or DPI settings. The USB product name is preserved when available.

@@ -13,6 +13,8 @@ GANSS GS3104T-Pro protocol research and the recorded 97% regression fixture refe
 
 Pulsar X2 V2 protocol research and recorded STATUS/POWER fixtures refer to VigilWatt's Pulsar module, tests and hardware documentation. The Rust transport, discovery and lifecycle integration are independently maintained.
 
+Inphic ZHEN protocol research and recorded 85% discharging / 84% charging payloads refer to VigilWatt's Inphic module and hardware documentation. Tests prepend the documented report ID; other transport and lifecycle cases are synthetic.
+
 MIT License
 
 Copyright (c) 2026 evren

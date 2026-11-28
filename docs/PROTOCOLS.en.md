@@ -28,6 +28,14 @@ This section covers selected protocols; the full device scope is in [compatibili
 4. Validate identical devices, mixed brands, unplug/reconnect, sleep and official-software coexistence on hardware.
 5. Before enabling Betop, obtain wireless collection descriptors, complete power-off/on captures and reliable XInput linkage. Do not infer slots from enumeration order, model or battery level, or suppress unrelated controllers.
 
+## Inphic ZHEN
+
+Sources are VigilWatt revision `c97adc389b60b0e945a62cddacbaaace39887723`, `docs/hardware/brands/inphic.md` section1, `InphicCodec.cs` and `InphicPlugin.cs`. Upstream records `1D57:FA65`, product `Inphic KP 8K`, battery collection `FF00:0001`, 5-byte input and report03. The separate `FF01:0002` 64-byte output collection is unused. Complete raw descriptors and definitive MI/Col numbers are unavailable; runtime validation checks report ID, capacity and collection instead of inventing interface numbers.
+
+Recorded payloads `76 41 01 55` and `76 41 03 54` mean 85% discharging and 84% charging. Tests prepend the documented report03 to represent Windows input. Parsing requires exactly 5 bytes and prefix `03 76 41`; byte4 is percentage0–100, and only byte3 values01/03 have established charging meanings. Boundary, corruption, concurrency and reconnect cases are synthetic. No special full-charge code has been captured.
+
+Only a read-only input handle is opened, with a 5-second / 32-frame bound. Discovery checks descriptors, reads recheck them before and after receiving, and current path/serial must match. Ambiguous battery collections are rejected; identical receivers sharing serial strings remain independent. No cached report is republished. Silence and malformed frames have separate diagnostic outcomes; failures never renew sample timestamps. Samples expire after 90 seconds, publication is capped at 10 seconds, and existing workers, raw capture and feedback are reused. IN9 `248A:5B2F` refresh writes are excluded. Initial latency, hardware caches, true zero, rapid reconnect and vendor-software coexistence require local hardware validation.
+
 ## Pulsar X2 V2
 
 Sources: VigilWatt `c97adc389b60b0e945a62cddacbaaace39887723`, `docs/hardware/brands/pulsar.md`, `PulsarCodec.cs`, `PulsarPlugin.cs` and `PulsarCodecTests.cs`. Interface, POWER fields and checksum were cross-checked against `andrewrabert/python-pulsar-mouse-tool` revision `587f3a996a32aaea0f40e671756808f2f37e7fe2`, `pulsar.py`; its settings implementation was not ported.

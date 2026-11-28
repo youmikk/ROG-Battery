@@ -28,6 +28,14 @@ VigilWatt 来源固定为 [`c97adc389b60b0e945a62cddacbaaace39887723`](https://g
 
 [分步骤采集](guided-capture.md) 旁路记录已发现设备的既有通信，并为正常使用、充电、关机、恢复添加时间标记，不主动探测未适配设备。有数据时默认附带到用户提交的反馈，提交前可关闭，公开议题提供下载链接。采集成功不等于协议已经解释正确。
 
+## 英菲克 ZHEN
+
+来源为 VigilWatt 固定提交 `c97adc389b60b0e945a62cddacbaaace39887723` 的 [英菲克硬件记录 §1](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/inphic.md)、`InphicCodec.cs` 和 `InphicPlugin.cs`。上游记录 `1D57:FA65`、产品串 `Inphic KP 8K`，电量集合 `FF00:0001`、输入 5 字节、Report03；同设备的 `FF01:0002` 64 字节输出集合不使用。没有原始完整描述符或确定的 MI/Col 编号，运行时检查报告 ID、长度及集合，未固定猜测的接口号。
+
+上游载荷 `76 41 01 55` / `76 41 03 54` 分别为 85% 放电、84% 充电；测试按记录的 Report03 前置得到完整 Windows 输入帧。解析只接受 5 字节和 `03 76 41` 前缀，byte4 为 0–100，byte3 仅 01/03 有明确充电含义。其他边界、损坏、并发和拔插是合成测试；未采集满电特殊编码。
+
+只读句柄监听，5 秒 / 32 帧上限；发现只查描述符，前后重新校验描述符，按当前实例和序列号核对目标。歧义电量集合不读取，同型号共享序列号不合并。不缓存并重新发布旧报文，静默和坏帧分别记录，失败不更新采样时间；有效期 90 秒、发布间隔上限 10 秒，沿用公共后台任务、原始采集和反馈诊断。IN9 `248A:5B2F` 的刷新写入协议未复用。首帧等待、硬件缓存、真实零电量、快速拔插及厂商软件共存仍待本项目实机验证。
+
 ## Pulsar X2 V2
 
 来源：VigilWatt 固定提交 `c97adc389b60b0e945a62cddacbaaace39887723` 的 [Pulsar 硬件记录](https://github.com/evren-oct/vigil-watt/blob/c97adc389b60b0e945a62cddacbaaace39887723/docs/hardware/brands/pulsar.md)、`PulsarCodec.cs`、`PulsarPlugin.cs`、`PulsarCodecTests.cs`；交叉核对 [python-pulsar-mouse-tool `587f3a996a32aaea0f40e671756808f2f37e7fe2`](https://github.com/andrewrabert/python-pulsar-mouse-tool/blob/587f3a996a32aaea0f40e671756808f2f37e7fe2/pulsar.py) 的接口、POWER 字段及校验公式。仅使用后者的协议事实，不移植设置实现。
