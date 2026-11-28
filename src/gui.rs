@@ -4939,10 +4939,13 @@ pub fn run(start_hidden: bool, after_update: bool) -> Result<(), String> {
     }
     signal.request_refresh();
 
-    // 初始化全部就绪、消息循环马上开始 —— 这一刻才把窗口显示出来。
-    // 若是开机自启拉起（且托盘已开启），就留在托盘后台，不弹窗打扰用户。
-    // SW_SHOWNORMAL = 1。
-    if !(start_hidden && (cfg.tray_enabled || cfg.taskbar_widget_enabled)) {
+    // 自启保留后台；没有托盘或任务栏入口时显示主窗口。
+    let show_main = !(start_hidden && (cfg.tray_enabled || cfg.taskbar_widget_enabled));
+    crate::diagnostics::event("app_launch_window", &format!(
+        "start_hidden={start_hidden} tray_enabled={} taskbar_widget_enabled={} show_main={show_main}",
+        cfg.tray_enabled, cfg.taskbar_widget_enabled,
+    ));
+    if show_main {
         unsafe {
             let _ = crate::win32::ShowWindow(hwnd, 1);
         }

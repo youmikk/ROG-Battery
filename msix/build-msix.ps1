@@ -126,6 +126,11 @@ $exeName = $props.Executable
 if (-not $exeName) {
     throw "package.props.psd1 里缺少 Executable 键（应为 'x-battery.exe'）"
 }
+$startupExeName = $props.StartupExecutable
+if (-not $startupExeName -or $startupExeName -eq $exeName -or
+    [IO.Path]::GetFileName($startupExeName) -ne $startupExeName) {
+    throw "package.props.psd1 的 StartupExecutable 必须是独立启动器文件名（应为 'x-battery-startup.exe'）。"
+}
 
 function Find-Tool {
     param([string] $Name, [string] $Preferred, [string] $Fallback)
@@ -176,6 +181,17 @@ if ($exeSize -eq 0) {
 }
 Write-Host ("exe: {0} ({1:N0} bytes)" -f $exe, $exeSize)
 
+$startupExe = Join-Path (Join-Path $repo 'target\release') $startupExeName
+if (-not (Test-Path -LiteralPath $startupExe -PathType Leaf)) {
+    throw "找不到启动器 $startupExe —— 先运行 cargo build --release，同时生成主程序和启动器。"
+}
+$startupExeSize = (Get-Item -LiteralPath $startupExe).Length
+if ($startupExeSize -eq 0) {
+    throw "$startupExe 是 0 字节 —— 编译产物损坏，重新跑 cargo build --release。"
+}
+$startupExeHash = (Get-FileHash -LiteralPath $startupExe -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Host ("startup exe: {0} ({1:N0} bytes)" -f $startupExe, $startupExeSize)
+
 Write-Step 'staging'
 Remove-BuildDirectory $stage
 New-Item -ItemType Directory -Path $stage | Out-Null
@@ -186,6 +202,12 @@ $stagedExeSize = (Get-Item (Join-Path $stage $exeName)).Length
 if ($stagedExeSize -ne $exeSize -or
     (Get-FileHash -LiteralPath (Join-Path $stage $exeName) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $verifiedExe.Sha256) {
     throw "拷贝 exe 到 stage 后大小不一致（源 $exeSize / 目标 $stagedExeSize），磁盘可能有问题。"
+}
+$stagedStartupExe = Join-Path $stage $startupExeName
+Copy-Item -LiteralPath $startupExe -Destination $stagedStartupExe
+if ((Get-Item -LiteralPath $stagedStartupExe).Length -ne $startupExeSize -or
+    (Get-FileHash -LiteralPath $stagedStartupExe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $startupExeHash) {
+    throw "拷贝启动器到 stage 后大小或 SHA256 不一致。"
 }
 
 $assetSrc = Join-Path $root 'Assets'
@@ -230,6 +252,7 @@ $map = @{
     '@DESCRIPTION@'            = $props.Description
     '@VERSION@'                = $props.Version
     '@STARTUP_TASK_ID@'        = $props.StartupTaskId
+    '@STARTUP_EXECUTABLE@'     = $startupExeName
     '@EXECUTABLE@'             = $exeName
 }
 foreach ($k in $map.Keys) {
@@ -261,7 +284,7 @@ if (Test-Path $msixPath) { Remove-Item $msixPath -Force }
 
 & $makeappx pack /d $stage /p $msixPath /o
 if ($LASTEXITCODE -ne 0) {
-    throw "makeappx pack 失败，退出码 $LASTEXITCODE。常见原因：exe 名和 manifest 不一致、Assets 缺文件、startupTask 扩展的 Executable 与 Application 不匹配。"
+    throw "makeappx pack 失败，退出码 $LASTEXITCODE。常见原因：exe 名和 manifest 不一致、Assets 缺文件、startupTask 扩展的 Executable 未指向已打包文件。"
 }
 if (-not (Test-Path $msixPath)) {
     throw "makeappx 返回 0 但 $msixPath 不存在 —— 检查 /p 参数是否被 shell 改写。"
@@ -413,8 +436,11 @@ if ($Verify) {
     Add-Check 'startupTask 扩展存在' ($null -ne $startupExt) 'desktop:Extension[@Category="windows.startupTask"]'
     if ($startupExt) {
         Add-Check 'startupTask Extension/@Executable' `
-            ($startupExt.GetAttribute('Executable') -eq $exeName) `
+            ($startupExt.GetAttribute('Executable') -eq $startupExeName) `
             $startupExt.GetAttribute('Executable')
+        Add-Check 'startupTask Extension/@EntryPoint' `
+            ($startupExt.GetAttribute('EntryPoint') -eq 'Windows.FullTrustApplication') `
+            $startupExt.GetAttribute('EntryPoint')
         $task = $startupExt.SelectSingleNode('desktop:StartupTask', $ns)
         Add-Check 'StartupTask/@TaskId' `
             ($task.GetAttribute('TaskId') -eq $props.StartupTaskId) `
@@ -443,6 +469,17 @@ if ($Verify) {
         Add-Check "exe（$exeName）" $false 'MISSING'
     }
 
+    $unpackedStartupExe = Join-Path $unpackDir $startupExeName
+    if (Test-Path -LiteralPath $unpackedStartupExe -PathType Leaf) {
+        $unpackedStartupSize = (Get-Item -LiteralPath $unpackedStartupExe).Length
+        Add-Check "startup exe（$startupExeName）" ($unpackedStartupSize -gt 0 -and $unpackedStartupSize -eq $startupExeSize) `
+            ("{0:N0} bytes / 源 {1:N0}" -f $unpackedStartupSize, $startupExeSize)
+        $unpackedStartupHash = (Get-FileHash -LiteralPath $unpackedStartupExe -Algorithm SHA256).Hash.ToLowerInvariant()
+        Add-Check 'startup exe SHA256 matches source' ($unpackedStartupHash -eq $startupExeHash) $unpackedStartupHash
+    } else {
+        Add-Check "startup exe（$startupExeName）" $false 'MISSING'
+    }
+
     foreach ($a in $requiredAssets) {
         $p = Join-Path (Join-Path $unpackDir 'Assets') $a
         if (Test-Path $p) {
@@ -452,7 +489,7 @@ if ($Verify) {
         }
     }
 
-    $allowed = @('AppxManifest.xml', $exeName, 'AppxBlockMap.xml', 'AppxSignature.p7x', '[Content_Types].xml')
+    $allowed = @('AppxManifest.xml', $exeName, $startupExeName, 'AppxBlockMap.xml', 'AppxSignature.p7x', '[Content_Types].xml')
     $extra = @(Get-ChildItem $unpackDir -File | Where-Object { $allowed -notcontains $_.Name })
     Add-Check '包根无多余文件' ($extra.Count -eq 0) (($extra | ForEach-Object { $_.Name }) -join ', ')
 

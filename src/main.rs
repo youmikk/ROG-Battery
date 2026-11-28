@@ -113,19 +113,13 @@ fn main() -> ExitCode {
 
     // 无参数和自启参数进入 GUI；帮助请求留在 CLI。
     let wants_help = matches!(args.first().map(|s| s.as_str()), Some("-h" | "--help" | "help"));
-    let wants_autostart = args.len() == 1 && args[0] == autostart::RUN_ARG;
-    let after_update = args.len() == 1 && args[0] == store::RESTART_ARG;
-
-    if args.is_empty() || wants_autostart || after_update {
+    if let Some(launch) = GuiLaunch::parse(&args) {
         // SAFETY: `FreeConsole` 只影响本进程的控制台关联，无指针参数。
         unsafe {
             win32::FreeConsole();
         }
-        // 绿色版自启携带参数；MSIX 由启动环境判断是否隐藏。
-        let start_hidden = !after_update && (wants_autostart || autostart::launched_at_logon());
-        return run_gui(start_hidden, after_update);
+        return run_gui(launch);
     }
-    let _ = wants_help; // 参数非空时由下面的 CLI 分支统一处理
 
     if wants_help {
         print!("{USAGE}");
@@ -198,8 +192,24 @@ fn main() -> ExitCode {
 
 const SINGLE_INSTANCE_MUTEX: &str = "Local\\RogMouseCtl_SingleInstance_Mutex";
 const ERROR_ALREADY_EXISTS: u32 = 183;
-const SW_RESTORE: i32 = 9;
-const SW_SHOW: i32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuiLaunch {
+    Manual,
+    Autostart,
+    AfterUpdate,
+}
+
+impl GuiLaunch {
+    fn parse(args: &[String]) -> Option<Self> {
+        match args {
+            [] => Some(Self::Manual),
+            [arg] if arg == autostart::RUN_ARG => Some(Self::Autostart),
+            [arg] if arg == store::RESTART_ARG => Some(Self::AfterUpdate),
+            _ => None,
+        }
+    }
+}
 
 struct MutexGuard(win32::Handle);
 
@@ -216,8 +226,7 @@ impl Drop for MutexGuard {
 enum Instance {
     /// 抢到了锁。值要在进程存活期间一直持有，否则锁会被系统回收。
     Owner(MutexGuard),
-    /// 已有实例在跑，已经把它的窗口激活到前台。
-    AlreadyRunning,
+    AlreadyRunning { activated: bool },
     /// 创建互斥体失败（权限/句柄耗尽等）。当首次启动继续跑。
     Unavailable,
 }
@@ -246,16 +255,15 @@ fn wake_existing() -> bool {
     true
 }
 
-/// 单实例互斥检查。已有实例时激活它的窗口并返回 [`Instance::AlreadyRunning`]。
-fn check_single_instance() -> Instance {
+fn check_single_instance(launch: GuiLaunch) -> Instance {
     check_instance_named(if crate::mock::enabled() {
         "Local\\RogMouseCtl_Mock_SingleInstance"
     } else {
         SINGLE_INSTANCE_MUTEX
-    })
+    }, launch, wake_existing)
 }
 
-fn check_instance_named(mutex_name: &str) -> Instance {
+fn check_instance_named(mutex_name: &str, launch: GuiLaunch, activate: impl FnOnce() -> bool) -> Instance {
     let name = win32::to_wide(mutex_name);
     let handle = unsafe { win32::CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
     if handle.is_null() {
@@ -263,37 +271,39 @@ fn check_instance_named(mutex_name: &str) -> Instance {
     }
     let err = unsafe { win32::GetLastError() };
     if err == ERROR_ALREADY_EXISTS {
-        let hwnd = existing_window();
-        if !hwnd.is_null() {
-            unsafe {
-                win32::ShowWindow(hwnd, SW_RESTORE);
-                win32::ShowWindow(hwnd, SW_SHOW);
-                win32::SetForegroundWindow(hwnd);
-            }
-        }
         unsafe { win32::CloseHandle(handle) };
-        return Instance::AlreadyRunning;
+        return Instance::AlreadyRunning {
+            activated: launch != GuiLaunch::Autostart && activate(),
+        };
     }
     Instance::Owner(MutexGuard(handle))
 }
 
 /// GUI 入口。控制台已经在上面的 [`main`] 里脱离干净，这里**不能**再 `println!`
 /// —— 没有地方会接住它。需要日志就写 [`paths::cache_dir`] 下的文件。
-fn run_gui(start_hidden: bool, after_update: bool) -> ExitCode {
+fn run_gui(launch: GuiLaunch) -> ExitCode {
     // 单实例互斥锁：防止多开造成 HID 设备冲突与多托盘图标堆叠
-    let _guard = match check_single_instance() {
+    let instance = check_single_instance(launch);
+    let (instance_state, activated) = match &instance {
+        Instance::Owner(_) => ("owner", false),
+        Instance::AlreadyRunning { activated } => ("already_running", *activated),
+        Instance::Unavailable => ("unavailable", false),
+    };
+    let pid = std::process::id();
+    diagnostics::event("app_launch", &format!(
+        "source={launch:?} packaged={} pid={pid} parent={:?} instance={instance_state} activated={activated}",
+        autostart::is_packaged(), win32::parent_exe_name(pid),
+    ));
+    let _guard = match instance {
         Instance::Owner(g) => Some(g),
-        Instance::AlreadyRunning => {
-            wake_existing();
-            return ExitCode::SUCCESS;
-        }
+        Instance::AlreadyRunning { .. } => return ExitCode::SUCCESS,
         Instance::Unavailable => None,
     };
 
     // 创建窗口前声明 DPI 感知，失败时允许系统缩放。
     let _ = dwm::enable_dpi_awareness();
 
-    match gui::run(start_hidden, after_update) {
+    match gui::run(launch == GuiLaunch::Autostart, launch == GuiLaunch::AfterUpdate) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // GUI 起不来时控制台已经没了，唯一的告知途径是消息框 + 日志文件。
@@ -312,6 +322,82 @@ fn run_gui(start_hidden: bool, after_update: bool) -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn mutex_name(test: &str) -> String {
+        format!("Local\\XBatteryLaunchTest_{}_{test}", std::process::id())
+    }
+
+    #[test]
+    fn gui_launch_arguments_are_explicit() {
+        assert_eq!(GuiLaunch::parse(&[]), Some(GuiLaunch::Manual));
+        assert_eq!(GuiLaunch::parse(&[autostart::RUN_ARG.into()]), Some(GuiLaunch::Autostart));
+        assert_eq!(GuiLaunch::parse(&[store::RESTART_ARG.into()]), Some(GuiLaunch::AfterUpdate));
+        for args in [
+            vec!["--help".into()],
+            vec!["version".into()],
+            vec!["devices".into(), autostart::RUN_ARG.into()],
+            vec![autostart::RUN_ARG.into(), store::RESTART_ARG.into()],
+        ] {
+            assert_eq!(GuiLaunch::parse(&args), None);
+        }
+    }
+
+    #[test]
+    fn first_launch_owns_mutex_without_activating_a_window() {
+        let name = mutex_name("first");
+        for launch in [GuiLaunch::Manual, GuiLaunch::Autostart, GuiLaunch::AfterUpdate] {
+            let instance = check_instance_named(&name, launch, || panic!("first instance activated a window"));
+            assert!(matches!(instance, Instance::Owner(_)));
+            drop(instance);
+        }
+    }
+
+    #[test]
+    fn repeated_autostart_keeps_the_existing_instance_in_background() {
+        let name = mutex_name("background");
+        let owner = check_instance_named(&name, GuiLaunch::Autostart, || panic!("unexpected activation"));
+        assert!(matches!(owner, Instance::Owner(_)));
+        for _ in 0..8 {
+            let duplicate = check_instance_named(&name, GuiLaunch::Autostart, || {
+                panic!("autostart must not activate the existing window")
+            });
+            assert!(matches!(duplicate, Instance::AlreadyRunning { activated: false }));
+        }
+        drop(owner);
+        let next = check_instance_named(&name, GuiLaunch::Autostart, || panic!("mutex handle leaked"));
+        assert!(matches!(next, Instance::Owner(_)));
+    }
+
+    #[test]
+    fn manual_and_update_launches_activate_existing_window_once() {
+        let name = mutex_name("foreground");
+        let owner = check_instance_named(&name, GuiLaunch::Autostart, || panic!("unexpected activation"));
+        assert!(matches!(owner, Instance::Owner(_)));
+        for launch in [GuiLaunch::Manual, GuiLaunch::AfterUpdate] {
+            let calls = Cell::new(0);
+            let duplicate = check_instance_named(&name, launch, || {
+                calls.set(calls.get() + 1);
+                true
+            });
+            assert!(matches!(duplicate, Instance::AlreadyRunning { activated: true }));
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn missing_existing_window_does_not_allow_a_second_instance() {
+        let name = mutex_name("missing_window");
+        let owner = check_instance_named(&name, GuiLaunch::Autostart, || panic!("unexpected activation"));
+        assert!(matches!(owner, Instance::Owner(_)));
+        let duplicate = check_instance_named(&name, GuiLaunch::Manual, || false);
+        assert!(matches!(duplicate, Instance::AlreadyRunning { activated: false }));
     }
 }
 

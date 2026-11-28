@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use crate::win32::to_wide;
 
+mod args;
 mod startup;
+
+pub use args::RUN_ARG;
 
 // ============================================================
 // 对外类型
@@ -128,64 +131,6 @@ pub fn detect_path() -> AutoStartPath {
     }
 }
 
-/// MSIX 无自启参数，以已启用的自启及已知父进程推断；信息不足时显示主窗口。
-pub fn launched_at_logon() -> bool {
-    if package_identity() != Some(true) {
-        return false;
-    }
-    let me = std::process::id();
-    let parent = crate::win32::parent_exe_name(me);
-    let gap = parent_gap_secs(me);
-    if !decide_hidden(parent.as_deref(), true, gap) {
-        return false;
-    }
-    let autostart_on = state().0.is_enabled();
-    let hidden = decide_hidden(parent.as_deref(), autostart_on, gap);
-    let parent_is_explorer = parent.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("explorer.exe"));
-    note_launch(parent_is_explorer, gap, autostart_on, hidden);
-    hidden
-}
-
-/// Explorer 启动后的登录自启推断窗口。
-const LOGON_WINDOW_SECS: i64 = 120;
-
-fn decide_hidden(
-    parent: Option<&str>,
-    autostart_on: bool,
-    parent_gap_secs: Option<i64>,
-) -> bool {
-    if !autostart_on {
-        return false;
-    }
-    let Some(parent) = parent else { return false; };
-    if parent.eq_ignore_ascii_case("explorer.exe") {
-        parent_gap_secs.is_some_and(|gap| (0..=LOGON_WINDOW_SECS).contains(&gap))
-    } else {
-        ["svchost.exe", "RuntimeBroker.exe"].iter().any(|host| parent.eq_ignore_ascii_case(host))
-    }
-}
-
-/// 我们比父进程晚出生多少秒（父进程更早为正）。
-fn parent_gap_secs(me: u32) -> Option<i64> {
-    let parent = crate::win32::parent_pid(me)?;
-    let mine = crate::win32::process_start_ticks(me)?;
-    let theirs = crate::win32::process_start_ticks(parent)?;
-    Some((mine as i64 - theirs as i64) / 10_000_000)
-}
-
-/// 记录自启推断依据，写入失败不影响启动。
-fn note_launch(parent_is_explorer: bool, gap: Option<i64>, autostart_on: bool, hidden: bool) {
-    let path = crate::paths::settings_file().with_file_name("last-launch.txt");
-    let line = format!(
-        "packaged=yes parent_is_explorer={parent_is_explorer} gap_secs={gap:?} autostart_on={autostart_on} hidden={hidden}\n"
-    );
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-}
-
 // ============================================================
 // 绿色版：注册表
 // ============================================================
@@ -200,9 +145,6 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// 保留旧值名以兼容已有启动项。
 const RUN_VALUE_NAME: &str = "RogMouseCtl";
-/// 绿色版启动项与 GUI 入口共用的后台启动参数。
-pub const RUN_ARG: &str = "--autostart";
-
 use crate::win32::{RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
 
 /// 当前 exe 的完整路径，包上引号。路径含空格时**必须**加引号，否则系统按空格
@@ -508,34 +450,5 @@ pub fn disable() -> Result<EnableOutcome, String> {
             })
         }
         AutoStartPath::Unknown => Err("无法判定运行形态（包身份读取失败）".to_string()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unknown_or_manual_launchers_keep_the_window_visible() {
-        for parent in [None, Some("powershell.exe"), Some("Taskmgr.exe"), Some("cmd.exe")] {
-            assert!(!decide_hidden(parent, true, Some(1)));
-        }
-    }
-
-    #[test]
-    fn disabled_startup_never_hides_an_implicit_launch() {
-        for parent in ["explorer.exe", "svchost.exe", "RuntimeBroker.exe"] {
-            assert!(!decide_hidden(Some(parent), false, Some(1)));
-        }
-    }
-
-    #[test]
-    fn explorer_requires_a_recent_known_logon_gap() {
-        for gap in [None, Some(-1), Some(121), Some(3600)] {
-            assert!(!decide_hidden(Some("explorer.exe"), true, gap));
-        }
-        assert!(decide_hidden(Some("EXPLORER.EXE"), true, Some(0)));
-        assert!(decide_hidden(Some("explorer.exe"), true, Some(120)));
-        assert!(decide_hidden(Some("RuntimeBroker.exe"), true, None));
     }
 }

@@ -48,6 +48,7 @@ struct Event<'a> {
     codes_truncated: bool,
     location: Option<String>,
     network: Option<NetworkFields>,
+    launch: Option<String>,
 }
 
 struct NetworkFields {
@@ -78,6 +79,8 @@ fn network_fields(value: &str) -> Option<NetworkFields> {
 
 fn operation(value: &str) -> &'static str {
     match value.trim() {
+        "app_launch" => "app_launch",
+        "app_launch_window" => "app_launch_window",
         "settings_save_failed" => "settings_save_failed",
         "settings_shutdown_failed" => "settings_shutdown_failed",
         "device_order_save_failed" => "device_order_save_failed",
@@ -117,6 +120,33 @@ fn operation(value: &str) -> &'static str {
         "恢复" => "restore",
         _ => "unknown_operation",
     }
+}
+
+fn launch_fields(operation: &str, value: &str) -> String {
+    let fields: &[(&str, &[&str])] = if operation == "app_launch" {
+        &[
+            ("source", &["Manual", "Autostart", "AfterUpdate"]),
+            ("packaged", &["true", "false"]),
+            ("instance", &["owner", "already_running", "unavailable"]),
+            ("activated", &["true", "false"]),
+        ]
+    } else {
+        &[
+            ("start_hidden", &["true", "false"]),
+            ("tray_enabled", &["true", "false"]),
+            ("taskbar_widget_enabled", &["true", "false"]),
+            ("show_main", &["true", "false"]),
+        ]
+    };
+    let mut result = String::new();
+    for &(name, allowed) in fields {
+        let mut values = value.split_ascii_whitespace().filter_map(|field| field.split_once('='))
+            .filter_map(|(key, value)| (key == name).then_some(value));
+        if let Some(value) = values.next().filter(|value| allowed.contains(value)) {
+            if values.next().is_none() { let _ = write!(result, "; {name}={value}"); }
+        }
+    }
+    result
 }
 
 fn decimal(value: &str, max_digits: usize) -> Option<u64> {
@@ -234,6 +264,10 @@ impl Event<'_> {
     }
 
     fn read_message(&mut self, value: &str) {
+        if matches!(self.operation, "app_launch" | "app_launch_window") {
+            self.launch = Some(launch_fields(self.operation, value));
+            return;
+        }
         if self.operation == "feedback_network_failed" {
             self.network = network_fields(value);
             return;
@@ -281,6 +315,7 @@ impl Event<'_> {
             }
         }
         if self.codes_truncated { line.push_str("; error_codes_truncated=true"); }
+        if let Some(launch) = self.launch { line.push_str(&launch); }
         if let Some(network) = self.network {
             let _ = write!(line, "; step={}; os_error={}; http_status={}; elapsed_ms={}; attempt={}",
                 network.step, network.os_error, network.http_status, network.elapsed_ms, network.attempt);
@@ -306,7 +341,7 @@ fn parse_record(record: &str) -> Option<Event<'_>> {
     };
     let mut event = Event {
         timestamp, version: None, operation: "panic", failed: panic,
-        elapsed: None, codes: Vec::new(), codes_truncated: false, location: None, network: None,
+        elapsed: None, codes: Vec::new(), codes_truncated: false, location: None, network: None, launch: None,
     };
     let mut field = lines.next().unwrap_or_default();
     if let Some(value) = field.strip_prefix("版本: ") {
@@ -530,6 +565,33 @@ mod tests {
         assert!(summary.contains("os_error=32"));
         for private in ["Alice", "Users", "settings.ini", "private-", "token=", "serial", "step="] {
             assert!(!summary.contains(private), "{private}");
+        }
+    }
+
+    #[test]
+    fn startup_feedback_preserves_launch_and_visibility_decisions() {
+        let log = record(1, "1.5.0", "app_launch",
+            "source=Autostart packaged=true pid=123 parent=Some(\"private.exe\") instance=already_running activated=false")
+            + &record(2, "1.5.0", "app_launch_window",
+                "start_hidden=true tray_enabled=false taskbar_widget_enabled=true show_main=false");
+        let summary = rendered(&log);
+        assert!(summary.contains("source=Autostart; packaged=true; instance=already_running; activated=false"));
+        assert!(summary.contains("start_hidden=true; tray_enabled=false; taskbar_widget_enabled=true; show_main=false"));
+        for private in ["pid=", "123", "parent=", "private.exe"] {
+            assert!(!summary.contains(private));
+        }
+    }
+
+    #[test]
+    fn startup_feedback_rejects_arbitrary_and_conflicting_field_values() {
+        let log = record(1, "1.5.0", "app_launch",
+            "source=Manual source=Autostart packaged=true;token=private instance=C:\\private activated=private os_error=5")
+            + &record(2, "1.5.0", "app_launch_window",
+                "start_hidden=private tray_enabled=true tray_enabled=false taskbar_widget_enabled=private show_main=false;private");
+        let summary = rendered(&log);
+        for field in ["source=", "packaged=", "instance=", "activated=", "start_hidden=", "tray_enabled=",
+            "taskbar_widget_enabled=", "show_main=", "private", "os_error="] {
+            assert!(!summary.contains(field), "{field}");
         }
     }
 

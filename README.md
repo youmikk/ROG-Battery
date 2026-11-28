@@ -168,7 +168,7 @@ rustup toolchain install stable-x86_64-pc-windows-gnu
 cargo +stable-x86_64-pc-windows-gnu build --release --locked
 ```
 
-产物为 `target/release/x-battery.exe`。仓库包含所需 Windows 导入库、图标和版本资源，无需额外安装运行时。更新图标或文件信息时使用 `windres -O coff -I assets -i assets/app.rc -o assets/app.o` 重新生成资源。
+产物为 `target/release/x-battery.exe` 和 `target/release/x-battery-startup.exe`；后者仅随 MSIX 打包，用于以 `--autostart` 启动同目录主程序。绿色版仍只发布 `x-battery.exe`，`cargo run` 默认运行主程序。MSIX 的 `-Verify` 会检查启动器大小、SHA256 和 manifest 自启入口。仓库包含所需 Windows 导入库、图标和版本资源，无需额外安装运行时。更新图标或文件信息时使用 `windres -O coff -I assets -i assets/app.rc -o assets/app.o` 重新生成资源。
 
 发布前可运行本地测试、构建及版本校验：
 

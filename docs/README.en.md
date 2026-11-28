@@ -164,7 +164,7 @@ rustup toolchain install stable-x86_64-pc-windows-gnu
 cargo +stable-x86_64-pc-windows-gnu build --release --locked
 ```
 
-The output is `target/release/x-battery.exe`. Required Windows import libraries plus icon and version resources are included; no additional runtime installation is needed. After changing icons or file information, regenerate resources with `windres -O coff -I assets -i assets/app.rc -o assets/app.o`.
+The outputs are `target/release/x-battery.exe` and `target/release/x-battery-startup.exe`. The latter is packaged only in MSIX and launches the main executable in the same directory with `--autostart`. Portable releases still ship only `x-battery.exe`, and `cargo run` defaults to the main application. MSIX `-Verify` checks the launcher's size, SHA256 and manifest startup entry. Required Windows import libraries plus icon and version resources are included; no additional runtime installation is needed. After changing icons or file information, regenerate resources with `windres -O coff -I assets -i assets/app.rc -o assets/app.o`.
 
 Run local tests, build and version checks before publishing:
 
